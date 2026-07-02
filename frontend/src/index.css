@@ -233,6 +233,75 @@ select:focus {
 .doc-table tbody tr:hover {
   background: rgba(148, 163, 184, 0.06);
 }
+.doc-row {
+  cursor: pointer;
+}
+.doc-title {
+  color: var(--accent);
+  font-weight: 500;
+}
+
+/* --- Detailansicht --- */
+.detail {
+  display: grid;
+  grid-template-columns: minmax(260px, 340px) 1fr;
+  gap: 1.25rem;
+  align-items: start;
+}
+@media (max-width: 800px) {
+  .detail {
+    grid-template-columns: 1fr;
+  }
+}
+.detail-meta h2 {
+  margin-top: 0;
+}
+.detail-meta dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.35rem 0.9rem;
+  margin: 0.5rem 0;
+  font-size: 0.9rem;
+}
+.detail-meta dt {
+  color: var(--muted);
+}
+.detail-meta dd {
+  margin: 0;
+  word-break: break-word;
+}
+.version-info {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+.version-info h3 {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+}
+.mono {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+.tag {
+  display: inline-block;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  padding: 0.1rem 0.6rem;
+  margin: 0 0.3rem 0.3rem 0;
+  font-size: 0.75rem;
+}
+.detail-preview {
+  padding: 0.5rem;
+}
+.pdf-frame {
+  width: 100%;
+  height: 80vh;
+  border: none;
+  border-radius: 8px;
+  background: #fff;
+}
 
 /* --- Status --- */
 .status {

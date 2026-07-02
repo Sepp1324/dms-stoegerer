@@ -11,6 +11,7 @@ import {
   type NamedRef,
 } from "../api";
 import UploadZone from "./UploadZone";
+import DocumentDetail from "./DocumentDetail";
 
 export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   const [q, setQ] = useState("");
@@ -30,6 +31,8 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   const [me, setMe] = useState<Me | null>(null);
   // Wird nach jedem Upload erhöht → löst ein Neuladen der Liste aus.
   const [reloadKey, setReloadKey] = useState(0);
+  // Aktuell geöffnetes Dokument (Detailansicht) oder null (Liste).
+  const [selectedId, setSelectedId] = useState<number | null>(null);
 
   // Profil + Filter-Stammdaten einmalig laden.
   useEffect(() => {
@@ -89,6 +92,10 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   function handleLogout() {
     logout();
     onLogout();
+  }
+
+  if (selectedId !== null) {
+    return <DocumentDetail id={selectedId} onBack={() => setSelectedId(null)} />;
   }
 
   return (
@@ -159,8 +166,8 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
                 </thead>
                 <tbody>
                   {docs.map((d) => (
-                    <tr key={d.id}>
-                      <td>{d.title}</td>
+                    <tr key={d.id} className="doc-row" onClick={() => setSelectedId(d.id)}>
+                      <td className="doc-title">{d.title}</td>
                       <td>{d.correspondent_name ?? "—"}</td>
                       <td>{d.document_type_name ?? "—"}</td>
                       <td>{d.page_count ?? "—"}</td>
