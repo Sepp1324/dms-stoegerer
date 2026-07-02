@@ -1,6 +1,9 @@
+import os
+
 from django.db import connection
+from django.http import FileResponse, Http404
 from rest_framework import status, viewsets
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -130,6 +133,30 @@ class DocumentViewSet(viewsets.ModelViewSet):
             qs = qs.filter(tags__id=params["tag"])
 
         return qs.distinct()
+
+    @action(detail=True, methods=["get"])
+    def preview(self, request, pk=None):
+        """Liefert das Archiv-PDF der aktuellen Version zur Inline-Vorschau.
+
+        Fällt auf das Original zurück, falls (noch) kein OCR-Archiv existiert.
+        Der Pfad stammt aus der DB (nicht aus Nutzereingaben) – keine Traversal-Gefahr.
+        """
+        document = self.get_object()
+        version = document.current_version
+        if version is None:
+            raise Http404("Keine Version vorhanden.")
+
+        path = version.archive_path or version.file_path
+        if not path or not os.path.exists(path):
+            raise Http404("Datei nicht gefunden.")
+
+        content_type = (
+            "application/pdf"
+            if version.archive_path
+            else (version.mime_type or "application/octet-stream")
+        )
+        # as_attachment=False → inline anzeigen (PDF-Vorschau im Browser)
+        return FileResponse(open(path, "rb"), content_type=content_type)
 
 
 class TagViewSet(viewsets.ModelViewSet):

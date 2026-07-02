@@ -94,6 +94,12 @@ export interface DocumentItem {
   tags: { id: number; name: string; color: string }[];
   page_count: number | null;
 }
+export interface DocumentDetail extends DocumentItem {
+  storage_path: number | null;
+  owner: number | null;
+  current_version: number | null;
+  versions: DocumentVersion[];
+}
 export interface Paginated<T> {
   count: number;
   next: string | null;
@@ -134,6 +140,20 @@ export async function getDocuments(
   const res = await apiFetch(`/documents/?${params.toString()}`);
   if (!res.ok) throw new Error(`Laden fehlgeschlagen: HTTP ${res.status}`);
   return res.json();
+}
+
+export async function getDocument(id: number): Promise<DocumentDetail> {
+  const res = await apiFetch(`/documents/${id}/`);
+  if (!res.ok) throw new Error(`Dokument laden fehlgeschlagen: HTTP ${res.status}`);
+  return res.json();
+}
+
+// Lädt das Vorschau-PDF als Blob (mit Auth-Header) – ein <iframe src="…/preview/">
+// würde den Bearer-Token nicht mitschicken, daher der Umweg über fetch + Blob-URL.
+export async function getDocumentPreview(id: number): Promise<Blob> {
+  const res = await apiFetch(`/documents/${id}/preview/`);
+  if (!res.ok) throw new Error(`Vorschau nicht verfügbar (HTTP ${res.status})`);
+  return res.blob();
 }
 
 export async function getMe(): Promise<Me> {
