@@ -104,6 +104,14 @@ export interface NamedRef {
   id: number;
   name: string;
 }
+export interface Me {
+  id: number;
+  username: string;
+  email: string;
+  role: string;
+  is_dms_admin: boolean;
+  can_write: boolean;
+}
 
 // --- Endpunkte ---
 export interface DocumentQuery {
@@ -125,6 +133,31 @@ export async function getDocuments(
   }
   const res = await apiFetch(`/documents/?${params.toString()}`);
   if (!res.ok) throw new Error(`Laden fehlgeschlagen: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function getMe(): Promise<Me> {
+  const res = await apiFetch("/me/");
+  if (!res.ok) throw new Error(`Profil laden fehlgeschlagen: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function uploadDocument(file: File, title?: string): Promise<DocumentItem> {
+  const form = new FormData();
+  form.append("file", file);
+  if (title) form.append("title", title);
+  // Kein Content-Type setzen – der Browser ergänzt die multipart-Boundary selbst.
+  const res = await apiFetch("/documents/upload/", { method: "POST", body: form });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const data = await res.json();
+      detail = data.detail || detail;
+    } catch {
+      /* keine JSON-Fehlermeldung */
+    }
+    throw new Error(detail);
+  }
   return res.json();
 }
 

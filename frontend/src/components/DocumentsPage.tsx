@@ -3,11 +3,14 @@ import {
   getCorrespondents,
   getDocuments,
   getDocumentTypes,
+  getMe,
   getTags,
   logout,
   type DocumentItem,
+  type Me,
   type NamedRef,
 } from "../api";
+import UploadZone from "./UploadZone";
 
 export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   const [q, setQ] = useState("");
@@ -24,8 +27,13 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Filter-Stammdaten einmalig laden.
+  const [me, setMe] = useState<Me | null>(null);
+  // Wird nach jedem Upload erhöht → löst ein Neuladen der Liste aus.
+  const [reloadKey, setReloadKey] = useState(0);
+
+  // Profil + Filter-Stammdaten einmalig laden.
   useEffect(() => {
+    getMe().then(setMe).catch(() => {});
     Promise.all([getCorrespondents(), getDocumentTypes(), getTags()])
       .then(([c, d, t]) => {
         setCorrespondents(c);
@@ -64,7 +72,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     return () => {
       active = false;
     };
-  }, [debouncedQ, correspondent, documentType, tag]);
+  }, [debouncedQ, correspondent, documentType, tag, reloadKey]);
 
   const hasFilters = useMemo(
     () => !!(debouncedQ || correspondent || documentType || tag),
@@ -87,10 +95,17 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     <div className="shell">
       <header className="topbar">
         <h1>DMS</h1>
-        <button className="link" onClick={handleLogout}>
-          Abmelden
-        </button>
+        <div className="topbar-right">
+          {me && <span className="muted user">{me.username}</span>}
+          <button className="link" onClick={handleLogout}>
+            Abmelden
+          </button>
+        </div>
       </header>
+
+      {me?.can_write && (
+        <UploadZone onUploaded={() => setReloadKey((k) => k + 1)} />
+      )}
 
       <section className="filters card">
         <input
