@@ -17,6 +17,7 @@ RUN apt-get update \
         unpaper \
         pngquant \
         qpdf \
+        poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

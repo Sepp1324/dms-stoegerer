@@ -11,6 +11,7 @@ Backend auch ohne installierte OCR-Binaries lädt (z. B. für `manage.py check`)
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 
 from . import storage
@@ -87,6 +88,43 @@ def run_ocr(input_path: str | Path, output_path: Path) -> tuple[str, int | None]
     return text, pages
 
 
+def generate_thumbnail(version, *, max_width: int = 400) -> str | None:
+    """Erzeugt ein JPEG-Miniaturbild der ersten Seite und speichert den Pfad.
+
+    Quelle: bevorzugt das Archiv-PDF, sonst das Original. Für Bild-Originale
+    direkt via Pillow. Imports sind lazy, damit das Backend ohne die
+    Render-Bibliotheken lädt (z. B. `manage.py check`).
+    """
+    src = version.archive_path or version.file_path
+    if not src or not os.path.exists(src):
+        return None
+
+    thumbs_dir = storage.DATA_DIR / "thumbnails"
+    thumbs_dir.mkdir(parents=True, exist_ok=True)
+    dest = thumbs_dir / f"{version.id}.jpg"
+
+    try:
+        if src.lower().endswith(".pdf"):
+            from pdf2image import convert_from_path
+
+            images = convert_from_path(src, first_page=1, last_page=1, size=(max_width, None))
+            if not images:
+                return None
+            img = images[0].convert("RGB")
+        else:
+            from PIL import Image
+
+            img = Image.open(src).convert("RGB")
+            img.thumbnail((max_width, max_width * 4))
+        img.save(dest, "JPEG", quality=80)
+    except Exception:  # pragma: no cover - Vorschau ist optional
+        return None
+
+    version.thumbnail_path = str(dest)
+    version.save(update_fields=["thumbnail_path"])
+    return str(dest)
+
+
 def _page_count(pdf_path: Path) -> int | None:
     try:
         import pikepdf
@@ -123,6 +161,9 @@ def process_version(version: DocumentVersion) -> dict:
             "page_count",
         ]
     )
+
+    # Miniaturbild der ersten Seite erzeugen (setzt thumbnail_path selbst).
+    generate_thumbnail(version)
 
     AuditLogEntry.objects.create(
         actor=version.created_by,

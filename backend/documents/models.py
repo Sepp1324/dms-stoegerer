@@ -188,6 +188,9 @@ class DocumentVersion(models.Model):
     archive_path = models.CharField(
         max_length=1024, blank=True, help_text="OCR'tes PDF/A"
     )
+    thumbnail_path = models.CharField(
+        max_length=1024, blank=True, help_text="Miniaturbild der ersten Seite (JPEG)"
+    )
 
     sha256 = models.CharField(max_length=64, help_text="Integritäts-Hash der Datei")
     prev_hash = models.CharField(

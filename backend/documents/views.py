@@ -176,6 +176,25 @@ class DocumentViewSet(viewsets.ModelViewSet):
         # as_attachment=False → inline anzeigen (PDF-Vorschau im Browser)
         return FileResponse(open(path, "rb"), content_type=content_type)
 
+    @action(detail=True, methods=["get"])
+    def thumbnail(self, request, pk=None):
+        """Liefert das Miniaturbild der ersten Seite (JPEG).
+
+        Erzeugt es bei Bedarf lazy (für Dokumente aus der Zeit vor dieser Funktion).
+        """
+        document = self.get_object()
+        version = document.current_version
+        if version is None:
+            raise Http404("Keine Version vorhanden.")
+
+        path = version.thumbnail_path
+        if not path or not os.path.exists(path):
+            path = pipeline.generate_thumbnail(version)
+        if not path or not os.path.exists(path):
+            raise Http404("Keine Vorschau verfügbar.")
+
+        return FileResponse(open(path, "rb"), content_type="image/jpeg")
+
 
 class TagViewSet(viewsets.ModelViewSet):
     queryset = Tag.objects.all()
