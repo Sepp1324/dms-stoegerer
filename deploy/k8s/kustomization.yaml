@@ -11,9 +11,9 @@ namespace: dms
 # (Überschreibt den Tag in allen Deployments – keine Änderung an den *.yaml nötig.)
 images:
   - name: registry.stoegerer-home.at/dms-backend
-    newTag: "0.1.1"
+    newTag: "0.2.0"
   - name: registry.stoegerer-home.at/dms-frontend
-    newTag: "0.1.0"
+    newTag: "0.2.0"
 
 resources:
   - namespace.yaml

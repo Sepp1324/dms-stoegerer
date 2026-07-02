@@ -15,6 +15,7 @@ venv/
 # Node / Frontend
 node_modules/
 /frontend/dist/
+/frontend/tsconfig.tsbuildinfo
 .vite/
 
 # OS / Editor
