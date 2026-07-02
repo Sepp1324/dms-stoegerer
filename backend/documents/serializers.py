@@ -5,6 +5,7 @@ from .models import (
     Document,
     DocumentType,
     DocumentVersion,
+    StoragePath,
     Tag,
 )
 
@@ -25,6 +26,16 @@ class DocumentTypeSerializer(serializers.ModelSerializer):
     class Meta:
         model = DocumentType
         fields = ("id", "name")
+
+
+class StoragePathSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = StoragePath
+        fields = ("id", "name", "path_template")
+        extra_kwargs = {
+            # Beim Inline-Anlegen genügt ein Name; Template hat einen Default.
+            "path_template": {"required": False},
+        }
 
 
 class DocumentVersionSerializer(serializers.ModelSerializer):
@@ -64,6 +75,9 @@ class DocumentSerializer(serializers.ModelSerializer):
     page_count = serializers.IntegerField(
         source="current_version.page_count", read_only=True, default=None
     )
+    storage_path_name = serializers.CharField(
+        source="storage_path.name", read_only=True, default=None
+    )
 
     class Meta:
         model = Document
@@ -77,6 +91,7 @@ class DocumentSerializer(serializers.ModelSerializer):
             "document_type",
             "document_type_name",
             "storage_path",
+            "storage_path_name",
             "tags",
             "tag_ids",
             "owner",

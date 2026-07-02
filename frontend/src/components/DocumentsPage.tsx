@@ -1,9 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  createCorrespondent,
+  createDocumentType,
+  createStoragePath,
+  createTag,
   getCorrespondents,
   getDocuments,
   getDocumentTypes,
   getMe,
+  getStoragePaths,
   getTags,
   logout,
   type DocumentItem,
@@ -22,6 +27,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   const [correspondents, setCorrespondents] = useState<NamedRef[]>([]);
   const [documentTypes, setDocumentTypes] = useState<NamedRef[]>([]);
   const [tags, setTags] = useState<NamedRef[]>([]);
+  const [storagePaths, setStoragePaths] = useState<NamedRef[]>([]);
 
   const [docs, setDocs] = useState<DocumentItem[]>([]);
   const [count, setCount] = useState(0);
@@ -37,16 +43,45 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   // Profil + Filter-Stammdaten einmalig laden.
   useEffect(() => {
     getMe().then(setMe).catch(() => {});
-    Promise.all([getCorrespondents(), getDocumentTypes(), getTags()])
-      .then(([c, d, t]) => {
+    Promise.all([
+      getCorrespondents(),
+      getDocumentTypes(),
+      getTags(),
+      getStoragePaths(),
+    ])
+      .then(([c, d, t, s]) => {
         setCorrespondents(c);
         setDocumentTypes(d);
         setTags(t);
+        setStoragePaths(s);
       })
       .catch(() => {
-        /* Filter sind optional – Fehler hier nicht blockierend */
+        /* Stammdaten sind optional – Fehler hier nicht blockierend */
       });
   }, []);
+
+  // Stammdaten inline anlegen: erzeugen, in die lokale Liste einsortieren, Item zurückgeben.
+  const byName = (a: NamedRef, b: NamedRef) => a.name.localeCompare(b.name);
+  async function addCorrespondent(name: string) {
+    const item = await createCorrespondent(name);
+    setCorrespondents((prev) => [...prev, item].sort(byName));
+    return item;
+  }
+  async function addDocumentType(name: string) {
+    const item = await createDocumentType(name);
+    setDocumentTypes((prev) => [...prev, item].sort(byName));
+    return item;
+  }
+  async function addStoragePath(name: string) {
+    const item = await createStoragePath(name);
+    setStoragePaths((prev) => [...prev, item].sort(byName));
+    return item;
+  }
+  async function addTag(name: string) {
+    const item = await createTag(name);
+    setTags((prev) => [...prev, item].sort(byName));
+    return item;
+  }
 
   // Suchfeld entprellen, damit nicht jeder Tastendruck eine Anfrage auslöst.
   const [debouncedQ, setDebouncedQ] = useState("");
@@ -104,8 +139,13 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
         }}
         correspondents={correspondents}
         documentTypes={documentTypes}
+        storagePaths={storagePaths}
         allTags={tags}
         canEdit={!!me?.can_write}
+        onCreateCorrespondent={addCorrespondent}
+        onCreateDocumentType={addDocumentType}
+        onCreateStoragePath={addStoragePath}
+        onCreateTag={addTag}
       />
     );
   }

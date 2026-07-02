@@ -96,6 +96,7 @@ export interface DocumentItem {
 }
 export interface DocumentDetail extends DocumentItem {
   storage_path: number | null;
+  storage_path_name: string | null;
   owner: number | null;
   current_version: number | null;
   versions: DocumentVersion[];
@@ -160,6 +161,7 @@ export interface DocumentPatch {
   title?: string;
   correspondent?: number | null;
   document_type?: number | null;
+  storage_path?: number | null;
   tag_ids?: number[];
 }
 
@@ -219,6 +221,41 @@ export async function getDocumentTypes(): Promise<NamedRef[]> {
 export async function getTags(): Promise<NamedRef[]> {
   return listAll<NamedRef>("/tags/");
 }
+export async function getStoragePaths(): Promise<NamedRef[]> {
+  return listAll<NamedRef>("/storage-paths/");
+}
+
+// --- Stammdaten inline anlegen ---
+async function postJson<T>(path: string, body: unknown): Promise<T> {
+  const res = await apiFetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const data = await res.json();
+      detail = data.detail || JSON.stringify(data);
+    } catch {
+      /* keine JSON-Fehlermeldung */
+    }
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+export const createCorrespondent = (name: string) =>
+  postJson<NamedRef>("/correspondents/", { name });
+export const createDocumentType = (name: string) =>
+  postJson<NamedRef>("/document-types/", { name });
+export const createTag = (name: string) =>
+  postJson<NamedRef>("/tags/", { name });
+export const createStoragePath = (name: string) =>
+  postJson<NamedRef>("/storage-paths/", {
+    name,
+    path_template: "archive/{jahr}/{korrespondent}/{titel}",
+  });
 
 // Hilfsfunktion: paginierte Liste in ein flaches Array einsammeln (erste Seite genügt hier).
 async function listAll<T>(path: string): Promise<T[]> {

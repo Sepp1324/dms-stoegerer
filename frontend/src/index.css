@@ -390,6 +390,23 @@ select:focus {
   gap: 0.5rem;
   margin-top: 0.3rem;
 }
+.creatable {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.creatable select {
+  flex: 1;
+}
+.creatable-new {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin-top: 0.4rem;
+}
+.creatable-new input {
+  flex: 1;
+}
 
 /* --- Status --- */
 .status {

@@ -12,8 +12,13 @@ interface Props {
   onBack: () => void;
   correspondents: NamedRef[];
   documentTypes: NamedRef[];
+  storagePaths: NamedRef[];
   allTags: NamedRef[];
   canEdit: boolean;
+  onCreateCorrespondent: (name: string) => Promise<NamedRef>;
+  onCreateDocumentType: (name: string) => Promise<NamedRef>;
+  onCreateStoragePath: (name: string) => Promise<NamedRef>;
+  onCreateTag: (name: string) => Promise<NamedRef>;
 }
 
 export default function DocumentDetail({
@@ -21,15 +26,19 @@ export default function DocumentDetail({
   onBack,
   correspondents,
   documentTypes,
+  storagePaths,
   allTags,
   canEdit,
+  onCreateCorrespondent,
+  onCreateDocumentType,
+  onCreateStoragePath,
+  onCreateTag,
 }: Props) {
   const [doc, setDoc] = useState<Detail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
   const [pdfError, setPdfError] = useState<string | null>(null);
 
-  // Bearbeiten-Modus
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -37,6 +46,7 @@ export default function DocumentDetail({
     title: "",
     correspondent: "" as number | "",
     document_type: "" as number | "",
+    storage_path: "" as number | "",
     tagIds: new Set<number>(),
   });
 
@@ -72,6 +82,7 @@ export default function DocumentDetail({
       title: doc.title,
       correspondent: doc.correspondent ?? "",
       document_type: doc.document_type ?? "",
+      storage_path: doc.storage_path ?? "",
       tagIds: new Set(doc.tags.map((t) => t.id)),
     });
     setSaveError(null);
@@ -94,6 +105,7 @@ export default function DocumentDetail({
         title: form.title,
         correspondent: form.correspondent === "" ? null : form.correspondent,
         document_type: form.document_type === "" ? null : form.document_type,
+        storage_path: form.storage_path === "" ? null : form.storage_path,
         tag_ids: Array.from(form.tagIds),
       });
       setDoc(updated);
@@ -115,9 +127,7 @@ export default function DocumentDetail({
         <button className="link" onClick={onBack}>
           ← Zurück zur Liste
         </button>
-        {doc && canEdit && !editing && (
-          <button onClick={startEdit}>Bearbeiten</button>
-        )}
+        {doc && canEdit && !editing && <button onClick={startEdit}>Bearbeiten</button>}
       </header>
 
       {error && <p className="status status--error">{error}</p>}
@@ -135,50 +145,32 @@ export default function DocumentDetail({
                     onChange={(e) => setForm((f) => ({ ...f, title: e.target.value }))}
                   />
                 </label>
-                <label>
-                  Korrespondent
-                  <select
-                    value={form.correspondent}
-                    onChange={(e) =>
-                      setForm((f) => ({
-                        ...f,
-                        correspondent: e.target.value ? Number(e.target.value) : "",
-                      }))
-                    }
-                  >
-                    <option value="">— keiner —</option>
-                    {correspondents.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  Typ
-                  <select
-                    value={form.document_type}
-                    onChange={(e) =>
-                      setForm((f) => ({
-                        ...f,
-                        document_type: e.target.value ? Number(e.target.value) : "",
-                      }))
-                    }
-                  >
-                    <option value="">— keiner —</option>
-                    {documentTypes.map((d) => (
-                      <option key={d.id} value={d.id}>
-                        {d.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+
+                <CreatableSelect
+                  label="Korrespondent"
+                  value={form.correspondent}
+                  onChange={(v) => setForm((f) => ({ ...f, correspondent: v }))}
+                  options={correspondents}
+                  onCreate={onCreateCorrespondent}
+                />
+                <CreatableSelect
+                  label="Typ"
+                  value={form.document_type}
+                  onChange={(v) => setForm((f) => ({ ...f, document_type: v }))}
+                  options={documentTypes}
+                  onCreate={onCreateDocumentType}
+                />
+                <CreatableSelect
+                  label="Ablagepfad"
+                  value={form.storage_path}
+                  onChange={(v) => setForm((f) => ({ ...f, storage_path: v }))}
+                  options={storagePaths}
+                  onCreate={onCreateStoragePath}
+                />
+
                 <div className="edit-tags">
                   <span className="edit-tags__label">Schlagworte</span>
                   <div className="tag-toggle-list">
-                    {allTags.length === 0 && (
-                      <span className="muted">Noch keine Schlagworte (im Admin anlegen).</span>
-                    )}
                     {allTags.map((t) => (
                       <button
                         key={t.id}
@@ -190,6 +182,14 @@ export default function DocumentDetail({
                       </button>
                     ))}
                   </div>
+                  <InlineCreate
+                    placeholder="Neues Schlagwort"
+                    buttonLabel="+ Tag"
+                    onCreate={async (name) => {
+                      const item = await onCreateTag(name);
+                      toggleTag(item.id);
+                    }}
+                  />
                 </div>
 
                 {saveError && <p className="status status--error">{saveError}</p>}
@@ -210,6 +210,8 @@ export default function DocumentDetail({
                   <dd>{doc.correspondent_name ?? "—"}</dd>
                   <dt>Typ</dt>
                   <dd>{doc.document_type_name ?? "—"}</dd>
+                  <dt>Ablagepfad</dt>
+                  <dd>{doc.storage_path_name ?? "—"}</dd>
                   <dt>Aufgenommen</dt>
                   <dd>{new Date(doc.added_at).toLocaleString("de-DE")}</dd>
                   <dt>Seiten</dt>
@@ -252,6 +254,104 @@ export default function DocumentDetail({
           </section>
         </div>
       )}
+    </div>
+  );
+}
+
+function CreatableSelect({
+  label,
+  value,
+  onChange,
+  options,
+  onCreate,
+}: {
+  label: string;
+  value: number | "";
+  onChange: (v: number | "") => void;
+  options: NamedRef[];
+  onCreate: (name: string) => Promise<NamedRef>;
+}) {
+  const [adding, setAdding] = useState(false);
+  return (
+    <label>
+      {label}
+      <div className="creatable">
+        <select
+          value={value}
+          onChange={(e) => onChange(e.target.value ? Number(e.target.value) : "")}
+        >
+          <option value="">— keiner —</option>
+          {options.map((o) => (
+            <option key={o.id} value={o.id}>
+              {o.name}
+            </option>
+          ))}
+        </select>
+        <button type="button" className="link" onClick={() => setAdding((a) => !a)}>
+          + neu
+        </button>
+      </div>
+      {adding && (
+        <InlineCreate
+          placeholder="Name"
+          buttonLabel="Anlegen"
+          onCreate={async (name) => {
+            const item = await onCreate(name);
+            onChange(item.id);
+            setAdding(false);
+          }}
+        />
+      )}
+    </label>
+  );
+}
+
+function InlineCreate({
+  placeholder,
+  buttonLabel,
+  onCreate,
+}: {
+  placeholder: string;
+  buttonLabel: string;
+  onCreate: (name: string) => Promise<void>;
+}) {
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function create() {
+    if (!name.trim()) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      await onCreate(name.trim());
+      setName("");
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="creatable-new">
+      <div style={{ display: "flex", gap: "0.4rem" }}>
+        <input
+          value={name}
+          placeholder={placeholder}
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              create();
+            }
+          }}
+        />
+        <button type="button" onClick={create} disabled={busy || !name.trim()}>
+          {busy ? "…" : buttonLabel}
+        </button>
+      </div>
+      {err && <span className="status status--error">{err}</span>}
     </div>
   );
 }
