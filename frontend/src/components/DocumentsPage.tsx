@@ -6,6 +6,7 @@ import {
   createTag,
   getCorrespondents,
   getDocuments,
+  getDocumentThumbnail,
   getDocumentTypes,
   getMe,
   getStoragePaths,
@@ -220,15 +221,39 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
 }
 
 function DocumentCard({ doc, onOpen }: { doc: DocumentItem; onOpen: () => void }) {
+  const [thumb, setThumb] = useState<string | null>(null);
+
+  useEffect(() => {
+    let url: string | null = null;
+    let active = true;
+    getDocumentThumbnail(doc.id)
+      .then((blob) => {
+        if (!active) return;
+        url = URL.createObjectURL(blob);
+        setThumb(url);
+      })
+      .catch(() => {
+        /* kein Thumbnail (z. B. OCR noch nicht fertig) → Icon-Fallback */
+      });
+    return () => {
+      active = false;
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [doc.id]);
+
   return (
     <button className="doc-card" onClick={onOpen} title={doc.title}>
       <div className="doc-card__preview">
-        <svg viewBox="0 0 24 24" width="38" height="38" aria-hidden="true">
-          <path
-            fill="currentColor"
-            d="M6 2h7l5 5v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2m7 1.5V8h4.5z"
-          />
-        </svg>
+        {thumb ? (
+          <img className="doc-card__thumb" src={thumb} alt="" />
+        ) : (
+          <svg viewBox="0 0 24 24" width="38" height="38" aria-hidden="true">
+            <path
+              fill="currentColor"
+              d="M6 2h7l5 5v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2m7 1.5V8h4.5z"
+            />
+          </svg>
+        )}
         {doc.page_count != null && (
           <span className="doc-card__pages">
             {doc.page_count} {doc.page_count === 1 ? "Seite" : "Seiten"}

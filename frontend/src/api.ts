@@ -157,6 +157,13 @@ export async function getDocumentPreview(id: number): Promise<Blob> {
   return res.blob();
 }
 
+// Miniaturbild der ersten Seite (JPEG) – ebenfalls per fetch+Blob wegen JWT.
+export async function getDocumentThumbnail(id: number): Promise<Blob> {
+  const res = await apiFetch(`/documents/${id}/thumbnail/`);
+  if (!res.ok) throw new Error(`Kein Thumbnail (HTTP ${res.status})`);
+  return res.blob();
+}
+
 export interface DocumentPatch {
   title?: string;
   correspondent?: number | null;
