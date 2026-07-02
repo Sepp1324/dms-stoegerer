@@ -1,0 +1,31 @@
+# k3s-Registry-Konfiguration – NICHT via kubectl anwenden!
+# Diese Datei gehört auf JEDEN Node nach /etc/rancher/k3s/registries.yaml,
+# damit containerd der (self-signed / unsicheren) Registry vertraut.
+#
+#   sudo cp registries.yaml.example /etc/rancher/k3s/registries.yaml
+#   # Server-Node (k3s-01):
+#   sudo systemctl restart k3s
+#   # Agent-Nodes (k3s-02, k3s-03):
+#   sudo systemctl restart k3s-agent
+#
+# Variante A: self-signed HTTPS-Zertifikat (Domain vorhanden) – unten aktiv.
+# Variante B: reines HTTP – endpoint auf http:// setzen, tls-Block entfernen.
+
+mirrors:
+  registry.stoegerer-home.at:
+    endpoint:
+      - "https://registry.stoegerer-home.at"
+      # Variante B (HTTP): stattdessen
+      # - "http://registry.stoegerer-home.at"
+
+configs:
+  registry.stoegerer-home.at:
+    tls:
+      # Self-signed Zertifikat akzeptieren (Variante A).
+      insecure_skip_verify: true
+      # Sauberer statt insecure_skip_verify: eigenes CA-Zertifikat hinterlegen:
+      # ca_file: "/etc/rancher/k3s/registry-ca.crt"
+    # Falls die Registry doch Zugangsdaten braucht (hier: anonym, also leer):
+    # auth:
+    #   username: "<user>"
+    #   password: "<pass>"

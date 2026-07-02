@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: dms
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: worker
+  template:
+    metadata:
+      labels:
+        app: worker
+    spec:
+      # Worker + Backend teilen die RWO-PVC dms-data → müssen auf denselben Node.
+      # (Ohne local-path gibt es keine automatische Node-Bindung; wir erzwingen
+      #  Co-Location. Alternative: RWX-Storage, dann kann diese Affinität weg.)
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: backend
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: worker
+          image: registry.stoegerer-home.at/dms-backend:0.1.0
+          imagePullPolicy: IfNotPresent
+          command: ["celery", "-A", "config", "worker", "-l", "info"]
+          envFrom:
+            - configMapRef:
+                name: dms-config
+            - secretRef:
+                name: dms-secrets
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: dms-data

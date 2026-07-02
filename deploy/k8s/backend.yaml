@@ -1,0 +1,96 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dms-data
+  namespace: dms
+spec:
+  # RWO genügt im Einzel-Node-k3s; Backend + Worker laufen auf demselben Node.
+  # Für Multi-Node später auf ein RWX-Volume (z. B. Longhorn/NFS) wechseln.
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: dms
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      # Migrationen einmalig vor dem Start des Web-Prozesses.
+      initContainers:
+        - name: migrate
+          image: registry.stoegerer-home.at/dms-backend:0.1.0
+          imagePullPolicy: IfNotPresent
+          command: ["python", "manage.py", "migrate", "--noinput"]
+          envFrom:
+            - configMapRef:
+                name: dms-config
+            - secretRef:
+                name: dms-secrets
+      containers:
+        - name: backend
+          image: registry.stoegerer-home.at/dms-backend:0.1.0
+          imagePullPolicy: IfNotPresent
+          command:
+            - gunicorn
+            - config.wsgi:application
+            - --bind
+            - 0.0.0.0:8000
+            - --workers
+            - "3"
+          envFrom:
+            - configMapRef:
+                name: dms-config
+            - secretRef:
+                name: dms-secrets
+          ports:
+            - containerPort: 8000
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            httpGet:
+              path: /api/health/
+              port: 8000
+              # Kubelet nutzt sonst die Pod-IP als Host → Django lehnt mit 400
+              # (DisallowedHost) ab. localhost steht in ALLOWED_HOSTS.
+              httpHeaders:
+                - name: Host
+                  value: localhost
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          livenessProbe:
+            httpGet:
+              path: /api/health/
+              port: 8000
+              httpHeaders:
+                - name: Host
+                  value: localhost
+            initialDelaySeconds: 20
+            periodSeconds: 30
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: dms-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: dms
+spec:
+  selector:
+    app: backend
+  ports:
+    - port: 8000
+      targetPort: 8000

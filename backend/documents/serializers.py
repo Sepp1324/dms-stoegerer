@@ -1,0 +1,78 @@
+from rest_framework import serializers
+
+from .models import (
+    Correspondent,
+    Document,
+    DocumentType,
+    DocumentVersion,
+    Tag,
+)
+
+
+class TagSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Tag
+        fields = ("id", "name", "color", "parent")
+
+
+class CorrespondentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Correspondent
+        fields = ("id", "name")
+
+
+class DocumentTypeSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DocumentType
+        fields = ("id", "name")
+
+
+class DocumentVersionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DocumentVersion
+        fields = (
+            "id",
+            "version_no",
+            "sha256",
+            "prev_hash",
+            "mime_type",
+            "size",
+            "page_count",
+            "is_immutable",
+            "created_at",
+        )
+
+
+class DocumentSerializer(serializers.ModelSerializer):
+    versions = DocumentVersionSerializer(many=True, read_only=True)
+    tags = TagSerializer(many=True, read_only=True)
+    # Anzeige-Namen für die Liste (spart dem Frontend Zusatz-Requests).
+    correspondent_name = serializers.CharField(
+        source="correspondent.name", read_only=True, default=None
+    )
+    document_type_name = serializers.CharField(
+        source="document_type.name", read_only=True, default=None
+    )
+    page_count = serializers.IntegerField(
+        source="current_version.page_count", read_only=True, default=None
+    )
+
+    class Meta:
+        model = Document
+        fields = (
+            "id",
+            "title",
+            "created_at",
+            "added_at",
+            "correspondent",
+            "correspondent_name",
+            "document_type",
+            "document_type_name",
+            "storage_path",
+            "tags",
+            "owner",
+            "current_version",
+            "page_count",
+            "versions",
+        )
+        read_only_fields = ("added_at", "current_version")

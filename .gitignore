@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+*.sqlite3
+
+# Django
+/backend/media/
+/backend/staticfiles/
+/data/
+
+# Node / Frontend
+node_modules/
+/frontend/dist/
+.vite/
+
+# OS / Editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Secrets (k8s)
+deploy/k8s/secret.yaml

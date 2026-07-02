@@ -1,0 +1,425 @@
+# DMS auf k3s – vollständige Konfigurationsanleitung
+
+Diese Anleitung führt das DMS auf einem **k3s-Cluster** aus – vom leeren Server
+bis zum erreichbaren `http://dms.stoegerer-home.at`. Optimiert für ein **Einzel-Node-Setup**
+(Familien-Homelab); Hinweise für Multi-Node stehen jeweils dabei.
+
+---
+
+## 1. Was ausgerollt wird
+
+| Objekt | Kind | Zweck |
+|---|---|---|
+| `dms` | Namespace | Alle Ressourcen leben hier |
+| `dms-config` | ConfigMap | Nicht-geheime Einstellungen (Hosts, DB-Name, AI-Provider …) |
+| `dms-secrets` | Secret | `DJANGO_SECRET_KEY`, `POSTGRES_PASSWORD`, API-Keys |
+| `postgres` | Deployment + PVC (`postgres-data`, 5 Gi) + Service | Datenbank |
+| `redis` | Deployment + Service | Celery-Broker |
+| `backend` | Deployment (Init-Container: migrate + collectstatic) + Service `:8000` | Django/DRF |
+| `worker` | Deployment | Celery-Worker (OCR-Pipeline) |
+| `frontend` | Deployment + Service `:80` | React-SPA (nginx) |
+| `dms-data` | PVC (20 Gi) | Revisionssichere Ablage `/data` (originals + archive) |
+| `dms` | Ingress (Traefik) | `/api`,`/admin`,`/static` → Backend, `/` → Frontend |
+
+```
+                 ┌──────────── Traefik Ingress (dms.stoegerer-home.at) ───────────┐
+                 │  /api /admin /static → backend    / → frontend      │
+                 └───────────────┬───────────────────────┬────────────┘
+                          ┌──────▼──────┐          ┌───────▼───────┐
+                          │  backend    │          │   frontend    │
+                          │ (gunicorn)  │          │   (nginx)     │
+                          └──┬───────┬──┘          └───────────────┘
+                             │       │
+                   ┌─────────▼─┐  ┌──▼────────┐        ┌──────────┐
+                   │ postgres  │  │  redis    │◀───────│  worker  │
+                   └───────────┘  └───────────┘        └──────────┘
+                             │                              │
+                             └──────── PVC dms-data (/data) ┘
+```
+
+---
+
+## 2. Voraussetzungen
+
+- Ein Linux-Server (Ubuntu/Debian o. ä.), ≥ 2 GB RAM, ≥ 20 GB frei.
+- Root/sudo auf dem Server.
+- `docker` **auf der Maschine, die die Images baut** (kann der Server selbst sein).
+- Grundkenntnisse `kubectl`.
+
+> k3s bringt vieles mit, was wir brauchen: **Traefik** (Ingress), den
+> **local-path-Provisioner** (Standard-`StorageClass` für die PVCs) und
+> **containerd** als Container-Runtime. Es ist kein zusätzlicher Ingress- oder
+> Storage-Controller nötig.
+
+---
+
+## 3. k3s installieren
+
+### Control-Plane-Node (Server)
+
+```bash
+curl -sfL https://get.k3s.io | sh -
+
+# Status prüfen
+sudo systemctl status k3s
+sudo k3s kubectl get nodes
+```
+
+### (Optional) weitere Nodes hinzufügen
+
+```bash
+# Auf dem Server: Join-Token auslesen
+sudo cat /var/lib/rancher/k3s/server/node-token
+
+# Auf dem zusätzlichen Node:
+curl -sfL https://get.k3s.io | K3S_URL=https://<server-ip>:6443 \
+  K3S_TOKEN=<token> sh -
+```
+
+> ⚠️ **Multi-Node-Hinweis:** Die PVC `dms-data` ist `ReadWriteOnce` (RWO) und wird
+> von **backend + worker gemeinsam** genutzt. Beide müssen dann auf denselben Node.
+> Für Einzel-Node ist das automatisch erfüllt. Für echtes Multi-Node siehe §12.
+
+---
+
+## 4. kubectl einrichten
+
+```bash
+# Kubeconfig für den eigenen Nutzer verfügbar machen
+mkdir -p ~/.kube
+sudo cp /etc/rancher/k3s/k3s.yaml ~/.kube/config
+sudo chown $(id -u):$(id -g) ~/.kube/config
+# Bei Remote-Zugriff: server: https://127.0.0.1:6443 → auf die Server-IP ändern
+
+kubectl get nodes        # sollte "Ready" zeigen
+```
+
+---
+
+## 5. Images bauen und in die Registry pushen
+
+Dieses Setup nutzt eine **Container-Registry** (`registry.stoegerer-home.at`).
+Die Deployments referenzieren `registry.stoegerer-home.at/dms-*:latest` mit
+`imagePullPolicy: Always`, sodass jeder Node beim Rollout die aktuelle Version
+zieht. Kein Tar-Kopieren zwischen den Nodes mehr.
+
+### 5a. Nodes für die Registry konfigurieren (einmalig)
+
+Da die Registry self-signed / unsicher ist, muss containerd ihr auf **jedem
+Node** vertrauen. Vorlage: [`registries.yaml.example`](registries.yaml.example).
+
+```bash
+sudo cp deploy/k8s/registries.yaml.example /etc/rancher/k3s/registries.yaml
+# (Inhalt bei Bedarf anpassen: HTTPS-self-signed vs. HTTP)
+
+# Node-Dienst neu starten, damit containerd die Konfig lädt:
+sudo systemctl restart k3s          # Server-Node (k3s-01)
+sudo systemctl restart k3s-agent    # auf jedem Agent-Node (k3s-02, k3s-03)
+```
+
+Die Datei muss auf allen Nodes liegen (per `scp` verteilen), sonst schlägt der
+Pull auf den nicht-konfigurierten Nodes fehl.
+
+### 5b. Bauen & pushen (bei jeder neuen Version)
+
+**Immer mit Versions-Tag** – nie `:latest`. Die Version wird an einer Stelle
+gepflegt: `newTag` in [`kustomization.yaml`](kustomization.yaml).
+
+```bash
+# Im Projekt-Root – Version einmal setzen und überall verwenden
+VERSION=0.1.0
+
+docker build -t registry.stoegerer-home.at/dms-backend:$VERSION  ./backend
+docker build -t registry.stoegerer-home.at/dms-frontend:$VERSION ./frontend
+
+docker push registry.stoegerer-home.at/dms-backend:$VERSION
+docker push registry.stoegerer-home.at/dms-frontend:$VERSION
+```
+
+Dann in `kustomization.yaml` beide `newTag` auf `$VERSION` setzen (siehe §7).
+
+> **`docker push` scheitert mit x509/Zertifikatsfehler?** Dann vertraut der
+> **Docker-Daemon** der Registry noch nicht. In `/etc/docker/daemon.json` auf der
+> Build-Maschine ergänzen: `{"insecure-registries": ["registry.stoegerer-home.at"]}`
+> und `sudo systemctl restart docker`. (Betrifft nur den Build-Host, nicht die Nodes.)
+
+> **Warum Versions-Tags statt `:latest`?** Nur so ist reproduzierbar, welche
+> Version auf welchem Node läuft, und ein Rollback ist ein simpler Tag-Wechsel.
+
+> **Hinweis Storage & Node-Zuordnung:** Bei einem **CSI-Provisioner** (z. B.
+> Longhorn) werden PVC-Pods **nicht** automatisch ko-lokalisiert. Da `backend`
+> und `worker` die RWO-PVC `dms-data` teilen, erzwingt `celery.yaml` per
+> `podAffinity`, dass der Worker auf demselben Node wie das Backend läuft (siehe
+> §12 für die RWX-Alternative). Die Registry muss von allen Nodes erreichbar sein.
+
+---
+
+## 6. Konfiguration anpassen
+
+### 6a. Secret erstellen (Pflicht)
+
+`secret.yaml` ist per `.gitignore` ausgeschlossen und wird aus der Vorlage erzeugt:
+
+```bash
+cp deploy/k8s/secret.example.yaml deploy/k8s/secret.yaml
+```
+
+In `deploy/k8s/secret.yaml` eintragen:
+
+| Schlüssel | Wert |
+|---|---|
+| `DJANGO_SECRET_KEY` | langer Zufallswert – z. B. `python -c 'import secrets;print(secrets.token_urlsafe(50))'` |
+| `POSTGRES_PASSWORD` | sicheres DB-Passwort |
+| `ANTHROPIC_API_KEY` | dein Claude-API-Key (nur wenn `AI_PROVIDER=anthropic`) |
+| `OPENAI_API_KEY` | optional |
+
+### 6b. ConfigMap prüfen (`deploy/k8s/configmap.yaml`)
+
+- `DJANGO_ALLOWED_HOSTS` / `DJANGO_CORS_ORIGINS` – müssen den Ingress-Host (`dms.stoegerer-home.at`) enthalten.
+- `AI_PROVIDER` – `anthropic` (Default), `ollama` (lokal, ohne Cloud) oder `disabled`.
+- `AI_MODEL` – Default `claude-opus-4-8`; für günstige Massen-Klassifizierung `claude-haiku-4-5`.
+- Für **Ollama** (Datenschutz, lokal): `AI_PROVIDER=ollama` und `OLLAMA_BASE_URL`
+  auf einen erreichbaren Ollama-Dienst zeigen lassen (im Cluster als eigener
+  Service oder extern).
+
+---
+
+## 7. Ausrollen
+
+```bash
+# 1. Namespace zuerst – das Secret lebt darin und braucht ihn vorab
+kubectl apply -f deploy/k8s/namespace.yaml
+
+# 2. Secret (steht bewusst nicht in der kustomization)
+kubectl apply -f deploy/k8s/secret.yaml
+
+# 3. Der Rest per kustomize (legt den Namespace idempotent erneut an – ok)
+kubectl apply -k deploy/k8s
+
+# Hochlaufen beobachten
+kubectl -n dms get pods -w
+```
+
+> ⚠️ **Reihenfolge wichtig:** Wird das Secret vor dem Namespace angewendet,
+> kommt `namespaces "dms" not found`. Deshalb Namespace → Secret → Rest.
+
+Ablauf: `postgres`/`redis` starten → Backend-**Init-Container** wartet auf die DB,
+führt `migrate` und `collectstatic` aus → dann laufen `backend`, `worker`,
+`frontend`. Alle Pods sollten `Running` / `Ready` werden.
+
+---
+
+## 8. Admin-Nutzer anlegen
+
+```bash
+kubectl -n dms exec -it deploy/backend -- python manage.py createsuperuser
+```
+
+Danach kannst du dich unter `http://dms.stoegerer-home.at/admin/` anmelden und dort
+Korrespondenten, Dokumenttypen, Tags, Klassifizierungsregeln und Nutzer pflegen.
+
+---
+
+## 9. Zugriff einrichten (DNS)
+
+Der Ingress hört auf den Host **`dms.stoegerer-home.at`**. Der DNS-Eintrag wird
+zentral in der **UDM (UniFi)** gepflegt – ein A-Record auf eine Node-IP:
+
+```bash
+# Node-IP ermitteln (eine der drei genügt – Traefik liegt auf jeder Node-IP)
+kubectl get nodes -o wide      # Spalte INTERNAL-IP
+```
+
+Dann in der UDM: `dms.stoegerer-home.at  A  <node-ip>` anlegen. Kein
+`/etc/hosts`-Eintrag nötig – gilt für alle Geräte im Netz.
+
+Aufruf im Browser: **http://dms.stoegerer-home.at** (SPA) ·
+**http://dms.stoegerer-home.at/admin/** (Verwaltung).
+
+> **Vor dem DNS-Eintrag testen** (umgeht DNS, spricht Traefik direkt an):
+> ```bash
+> curl -s -H 'Host: dms.stoegerer-home.at' http://127.0.0.1/api/health/
+> ```
+> Kommt `{"status":"ok",…}`, funktioniert der Ingress – dann fehlt nur noch DNS.
+
+---
+
+## 10. Verifizieren
+
+```bash
+# Alle Objekte im Namespace
+kubectl -n dms get all,ingress,pvc
+
+# Health-Check über den Ingress
+curl http://dms.stoegerer-home.at/api/health/
+# → {"status":"ok","service":"dms-backend","version":"0.1.0","database":"ok"}
+
+# Logs
+kubectl -n dms logs deploy/backend
+kubectl -n dms logs deploy/worker      # Celery/OCR
+```
+
+**Ende-zu-Ende-Test** (Token holen, PDF hochladen):
+
+```bash
+TOKEN=$(curl -s http://dms.stoegerer-home.at/api/auth/token/ \
+  -d 'username=<user>&password=<pass>' | python3 -c 'import sys,json;print(json.load(sys.stdin)["access"])')
+
+curl -s http://dms.stoegerer-home.at/api/documents/upload/ \
+  -H "Authorization: Bearer $TOKEN" \
+  -F 'file=@rechnung.pdf' -F 'title=Stadtwerke Januar'
+```
+
+Der Worker verarbeitet OCR + Ablage; im Admin erscheinen Dokument, Version
+(mit `sha256`/`prev_hash`) und Audit-Log.
+
+---
+
+## 11. Betrieb
+
+### Neue Version ausrollen
+
+Immer mit neuem Versions-Tag (z. B. `0.2.0`):
+
+```bash
+VERSION=0.2.0
+docker build -t registry.stoegerer-home.at/dms-backend:$VERSION  ./backend
+docker build -t registry.stoegerer-home.at/dms-frontend:$VERSION ./frontend
+docker push registry.stoegerer-home.at/dms-backend:$VERSION
+docker push registry.stoegerer-home.at/dms-frontend:$VERSION
+
+# newTag in kustomization.yaml auf $VERSION setzen, dann:
+kubectl apply -k deploy/k8s
+kubectl -n dms rollout status deploy/backend
+```
+
+Der Tag-Wechsel in `kustomization.yaml` ändert die Pod-Spezifikation → das
+Rollout startet automatisch (kein manuelles `rollout restart` nötig).
+**Rollback:** `newTag` zurück auf die alte Version, `kubectl apply -k`.
+
+### Consume-Ordner (Scanner-Eingang)
+
+Der Worker kann einen Eingangsordner `/data/consume` aufnehmen. Dateien
+hineinlegen (z. B. per Sidecar, NFS-Mount oder `kubectl cp`) und den Task anstoßen:
+
+```bash
+kubectl -n dms exec deploy/worker -- \
+  python -c "from documents.tasks import scan_consume_folder as s; print(s())"
+```
+
+Ein automatischer Zeitplan (Celery Beat) folgt in einer späteren Ausbaustufe.
+
+### Skalierung
+
+`backend` und `frontend` sind zustandslos und horizontal skalierbar
+(`kubectl -n dms scale deploy/backend --replicas=2`) – **solange** alle Backend-
+und Worker-Pods auf dem Node mit der `dms-data`-PVC liegen (RWO). Für echte
+Verteilung siehe §12.
+
+---
+
+## 12. Multi-Node & geteilter Speicher
+
+Die `dms-data`-PVC ist `ReadWriteOnce` und wird von `backend` **und** `worker`
+genutzt. Bei einem CSI-Provisioner scattern die Pods sonst über Nodes und der
+zweite Mount scheitert (`FailedMount … volumeattachments … no relationship`).
+Zwei Wege:
+
+1. **Umgesetzt (Default):** `worker` hat eine `podAffinity` auf `app: backend`
+   (in `celery.yaml`) → beide laufen auf demselben Node, das RWO-Volume ist nur
+   dort angehängt. Einfach, aber keine echte Verteilung.
+2. **Sauber (RWX):** ein **RWX-fähiges** Storage nutzen – z. B.
+   [Longhorn](https://longhorn.io) (RWX über NFS) oder ein NFS-Provisioner. Dann
+   in `backend.yaml` die `dms-data`-PVC auf `accessModes: ["ReadWriteMany"]` und
+   die passende `storageClassName` setzen und die `podAffinity` in `celery.yaml`
+   entfernen. Backend ist dann über mehrere Nodes skalierbar.
+
+---
+
+## 13. Backup
+
+Zwei Dinge sichern: **Datenbank** (Metadaten) und **`/data`** (Dateien).
+
+```bash
+# 1. Datenbank-Dump
+kubectl -n dms exec deploy/postgres -- \
+  pg_dump -U dms dms | gzip > dms-db-$(date +%F).sql.gz
+
+# 2. Datei-Ablage (/data) aus dem Backend-Pod
+kubectl -n dms exec deploy/backend -- \
+  tar czf - -C /data . > dms-data-$(date +%F).tar.gz
+```
+
+> Da Metadaten (DB) und Dateien (`/data`) getrennt liegen, immer **beide zum
+> gleichen Zeitpunkt** sichern. Für Konsistenz idealerweise Uploads kurz pausieren
+> oder zu ruhiger Zeit sichern. Wiederherstellung: DB per `psql < dump` einspielen,
+> `/data` in die PVC zurückspielen.
+
+---
+
+## 14. TLS (optional, empfohlen für externen Zugriff)
+
+Für HTTPS statt reinem HTTP:
+
+1. `cert-manager` installieren und einen `ClusterIssuer` (z. B. Let's Encrypt)
+   anlegen.
+2. Im `ingress.yaml` einen `tls`-Block und die Cert-Manager-Annotation ergänzen,
+   den Traefik-Entrypoint auf `websecure` stellen.
+3. Voraussetzung: ein echter, öffentlich auflösbarer DNS-Name (kein `.local`).
+
+---
+
+## 15. Troubleshooting
+
+| Symptom | Ursache / Lösung |
+|---|---|
+| Pod `ImagePullBackOff` | Image nicht in containerd importiert → §5 erneut; auf Multi-Node auf **jedem** Node importieren oder Registry nutzen |
+| Backend `CrashLoopBackOff` | DB nicht erreichbar oder `dms-secrets` fehlt → `kubectl -n dms logs`, Secret angewendet? `kubectl -n dms get secret dms-secrets` |
+| Init-Container hängt | Postgres noch nicht `Ready` → `kubectl -n dms get pods`, DB-Logs prüfen |
+| `/admin/` ohne Styles | `collectstatic` lief nicht → Init-Container-Logs; Ingress-Pfad `/static` vorhanden? |
+| `400 Bad Request`/`DisallowedHost` | Host nicht in `DJANGO_ALLOWED_HOSTS` (ConfigMap) → ergänzen, Rollout-Restart |
+| Upload OK, aber kein OCR-Ergebnis | Worker-Logs (`kubectl -n dms logs deploy/worker`); Redis erreichbar? OCR-Binaries im Image (§ Dockerfile) |
+| `dms.stoegerer-home.at` nicht erreichbar | DNS-A-Record (UDM) auf Node-IP gesetzt? Erst per `curl -H 'Host: …' http://127.0.0.1/api/health/` prüfen, ob Traefik antwortet; Traefik läuft (`kubectl -n kube-system get pods`)? |
+| `404 page not found` (Traefik) beim Aufruf | Kein Router für den Host → Ingress vorhanden (`kubectl -n dms get ingress`)? `ingressClassName: traefik` gesetzt? Host im Ingress == angefragter Host? |
+| PVC `Pending` | local-path-Provisioner aktiv? `kubectl get sc` sollte `local-path (default)` zeigen |
+| postgres `Error`: `initdb: directory … not empty (lost+found)` | PVC liegt auf eigenem Dateisystem-Mount → bereits gelöst per `PGDATA=/var/lib/postgresql/data/pgdata` im `postgres.yaml` (Daten im Unterverzeichnis statt im Mount-Punkt) |
+| `FailedMount … volumeattachments … no relationship found between node …` | RWO-PVC `dms-data` von backend+worker auf verschiedenen Nodes angefordert → durch `podAffinity` in `celery.yaml` gelöst (Co-Location). Dauerhaft besser: RWX-Storage, siehe §12 |
+
+Nützlich:
+
+```bash
+kubectl -n dms describe pod <pod>     # Events unten ansehen
+kubectl -n dms get events --sort-by=.lastTimestamp
+```
+
+---
+
+## Schnell-Referenz (alles auf einmal)
+
+```bash
+# 1. k3s
+curl -sfL https://get.k3s.io | sh -
+mkdir -p ~/.kube && sudo cp /etc/rancher/k3s/k3s.yaml ~/.kube/config \
+  && sudo chown $(id -u):$(id -g) ~/.kube/config
+
+# 2. Registry auf jedem Node vertrauen + Images (mit Versions-Tag) pushen
+sudo cp deploy/k8s/registries.yaml.example /etc/rancher/k3s/registries.yaml   # auf allen Nodes
+sudo systemctl restart k3s          # bzw. k3s-agent auf den Agent-Nodes
+VERSION=0.1.0   # muss dem newTag in kustomization.yaml entsprechen
+docker build -t registry.stoegerer-home.at/dms-backend:$VERSION  ./backend
+docker build -t registry.stoegerer-home.at/dms-frontend:$VERSION ./frontend
+docker push registry.stoegerer-home.at/dms-backend:$VERSION
+docker push registry.stoegerer-home.at/dms-frontend:$VERSION
+
+# 3. Namespace → Secret → Deploy (Reihenfolge beachten!)
+cp deploy/k8s/secret.example.yaml deploy/k8s/secret.yaml   # Werte eintragen!
+kubectl apply -f deploy/k8s/namespace.yaml
+kubectl apply -f deploy/k8s/secret.yaml
+kubectl apply -k deploy/k8s
+
+# 4. Superuser + Zugriff
+kubectl -n dms exec -it deploy/backend -- python manage.py createsuperuser
+# DNS-A-Record in der UDM: dms.stoegerer-home.at -> <node-ip>
+curl -H 'Host: dms.stoegerer-home.at' http://127.0.0.1/api/health/   # Ingress-Test ohne DNS
+curl http://dms.stoegerer-home.at/api/health/                        # nach DNS-Eintrag
+```

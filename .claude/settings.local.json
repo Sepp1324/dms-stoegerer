@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Skill(claude-api)",
+      "Skill(claude-api:*)",
+      "Bash(python3 -m py_compile config/*.py accounts/*.py documents/*.py ai/*.py)",
+      "Bash(python3 -m venv dmsvenv)",
+      "Bash(./dmsvenv/bin/pip install *)",
+      "Bash(kubectl kustomize *)"
+    ]
+  }
+}

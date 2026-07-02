@@ -1,0 +1,46 @@
+# Ingress über Traefik (in k3s standardmäßig installiert).
+# /api,/admin,/static -> Backend,  alles andere -> Frontend (SPA).
+# Hostname dms.stoegerer-home.at per DNS (UDM) auf eine Node-IP zeigen lassen.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: dms
+  namespace: dms
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: dms.stoegerer-home.at
+      http:
+        paths:
+          # API, Django-Admin und dessen Static-Dateien → Backend
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: backend
+                port:
+                  number: 8000
+          - path: /admin
+            pathType: Prefix
+            backend:
+              service:
+                name: backend
+                port:
+                  number: 8000
+          - path: /static
+            pathType: Prefix
+            backend:
+              service:
+                name: backend
+                port:
+                  number: 8000
+          # Alles andere → Frontend (SPA)
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 80

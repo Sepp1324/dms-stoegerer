@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dms-config
+  namespace: dms
+data:
+  DJANGO_DEBUG: "false"
+  DJANGO_ALLOWED_HOSTS: "dms.stoegerer-home.at,localhost,backend"
+  DJANGO_CORS_ORIGINS: "http://dms.stoegerer-home.at"
+  POSTGRES_DB: "dms"
+  POSTGRES_USER: "dms"
+  POSTGRES_HOST: "postgres"
+  POSTGRES_PORT: "5432"
+  REDIS_URL: "redis://redis:6379/0"
+  DMS_DATA_DIR: "/data"
+  AI_PROVIDER: "anthropic"
+  AI_MODEL: "claude-opus-4-8"
+  OLLAMA_BASE_URL: "http://ollama:11434"
