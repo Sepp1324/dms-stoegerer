@@ -1,0 +1,68 @@
+name: build-and-deploy
+
+# Läuft beim Merge/Push nach main auf einem self-hosted Runner im Heimnetz
+# (Label "dms"). Der Runner hat Zugriff auf Docker, die Registry und den
+# k3s-Cluster. Ablauf: Django-Check → Images bauen (Git-SHA-Tag) → pushen →
+# Manifeste rendern, Tags ersetzen, anwenden → Rollout abwarten.
+#
+# Einrichtung des Runners: siehe docs/ci-cd.md
+
+on:
+  push:
+    branches: [main]
+
+# Nie zwei Deploys gleichzeitig (kein Cancel – laufendes Rollout fertigmachen).
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+env:
+  REGISTRY: registry.stoegerer-home.at
+  # k3s legt die Kubeconfig hier ab; der Runner-Nutzer braucht Lesezugriff.
+  KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, dms]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Image-Tag = Git-SHA
+        run: echo "TAG=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+
+      - name: Images bauen
+        run: |
+          set -euo pipefail
+          docker build -t "$REGISTRY/dms-backend:$TAG"  ./backend
+          docker build -t "$REGISTRY/dms-frontend:$TAG" ./frontend
+
+      - name: Django-Check (im frischen Backend-Image)
+        run: docker run --rm "$REGISTRY/dms-backend:$TAG" python manage.py check
+
+      - name: Images pushen
+        run: |
+          set -euo pipefail
+          docker push "$REGISTRY/dms-backend:$TAG"
+          docker push "$REGISTRY/dms-frontend:$TAG"
+
+      - name: Manifeste rendern, Tags ersetzen, anwenden
+        run: |
+          set -euo pipefail
+          kubectl kustomize deploy/k8s \
+            | sed -E "s#(image: ${REGISTRY}/dms-backend):[^[:space:]]+#\1:${TAG}#g; \
+                      s#(image: ${REGISTRY}/dms-frontend):[^[:space:]]+#\1:${TAG}#g" \
+            | kubectl apply -f -
+
+      - name: Rollout abwarten
+        run: |
+          set -euo pipefail
+          kubectl -n dms rollout status deploy/backend  --timeout=240s
+          kubectl -n dms rollout status deploy/worker   --timeout=240s
+          kubectl -n dms rollout status deploy/frontend --timeout=180s
+
+      - name: Zusammenfassung
+        if: always()
+        run: |
+          echo "### Deploy $TAG" >> "$GITHUB_STEP_SUMMARY"
+          kubectl -n dms get pods -o wide >> "$GITHUB_STEP_SUMMARY" 2>&1 || true
