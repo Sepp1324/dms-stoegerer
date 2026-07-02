@@ -68,11 +68,23 @@ mkdir -p ~/actions-runner && cd ~/actions-runner
 curl -o runner.tar.gz -L https://github.com/actions/runner/releases/latest/download/actions-runner-linux-x64.tar.gz
 tar xzf runner.tar.gz
 
+# Nicht-interaktiv – umgeht alle Abfragen:
 ./config.sh --url https://github.com/Sepp1324/dms-stoegerer \
   --token <REGISTRIERUNGS-TOKEN> \
+  --name k3s-01 \
   --labels dms \
-  --name k3s-01
+  --runnergroup Default \
+  --unattended
 ```
+
+> ⚠️ **Bei der interaktiven Variante:** Die **erste** Abfrage ist die *Runner
+> group* – dort einfach **Enter** drücken (= `Default`). Ein privates Repo hat
+> nur diese Gruppe; ein anderer Name führt zu
+> `Could not find any self-hosted runner group named "…"`. Der Runner-**Name**
+> kommt erst bei der zweiten Abfrage.
+>
+> Schon halb konfiguriert? Erst entfernen (frischen Token von der Runners-Seite):
+> `./config.sh remove --token <ENTFERNUNGS-TOKEN>`, dann neu konfigurieren.
 
 ### Als Dienst laufen lassen (Autostart)
 
