@@ -8,6 +8,7 @@ router.register("documents", views.DocumentViewSet)
 router.register("tags", views.TagViewSet)
 router.register("correspondents", views.CorrespondentViewSet)
 router.register("document-types", views.DocumentTypeViewSet)
+router.register("storage-paths", views.StoragePathViewSet)
 
 urlpatterns = [
     # Explizit vor dem Router, sonst würde "upload" als Dokument-PK gelesen.

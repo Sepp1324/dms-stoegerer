@@ -1,9 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  createCorrespondent,
+  createDocumentType,
+  createStoragePath,
+  createTag,
   getCorrespondents,
   getDocuments,
   getDocumentTypes,
   getMe,
+  getStoragePaths,
   getTags,
   logout,
   type DocumentItem,
@@ -22,6 +27,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   const [correspondents, setCorrespondents] = useState<NamedRef[]>([]);
   const [documentTypes, setDocumentTypes] = useState<NamedRef[]>([]);
   const [tags, setTags] = useState<NamedRef[]>([]);
+  const [storagePaths, setStoragePaths] = useState<NamedRef[]>([]);
 
   const [docs, setDocs] = useState<DocumentItem[]>([]);
   const [count, setCount] = useState(0);
@@ -37,16 +43,45 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   // Profil + Filter-Stammdaten einmalig laden.
   useEffect(() => {
     getMe().then(setMe).catch(() => {});
-    Promise.all([getCorrespondents(), getDocumentTypes(), getTags()])
-      .then(([c, d, t]) => {
+    Promise.all([
+      getCorrespondents(),
+      getDocumentTypes(),
+      getTags(),
+      getStoragePaths(),
+    ])
+      .then(([c, d, t, s]) => {
         setCorrespondents(c);
         setDocumentTypes(d);
         setTags(t);
+        setStoragePaths(s);
       })
       .catch(() => {
-        /* Filter sind optional – Fehler hier nicht blockierend */
+        /* Stammdaten sind optional – Fehler hier nicht blockierend */
       });
   }, []);
+
+  // Stammdaten inline anlegen: erzeugen, in die lokale Liste einsortieren, Item zurückgeben.
+  const byName = (a: NamedRef, b: NamedRef) => a.name.localeCompare(b.name);
+  async function addCorrespondent(name: string) {
+    const item = await createCorrespondent(name);
+    setCorrespondents((prev) => [...prev, item].sort(byName));
+    return item;
+  }
+  async function addDocumentType(name: string) {
+    const item = await createDocumentType(name);
+    setDocumentTypes((prev) => [...prev, item].sort(byName));
+    return item;
+  }
+  async function addStoragePath(name: string) {
+    const item = await createStoragePath(name);
+    setStoragePaths((prev) => [...prev, item].sort(byName));
+    return item;
+  }
+  async function addTag(name: string) {
+    const item = await createTag(name);
+    setTags((prev) => [...prev, item].sort(byName));
+    return item;
+  }
 
   // Suchfeld entprellen, damit nicht jeder Tastendruck eine Anfrage auslöst.
   const [debouncedQ, setDebouncedQ] = useState("");
@@ -95,7 +130,24 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   }
 
   if (selectedId !== null) {
-    return <DocumentDetail id={selectedId} onBack={() => setSelectedId(null)} />;
+    return (
+      <DocumentDetail
+        id={selectedId}
+        onBack={() => {
+          setSelectedId(null);
+          setReloadKey((k) => k + 1); // ggf. geänderte Metadaten in der Liste zeigen
+        }}
+        correspondents={correspondents}
+        documentTypes={documentTypes}
+        storagePaths={storagePaths}
+        allTags={tags}
+        canEdit={!!me?.can_write}
+        onCreateCorrespondent={addCorrespondent}
+        onCreateDocumentType={addDocumentType}
+        onCreateStoragePath={addStoragePath}
+        onCreateTag={addTag}
+      />
+    );
   }
 
   return (
@@ -154,33 +206,55 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
             {docs.length === 0 ? (
               <p className="muted">Keine Dokumente gefunden.</p>
             ) : (
-              <table className="doc-table">
-                <thead>
-                  <tr>
-                    <th>Titel</th>
-                    <th>Korrespondent</th>
-                    <th>Typ</th>
-                    <th>Seiten</th>
-                    <th>Aufgenommen</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {docs.map((d) => (
-                    <tr key={d.id} className="doc-row" onClick={() => setSelectedId(d.id)}>
-                      <td className="doc-title">{d.title}</td>
-                      <td>{d.correspondent_name ?? "—"}</td>
-                      <td>{d.document_type_name ?? "—"}</td>
-                      <td>{d.page_count ?? "—"}</td>
-                      <td>{new Date(d.added_at).toLocaleDateString("de-DE")}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              <div className="doc-grid">
+                {docs.map((d) => (
+                  <DocumentCard key={d.id} doc={d} onOpen={() => setSelectedId(d.id)} />
+                ))}
+              </div>
             )}
           </>
         )}
       </section>
     </div>
+  );
+}
+
+function DocumentCard({ doc, onOpen }: { doc: DocumentItem; onOpen: () => void }) {
+  return (
+    <button className="doc-card" onClick={onOpen} title={doc.title}>
+      <div className="doc-card__preview">
+        <svg viewBox="0 0 24 24" width="38" height="38" aria-hidden="true">
+          <path
+            fill="currentColor"
+            d="M6 2h7l5 5v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2m7 1.5V8h4.5z"
+          />
+        </svg>
+        {doc.page_count != null && (
+          <span className="doc-card__pages">
+            {doc.page_count} {doc.page_count === 1 ? "Seite" : "Seiten"}
+          </span>
+        )}
+      </div>
+      <div className="doc-card__body">
+        <h3 className="doc-card__title">{doc.title}</h3>
+        <p className="doc-card__meta">
+          {doc.correspondent_name ?? "Unbekannt"}
+          {doc.document_type_name ? ` · ${doc.document_type_name}` : ""}
+        </p>
+        {doc.tags.length > 0 && (
+          <div className="doc-card__tags">
+            {doc.tags.map((t) => (
+              <span key={t.id} className="tag" style={{ borderColor: t.color, color: t.color }}>
+                {t.name}
+              </span>
+            ))}
+          </div>
+        )}
+        <p className="doc-card__date">
+          {new Date(doc.added_at).toLocaleDateString("de-DE")}
+        </p>
+      </div>
+    </button>
   );
 }
 

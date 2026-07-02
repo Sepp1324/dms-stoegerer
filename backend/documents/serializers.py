@@ -5,6 +5,7 @@ from .models import (
     Document,
     DocumentType,
     DocumentVersion,
+    StoragePath,
     Tag,
 )
 
@@ -27,6 +28,16 @@ class DocumentTypeSerializer(serializers.ModelSerializer):
         fields = ("id", "name")
 
 
+class StoragePathSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = StoragePath
+        fields = ("id", "name", "path_template")
+        extra_kwargs = {
+            # Beim Inline-Anlegen genügt ein Name; Template hat einen Default.
+            "path_template": {"required": False},
+        }
+
+
 class DocumentVersionSerializer(serializers.ModelSerializer):
     class Meta:
         model = DocumentVersion
@@ -46,6 +57,14 @@ class DocumentVersionSerializer(serializers.ModelSerializer):
 class DocumentSerializer(serializers.ModelSerializer):
     versions = DocumentVersionSerializer(many=True, read_only=True)
     tags = TagSerializer(many=True, read_only=True)
+    # Schreib-Pfad für Tags: Liste von IDs (die nested `tags` bleiben Read-only).
+    tag_ids = serializers.PrimaryKeyRelatedField(
+        many=True,
+        queryset=Tag.objects.all(),
+        source="tags",
+        write_only=True,
+        required=False,
+    )
     # Anzeige-Namen für die Liste (spart dem Frontend Zusatz-Requests).
     correspondent_name = serializers.CharField(
         source="correspondent.name", read_only=True, default=None
@@ -55,6 +74,9 @@ class DocumentSerializer(serializers.ModelSerializer):
     )
     page_count = serializers.IntegerField(
         source="current_version.page_count", read_only=True, default=None
+    )
+    storage_path_name = serializers.CharField(
+        source="storage_path.name", read_only=True, default=None
     )
 
     class Meta:
@@ -69,7 +91,9 @@ class DocumentSerializer(serializers.ModelSerializer):
             "document_type",
             "document_type_name",
             "storage_path",
+            "storage_path_name",
             "tags",
+            "tag_ids",
             "owner",
             "current_version",
             "page_count",
