@@ -167,6 +167,12 @@ class Document(models.Model):
         related_name="+",
     )
 
+    # KI-Metadatenvorschläge (nach OCR erzeugt) – zum Bestätigen durch den Nutzer,
+    # nicht bindend. z. B. {"title": "...", "document_type": "Rechnung",
+    # "correspondent": "Stadtwerke", "tags": ["Finanzen"], "summary": "..."}
+    ai_suggestions = models.JSONField(default=dict, blank=True)
+    ai_suggested_at = models.DateTimeField(null=True, blank=True)
+
     class Meta:
         verbose_name = "Dokument"
         verbose_name_plural = "Dokumente"

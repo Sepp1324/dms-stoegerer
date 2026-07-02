@@ -1,14 +1,42 @@
 """Celery-Tasks für KI-gestützte Verarbeitung (asynchron, außerhalb des Requests)."""
 from celery import shared_task
+from django.utils import timezone
 
 from .services import suggest_metadata
 
 
 @shared_task
 def suggest_metadata_task(ocr_text: str) -> dict:
-    """Erzeugt KI-Metadatenvorschläge im Hintergrund.
-
-    Wird in Stufe 2 an die Pipeline gehängt und schreibt Vorschläge an das
-    Dokument (zum Bestätigen durch den Nutzer), statt sie direkt zu setzen.
-    """
+    """Erzeugt KI-Metadatenvorschläge aus reinem OCR-Text (ohne Speicherung)."""
     return suggest_metadata(ocr_text)
+
+
+@shared_task
+def suggest_document_metadata(document_id: int) -> dict:
+    """Erzeugt Vorschläge für ein Dokument und speichert sie an ``ai_suggestions``.
+
+    Wird nach der OCR-Pipeline angestoßen. Die Vorschläge sind unverbindlich –
+    der Nutzer bestätigt sie in der Detailansicht (apply_suggestions).
+    """
+    # Import lazy, um Import-Reihenfolge/Zyklen zu vermeiden.
+    from documents.models import Document
+
+    try:
+        document = Document.objects.select_related("current_version").get(pk=document_id)
+    except Document.DoesNotExist:
+        return {"status": "missing", "document_id": document_id}
+
+    version = document.current_version
+    text = (version.ocr_text if version else "") or ""
+    if not text.strip():
+        return {"status": "no_text", "document_id": document_id}
+
+    result = suggest_metadata(text)
+    suggestions = result.get("suggestions") or {}
+    if result.get("source") != "ai" or not suggestions:
+        return {"status": result.get("source", "unavailable"), "document_id": document_id}
+
+    document.ai_suggestions = suggestions
+    document.ai_suggested_at = timezone.now()
+    document.save(update_fields=["ai_suggestions", "ai_suggested_at"])
+    return {"status": "done", "document_id": document_id, "suggestions": suggestions}

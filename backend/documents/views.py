@@ -195,6 +195,64 @@ class DocumentViewSet(viewsets.ModelViewSet):
 
         return FileResponse(open(path, "rb"), content_type="image/jpeg")
 
+    @action(detail=True, methods=["post"])
+    def apply_suggestions(self, request, pk=None):
+        """Übernimmt KI-Vorschläge ans Dokument (legt Stammdaten bei Bedarf an).
+
+        Body optional: ``{"fields": ["title","correspondent","document_type","tags"]}``
+        – ohne Angabe werden alle vorhandenen Vorschläge übernommen. Übernommene
+        Felder werden aus ``ai_suggestions`` entfernt, der Rest bleibt stehen.
+        """
+        if not request.user.can_write:
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        document = self.get_object()
+        suggestions = dict(document.ai_suggestions or {})
+        requested = request.data.get("fields")
+        fields = (
+            requested
+            if isinstance(requested, list)
+            else ["title", "correspondent", "document_type", "tags"]
+        )
+
+        def clean(value) -> str:
+            return str(value).strip() if value is not None else ""
+
+        applied = []
+        if "title" in fields and clean(suggestions.get("title")):
+            document.title = clean(suggestions["title"])
+            applied.append("title")
+        if "correspondent" in fields and clean(suggestions.get("correspondent")):
+            obj, _ = Correspondent.objects.get_or_create(
+                name=clean(suggestions["correspondent"])
+            )
+            document.correspondent = obj
+            applied.append("correspondent")
+        if "document_type" in fields and clean(suggestions.get("document_type")):
+            obj, _ = DocumentType.objects.get_or_create(
+                name=clean(suggestions["document_type"])
+            )
+            document.document_type = obj
+            applied.append("document_type")
+        document.save()
+
+        if "tags" in fields and isinstance(suggestions.get("tags"), list):
+            for name in suggestions["tags"]:
+                if clean(name):
+                    tag, _ = Tag.objects.get_or_create(name=clean(name), parent=None)
+                    document.tags.add(tag)
+            applied.append("tags")
+
+        for key in applied:
+            suggestions.pop(key, None)
+        document.ai_suggestions = suggestions
+        document.save(update_fields=["ai_suggestions"])
+
+        return Response(self.get_serializer(document).data)
+
 
 class TagViewSet(viewsets.ModelViewSet):
     queryset = Tag.objects.all()

@@ -94,11 +94,20 @@ export interface DocumentItem {
   tags: { id: number; name: string; color: string }[];
   page_count: number | null;
 }
+export interface AiSuggestions {
+  title?: string;
+  document_type?: string;
+  correspondent?: string;
+  tags?: string[];
+  summary?: string;
+}
 export interface DocumentDetail extends DocumentItem {
   storage_path: number | null;
   storage_path_name: string | null;
   owner: number | null;
   current_version: number | null;
+  ai_suggestions: AiSuggestions;
+  ai_suggested_at: string | null;
   versions: DocumentVersion[];
 }
 export interface Paginated<T> {
@@ -180,6 +189,28 @@ export async function updateDocument(
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(patch),
+  });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const data = await res.json();
+      detail = data.detail || JSON.stringify(data);
+    } catch {
+      /* keine JSON-Fehlermeldung */
+    }
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+export async function applySuggestions(
+  id: number,
+  fields?: string[],
+): Promise<DocumentDetail> {
+  const res = await apiFetch(`/documents/${id}/apply_suggestions/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(fields ? { fields } : {}),
   });
   if (!res.ok) {
     let detail = `HTTP ${res.status}`;

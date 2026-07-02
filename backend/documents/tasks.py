@@ -9,9 +9,18 @@ from .models import DocumentVersion
 
 @shared_task
 def process_document_version(version_id: int) -> dict:
-    """Verarbeitet eine neu angelegte Version: Hash-Kette + OCR + Ablage + Audit."""
+    """Verarbeitet eine neu angelegte Version: Hash-Kette + OCR + Ablage + Audit.
+
+    Stößt anschließend die KI-Metadatenvorschläge an (asynchron, unverbindlich).
+    """
     version = DocumentVersion.objects.select_related("document").get(pk=version_id)
-    return pipeline.process_version(version)
+    result = pipeline.process_version(version)
+
+    # KI-Vorschläge nach dem OCR (eigener Task, damit OCR nicht daran hängt).
+    from ai.tasks import suggest_document_metadata
+
+    suggest_document_metadata.delay(version.document_id)
+    return result
 
 
 @shared_task
