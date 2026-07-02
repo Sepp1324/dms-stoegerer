@@ -154,33 +154,55 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
             {docs.length === 0 ? (
               <p className="muted">Keine Dokumente gefunden.</p>
             ) : (
-              <table className="doc-table">
-                <thead>
-                  <tr>
-                    <th>Titel</th>
-                    <th>Korrespondent</th>
-                    <th>Typ</th>
-                    <th>Seiten</th>
-                    <th>Aufgenommen</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {docs.map((d) => (
-                    <tr key={d.id} className="doc-row" onClick={() => setSelectedId(d.id)}>
-                      <td className="doc-title">{d.title}</td>
-                      <td>{d.correspondent_name ?? "—"}</td>
-                      <td>{d.document_type_name ?? "—"}</td>
-                      <td>{d.page_count ?? "—"}</td>
-                      <td>{new Date(d.added_at).toLocaleDateString("de-DE")}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              <div className="doc-grid">
+                {docs.map((d) => (
+                  <DocumentCard key={d.id} doc={d} onOpen={() => setSelectedId(d.id)} />
+                ))}
+              </div>
             )}
           </>
         )}
       </section>
     </div>
+  );
+}
+
+function DocumentCard({ doc, onOpen }: { doc: DocumentItem; onOpen: () => void }) {
+  return (
+    <button className="doc-card" onClick={onOpen} title={doc.title}>
+      <div className="doc-card__preview">
+        <svg viewBox="0 0 24 24" width="38" height="38" aria-hidden="true">
+          <path
+            fill="currentColor"
+            d="M6 2h7l5 5v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2m7 1.5V8h4.5z"
+          />
+        </svg>
+        {doc.page_count != null && (
+          <span className="doc-card__pages">
+            {doc.page_count} {doc.page_count === 1 ? "Seite" : "Seiten"}
+          </span>
+        )}
+      </div>
+      <div className="doc-card__body">
+        <h3 className="doc-card__title">{doc.title}</h3>
+        <p className="doc-card__meta">
+          {doc.correspondent_name ?? "Unbekannt"}
+          {doc.document_type_name ? ` · ${doc.document_type_name}` : ""}
+        </p>
+        {doc.tags.length > 0 && (
+          <div className="doc-card__tags">
+            {doc.tags.map((t) => (
+              <span key={t.id} className="tag" style={{ borderColor: t.color, color: t.color }}>
+                {t.name}
+              </span>
+            ))}
+          </div>
+        )}
+        <p className="doc-card__date">
+          {new Date(doc.added_at).toLocaleDateString("de-DE")}
+        </p>
+      </div>
+    </button>
   );
 }
 

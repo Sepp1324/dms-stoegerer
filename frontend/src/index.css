@@ -212,33 +212,79 @@ select:focus {
   margin: 0 0 0.5rem;
   font-size: 0.85rem;
 }
-.doc-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 0.9rem;
+/* --- Dokument-Karten (Grid) --- */
+.doc-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 1rem;
 }
-.doc-table th,
-.doc-table td {
+.doc-card {
+  display: flex;
+  flex-direction: column;
   text-align: left;
-  padding: 0.6rem 0.75rem;
+  padding: 0;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  cursor: pointer;
+  transition: border-color 0.15s, transform 0.1s;
+}
+.doc-card:hover {
+  border-color: var(--accent);
+  transform: translateY(-2px);
+  background: var(--card);
+}
+.doc-card__preview {
+  position: relative;
+  height: 96px;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  background: linear-gradient(160deg, rgba(59, 130, 246, 0.1), rgba(148, 163, 184, 0.05));
   border-bottom: 1px solid var(--border);
 }
-.doc-table th {
+.doc-card__pages {
+  position: absolute;
+  bottom: 0.4rem;
+  right: 0.5rem;
+  font-size: 0.7rem;
   color: var(--muted);
+  background: rgba(15, 23, 42, 0.7);
+  padding: 0.1rem 0.4rem;
+  border-radius: 6px;
+}
+.doc-card__body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.75rem 0.85rem 0.85rem;
+  flex: 1;
+}
+.doc-card__title {
+  margin: 0;
+  font-size: 0.95rem;
   font-weight: 600;
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.doc-card__meta {
+  margin: 0;
   font-size: 0.8rem;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
+  color: var(--muted);
 }
-.doc-table tbody tr:hover {
-  background: rgba(148, 163, 184, 0.06);
+.doc-card__tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
 }
-.doc-row {
-  cursor: pointer;
-}
-.doc-title {
-  color: var(--accent);
-  font-weight: 500;
+.doc-card__date {
+  margin: auto 0 0;
+  font-size: 0.75rem;
+  color: var(--muted);
 }
 
 /* --- Detailansicht --- */
