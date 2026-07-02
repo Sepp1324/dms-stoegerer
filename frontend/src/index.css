@@ -349,6 +349,48 @@ select:focus {
   background: #fff;
 }
 
+/* --- Bearbeiten-Formular --- */
+.edit-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+.edit-form > label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.edit-tags__label {
+  display: block;
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin-bottom: 0.4rem;
+}
+.tag-toggle-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.tag-toggle {
+  cursor: pointer;
+  background: transparent;
+  border-color: var(--border);
+  color: var(--muted);
+}
+.tag-toggle--on {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(59, 130, 246, 0.12);
+}
+.edit-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.3rem;
+}
+
 /* --- Status --- */
 .status {
   font-weight: 600;

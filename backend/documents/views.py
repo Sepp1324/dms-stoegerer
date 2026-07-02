@@ -5,9 +5,25 @@ from django.http import FileResponse, Http404
 from rest_framework import status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.parsers import FormParser, MultiPartParser
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import (
+    SAFE_METHODS,
+    AllowAny,
+    BasePermission,
+    IsAuthenticated,
+)
 from rest_framework.response import Response
 from rest_framework.views import APIView
+
+
+class ReadOnlyOrCanWrite(BasePermission):
+    """Lesen für alle Angemeldeten; Schreiben nur für can_write (nicht Gäste)."""
+
+    def has_permission(self, request, view):
+        if not (request.user and request.user.is_authenticated):
+            return False
+        if request.method in SAFE_METHODS:
+            return True
+        return bool(getattr(request.user, "can_write", False))
 
 from . import pipeline, storage
 from .models import Correspondent, Document, DocumentType, Tag
@@ -98,6 +114,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
 
     serializer_class = DocumentSerializer
     queryset = Document.objects.all()  # für Basename-Ableitung im Router
+    permission_classes = [ReadOnlyOrCanWrite]
 
     def get_queryset(self):
         qs = (
@@ -162,13 +179,16 @@ class DocumentViewSet(viewsets.ModelViewSet):
 class TagViewSet(viewsets.ModelViewSet):
     queryset = Tag.objects.all()
     serializer_class = TagSerializer
+    permission_classes = [ReadOnlyOrCanWrite]
 
 
 class CorrespondentViewSet(viewsets.ModelViewSet):
     queryset = Correspondent.objects.all()
     serializer_class = CorrespondentSerializer
+    permission_classes = [ReadOnlyOrCanWrite]
 
 
 class DocumentTypeViewSet(viewsets.ModelViewSet):
     queryset = DocumentType.objects.all()
     serializer_class = DocumentTypeSerializer
+    permission_classes = [ReadOnlyOrCanWrite]

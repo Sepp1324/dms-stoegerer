@@ -156,6 +156,35 @@ export async function getDocumentPreview(id: number): Promise<Blob> {
   return res.blob();
 }
 
+export interface DocumentPatch {
+  title?: string;
+  correspondent?: number | null;
+  document_type?: number | null;
+  tag_ids?: number[];
+}
+
+export async function updateDocument(
+  id: number,
+  patch: DocumentPatch,
+): Promise<DocumentDetail> {
+  const res = await apiFetch(`/documents/${id}/`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const data = await res.json();
+      detail = data.detail || JSON.stringify(data);
+    } catch {
+      /* keine JSON-Fehlermeldung */
+    }
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
 export async function getMe(): Promise<Me> {
   const res = await apiFetch("/me/");
   if (!res.ok) throw new Error(`Profil laden fehlgeschlagen: HTTP ${res.status}`);

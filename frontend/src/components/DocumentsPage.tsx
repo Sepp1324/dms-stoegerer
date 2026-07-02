@@ -95,7 +95,19 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   }
 
   if (selectedId !== null) {
-    return <DocumentDetail id={selectedId} onBack={() => setSelectedId(null)} />;
+    return (
+      <DocumentDetail
+        id={selectedId}
+        onBack={() => {
+          setSelectedId(null);
+          setReloadKey((k) => k + 1); // ggf. geänderte Metadaten in der Liste zeigen
+        }}
+        correspondents={correspondents}
+        documentTypes={documentTypes}
+        allTags={tags}
+        canEdit={!!me?.can_write}
+      />
+    );
   }
 
   return (

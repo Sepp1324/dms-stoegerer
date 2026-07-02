@@ -46,6 +46,14 @@ class DocumentVersionSerializer(serializers.ModelSerializer):
 class DocumentSerializer(serializers.ModelSerializer):
     versions = DocumentVersionSerializer(many=True, read_only=True)
     tags = TagSerializer(many=True, read_only=True)
+    # Schreib-Pfad für Tags: Liste von IDs (die nested `tags` bleiben Read-only).
+    tag_ids = serializers.PrimaryKeyRelatedField(
+        many=True,
+        queryset=Tag.objects.all(),
+        source="tags",
+        write_only=True,
+        required=False,
+    )
     # Anzeige-Namen für die Liste (spart dem Frontend Zusatz-Requests).
     correspondent_name = serializers.CharField(
         source="correspondent.name", read_only=True, default=None
@@ -70,6 +78,7 @@ class DocumentSerializer(serializers.ModelSerializer):
             "document_type_name",
             "storage_path",
             "tags",
+            "tag_ids",
             "owner",
             "current_version",
             "page_count",
