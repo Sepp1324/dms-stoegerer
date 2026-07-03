@@ -134,6 +134,16 @@ class DocumentViewSet(viewsets.ModelViewSet):
             .select_related("correspondent", "document_type", "current_version")
             .prefetch_related("tags", "versions")
         )
+        # --- Owner-Isolation (STOAA-7) -------------------------------------
+        # Jeder Nutzer sieht/verwaltet ausschließlich eigene Dokumente. Da
+        # get_object() dieses Queryset nutzt, wirkt die Scope-Filterung auch
+        # auf Detail/Download/Update/Delete sowie die Sub-Actions (preview,
+        # thumbnail, audit, apply_suggestions): fremde IDs → 404 (kein Leak).
+        # Ausnahme: DMS-Admin (Rolle admin / superuser) verwaltet alles.
+        user = self.request.user
+        if not getattr(user, "is_dms_admin", False):
+            qs = qs.filter(owner=user)
+
         params = self.request.query_params
 
         q = params.get("q", "").strip()
@@ -179,6 +189,13 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 raise Http404("Version nicht vorhanden.")
             return version
         return document.current_version
+    def perform_create(self, serializer):
+        """Setzt den Eigentümer serverseitig – nie aus dem Request übernehmbar.
+
+        Verhindert, dass ein Nutzer beim Anlegen ein fremdes ``owner`` setzt.
+        (Der reguläre Upload-Pfad setzt owner ohnehin; hier für direktes POST.)
+        """
+        serializer.save(owner=self.request.user)
 
     @action(detail=True, methods=["get"])
     def preview(self, request, pk=None):

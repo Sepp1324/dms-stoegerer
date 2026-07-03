@@ -156,6 +156,7 @@ class DocumentSerializer(serializers.ModelSerializer):
         read_only_fields = (
             "added_at",
             "current_version",
+            "owner",  # Eigentümer serverseitig gesetzt – nicht per Request änderbar (STOAA-7)
             "ai_suggestions",
             "ai_suggested_at",
             "classification",
