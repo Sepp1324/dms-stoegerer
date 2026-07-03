@@ -8,12 +8,11 @@ Regel-Schema (``ClassificationRule``):
   match: {"text_contains": ["Rechnung", "Invoice"], "text_regex": "SR-\\d+",
           "subject_contains": ["Rechnung"], "from_contains": ["@stadtwerke.de"]}
          – mehrere Bedingungen werden UND-verknüpft; eine Wortliste bei
-           text_contains/subject_contains/from_contains ist jeweils ODER-verknüpft
-           (irgendeines enthalten). ``subject_contains`` matcht gegen den Betreff,
-           ``from_contains`` gegen den Absender der Quell-E-Mail (bei IMAP-Ingest
-           an ``Document.email_subject``/``email_from`` persistiert). Leere bzw.
-           fehlende Felder sind keine Bedingung (rückwärtskompatibel zu reinen
-           Text-Regeln).
+           text_contains/subject_contains/from_contains ist ODER-verknüpft
+           (irgendeines enthalten). ``subject_contains``/``from_contains``
+           matchen auf Betreff bzw. Absender der Quell-E-Mail (bei IMAP-Ingest
+           an ``Document.mail_subject``/``mail_sender`` hinterlegt); leer/fehlend
+           bedeutet keine Bedingung (rückwärtskompatibel zu reinen Text-Regeln).
   then:  {"document_type": "Rechnung", "correspondent": "Stadtwerke",
           "tags": ["Finanzen"], "storage_path": "Rechnungen"}
          – Einzelwerte (Typ/Korrespondent/Ablagepfad) werden nur gesetzt, wenn
@@ -32,27 +31,36 @@ def _searchable_text(document) -> str:
     return " ".join(parts).lower()
 
 
-def rule_matches(rule, text: str, subject: str = "", sender: str = "") -> bool:
+def _contains_any(match, key: str, haystack: str) -> bool | None:
+    """ODER-verknüpfte Wortliste gegen ``haystack`` (bereits lowercase).
+
+    Rückgabe ``None`` = Feld leer/fehlend → keine Bedingung; sonst Trefferstatus.
+    """
+    raw = match.get(key)
+    if not raw:
+        return None
+    needles = [
+        str(n).lower()
+        for n in (raw if isinstance(raw, list) else [raw])
+        if str(n).strip()
+    ]
+    if not needles:
+        return None
+    return any(n in haystack for n in needles)
+
+
+def rule_matches(rule, text: str, *, subject: str = "", sender: str = "") -> bool:
     match = rule.match or {}
     checks = []
 
-    # ODER-verknüpfte Wortlisten gegen den jeweiligen Text; leer/fehlend = keine
-    # Bedingung. subject/sender werden lower-case erwartet (siehe apply_rules).
     for key, haystack in (
         ("text_contains", text),
-        ("subject_contains", subject),
-        ("from_contains", sender),
+        ("subject_contains", (subject or "").lower()),
+        ("from_contains", (sender or "").lower()),
     ):
-        raw = match.get(key)
-        if not raw:
-            continue
-        needles = [
-            str(n).lower()
-            for n in (raw if isinstance(raw, list) else [raw])
-            if str(n).strip()
-        ]
-        if needles:
-            checks.append(any(n in haystack for n in needles))
+        result = _contains_any(match, key, haystack)
+        if result is not None:
+            checks.append(result)
 
     regex = match.get("text_regex")
     if regex:
@@ -77,8 +85,8 @@ def apply_rules(document) -> dict:
     )
 
     text = _searchable_text(document)
-    subject = (document.email_subject or "").lower()
-    sender = (document.email_from or "").lower()
+    subject = getattr(document, "mail_subject", "") or ""
+    sender = getattr(document, "mail_sender", "") or ""
     matched: list[str] = []
     applied: dict = {}
 
