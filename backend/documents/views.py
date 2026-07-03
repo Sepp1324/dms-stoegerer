@@ -1,8 +1,12 @@
 import os
+from datetime import date as date_cls
+from datetime import datetime, time
 
+from django.conf import settings
 from django.db import connection
 from django.db.models import Q
 from django.http import FileResponse, Http404
+from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.filters import OrderingFilter
@@ -47,6 +51,54 @@ from .serializers import (
     TagSerializer,
 )
 from .tasks import process_document_version
+
+
+def _clean(value, max_len=255) -> str:
+    """Normalisiert einen Vorschlagswert: strip + Längen-Cap.
+
+    Nicht-String-Werte werden robust ignoriert (leerer String), ebenso Leerwerte
+    nach dem Strippen. So können fehlerhafte KI-Vorschläge nie ungeprüft in die
+    Stammdaten gelangen.
+    """
+    if not isinstance(value, str):
+        return ""
+    return value.strip()[:max_len]
+
+
+def _get_or_create_ci(model, name, **extra):
+    """Case-insensitive get-or-create über ``name`` (verhindert Duplikate).
+
+    "Finanzamt" und "finanzamt" gelten als derselbe Bestandswert – existiert
+    bereits einer, wird er wiederverwendet; sonst mit dem gereinigten Namen neu
+    angelegt. ``extra`` grenzt die Suche zusätzlich ein (z. B. ``parent=None``).
+    """
+    obj = model.objects.filter(name__iexact=name, **extra).first()
+    if obj is None:
+        obj = model.objects.create(name=name, **extra)
+    return obj
+
+
+def _parse_iso_date(raw):
+    """Parst ein striktes ISO-Datum (``YYYY-MM-DD``) zu tz-awarem 00:00 Uhr.
+
+    Gibt ``None`` bei Nicht-Strings, Leerwerten oder ungültigem Format zurück –
+    der Aufrufer ignoriert solche Werte still (kein Fehler). Das Ergebnis ist an
+    ``settings.TIME_ZONE`` ausgerichtet, da ``Document.created_at`` ein DateTime
+    ist.
+    """
+    if not isinstance(raw, str):
+        return None
+    raw = raw.strip()
+    if not raw:
+        return None
+    try:
+        parsed = date_cls.fromisoformat(raw)
+    except ValueError:
+        return None
+    dt = datetime.combine(parsed, time.min)
+    if settings.USE_TZ:
+        dt = timezone.make_aware(dt)
+    return dt
 
 
 @api_view(["GET"])
@@ -402,9 +454,13 @@ class DocumentViewSet(viewsets.ModelViewSet):
     def apply_suggestions(self, request, pk=None):
         """Übernimmt KI-Vorschläge ans Dokument (legt Stammdaten bei Bedarf an).
 
-        Body optional: ``{"fields": ["title","correspondent","document_type","tags"]}``
-        – ohne Angabe werden alle vorhandenen Vorschläge übernommen. Übernommene
-        Felder werden aus ``ai_suggestions`` entfernt, der Rest bleibt stehen.
+        Body optional: ``{"fields": ["title","correspondent","document_type","date","tags"]}``
+        – ohne Angabe werden alle vorhandenen Vorschläge übernommen. Werte werden
+        gereinigt (strip + Längen-Cap); Stammdaten werden case-insensitiv
+        wiederverwendet (keine Groß/Klein-Duplikate). ``date`` (ISO YYYY-MM-DD)
+        wird auf ``Document.created_at`` (Belegdatum) gemappt; ungültige/leere
+        Werte werden still ignoriert. Übernommene Felder werden aus
+        ``ai_suggestions`` entfernt, der Rest bleibt stehen.
         """
         if not request.user.can_write:
             return Response(
@@ -418,36 +474,48 @@ class DocumentViewSet(viewsets.ModelViewSet):
         fields = (
             requested
             if isinstance(requested, list)
-            else ["title", "correspondent", "document_type", "tags"]
+            else ["title", "correspondent", "document_type", "date", "tags"]
         )
 
-        def clean(value) -> str:
-            return str(value).strip() if value is not None else ""
-
         applied = []
-        if "title" in fields and clean(suggestions.get("title")):
-            document.title = clean(suggestions["title"])
+        changed_fields = []
+
+        if "title" in fields and _clean(suggestions.get("title")):
+            document.title = _clean(suggestions["title"])
+            changed_fields.append("title")
             applied.append("title")
-        if "correspondent" in fields and clean(suggestions.get("correspondent")):
-            obj, _ = Correspondent.objects.get_or_create(
-                name=clean(suggestions["correspondent"])
+        if "correspondent" in fields and _clean(suggestions.get("correspondent")):
+            document.correspondent = _get_or_create_ci(
+                Correspondent, _clean(suggestions["correspondent"])
             )
-            document.correspondent = obj
+            changed_fields.append("correspondent")
             applied.append("correspondent")
-        if "document_type" in fields and clean(suggestions.get("document_type")):
-            obj, _ = DocumentType.objects.get_or_create(
-                name=clean(suggestions["document_type"])
+        if "document_type" in fields and _clean(suggestions.get("document_type")):
+            document.document_type = _get_or_create_ci(
+                DocumentType, _clean(suggestions["document_type"])
             )
-            document.document_type = obj
+            changed_fields.append("document_type")
             applied.append("document_type")
-        document.save()
+        if "date" in fields:
+            parsed = _parse_iso_date(suggestions.get("date"))
+            if parsed is not None:
+                document.created_at = parsed
+                changed_fields.append("created_at")
+                applied.append("date")
+
+        if changed_fields:
+            document.save(update_fields=changed_fields)
 
         if "tags" in fields and isinstance(suggestions.get("tags"), list):
+            added_any = False
             for name in suggestions["tags"]:
-                if clean(name):
-                    tag, _ = Tag.objects.get_or_create(name=clean(name), parent=None)
+                clean_name = _clean(name, 64)
+                if clean_name:
+                    tag = _get_or_create_ci(Tag, clean_name, parent=None)
                     document.tags.add(tag)
-            applied.append("tags")
+                    added_any = True
+            if added_any:
+                applied.append("tags")
 
         for key in applied:
             suggestions.pop(key, None)
@@ -461,6 +529,88 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 object_type="Document",
                 object_id=str(document.id),
                 detail={"fields": applied},
+            )
+
+        return Response(self.get_serializer(document).data)
+
+    @action(detail=True, methods=["post"], url_path="suggest")
+    def suggest(self, request, pk=None):
+        """Regeneriert die KI-Metadatenvorschläge synchron (sofortiges UI-Feedback).
+
+        Ruft die bestehende Generierung (``suggest_metadata``) direkt im Request
+        auf und schreibt das Ergebnis nach ``ai_suggestions`` (+ ``ai_suggested_at``).
+        Ist kein Provider verfügbar, wird nichts geschrieben und ``source`` ist
+        ``"unavailable"`` (Status 200, damit die UI sauber reagieren kann).
+        Owner-Scoping über ``get_object()``; Schreiben nur für ``can_write``.
+        """
+        if not request.user.can_write:
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        document = self.get_object()
+        # Lazy-Import: vermeidet Zyklus documents <-> ai zur Ladezeit.
+        from ai.services import suggest_metadata
+
+        version = document.current_version
+        text = (version.ocr_text if version else "") or ""
+        result = suggest_metadata(text)
+        suggestions = result.get("suggestions") or {}
+
+        if result.get("source") == "ai" and suggestions:
+            # Bereits hinterlegte Vorschläge erhalten; KI hat bei Überschneidung Vorrang.
+            merged = {**(document.ai_suggestions or {}), **suggestions}
+            document.ai_suggestions = merged
+            document.ai_suggested_at = timezone.now()
+            document.save(update_fields=["ai_suggestions", "ai_suggested_at"])
+            AuditLogEntry.objects.create(
+                actor=request.user,
+                action="suggest",
+                object_type="Document",
+                object_id=str(document.id),
+                detail={
+                    "provider": result.get("provider"),
+                    "keys": sorted(suggestions.keys()),
+                },
+            )
+
+        data = self.get_serializer(document).data
+        return Response({**data, "source": result.get("source", "unavailable")})
+
+    @action(detail=True, methods=["post"], url_path="dismiss_suggestions")
+    def dismiss_suggestions(self, request, pk=None):
+        """Verwirft einzelne KI-Vorschläge, OHNE sie anzuwenden (FE-Reject).
+
+        Body: ``{"fields": ["title","date",...]}`` – die genannten Schlüssel
+        werden aus ``ai_suggestions`` entfernt und der Rest gespeichert. Spiegelt
+        die Struktur von ``apply_suggestions``. Owner-Scoping über ``get_object()``;
+        Schreiben nur für ``can_write``.
+        """
+        if not request.user.can_write:
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        document = self.get_object()
+        requested = request.data.get("fields")
+        fields = requested if isinstance(requested, list) else []
+
+        suggestions = dict(document.ai_suggestions or {})
+        removed = [f for f in fields if isinstance(f, str) and f in suggestions]
+        for key in removed:
+            suggestions.pop(key, None)
+
+        if removed:
+            document.ai_suggestions = suggestions
+            document.save(update_fields=["ai_suggestions"])
+            AuditLogEntry.objects.create(
+                actor=request.user,
+                action="dismiss_suggestions",
+                object_type="Document",
+                object_id=str(document.id),
+                detail={"fields": removed},
             )
 
         return Response(self.get_serializer(document).data)
