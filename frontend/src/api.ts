@@ -189,6 +189,9 @@ export interface DocumentQuery {
   document_type?: number | "";
   tag?: number | "";
   page?: number;
+  // Whitelisted vom Backend: added_at/-added_at, title/-title. Leer = Standard
+  // (FTS-Relevanz bei ?q=, sonst -added_at); wird dann nicht mitgesendet.
+  ordering?: string;
 }
 
 export async function getDocuments(
