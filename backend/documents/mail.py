@@ -171,6 +171,14 @@ def ingest_message(account, raw_bytes: bytes) -> int | None:
                                 or sender_addr or sender_name or "")[:512]
         document.save(update_fields=["mail_subject", "mail_sender"])
         _apply_sender_hint(document, sender_name, sender_addr)
+        # Betreff/Absender am Document persistieren, damit die asynchrone
+        # Regel-Engine (classification.apply_rules, läuft in process_document_version)
+        # darauf matchen kann – ein Runtime-Kwarg würde die Task-Grenze nicht
+        # überleben. Absender als "Anzeigename <adresse>", damit from_contains
+        # sowohl den Namen als auch Adresse/Domain trifft.
+        document.email_subject = (subject or "")[:512]
+        document.email_from = f"{sender_name} <{sender_addr}>".strip()[:512]
+        document.save(update_fields=["email_subject", "email_from"])
         process_document_version.delay(version.id)
         imported += 1
 
