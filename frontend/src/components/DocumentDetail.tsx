@@ -2,11 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import {
   addDocumentVersion,
   applySuggestions,
+  dismissSuggestions,
   getDocument,
   getDocumentAudit,
   getDocumentIntegrity,
   getDocumentPreview,
   getDocumentVersionFile,
+  suggestDocument,
   updateDocument,
   type AuditEntry,
   type DocumentDetail as Detail,
@@ -212,12 +214,50 @@ export default function DocumentDetail({
     }
   }
 
+  async function dismiss(field: string) {
+    setApplying(true);
+    setApplyError(null);
+    try {
+      const updated = await dismissSuggestions(id, [field]);
+      setDoc(updated);
+    } catch (e) {
+      setApplyError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setApplying(false);
+    }
+  }
+
+  // Regeneriert die KI-Vorschläge synchron; bei fehlendem Provider Hinweis anzeigen.
+  const [regenerating, setRegenerating] = useState(false);
+  const [regenNote, setRegenNote] = useState<string | null>(null);
+
+  async function regenerate() {
+    setRegenerating(true);
+    setRegenNote(null);
+    setApplyError(null);
+    try {
+      const updated = await suggestDocument(id);
+      const { source, ...rest } = updated;
+      setDoc(rest as Detail);
+      if (source === "unavailable") {
+        setRegenNote("KI nicht verfügbar – es wurden keine Vorschläge erzeugt.");
+      }
+    } catch (e) {
+      setApplyError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRegenerating(false);
+    }
+  }
+
   const versions = [...(doc?.versions ?? [])].sort(
     (a, b) => b.version_no - a.version_no,
   );
 
   const s = doc?.ai_suggestions ?? {};
   const suggestionRows: { key: string; label: string; value: string }[] = [];
+  // Belegdatum zuerst und hervorgehoben (ISO YYYY-MM-DD → de-DE); Übernehmen setzt created_at.
+  if (s.date)
+    suggestionRows.push({ key: "date", label: "Belegdatum", value: formatIsoDate(s.date) });
   if (s.title) suggestionRows.push({ key: "title", label: "Titel", value: s.title });
   if (s.correspondent)
     suggestionRows.push({ key: "correspondent", label: "Korrespondent", value: s.correspondent });
@@ -315,32 +355,72 @@ export default function DocumentDetail({
             ) : (
               <>
                 <DetailTabs tab={tab} onChange={setTab} />
-                {canEdit && suggestionRows.length > 0 && (
+                {canEdit && (
                   <div className="ai-panel">
                     <div className="ai-panel__head">
                       <span>
                         <i aria-hidden="true">✦</i> KI-Vorschläge
                       </span>
-                      <button onClick={() => apply()} disabled={applying}>
-                        {applying ? "…" : "Alle übernehmen"}
-                      </button>
-                    </div>
-                    {s.summary && <p className="ai-panel__summary">{s.summary}</p>}
-                    <ul className="ai-suggestions">
-                      {suggestionRows.map((row) => (
-                        <li key={row.key}>
-                          <span className="ai-suggestions__label">{row.label}</span>
-                          <span className="ai-suggestions__value">{row.value}</span>
-                          <button
-                            className="link"
-                            onClick={() => apply([row.key])}
-                            disabled={applying}
-                          >
-                            Übernehmen
+                      <div className="ai-panel__actions">
+                        <button
+                          className="link"
+                          onClick={regenerate}
+                          disabled={regenerating || applying}
+                        >
+                          {regenerating ? "Generiere …" : "Neu generieren"}
+                        </button>
+                        {suggestionRows.length > 0 && (
+                          <button onClick={() => apply()} disabled={applying || regenerating}>
+                            {applying ? "…" : "Alle übernehmen"}
                           </button>
-                        </li>
-                      ))}
-                    </ul>
+                        )}
+                      </div>
+                    </div>
+                    {s.summary && (
+                      <div className="ai-panel__summary-row">
+                        <p className="ai-panel__summary">{s.summary}</p>
+                        <button
+                          className="link ai-suggestions__dismiss"
+                          onClick={() => dismiss("summary")}
+                          disabled={applying || regenerating}
+                          title="Zusammenfassung verwerfen"
+                        >
+                          Verwerfen
+                        </button>
+                      </div>
+                    )}
+                    {suggestionRows.length > 0 ? (
+                      <ul className="ai-suggestions">
+                        {suggestionRows.map((row) => (
+                          <li key={row.key}>
+                            <span className="ai-suggestions__label">{row.label}</span>
+                            <span className="ai-suggestions__value">{row.value}</span>
+                            <button
+                              className="link"
+                              onClick={() => apply([row.key])}
+                              disabled={applying || regenerating}
+                            >
+                              Übernehmen
+                            </button>
+                            <button
+                              className="link ai-suggestions__dismiss"
+                              onClick={() => dismiss(row.key)}
+                              disabled={applying || regenerating}
+                              title={`${row.label} verwerfen`}
+                            >
+                              Verwerfen
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      !s.summary && (
+                        <p className="muted ai-panel__empty">
+                          Keine KI-Vorschläge vorhanden.
+                        </p>
+                      )
+                    )}
+                    {regenNote && <p className="status status--warn">{regenNote}</p>}
                     {applyError && <p className="status status--error">{applyError}</p>}
                   </div>
                 )}
@@ -843,6 +923,19 @@ function VersionsPanel({
       )}
     </div>
   );
+}
+
+// ISO-Belegdatum (YYYY-MM-DD) menschenlesbar; ungültige Werte unverändert lassen.
+function formatIsoDate(iso: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso);
+  if (!m) return iso;
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString("de-DE", {
+    day: "2-digit",
+    month: "long",
+    year: "numeric",
+  });
 }
 
 function formatBytes(bytes: number): string {
