@@ -1,8 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-<<<<<<< HEAD
-=======
-import PdfPreview from "./PdfPreview";
->>>>>>> 798893d (Adjusted PDF Preview)
 import {
   addDocumentVersion,
   applySuggestions,
@@ -307,7 +303,6 @@ export default function DocumentDetail({
 
       {doc && (
         <div className="detail">
-<<<<<<< HEAD
           <section className="card detail-meta">
             {editing ? (
               <div className="edit-form">
@@ -317,15 +312,6 @@ export default function DocumentDetail({
                     value={form.title}
                     onChange={(e) => setForm((f) => ({ ...f, title: e.target.value }))}
                   />
-=======
-          <section className="card detail-preview" style={{ padding: 0, overflow: "hidden" }}>
-            {pdfError && <p className="status status--warn" style={{ padding: "1rem" }}>Vorschau: {pdfError}</p>}
-            {!pdfError && !pdfUrl && <p className="muted" style={{ padding: "1rem" }}>Lade Vorschau …</p>}
-            {pdfUrl && (
-              <PdfPreview url={pdfUrl} />
-            )}
-          </section>
->>>>>>> 798893d (Adjusted PDF Preview)
                 </label>
 
                 <CreatableSelect
@@ -398,28 +384,66 @@ export default function DocumentDetail({
                       <span>
                         <i aria-hidden="true">✦</i> KI-Vorschläge
                       </span>
-                      <button onClick={() => apply()} disabled={applying}>
-                        {applying ? "…" : "Alle übernehmen"}
-                      </button>
+                      <div className="ai-panel__actions">
+                        <button
+                          className="link"
+                          onClick={regenerate}
+                          disabled={regenerating || applying}
+                        >
+                          {regenerating ? "Generiere …" : "Neu generieren"}
+                        </button>
+                        {suggestionRows.length > 0 && (
+                          <button onClick={() => apply()} disabled={applying || regenerating}>
+                            {applying ? "…" : "Alle übernehmen"}
+                          </button>
+                        )}
+                      </div>
                     </div>
-                    {s.summary && <p className="ai-panel__summary">{s.summary}</p>}
-                    <ul className="ai-suggestions">
-                      {suggestionRows.map((row) => (
-                        <li key={row.key}>
-                          <span className="ai-suggestions__label">{row.label}</span>
-                          <span className="ai-suggestions__value">{row.value}</span>
-                          <div className="ai-suggestions__actions">
+                    {s.summary && (
+                      <div className="ai-panel__summary-row">
+                        <p className="ai-panel__summary">{s.summary}</p>
+                        <button
+                          className="link ai-suggestions__dismiss"
+                          onClick={() => dismiss("summary")}
+                          disabled={applying || regenerating}
+                          title="Zusammenfassung verwerfen"
+                        >
+                          Verwerfen
+                        </button>
+                      </div>
+                    )}
+                    {suggestionRows.length > 0 ? (
+                      <ul className="ai-suggestions">
+                        {suggestionRows.map((row) => (
+                          <li key={row.key}>
+                            <span className="ai-suggestions__label">{row.label}</span>
+                            <span className="ai-suggestions__value">{row.value}</span>
                             <button
                               className="link"
                               onClick={() => apply([row.key])}
-                              disabled={applying}
+                              disabled={applying || regenerating}
                             >
                               Übernehmen
                             </button>
-                          </div>
-                        </li>
-                      ))}
-                    </ul>
+                            <button
+                              className="link ai-suggestions__dismiss"
+                              onClick={() => dismiss(row.key)}
+                              disabled={applying || regenerating}
+                              title={`${row.label} verwerfen`}
+                            >
+                              Verwerfen
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      !s.summary && (
+                        <p className="muted ai-panel__empty">
+                          Keine KI-Vorschläge vorhanden.
+                        </p>
+                      )
+                    )}
+                    {regenNote && <p className="status status--warn">{regenNote}</p>}
                     {applyError && <p className="status status--error">{applyError}</p>}
                   </div>
                 )}
