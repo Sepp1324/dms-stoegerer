@@ -133,6 +133,17 @@ class CustomFieldValue(models.Model):
 class Document(models.Model):
     """Logisches Dokument. Die eigentlichen Dateien hängen an DocumentVersion."""
 
+    class ApprovalStatus(models.TextChoices):
+        """Freigabe-Workflow (Stufe 4). Stored Values = deutsche Slugs,
+        Python-Konstanten englisch, Labels deutsch. Statuswechsel NUR über
+        die Actions submit/approve/reject – nie per PATCH (Serializer read_only).
+        """
+
+        ENTWURF = "entwurf", "Entwurf"
+        ZUR_FREIGABE = "zur_freigabe", "Zur Freigabe"
+        FREIGEGEBEN = "freigegeben", "Freigegeben"
+        ABGELEHNT = "abgelehnt", "Abgelehnt"
+
     title = models.CharField(max_length=512)
     created_at = models.DateTimeField(
         help_text="Datum des Dokuments selbst (z. B. Rechnungsdatum)",
@@ -176,6 +187,14 @@ class Document(models.Model):
     # Nachvollziehbarkeit der regelbasierten Klassifizierung (erklärbar):
     # {"rules": ["Rechnungen"], "applied": {"document_type": "Rechnung", "tags": ["Finanzen"]}}
     classification = models.JSONField(default=dict, blank=True)
+
+    # Freigabe-Status (Stufe 4). Bestand wird via Spalten-Default in Migration
+    # 0007 auf "entwurf" gesetzt – kein Backfill-Command nötig.
+    status = models.CharField(
+        max_length=16,
+        choices=ApprovalStatus.choices,
+        default=ApprovalStatus.ENTWURF,
+    )
 
     class Meta:
         verbose_name = "Dokument"
