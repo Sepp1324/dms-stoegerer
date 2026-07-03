@@ -30,6 +30,8 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   const [correspondent, setCorrespondent] = useState<number | "">("");
   const [documentType, setDocumentType] = useState<number | "">("");
   const [tag, setTag] = useState<number | "">("");
+  // Sortierung; "" = Backend-Standard (FTS-Relevanz bei Suche, sonst Datum neu→alt).
+  const [ordering, setOrdering] = useState("");
 
   const [correspondents, setCorrespondents] = useState<NamedRef[]>([]);
   const [documentTypes, setDocumentTypes] = useState<NamedRef[]>([]);
@@ -117,6 +119,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
       correspondent,
       document_type: documentType,
       tag,
+      ordering,
       page,
     })
       .then((res) => {
@@ -131,7 +134,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     return () => {
       active = false;
     };
-  }, [debouncedQ, correspondent, documentType, tag, page, reloadKey]);
+  }, [debouncedQ, correspondent, documentType, tag, ordering, page, reloadKey]);
 
   const hasFilters = useMemo(
     () => !!(debouncedQ || correspondent || documentType || tag),
