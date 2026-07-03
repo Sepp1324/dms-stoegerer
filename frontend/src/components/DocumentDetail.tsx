@@ -3,6 +3,7 @@ import {
   addDocumentVersion,
   applySuggestions,
   approveDocument,
+  dismissSuggestions,
   getDocument,
   getDocumentAudit,
   getDocumentIntegrity,
@@ -10,6 +11,7 @@ import {
   getDocumentVersionFile,
   rejectDocument,
   submitDocument,
+  suggestDocument,
   updateDocument,
   type AuditEntry,
   type DocumentDetail as Detail,
@@ -213,6 +215,41 @@ export default function DocumentDetail({
       setApplyError(e instanceof Error ? e.message : String(e));
     } finally {
       setApplying(false);
+    }
+  }
+
+  async function dismiss(field: string) {
+    setApplying(true);
+    setApplyError(null);
+    try {
+      const updated = await dismissSuggestions(id, [field]);
+      setDoc(updated);
+    } catch (e) {
+      setApplyError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setApplying(false);
+    }
+  }
+
+  // Regeneriert die KI-Vorschläge synchron; bei fehlendem Provider Hinweis anzeigen.
+  const [regenerating, setRegenerating] = useState(false);
+  const [regenNote, setRegenNote] = useState<string | null>(null);
+
+  async function regenerate() {
+    setRegenerating(true);
+    setRegenNote(null);
+    setApplyError(null);
+    try {
+      const updated = await suggestDocument(id);
+      const { source, ...rest } = updated;
+      setDoc(rest as Detail);
+      if (source === "unavailable") {
+        setRegenNote("KI nicht verfügbar – es wurden keine Vorschläge erzeugt.");
+      }
+    } catch (e) {
+      setApplyError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRegenerating(false);
     }
   }
 
