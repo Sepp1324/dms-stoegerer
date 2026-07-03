@@ -237,12 +237,12 @@ select:focus {
 }
 .doc-card__preview {
   position: relative;
-  height: 140px;
+  height: 150px;
   display: grid;
   place-items: center;
   overflow: hidden;
-  color: var(--muted);
-  background: rgba(148, 163, 184, 0.06);
+  color: #64748b;
+  background: #ffffff;
   border-bottom: 1px solid var(--border);
 }
 .doc-card__thumb {
