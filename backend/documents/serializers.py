@@ -152,6 +152,7 @@ class DocumentSerializer(serializers.ModelSerializer):
             "ai_suggestions",
             "ai_suggested_at",
             "classification",
+            "status",
             "versions",
         )
         read_only_fields = (
@@ -161,4 +162,5 @@ class DocumentSerializer(serializers.ModelSerializer):
             "ai_suggestions",
             "ai_suggested_at",
             "classification",
+            "status",  # Statuswechsel NUR über submit/approve/reject – nie per PATCH (STOAA-63)
         )
