@@ -122,11 +122,19 @@ export interface AiSuggestions {
   // Belegdatum als ISO-String (YYYY-MM-DD); beim Übernehmen auf created_at gemappt.
   date?: string;
 }
+// Freigabe-Status (Stufe 4, STOAA-57/63). Bestandsdaten ohne Feld gelten als
+// "entwurf"; das Backend liefert das Feld ab STOAA-63 verbindlich mit.
+export type DocumentStatus =
+  | "entwurf"
+  | "zur_freigabe"
+  | "freigegeben"
+  | "abgelehnt";
 export interface DocumentDetail extends DocumentItem {
   storage_path: number | null;
   storage_path_name: string | null;
   owner: number | null;
   current_version: number | null;
+  status: DocumentStatus;
   ai_suggestions: AiSuggestions;
   ai_suggested_at: string | null;
   classification: Classification;
@@ -394,6 +402,48 @@ export async function dismissSuggestions(
     throw new Error(detail);
   }
   return res.json();
+}
+
+// --- Freigabe-Workflow (Stufe 4, Kontrakt aus STOAA-63) ---
+// Jede Aktion liefert das aktualisierte Dokument (inkl. neuem status) zurück.
+// Ungültiger Übergang → 4xx, Gast → 403; Fehlermeldung analog zu updateDocument.
+async function postDocAction(
+  id: number,
+  action: "submit" | "approve" | "reject",
+  body: unknown = {},
+): Promise<DocumentDetail> {
+  const res = await apiFetch(`/documents/${id}/${action}/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const data = await res.json();
+      detail = data.detail || JSON.stringify(data);
+    } catch {
+      /* keine JSON-Fehlermeldung */
+    }
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+// Dokument zur Freigabe einreichen (nur aus entwurf|abgelehnt).
+export function submitDocument(id: number): Promise<DocumentDetail> {
+  return postDocAction(id, "submit");
+}
+// Dokument genehmigen (nur aus zur_freigabe).
+export function approveDocument(id: number): Promise<DocumentDetail> {
+  return postDocAction(id, "approve");
+}
+// Dokument ablehnen (nur aus zur_freigabe), optional mit Begründung.
+export function rejectDocument(
+  id: number,
+  reason?: string,
+): Promise<DocumentDetail> {
+  return postDocAction(id, "reject", reason ? { reason } : {});
 }
 
 export async function getMe(): Promise<Me> {

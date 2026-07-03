@@ -2,17 +2,21 @@ import { useEffect, useRef, useState } from "react";
 import {
   addDocumentVersion,
   applySuggestions,
+  approveDocument,
   dismissSuggestions,
   getDocument,
   getDocumentAudit,
   getDocumentIntegrity,
   getDocumentPreview,
   getDocumentVersionFile,
+  rejectDocument,
+  submitDocument,
   suggestDocument,
   updateDocument,
   type AuditEntry,
   type DocumentDetail as Detail,
   type DocumentIntegrity,
+  type DocumentStatus,
   type DocumentVersion,
   type NamedRef,
 } from "../api";
@@ -249,6 +253,25 @@ export default function DocumentDetail({
     }
   }
 
+  // Freigabe-Workflow (Stufe 4): eine Aktion aktiv, Fehler separat anzeigen.
+  const [freigabeBusy, setFreigabeBusy] = useState(false);
+  const [freigabeError, setFreigabeError] = useState<string | null>(null);
+
+  // Führt eine Freigabe-Aktion aus und lädt danach Dokument + Verlauf/Integrität neu.
+  async function runFreigabe(action: () => Promise<Detail>) {
+    setFreigabeBusy(true);
+    setFreigabeError(null);
+    try {
+      const updated = await action();
+      setDoc(updated);
+      setRefresh((r) => r + 1); // Verlauf & Integrität neu laden
+    } catch (e) {
+      setFreigabeError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setFreigabeBusy(false);
+    }
+  }
+
   const versions = [...(doc?.versions ?? [])].sort(
     (a, b) => b.version_no - a.version_no,
   );
@@ -388,6 +411,15 @@ export default function DocumentDetail({
                 )}
 
                 <h2>{doc.title}</h2>
+                <FreigabePanel
+                  status={doc.status}
+                  canEdit={canEdit}
+                  busy={freigabeBusy}
+                  error={freigabeError}
+                  onSubmit={() => runFreigabe(() => submitDocument(id))}
+                  onApprove={() => runFreigabe(() => approveDocument(id))}
+                  onReject={(reason) => runFreigabe(() => rejectDocument(id, reason))}
+                />
                 {doc.classification?.rules?.length ? (
                   <p className="class-note">
                     <i aria-hidden="true">⚙</i> Automatisch klassifiziert durch Regel
@@ -576,6 +608,111 @@ function DetailTabs({
   );
 }
 
+// Deutsche Labels + Farbakzent (CSS-Modifier) je Freigabe-Status.
+const STATUS_LABELS: Record<DocumentStatus, string> = {
+  entwurf: "Entwurf",
+  zur_freigabe: "Zur Freigabe",
+  freigegeben: "Freigegeben",
+  abgelehnt: "Abgelehnt",
+};
+
+// Statusanzeige + Freigabe-Buttons (Stufe 4). Buttons nur bei Schreibrecht und
+// passend zum aktuellen Status; ``freigegeben`` bietet keine Aktion.
+function FreigabePanel({
+  status,
+  canEdit,
+  busy,
+  error,
+  onSubmit,
+  onApprove,
+  onReject,
+}: {
+  status: DocumentStatus;
+  canEdit: boolean;
+  busy: boolean;
+  error: string | null;
+  onSubmit: () => void;
+  onApprove: () => void;
+  onReject: (reason?: string) => void;
+}) {
+  // Ablehnen mit optionaler Begründung: erst Eingabe einblenden, dann bestätigen.
+  const [rejecting, setRejecting] = useState(false);
+  const [reason, setReason] = useState("");
+
+  // Unbekannter/fehlender Status (z. B. vor BE-Merge): neutraler Fallback-Text.
+  const label = STATUS_LABELS[status] ?? "Unbekannt";
+  const accent = STATUS_LABELS[status] ? status : "unknown";
+
+  function confirmReject() {
+    onReject(reason.trim() || undefined);
+    setRejecting(false);
+    setReason("");
+  }
+
+  return (
+    <div className="freigabe">
+      <div className="freigabe__head">
+        <span className="freigabe__label">Status</span>
+        <span className={`freigabe-badge freigabe-badge--${accent}`}>{label}</span>
+      </div>
+
+      {canEdit && (
+        <div className="freigabe__actions">
+          {(status === "entwurf" || status === "abgelehnt") && (
+            <button onClick={onSubmit} disabled={busy}>
+              {busy ? "…" : "Zur Freigabe"}
+            </button>
+          )}
+          {status === "zur_freigabe" && !rejecting && (
+            <>
+              <button onClick={onApprove} disabled={busy}>
+                {busy ? "…" : "Genehmigen"}
+              </button>
+              <button
+                className="freigabe__reject"
+                onClick={() => setRejecting(true)}
+                disabled={busy}
+              >
+                Ablehnen
+              </button>
+            </>
+          )}
+          {status === "zur_freigabe" && rejecting && (
+            <div className="freigabe__reject-form">
+              <input
+                value={reason}
+                placeholder="Begründung (optional)"
+                onChange={(e) => setReason(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && confirmReject()}
+                autoFocus
+              />
+              <button
+                className="freigabe__reject"
+                onClick={confirmReject}
+                disabled={busy}
+              >
+                {busy ? "…" : "Ablehnen bestätigen"}
+              </button>
+              <button
+                className="link"
+                onClick={() => {
+                  setRejecting(false);
+                  setReason("");
+                }}
+                disabled={busy}
+              >
+                Abbrechen
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {error && <p className="status status--error">{error}</p>}
+    </div>
+  );
+}
+
 // Menschlich lesbare Bezeichnungen für Aktionen und Felder.
 const ACTION_LABELS: Record<string, string> = {
   upload: "Upload / Erstellung",
@@ -584,6 +721,9 @@ const ACTION_LABELS: Record<string, string> = {
   classify: "Automatische Klassifizierung",
   update: "Metadaten geändert",
   apply_suggestions: "KI-Vorschläge übernommen",
+  submit: "Zur Freigabe eingereicht",
+  approve: "Freigegeben",
+  reject: "Abgelehnt",
   delete: "Gelöscht",
 };
 const FIELD_LABELS: Record<string, string> = {
