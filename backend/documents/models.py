@@ -5,8 +5,48 @@ Ein `Document` ist ein logisches Objekt mit mehreren `DocumentVersion`s.
 Jede Version trägt einen SHA-256-Hash und den Hash der Vorgängerversion
 (Hash-Kette) – die Grundlage für Versionierung und spätere Revisionssicherheit.
 """
+import calendar
+import datetime
+
 from django.conf import settings
 from django.db import models
+from django.utils import timezone
+
+
+# ---------------------------------------------------------------------------
+# Revisionssicherheit (Stufe 4): WORM/Immutable + Aufbewahrungsfristen
+# ---------------------------------------------------------------------------
+class ImmutableVersionError(Exception):
+    """Änderung/Löschung einer WORM-geschützten (is_immutable) Version verboten."""
+
+
+class RetentionError(Exception):
+    """Löschung vor Ablauf der Aufbewahrungsfrist (retention_until) verboten."""
+
+
+def _add_months(dt: datetime.datetime, months: int) -> datetime.datetime:
+    """Addiert ``months`` Monate auf ein Datum – ohne dateutil-Abhängigkeit.
+
+    Bewahrt den Tag, korrigiert Monatsüberläufe (z. B. 31.01. + 1 Monat →
+    28./29.02.). Grundlage der Fristberechnung ``retention_until``.
+    """
+    month = dt.month - 1 + months
+    year = dt.year + month // 12
+    month = month % 12 + 1
+    day = min(dt.day, calendar.monthrange(year, month)[1])
+    return dt.replace(year=year, month=month, day=day)
+
+
+def _audit_block(action: str, version, *, actor=None, reason: str = "") -> None:
+    """Schreibt einen Sperr-Audit-Eintrag (append-only) für einen WORM-/Fristen-Block."""
+    # Lazy, um zirkuläre Referenzen bei Modul-Ladezeit zu vermeiden.
+    AuditLogEntry.objects.create(
+        actor=actor,
+        action=action,
+        object_type=type(version).__name__,
+        object_id=str(version.pk) if version.pk else "",
+        detail={"reason": reason},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +217,14 @@ class Document(models.Model):
     # {"rules": ["Rechnungen"], "applied": {"document_type": "Rechnung", "tags": ["Finanzen"]}}
     classification = models.JSONField(default=dict, blank=True)
 
+    # Aufbewahrungsfrist (Stufe 4): Bis zu diesem Zeitpunkt ist Löschen gesperrt.
+    # Wird aus der RetentionPolicy des document_type berechnet (compute_retention_until).
+    retention_until = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Löschsperre bis zu diesem Zeitpunkt (Aufbewahrungsfrist).",
+    )
+
     class Meta:
         verbose_name = "Dokument"
         verbose_name_plural = "Dokumente"
@@ -184,6 +232,54 @@ class Document(models.Model):
 
     def __str__(self) -> str:
         return self.title
+
+    def compute_retention_until(self) -> datetime.datetime | None:
+        """Berechnet den Fristende-Zeitpunkt aus der RetentionPolicy des Typs.
+
+        Referenzdatum ist das Belegdatum (``created_at``), sonst das
+        Aufnahmedatum (``added_at``). Ohne Typ oder ohne (positive) Frist: ``None``.
+        """
+        if not self.document_type_id:
+            return None
+        policy = RetentionPolicy.objects.filter(
+            document_type_id=self.document_type_id
+        ).first()
+        if not policy or policy.retention_months <= 0:
+            return None
+        reference = self.created_at or self.added_at or timezone.now()
+        return _add_months(reference, policy.retention_months)
+
+    def delete(self, *args, actor=None, **kwargs):
+        """Löschsperre: Blockt Löschung innerhalb der Aufbewahrungsfrist.
+
+        Zusätzlich WORM-Schutz: Existieren WORM-Versionen ohne definierte Frist
+        (kein Verfallsdatum), bleibt das Dokument unbefristet erhalten. Der
+        Löschversuch erzeugt einen Audit-Eintrag und wirft einen sauberen Fehler.
+        """
+        now = timezone.now()
+        if self.retention_until and self.retention_until > now:
+            _audit_block(
+                "retention_block",
+                self,
+                actor=actor,
+                reason=f"retention_until={self.retention_until.isoformat()}",
+            )
+            raise RetentionError(
+                "Löschen gesperrt: Aufbewahrungsfrist läuft bis "
+                f"{self.retention_until:%d.%m.%Y}."
+            )
+        if not self.retention_until and self.versions.filter(is_immutable=True).exists():
+            _audit_block(
+                "immutable_block",
+                self,
+                actor=actor,
+                reason="worm_versions_without_retention",
+            )
+            raise ImmutableVersionError(
+                "Löschen gesperrt: Dokument enthält revisionssichere "
+                "(WORM-)Versionen ohne definierte Aufbewahrungsfrist."
+            )
+        return super().delete(*args, **kwargs)
 
 
 class DocumentVersion(models.Model):
@@ -232,6 +328,67 @@ class DocumentVersion(models.Model):
 
     def __str__(self) -> str:
         return f"{self.document.title} · v{self.version_no}"
+
+    def save(self, *args, **kwargs):
+        """WORM-Schutz: Eine bereits als ``is_immutable`` persistierte Version
+        kann nicht mehr überschrieben werden.
+
+        Der Übergang ``False → True`` (Versiegeln nach der Verarbeitung) bleibt
+        erlaubt, weil der geprüfte DB-Zustand dabei noch ``False`` ist. Jeder
+        spätere Schreibversuch erzeugt einen Audit-Eintrag und wirft einen Fehler.
+        """
+        if self.pk:
+            locked = (
+                type(self)
+                .objects.filter(pk=self.pk, is_immutable=True)
+                .exists()
+            )
+            if locked:
+                _audit_block("immutable_block", self, reason="save")
+                raise ImmutableVersionError(
+                    f"Version v{self.version_no} ist revisionssicher (WORM) und "
+                    "kann nicht mehr geändert werden."
+                )
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, actor=None, **kwargs):
+        """WORM-Schutz: Eine ``is_immutable``-Version kann nicht gelöscht werden."""
+        if self.is_immutable:
+            _audit_block("immutable_block", self, actor=actor, reason="delete")
+            raise ImmutableVersionError(
+                f"Version v{self.version_no} ist revisionssicher (WORM) und "
+                "kann nicht gelöscht werden."
+            )
+        return super().delete(*args, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Aufbewahrungsfristen je Dokumenttyp (Stufe 4 – Revisionssicherheit)
+# ---------------------------------------------------------------------------
+class RetentionPolicy(models.Model):
+    """Aufbewahrungsfrist (in Monaten) je Dokumenttyp.
+
+    Daraus wird ``Document.retention_until`` berechnet (Belegdatum + Monate).
+    Beispiel GoBD: Rechnungen 10 Jahre → ``retention_months = 120``.
+    """
+
+    document_type = models.OneToOneField(
+        DocumentType,
+        on_delete=models.CASCADE,
+        related_name="retention_policy",
+    )
+    retention_months = models.PositiveIntegerField(
+        default=0,
+        help_text="Aufbewahrungsfrist in Monaten (0 = keine Frist).",
+    )
+
+    class Meta:
+        verbose_name = "Aufbewahrungsfrist"
+        verbose_name_plural = "Aufbewahrungsfristen"
+        ordering = ["document_type__name"]
+
+    def __str__(self) -> str:
+        return f"{self.document_type.name}: {self.retention_months} Monate"
 
 
 # ---------------------------------------------------------------------------

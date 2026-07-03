@@ -9,6 +9,7 @@ from django.http import FileResponse, Http404
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
+from rest_framework.exceptions import APIException
 from rest_framework.filters import OrderingFilter
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import (
@@ -31,6 +32,14 @@ class ReadOnlyOrCanWrite(BasePermission):
             return True
         return bool(getattr(request.user, "can_write", False))
 
+
+class ResourceLocked(APIException):
+    """HTTP 423 Locked – Objekt durch WORM/Aufbewahrungsfrist gesperrt."""
+
+    status_code = status.HTTP_423_LOCKED
+    default_detail = "Objekt ist gesperrt (Revisionssicherheit)."
+    default_code = "locked"
+
 from . import pipeline, storage
 from .models import (
     AuditLogEntry,
@@ -38,6 +47,9 @@ from .models import (
     Correspondent,
     Document,
     DocumentType,
+    ImmutableVersionError,
+    RetentionError,
+    RetentionPolicy,
     StoragePath,
     Tag,
 )
@@ -47,6 +59,7 @@ from .serializers import (
     CorrespondentSerializer,
     DocumentSerializer,
     DocumentTypeSerializer,
+    RetentionPolicySerializer,
     StoragePathSerializer,
     TagSerializer,
 )
@@ -425,10 +438,20 @@ class DocumentViewSet(viewsets.ModelViewSet):
         }
 
     def perform_update(self, serializer):
-        """Speichert und protokolliert geänderte Metadatenfelder (vorher/nachher)."""
+        """Speichert und protokolliert geänderte Metadatenfelder (vorher/nachher).
+
+        Ändert sich der Dokumenttyp, wird die Aufbewahrungsfrist
+        (``retention_until``) aus der zugehörigen RetentionPolicy neu berechnet.
+        """
         before = self._metadata_snapshot(serializer.instance)
+        before_type = serializer.instance.document_type_id
         super().perform_update(serializer)
         document = serializer.instance
+        if document.document_type_id != before_type:
+            new_until = document.compute_retention_until()
+            if new_until != document.retention_until:
+                document.retention_until = new_until
+                document.save(update_fields=["retention_until"])
         after = self._metadata_snapshot(document)
         changes = {
             field: {"from": before[field], "to": after[field]}
@@ -445,11 +468,20 @@ class DocumentViewSet(viewsets.ModelViewSet):
             )
 
     def perform_destroy(self, instance):
-        """Protokolliert die Löschung, bevor das Dokument entfernt wird.
+        """Löscht das Dokument – gesperrt durch WORM/Aufbewahrungsfrist.
+
+        Der Modell-Guard (``Document.delete``) wirft bei aktiver Frist bzw.
+        WORM-Versionen und schreibt selbst den Sperr-Audit (``retention_block`` /
+        ``immutable_block``). Hier wird der Fehler in eine saubere HTTP-Antwort
+        (423 Locked) übersetzt; der ``delete``-Audit entsteht nur bei Erfolg.
 
         Audit-Einträge referenzieren die ID als String (keine FK) und überleben
         die Löschung des Dokuments – das Protokoll bleibt append-only lückenlos.
         """
+        try:
+            instance.delete(actor=self.request.user)
+        except (RetentionError, ImmutableVersionError) as exc:
+            raise ResourceLocked(str(exc))
         AuditLogEntry.objects.create(
             actor=self.request.user,
             action="delete",
@@ -457,7 +489,6 @@ class DocumentViewSet(viewsets.ModelViewSet):
             object_id=str(instance.id),
             detail={"title": instance.title},
         )
-        super().perform_destroy(instance)
 
     @action(detail=True, methods=["post"])
     def apply_suggestions(self, request, pk=None):
@@ -652,4 +683,17 @@ class StoragePathViewSet(viewsets.ModelViewSet):
 class ClassificationRuleViewSet(viewsets.ModelViewSet):
     queryset = ClassificationRule.objects.all()
     serializer_class = ClassificationRuleSerializer
+    permission_classes = [ReadOnlyOrCanWrite]
+
+
+class RetentionPolicyViewSet(viewsets.ModelViewSet):
+    """Aufbewahrungsfristen je Dokumenttyp pflegen (Stufe 4).
+
+    Lesen für alle Angemeldeten; Schreiben nur für ``can_write``. Änderungen
+    wirken auf künftig versiegelte Versionen (``retention_until`` wird beim
+    Versiegeln bzw. Typwechsel neu berechnet), nicht rückwirkend.
+    """
+
+    queryset = RetentionPolicy.objects.select_related("document_type").all()
+    serializer_class = RetentionPolicySerializer
     permission_classes = [ReadOnlyOrCanWrite]

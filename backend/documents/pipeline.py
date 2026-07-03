@@ -306,10 +306,60 @@ def process_version(version: DocumentVersion) -> dict:
             "chars": len(text),
         },
     )
+
+    # WORM versiegeln: nach erfolgreicher Verarbeitung ist die Version final.
+    seal_version(version)
+
     return {
         "version_id": version.id,
         "sha256": version.sha256,
         "pages": pages,
         "chars": len(text),
         "status": "done",
+        "is_immutable": version.is_immutable,
     }
+
+
+def seal_version(version: DocumentVersion) -> None:
+    """Versiegelt eine Version revisionssicher (WORM) – der letzte Pipeline-Schritt.
+
+    Wirkung:
+      * Archiv-PDF (falls vorhanden) wird schreibgeschützt (``chmod 0444``).
+      * ``is_immutable=True`` – ab jetzt sperren die Modell-Guards jede Änderung
+        oder Löschung dieser Version.
+      * ``Document.retention_until`` wird aus der Aufbewahrungsfrist des Typs neu
+        berechnet (Löschsperre bis zum Fristende).
+      * Audit-Eintrag ``action="immutable_set"``.
+
+    Idempotent: Eine bereits versiegelte Version wird übersprungen (die
+    Modell-Guards würden ein erneutes ``save()`` sonst blockieren).
+    """
+    if version.is_immutable:
+        return
+
+    if version.archive_path:
+        storage.make_readonly(version.archive_path)
+
+    version.is_immutable = True
+    version.save(update_fields=["is_immutable"])
+
+    document = version.document
+    retention_until = document.compute_retention_until()
+    if retention_until and document.retention_until != retention_until:
+        document.retention_until = retention_until
+        document.save(update_fields=["retention_until"])
+
+    AuditLogEntry.objects.create(
+        actor=version.created_by,
+        action="immutable_set",
+        object_type="DocumentVersion",
+        object_id=str(version.id),
+        detail={
+            "archive_path": version.archive_path,
+            "retention_until": (
+                document.retention_until.isoformat()
+                if document.retention_until
+                else None
+            ),
+        },
+    )

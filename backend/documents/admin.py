@@ -11,6 +11,7 @@ from .models import (
     DocumentVersion,
     MailAccount,
     ProcessedMail,
+    RetentionPolicy,
     StoragePath,
     Tag,
 )
@@ -61,6 +62,12 @@ admin.site.register(DocumentType)
 admin.site.register(Tag)
 admin.site.register(StoragePath)
 admin.site.register(CustomField)
+
+
+@admin.register(RetentionPolicy)
+class RetentionPolicyAdmin(admin.ModelAdmin):
+    list_display = ("document_type", "retention_months")
+    list_editable = ("retention_months",)
 
 @admin.register(MailAccount)
 class MailAccountAdmin(admin.ModelAdmin):

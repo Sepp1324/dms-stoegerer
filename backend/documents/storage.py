@@ -10,6 +10,7 @@ Zwei Bereiche unterhalb von ``DMS_DATA_DIR`` (siehe Settings):
 from __future__ import annotations
 
 import mimetypes
+import os
 import uuid
 from pathlib import Path
 
@@ -60,6 +61,20 @@ def save_bytes(data: bytes, ext: str = "") -> Path:
     dest = ORIGINALS_DIR / f"{uuid.uuid4().hex}{ext}"
     dest.write_bytes(data)
     return dest
+
+
+def make_readonly(path: str | Path) -> bool:
+    """Setzt eine Datei schreibgeschützt (chmod 0444) – WORM-Ablage.
+
+    Best effort: Schlägt das ``chmod`` fehl (z. B. read-only Mount, fehlende
+    Rechte), wird der Fehler geschluckt und ``False`` zurückgegeben; der
+    WORM-Schutz auf DB-Ebene (``is_immutable``) greift unabhängig davon.
+    """
+    try:
+        os.chmod(path, 0o444)
+        return True
+    except OSError:  # pragma: no cover - abhängig vom Dateisystem
+        return False
 
 
 def build_archive_path(document) -> Path:

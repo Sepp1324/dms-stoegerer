@@ -7,6 +7,7 @@ from .models import (
     Document,
     DocumentType,
     DocumentVersion,
+    RetentionPolicy,
     StoragePath,
     Tag,
 )
@@ -66,6 +67,9 @@ class DocumentVersionSerializer(serializers.ModelSerializer):
             "has_archive",
             "created_at",
         )
+        # WORM: Der Immutable-Status wird ausschließlich serverseitig gesetzt
+        # (Pipeline) und darf nie per Request geändert werden.
+        read_only_fields = ("is_immutable",)
 
     def get_created_by_name(self, obj) -> str | None:
         """Anzeigename des Erstellers (voller Name, sonst Login) – Altdaten: ``None``."""
@@ -151,6 +155,7 @@ class DocumentSerializer(serializers.ModelSerializer):
             "ai_suggestions",
             "ai_suggested_at",
             "classification",
+            "retention_until",
             "versions",
         )
         read_only_fields = (
@@ -160,4 +165,17 @@ class DocumentSerializer(serializers.ModelSerializer):
             "ai_suggestions",
             "ai_suggested_at",
             "classification",
+            "retention_until",  # aus RetentionPolicy berechnet – nicht per Request setzbar
         )
+
+
+class RetentionPolicySerializer(serializers.ModelSerializer):
+    """Aufbewahrungsfrist je Dokumenttyp (Stufe 4)."""
+
+    document_type_name = serializers.CharField(
+        source="document_type.name", read_only=True, default=None
+    )
+
+    class Meta:
+        model = RetentionPolicy
+        fields = ("id", "document_type", "document_type_name", "retention_months")

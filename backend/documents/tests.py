@@ -11,7 +11,11 @@ from .models import (
     AuditLogEntry,
     Correspondent,
     Document,
+    DocumentType,
     DocumentVersion,
+    ImmutableVersionError,
+    RetentionError,
+    RetentionPolicy,
     StoragePath,
     Tag,
 )
@@ -475,3 +479,165 @@ class StoragePathFilterTests(APITestCase):
         self.client.force_authenticate(self.user)
         resp = self.client.get(f"/api/documents/?tag={self.tag_x.id}")
         self.assertEqual(self._ids(resp), {self.doc_a.id})
+
+
+# ---------------------------------------------------------------------------
+# WORM/Immutable + Aufbewahrungsfristen (STOAA-54, Stufe 4)
+# ---------------------------------------------------------------------------
+import os
+import tempfile
+from datetime import timedelta
+
+from django.test import TestCase
+from django.utils import timezone
+
+from . import pipeline, storage
+
+
+class WormImmutableTests(TestCase):
+    """WORM-Schutz: versiegelte (is_immutable) Versionen sind unveränderlich."""
+
+    def setUp(self):
+        self.doc = Document.objects.create(title="Rechnung 2026")
+        self.version = DocumentVersion.objects.create(
+            document=self.doc,
+            version_no=1,
+            file_path="/data/originals/rechnung.pdf",
+            sha256="b" * 64,
+            is_immutable=True,
+        )
+
+    def test_immutable_version_kann_nicht_ueberschrieben_werden(self):
+        self.version.ocr_text = "manipuliert"
+        with self.assertRaises(ImmutableVersionError):
+            self.version.save(update_fields=["ocr_text"])
+        # Audit-Eintrag action="immutable_block" muss entstanden sein.
+        self.assertTrue(
+            AuditLogEntry.objects.filter(
+                action="immutable_block", object_id=str(self.version.id)
+            ).exists()
+        )
+        # Persistierter Wert bleibt unverändert.
+        self.version.refresh_from_db()
+        self.assertNotEqual(self.version.ocr_text, "manipuliert")
+
+    def test_immutable_version_kann_nicht_geloescht_werden(self):
+        with self.assertRaises(ImmutableVersionError):
+            self.version.delete()
+        self.assertTrue(
+            DocumentVersion.objects.filter(pk=self.version.pk).exists()
+        )
+        self.assertTrue(
+            AuditLogEntry.objects.filter(
+                action="immutable_block", object_id=str(self.version.id)
+            ).exists()
+        )
+
+    def test_uebergang_false_true_ist_erlaubt(self):
+        """Das Versiegeln (False → True) selbst darf nicht blockiert werden."""
+        doc = Document.objects.create(title="Bescheid")
+        v = DocumentVersion.objects.create(
+            document=doc, version_no=1, file_path="/x.pdf", sha256="c" * 64
+        )
+        v.is_immutable = True
+        v.save(update_fields=["is_immutable"])  # darf NICHT werfen
+        v.refresh_from_db()
+        self.assertTrue(v.is_immutable)
+
+
+class ChmodReadonlyTests(TestCase):
+    """chmod 0444 auf der Archiv-Datei beim Versiegeln."""
+
+    def test_make_readonly_setzt_0444(self):
+        fd, path = tempfile.mkstemp(suffix=".pdf")
+        os.close(fd)
+        try:
+            self.assertTrue(storage.make_readonly(path))
+            mode = os.stat(path).st_mode & 0o777
+            self.assertEqual(mode, 0o444)
+        finally:
+            os.chmod(path, 0o644)
+            os.remove(path)
+
+    def test_seal_version_setzt_immutable_und_chmod(self):
+        fd, path = tempfile.mkstemp(suffix=".pdf")
+        os.close(fd)
+        try:
+            doc = Document.objects.create(title="Vertrag")
+            v = DocumentVersion.objects.create(
+                document=doc,
+                version_no=1,
+                file_path="/orig.pdf",
+                archive_path=path,
+                sha256="d" * 64,
+            )
+            pipeline.seal_version(v)
+            v.refresh_from_db()
+            self.assertTrue(v.is_immutable)
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o444)
+            self.assertTrue(
+                AuditLogEntry.objects.filter(
+                    action="immutable_set", object_id=str(v.id)
+                ).exists()
+            )
+        finally:
+            os.chmod(path, 0o644)
+            os.remove(path)
+
+
+class RetentionTests(APITestCase):
+    """Aufbewahrungsfristen: Löschsperre bis retention_until."""
+
+    def setUp(self):
+        self.dtype = DocumentType.objects.create(name="Rechnung")
+        RetentionPolicy.objects.create(
+            document_type=self.dtype, retention_months=120
+        )
+
+    def test_compute_retention_until_aus_policy(self):
+        doc = Document.objects.create(
+            title="R1",
+            document_type=self.dtype,
+            created_at=timezone.now(),
+        )
+        until = doc.compute_retention_until()
+        self.assertIsNotNone(until)
+        self.assertGreater(until, timezone.now())
+
+    def test_ohne_policy_keine_frist(self):
+        doc = Document.objects.create(title="Notiz")
+        self.assertIsNone(doc.compute_retention_until())
+
+    def test_loeschen_vor_fristende_gesperrt(self):
+        doc = Document.objects.create(title="R2", document_type=self.dtype)
+        doc.retention_until = timezone.now() + timedelta(days=365)
+        doc.save(update_fields=["retention_until"])
+        with self.assertRaises(RetentionError):
+            doc.delete()
+        self.assertTrue(Document.objects.filter(pk=doc.pk).exists())
+        self.assertTrue(
+            AuditLogEntry.objects.filter(
+                action="retention_block", object_id=str(doc.pk)
+            ).exists()
+        )
+
+    def test_loeschen_nach_fristende_erlaubt(self):
+        doc = Document.objects.create(title="R3", document_type=self.dtype)
+        doc.retention_until = timezone.now() - timedelta(days=1)
+        doc.save(update_fields=["retention_until"])
+        doc.delete()  # Frist abgelaufen → erlaubt
+        self.assertFalse(Document.objects.filter(pk=doc.pk).exists())
+
+    def test_api_delete_liefert_423_bei_aktiver_frist(self):
+        writer = User.objects.create_user(
+            username="worm-writer", password="pw", role="user"
+        )
+        doc = Document.objects.create(
+            title="R4", owner=writer, document_type=self.dtype
+        )
+        doc.retention_until = timezone.now() + timedelta(days=30)
+        doc.save(update_fields=["retention_until"])
+        self.client.force_authenticate(writer)
+        resp = self.client.delete(f"/api/documents/{doc.id}/")
+        self.assertEqual(resp.status_code, 423)
+        self.assertTrue(Document.objects.filter(pk=doc.pk).exists())
