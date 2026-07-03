@@ -26,8 +26,16 @@ class ReadOnlyOrCanWrite(BasePermission):
         return bool(getattr(request.user, "can_write", False))
 
 from . import pipeline, storage
-from .models import Correspondent, Document, DocumentType, StoragePath, Tag
+from .models import (
+    ClassificationRule,
+    Correspondent,
+    Document,
+    DocumentType,
+    StoragePath,
+    Tag,
+)
 from .serializers import (
+    ClassificationRuleSerializer,
     CorrespondentSerializer,
     DocumentSerializer,
     DocumentTypeSerializer,
@@ -275,4 +283,10 @@ class DocumentTypeViewSet(viewsets.ModelViewSet):
 class StoragePathViewSet(viewsets.ModelViewSet):
     queryset = StoragePath.objects.all()
     serializer_class = StoragePathSerializer
+    permission_classes = [ReadOnlyOrCanWrite]
+
+
+class ClassificationRuleViewSet(viewsets.ModelViewSet):
+    queryset = ClassificationRule.objects.all()
+    serializer_class = ClassificationRuleSerializer
     permission_classes = [ReadOnlyOrCanWrite]

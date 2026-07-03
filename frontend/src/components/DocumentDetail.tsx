@@ -262,6 +262,13 @@ export default function DocumentDetail({
                 )}
 
                 <h2>{doc.title}</h2>
+                {doc.classification?.rules?.length ? (
+                  <p className="class-note">
+                    <i aria-hidden="true">⚙</i> Automatisch klassifiziert durch Regel
+                    {doc.classification.rules.length > 1 ? "n" : ""}{" "}
+                    „{doc.classification.rules.join("“, „")}“
+                  </p>
+                ) : null}
                 <dl>
                   <dt>Korrespondent</dt>
                   <dd>{doc.correspondent_name ?? "—"}</dd>

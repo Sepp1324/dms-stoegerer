@@ -18,6 +18,7 @@ import {
 } from "../api";
 import UploadZone from "./UploadZone";
 import DocumentDetail from "./DocumentDetail";
+import RulesPage from "./RulesPage";
 
 export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   const [q, setQ] = useState("");
@@ -40,6 +41,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   const [reloadKey, setReloadKey] = useState(0);
   // Aktuell geöffnetes Dokument (Detailansicht) oder null (Liste).
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [showRules, setShowRules] = useState(false);
 
   // Profil + Filter-Stammdaten einmalig laden.
   useEffect(() => {
@@ -130,6 +132,10 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     onLogout();
   }
 
+  if (showRules) {
+    return <RulesPage onBack={() => setShowRules(false)} canEdit={!!me?.can_write} />;
+  }
+
   if (selectedId !== null) {
     return (
       <DocumentDetail
@@ -157,6 +163,9 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
         <h1>DMS</h1>
         <div className="topbar-right">
           {me && <span className="muted user">{me.username}</span>}
+          <button className="link" onClick={() => setShowRules(true)}>
+            Regeln
+          </button>
           <button className="link" onClick={handleLogout}>
             Abmelden
           </button>
