@@ -89,7 +89,8 @@ Danach erscheint der Runner in GitHub unter *Settings → Actions → Runners* a
 
 ## 3. Nutzung
 
-1. Wie gewohnt einen **PR** erstellen und mergen (oder direkt auf `main` pushen).
+1. Einen **PR** gegen `main` erstellen und nach Review mergen — kein Direkt-Push
+   auf `main` (verbindlicher Standard: CONTRIBUTING.md). Push-Credential: docs/secrets.md.
 2. Der Merge löst den Workflow aus – live verfolgbar unter dem **Actions**-Tab
    des Repos.
 3. Nach erfolgreichem Lauf laufen die neuen Images im Cluster; der Schritt

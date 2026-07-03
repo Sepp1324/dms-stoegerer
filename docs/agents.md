@@ -39,12 +39,14 @@ Konventionen (verbindlich):
 - Kleine, fokussierte Änderungen. Keine ungefragten Refactorings, keine
   Über-Abstraktion, keine Bibliotheken ohne Not.
 - Workflow: NIE direkt auf main committen. Immer Feature-Branch von main →
-  Änderung → PR gegen main. Commit-Messages enden mit:
-  Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+  Änderung → PR gegen main → Review (QA/CTO) → Merge. Eine Aufgabe = ein PR.
+  Verbindlicher Standard mit Beispiel-Flow: CONTRIBUTING.md. Commit-Messages
+  enden mit: Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 - Vor jedem PR verifizieren: Backend `python manage.py check` (0 Probleme) und
   `python manage.py makemigrations --check` (keine offenen); Frontend `npm run build`
   (tsc + vite erfolgreich). Bei Modelländerungen Migration erzeugen und mitliefern.
-- Geheimnisse (API-Keys, Secrets) niemals in Code/Config/Commits.
+- Geheimnisse (API-Keys, Secrets, Push-Token) niemals in Code/Config/Commits/
+  Issues/Kommentaren — ausschließlich im Secret-Store (siehe docs/secrets.md).
 - Ehrlich berichten: fehlgeschlagene Tests/Checks klar benennen, nicht kaschieren.
 ```
 

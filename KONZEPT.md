@@ -233,6 +233,13 @@ z. B. „Rechnungsbetrag", „Fälligkeitsdatum", „Vertragsnummer".
 - ✅ **paperless-Import-Umfang:** Nur **Dateien + Kern-Metadaten** (Titel, Datum,
   Korrespondent, Dokumenttyp). Tags/Custom Fields werden *nicht* 1:1 migriert.
 
+**Getroffen (2026-07-03):**
+- ✅ **Beitrags-Workflow (verbindlich):** Jede Aufgabe endet mit einem **Pull
+  Request** gegen `main` — kein Direkt-Commit auf `main`. Ablauf:
+  Branch je Aufgabe → PR → Review (QA/CTO) → Merge → CI deployt. Details in
+  [`CONTRIBUTING.md`](CONTRIBUTING.md); Push-Credential-Ablage in
+  [`docs/secrets.md`](docs/secrets.md) (Token nur im Secret-Store, nie in Git).
+
 **Noch offen (nicht blockierend):**
 1. **Backup-Strategie:** Wie sicherst du heute paperless/ecoDMS? Das DMS sollte
    sich in dein bestehendes Backup einfügen.
