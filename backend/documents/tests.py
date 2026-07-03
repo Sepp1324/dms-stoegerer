@@ -12,6 +12,7 @@ from .models import (
     Correspondent,
     Document,
     DocumentVersion,
+    StoragePath,
     Tag,
 )
 
@@ -419,3 +420,58 @@ class AISuggestionsTests(APITestCase):
                 format="json",
             )
             self.assertEqual(resp.status_code, 403, path)
+
+
+class StoragePathFilterTests(APITestCase):
+    """Listenfilter nach Speicherpfad und Mehrfach-Tag (STOAA-49)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(
+            username="pathfilter", password="pw", role="user"
+        )
+        cls.sp_a = StoragePath.objects.create(name="Archiv A")
+        cls.sp_b = StoragePath.objects.create(name="Archiv B")
+        cls.tag_x = Tag.objects.create(name="Steuer")
+        cls.tag_y = Tag.objects.create(name="Versicherung")
+
+        cls.doc_a = Document.objects.create(
+            title="Doc A", owner=cls.user, storage_path=cls.sp_a
+        )
+        cls.doc_a.tags.add(cls.tag_x)
+        cls.doc_b = Document.objects.create(
+            title="Doc B", owner=cls.user, storage_path=cls.sp_b
+        )
+        cls.doc_b.tags.add(cls.tag_y)
+        # Ohne Speicherpfad → darf bei storage_path-Filter nie auftauchen.
+        cls.doc_none = Document.objects.create(title="Doc ohne Pfad", owner=cls.user)
+
+    def _ids(self, resp):
+        data = resp.json()
+        results = data["results"] if isinstance(data, dict) else data
+        return {d["id"] for d in results}
+
+    def test_storage_path_filter(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.get(f"/api/documents/?storage_path={self.sp_a.id}")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._ids(resp), {self.doc_a.id})
+
+    def test_ohne_filter_alle_sichtbar(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.get("/api/documents/")
+        self.assertEqual(
+            self._ids(resp), {self.doc_a.id, self.doc_b.id, self.doc_none.id}
+        )
+
+    def test_multi_tag_filter_oder(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.get(
+            f"/api/documents/?tag={self.tag_x.id}&tag={self.tag_y.id}"
+        )
+        self.assertEqual(self._ids(resp), {self.doc_a.id, self.doc_b.id})
+
+    def test_single_tag_filter_abwaertskompatibel(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.get(f"/api/documents/?tag={self.tag_x.id}")
+        self.assertEqual(self._ids(resp), {self.doc_a.id})

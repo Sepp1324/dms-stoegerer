@@ -174,7 +174,9 @@ class DocumentViewSet(viewsets.ModelViewSet):
       * ``q``             – Volltextsuche über Titel + OCR-Text (PostgreSQL FTS)
       * ``correspondent`` – Filter auf Korrespondenten-ID
       * ``document_type`` – Filter auf Dokumenttyp-ID
-      * ``tag``           – Filter auf Tag-ID
+      * ``storage_path``  – Filter auf Speicherpfad-ID
+      * ``tag``           – Filter auf Tag-ID (mehrfach angebbar → ODER-Verknüpfung,
+                            z. B. ``?tag=1&tag=2``)
       * ``ordering``      – Sortierung, z. B. ``added_at``/``-added_at`` (Datum)
                             oder ``title``/``-title`` (A–Z). Ohne Angabe gilt die
                             Standard-Sortierung (bei ``q`` nach FTS-Relevanz,
@@ -194,7 +196,9 @@ class DocumentViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = (
             Document.objects.all()
-            .select_related("correspondent", "document_type", "current_version")
+            .select_related(
+                "correspondent", "document_type", "storage_path", "current_version"
+            )
             .prefetch_related("tags", "versions")
         )
         # --- Owner-Isolation (STOAA-7) -------------------------------------
@@ -231,8 +235,13 @@ class DocumentViewSet(viewsets.ModelViewSet):
             qs = qs.filter(correspondent_id=params["correspondent"])
         if params.get("document_type"):
             qs = qs.filter(document_type_id=params["document_type"])
-        if params.get("tag"):
-            qs = qs.filter(tags__id=params["tag"])
+        if params.get("storage_path"):
+            qs = qs.filter(storage_path_id=params["storage_path"])
+        # ``tag`` mehrfach erlaubt (?tag=1&tag=2) → ODER via ``__in``;
+        # ein einzelner Wert bleibt abwärtskompatibel (getlist → ["1"]).
+        tags = params.getlist("tag")
+        if tags:
+            qs = qs.filter(tags__id__in=tags)
 
         return qs.distinct()
 
