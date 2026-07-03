@@ -9,6 +9,17 @@
   --error: #ef4444;
   --accent: #3b82f6;
   --accent-hover: #2563eb;
+  /* Dunkleres Panel/Eingabefeld (einziger zulässiger Sonderwert, UX-Baukasten 1.1) */
+  --surface-sunken: #0b1220;
+
+  /* Ableitungen (UX-Baukasten 1.2) – rein additiv, ändern das Aussehen nicht */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-pill: 999px;
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+  --accent-tint: rgba(59, 130, 246, 0.14); /* Nav-/Chip-aktiv */
+  --hover-tint: rgba(148, 163, 184, 0.08); /* neutraler Hover */
+
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
 
@@ -95,11 +106,11 @@ h1 {
   transition: background 0.15s, color 0.15s;
 }
 .nav-item:hover {
-  background: rgba(148, 163, 184, 0.08);
+  background: var(--hover-tint);
   color: var(--text);
 }
 .nav-item--active {
-  background: rgba(59, 130, 246, 0.14);
+  background: var(--accent-tint);
   color: var(--text);
   font-weight: 600;
 }
@@ -315,6 +326,20 @@ input:focus,
 select:focus {
   outline: none;
   border-color: var(--accent);
+}
+
+/* Sichtbarer Tastatur-Fokus auf allen interaktiven Elementen (UX-Baukasten 6.1).
+   :focus-visible → kein Ring bei reiner Maus-Interaktion, immer bei Tastatur. */
+:where(button, a, .nav-item, .tag, .tag-toggle, .doc-card, [tabindex]):focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
+}
+input:focus-visible,
+select:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-tint);
 }
 
 /* --- Login --- */
