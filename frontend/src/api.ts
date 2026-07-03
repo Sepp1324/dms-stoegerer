@@ -133,6 +133,17 @@ export interface ClassificationRule {
     tags?: string[];
   };
 }
+export interface AuditEntry {
+  id: number;
+  timestamp: string;
+  actor: number | null;
+  actor_name: string;
+  action: string;
+  object_type: string;
+  object_id: string;
+  // Aktionsabhängige Nutzlast, z. B. { changes: { title: { from, to } } }.
+  detail: Record<string, unknown>;
+}
 export interface Paginated<T> {
   count: number;
   next: string | null;
@@ -178,6 +189,16 @@ export async function getDocuments(
 export async function getDocument(id: number): Promise<DocumentDetail> {
   const res = await apiFetch(`/documents/${id}/`);
   if (!res.ok) throw new Error(`Dokument laden fehlgeschlagen: HTTP ${res.status}`);
+  return res.json();
+}
+
+// Verlauf/Audit-Trail eines Dokuments (paginiert, neueste zuerst).
+export async function getDocumentAudit(
+  id: number,
+  page = 1,
+): Promise<Paginated<AuditEntry>> {
+  const res = await apiFetch(`/documents/${id}/audit/?page=${page}`);
+  if (!res.ok) throw new Error(`Verlauf laden fehlgeschlagen: HTTP ${res.status}`);
   return res.json();
 }
 

@@ -1,6 +1,7 @@
 import os
 
 from django.db import connection
+from django.db.models import Q
 from django.http import FileResponse, Http404
 from rest_framework import status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
@@ -27,6 +28,7 @@ class ReadOnlyOrCanWrite(BasePermission):
 
 from . import pipeline, storage
 from .models import (
+    AuditLogEntry,
     ClassificationRule,
     Correspondent,
     Document,
@@ -35,6 +37,7 @@ from .models import (
     Tag,
 )
 from .serializers import (
+    AuditLogEntrySerializer,
     ClassificationRuleSerializer,
     CorrespondentSerializer,
     DocumentSerializer,
@@ -203,6 +206,80 @@ class DocumentViewSet(viewsets.ModelViewSet):
 
         return FileResponse(open(path, "rb"), content_type="image/jpeg")
 
+    @action(detail=True, methods=["get"])
+    def audit(self, request, pk=None):
+        """Lückenloses, chronologisches Protokoll dieses Dokuments (paginiert).
+
+        Enthält Dokument-Ereignisse (Upload, Metadaten-Änderung, Klassifizierung,
+        Löschung) sowie zugehörige Versions-Ereignisse (z. B. OCR). Wer das Dokument
+        sehen darf, darf den Verlauf lesen; Schreibrechte sind nicht nötig (GET).
+        """
+        document = self.get_object()
+        version_ids = [str(v.id) for v in document.versions.all()]
+        entries = (
+            AuditLogEntry.objects.filter(
+                Q(object_type="Document", object_id=str(document.id))
+                | Q(object_type="DocumentVersion", object_id__in=version_ids)
+            )
+            .select_related("actor")
+            .order_by("-timestamp", "-id")
+        )
+
+        page = self.paginate_queryset(entries)
+        serializer = AuditLogEntrySerializer(page, many=True)
+        return self.get_paginated_response(serializer.data)
+
+    def _metadata_snapshot(self, document) -> dict:
+        """Menschlich lesbarer Schnappschuss der Metadaten für den Audit-Diff."""
+        return {
+            "title": document.title,
+            "correspondent": (
+                document.correspondent.name if document.correspondent_id else None
+            ),
+            "document_type": (
+                document.document_type.name if document.document_type_id else None
+            ),
+            "storage_path": (
+                document.storage_path.name if document.storage_path_id else None
+            ),
+            "tags": sorted(t.name for t in document.tags.all()),
+        }
+
+    def perform_update(self, serializer):
+        """Speichert und protokolliert geänderte Metadatenfelder (vorher/nachher)."""
+        before = self._metadata_snapshot(serializer.instance)
+        super().perform_update(serializer)
+        document = serializer.instance
+        after = self._metadata_snapshot(document)
+        changes = {
+            field: {"from": before[field], "to": after[field]}
+            for field in before
+            if before[field] != after[field]
+        }
+        if changes:
+            AuditLogEntry.objects.create(
+                actor=self.request.user,
+                action="update",
+                object_type="Document",
+                object_id=str(document.id),
+                detail={"changes": changes},
+            )
+
+    def perform_destroy(self, instance):
+        """Protokolliert die Löschung, bevor das Dokument entfernt wird.
+
+        Audit-Einträge referenzieren die ID als String (keine FK) und überleben
+        die Löschung des Dokuments – das Protokoll bleibt append-only lückenlos.
+        """
+        AuditLogEntry.objects.create(
+            actor=self.request.user,
+            action="delete",
+            object_type="Document",
+            object_id=str(instance.id),
+            detail={"title": instance.title},
+        )
+        super().perform_destroy(instance)
+
     @action(detail=True, methods=["post"])
     def apply_suggestions(self, request, pk=None):
         """Übernimmt KI-Vorschläge ans Dokument (legt Stammdaten bei Bedarf an).
@@ -258,6 +335,15 @@ class DocumentViewSet(viewsets.ModelViewSet):
             suggestions.pop(key, None)
         document.ai_suggestions = suggestions
         document.save(update_fields=["ai_suggestions"])
+
+        if applied:
+            AuditLogEntry.objects.create(
+                actor=request.user,
+                action="apply_suggestions",
+                object_type="Document",
+                object_id=str(document.id),
+                detail={"fields": applied},
+            )
 
         return Response(self.get_serializer(document).data)
 
