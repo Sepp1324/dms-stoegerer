@@ -475,3 +475,167 @@ class StoragePathFilterTests(APITestCase):
         self.client.force_authenticate(self.user)
         resp = self.client.get(f"/api/documents/?tag={self.tag_x.id}")
         self.assertEqual(self._ids(resp), {self.doc_a.id})
+
+
+# ---------------------------------------------------------------------------
+# STOAA-52: WORM / Immutable-Storage + Aufbewahrungsfristen
+# ---------------------------------------------------------------------------
+import os
+import tempfile
+from datetime import date, timedelta
+from unittest.mock import patch
+
+from django.core.exceptions import ValidationError as DjValidationError
+
+from .models import DocumentType
+
+
+class ImmutableVersionTests(APITestCase):
+    """Testet den WORM-Schutz auf DocumentVersion-Ebene."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="worm_user", password="pw", role="user")
+        self.doc = Document.objects.create(title="Worm-Dok", owner=self.user)
+
+    def _make_version(self, **kwargs):
+        defaults = dict(
+            document=self.doc,
+            version_no=1,
+            file_path="/tmp/test.pdf",
+            sha256="abc123",
+            size=100,
+        )
+        defaults.update(kwargs)
+        v = DocumentVersion(**defaults)
+        DocumentVersion.objects.bulk_create([v])
+        return DocumentVersion.objects.get(document=self.doc, version_no=defaults["version_no"])
+
+    def test_immutable_version_cannot_be_overwritten(self):
+        """save() auf unveränderlicher Version wirft ValidationError."""
+        v = self._make_version()
+        DocumentVersion.objects.filter(pk=v.pk).update(is_immutable=True)
+        v.refresh_from_db()
+        v.ocr_text = "neuer Text"
+        with self.assertRaises(DjValidationError):
+            v.save()
+
+    def test_immutable_version_cannot_be_deleted(self):
+        """delete() auf unveränderlicher Version wirft ValidationError."""
+        v = self._make_version()
+        DocumentVersion.objects.filter(pk=v.pk).update(is_immutable=True)
+        v.refresh_from_db()
+        with self.assertRaises(DjValidationError):
+            v.delete()
+
+    def test_immutable_block_creates_audit_entry(self):
+        """Beim blockierten Löschen entsteht ein immutable_block-Audit-Eintrag."""
+        v = self._make_version()
+        DocumentVersion.objects.filter(pk=v.pk).update(is_immutable=True)
+        v.refresh_from_db()
+        before = AuditLogEntry.objects.count()
+        with self.assertRaises(DjValidationError):
+            v.delete()
+        self.assertEqual(
+            AuditLogEntry.objects.filter(action="immutable_block").count(), 1
+        )
+
+    def test_document_delete_blocked_if_immutable_version_exists(self):
+        """DELETE /api/documents/{id}/ gibt 403, wenn immutable Version vorhanden."""
+        self.client.force_authenticate(self.user)
+        v = self._make_version()
+        DocumentVersion.objects.filter(pk=v.pk).update(is_immutable=True)
+        resp = self.client.delete(f"/api/documents/{self.doc.id}/")
+        self.assertEqual(resp.status_code, 403)
+        audit = AuditLogEntry.objects.filter(action="immutable_block", object_id=str(self.doc.id))
+        self.assertTrue(audit.exists())
+
+    def test_seal_sets_chmod(self):
+        """_seal_version() setzt chmod 0444 auf die Archiv-Datei."""
+        from .pipeline import _seal_version
+
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+            f.write(b"%PDF-1.4")
+            tmp_path = f.name
+        try:
+            v = self._make_version(archive_path=tmp_path)
+            _seal_version(v)
+            mode = oct(os.stat(tmp_path).st_mode)[-4:]
+            self.assertEqual(mode, "0444")
+        finally:
+            os.chmod(tmp_path, 0o644)
+            os.unlink(tmp_path)
+
+    def test_seal_creates_immutable_set_audit(self):
+        """_seal_version() erzeugt einen immutable_set-Audit-Eintrag."""
+        from .pipeline import _seal_version
+
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+            f.write(b"%PDF-1.4")
+            tmp_path = f.name
+        try:
+            v = self._make_version(archive_path=tmp_path)
+            _seal_version(v)
+            self.assertTrue(
+                AuditLogEntry.objects.filter(action="immutable_set", object_id=str(v.pk)).exists()
+            )
+        finally:
+            os.chmod(tmp_path, 0o644)
+            os.unlink(tmp_path)
+
+
+class RetentionPolicyTests(APITestCase):
+    """Testet Aufbewahrungsfristen-Sperre."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="ret_user", password="pw", role="user")
+        self.doc_type = DocumentType.objects.create(name="Rechnung-Test", retention_months=120)
+        self.doc = Document.objects.create(
+            title="Retention-Dok",
+            owner=self.user,
+            document_type=self.doc_type,
+            retention_until=date.today() + timedelta(days=365),
+        )
+
+    def test_document_delete_blocked_within_retention(self):
+        """DELETE gibt 403, solange retention_until in der Zukunft liegt."""
+        self.client.force_authenticate(self.user)
+        resp = self.client.delete(f"/api/documents/{self.doc.id}/")
+        self.assertEqual(resp.status_code, 403)
+        self.assertTrue(
+            AuditLogEntry.objects.filter(
+                action="retention_block", object_id=str(self.doc.id)
+            ).exists()
+        )
+
+    def test_document_delete_allowed_after_retention(self):
+        """DELETE erlaubt, wenn retention_until in der Vergangenheit."""
+        self.doc.retention_until = date.today() - timedelta(days=1)
+        self.doc.save()
+        self.client.force_authenticate(self.user)
+        resp = self.client.delete(f"/api/documents/{self.doc.id}/")
+        self.assertEqual(resp.status_code, 204)
+
+    def test_seal_computes_retention_until(self):
+        """_seal_version() berechnet retention_until aus DocumentType.retention_months."""
+        from .pipeline import _seal_version
+
+        v = DocumentVersion.objects.create(
+            document=self.doc,
+            version_no=1,
+            file_path="/tmp/test.pdf",
+            sha256="def456",
+            size=100,
+        )
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+            f.write(b"%PDF")
+            tmp = f.name
+        v.archive_path = tmp
+        try:
+            DocumentVersion.objects.filter(pk=v.pk).update(archive_path=tmp)
+            v.refresh_from_db()
+            _seal_version(v)
+            v.refresh_from_db()
+            self.assertIsNotNone(v.retention_until)
+        finally:
+            os.chmod(tmp, 0o644)
+            os.unlink(tmp)

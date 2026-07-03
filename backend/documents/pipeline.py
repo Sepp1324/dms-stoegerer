@@ -306,6 +306,10 @@ def process_version(version: DocumentVersion) -> dict:
             "chars": len(text),
         },
     )
+
+    # WORM: Version versiegeln + Archiv-Datei schreibschützen.
+    _seal_version(version)
+
     return {
         "version_id": version.id,
         "sha256": version.sha256,
@@ -313,3 +317,59 @@ def process_version(version: DocumentVersion) -> dict:
         "chars": len(text),
         "status": "done",
     }
+
+
+def _add_months(d, months: int):
+    """Addiert `months` Monate zu einem date-Objekt (kein dateutil nötig)."""
+    import calendar
+    month = d.month - 1 + months
+    year = d.year + month // 12
+    month = month % 12 + 1
+    day = min(d.day, calendar.monthrange(year, month)[1])
+    from datetime import date
+    return date(year, month, day)
+
+
+def _seal_version(version: DocumentVersion) -> None:
+    """Setzt is_immutable=True und schützt die Archiv-Datei (chmod 0444)."""
+    import os as _os
+    from datetime import date
+
+    # Archiv-Datei schreibschützen
+    archive = version.archive_path or version.file_path
+    if archive:
+        try:
+            _os.chmod(archive, 0o444)
+        except OSError:
+            pass  # Im Test/Mock-Umfeld ggf. kein echtes Dateisystem
+
+    # Aufbewahrungsfrist aus DocumentType berechnen
+    retention_until = None
+    doc_type = version.document.document_type
+    if doc_type and doc_type.retention_months:
+        ref = version.document.created_at or version.document.added_at
+        base = ref.date() if hasattr(ref, "date") else date.today()
+        retention_until = _add_months(base, doc_type.retention_months)
+
+    # Direkt auf DB-Ebene setzen, ohne save()-Guard auszulösen
+    DocumentVersion.objects.filter(pk=version.pk).update(
+        is_immutable=True,
+        retention_until=retention_until,
+    )
+    version.is_immutable = True
+    version.retention_until = retention_until
+
+    # Retention auch am Dokument speichern (längste Frist gewinnt)
+    doc = version.document
+    if retention_until and (doc.retention_until is None or retention_until > doc.retention_until):
+        from .models import Document
+        Document.objects.filter(pk=doc.pk).update(retention_until=retention_until)
+        doc.retention_until = retention_until
+
+    AuditLogEntry.objects.create(
+        actor=version.created_by,
+        action="immutable_set",
+        object_type="DocumentVersion",
+        object_id=str(version.id),
+        detail={"archive_path": archive, "retention_until": str(retention_until)},
+    )
