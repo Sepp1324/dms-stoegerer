@@ -174,7 +174,9 @@ class DocumentViewSet(viewsets.ModelViewSet):
       * ``q``             – Volltextsuche über Titel + OCR-Text (PostgreSQL FTS)
       * ``correspondent`` – Filter auf Korrespondenten-ID
       * ``document_type`` – Filter auf Dokumenttyp-ID
-      * ``tag``           – Filter auf Tag-ID
+      * ``storage_path``  – Filter auf Speicherpfad-ID
+      * ``tag``           – Filter auf Tag-ID (mehrfach angebbar → ODER-Verknüpfung,
+                            z. B. ``?tag=1&tag=2``)
       * ``ordering``      – Sortierung, z. B. ``added_at``/``-added_at`` (Datum)
                             oder ``title``/``-title`` (A–Z). Ohne Angabe gilt die
                             Standard-Sortierung (bei ``q`` nach FTS-Relevanz,
@@ -194,7 +196,9 @@ class DocumentViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = (
             Document.objects.all()
-            .select_related("correspondent", "document_type", "current_version")
+            .select_related(
+                "correspondent", "document_type", "storage_path", "current_version"
+            )
             .prefetch_related("tags", "versions")
         )
         # --- Owner-Isolation (STOAA-7) -------------------------------------
@@ -231,8 +235,13 @@ class DocumentViewSet(viewsets.ModelViewSet):
             qs = qs.filter(correspondent_id=params["correspondent"])
         if params.get("document_type"):
             qs = qs.filter(document_type_id=params["document_type"])
-        if params.get("tag"):
-            qs = qs.filter(tags__id=params["tag"])
+        if params.get("storage_path"):
+            qs = qs.filter(storage_path_id=params["storage_path"])
+        # ``tag`` mehrfach erlaubt (?tag=1&tag=2) → ODER via ``__in``;
+        # ein einzelner Wert bleibt abwärtskompatibel (getlist → ["1"]).
+        tags = params.getlist("tag")
+        if tags:
+            qs = qs.filter(tags__id__in=tags)
 
         return qs.distinct()
 
@@ -441,6 +450,36 @@ class DocumentViewSet(viewsets.ModelViewSet):
         Audit-Einträge referenzieren die ID als String (keine FK) und überleben
         die Löschung des Dokuments – das Protokoll bleibt append-only lückenlos.
         """
+        from django.core.exceptions import ValidationError as DjValidationError
+        from rest_framework.exceptions import PermissionDenied
+
+        # WORM: Dokument mit unveränderlichen Versionen darf nicht gelöscht werden.
+        if instance.versions.filter(is_immutable=True).exists():
+            AuditLogEntry.objects.create(
+                actor=self.request.user,
+                action="immutable_block",
+                object_type="Document",
+                object_id=str(instance.id),
+                detail={"title": instance.title, "reason": "unveränderliche Version vorhanden"},
+            )
+            raise PermissionDenied(
+                "Dokument enthält unveränderliche Versionen und kann nicht gelöscht werden."
+            )
+
+        # Aufbewahrungsfrist: retention_until am Dokument prüfen.
+        today = timezone.now().date()
+        if instance.retention_until and today < instance.retention_until:
+            AuditLogEntry.objects.create(
+                actor=self.request.user,
+                action="retention_block",
+                object_type="Document",
+                object_id=str(instance.id),
+                detail={"title": instance.title, "retention_until": str(instance.retention_until)},
+            )
+            raise PermissionDenied(
+                f"Aufbewahrungsfrist bis {instance.retention_until} aktiv – Löschen gesperrt."
+            )
+
         AuditLogEntry.objects.create(
             actor=self.request.user,
             action="delete",
@@ -614,6 +653,82 @@ class DocumentViewSet(viewsets.ModelViewSet):
             )
 
         return Response(self.get_serializer(document).data)
+
+    # --- Freigabe-Workflow (STOAA-63) ------------------------------------
+    def _transition(self, request, allowed_from, new_status, action_name):
+        """Gemeinsame Logik der Freigabe-Übergänge submit/approve/reject.
+
+        Prüft Schreibrecht (403 für Gäste), lädt owner-gescoped über
+        ``get_object()`` und lässt nur gültige Statusübergänge zu – ein
+        unzulässiger Übergang liefert **409 Conflict** (sauberer 4xx, nie 500).
+        Nach dem Übergang wird ``status`` gespeichert und genau ein
+        ``AuditLogEntry`` mit ``from``/``to`` geschrieben. Antwort: 200 mit
+        dem serialisierten Dokument (das FE erhält den neuen Status direkt).
+        """
+        if not request.user.can_write:
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        document = self.get_object()
+        old_status = document.status
+        if old_status not in allowed_from:
+            return Response(
+                {
+                    "detail": (
+                        f"Übergang aus Status '{old_status}' nach '{new_status}' "
+                        "nicht erlaubt."
+                    ),
+                    "status": old_status,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        reason = request.data.get("reason") if action_name == "reject" else None
+        document.status = new_status
+        document.save(update_fields=["status"])
+        AuditLogEntry.objects.create(
+            actor=request.user,
+            action=action_name,
+            object_type="Document",
+            object_id=str(document.id),
+            detail={"from": old_status, "to": new_status, "reason": reason or None},
+        )
+        return Response(self.get_serializer(document).data)
+
+    @action(detail=True, methods=["post"], url_path="submit")
+    def submit(self, request, pk=None):
+        """Dokument zur Freigabe einreichen: entwurf|abgelehnt → zur_freigabe."""
+        return self._transition(
+            request,
+            allowed_from=(
+                Document.ApprovalStatus.ENTWURF,
+                Document.ApprovalStatus.ABGELEHNT,
+            ),
+            new_status=Document.ApprovalStatus.ZUR_FREIGABE,
+            action_name="submit",
+        )
+
+    @action(detail=True, methods=["post"], url_path="approve")
+    def approve(self, request, pk=None):
+        """Freigeben: zur_freigabe → freigegeben."""
+        return self._transition(
+            request,
+            allowed_from=(Document.ApprovalStatus.ZUR_FREIGABE,),
+            new_status=Document.ApprovalStatus.FREIGEGEBEN,
+            action_name="approve",
+        )
+
+    @action(detail=True, methods=["post"], url_path="reject")
+    def reject(self, request, pk=None):
+        """Ablehnen: zur_freigabe → abgelehnt. Grund optional aus ``reason``."""
+        return self._transition(
+            request,
+            allowed_from=(Document.ApprovalStatus.ZUR_FREIGABE,),
+            new_status=Document.ApprovalStatus.ABGELEHNT,
+            action_name="reject",
+        )
 
 
 class TagViewSet(viewsets.ModelViewSet):

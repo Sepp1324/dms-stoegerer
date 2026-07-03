@@ -2,11 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import {
   addDocumentVersion,
   applySuggestions,
+  dismissSuggestions,
   getDocument,
   getDocumentAudit,
   getDocumentIntegrity,
   getDocumentPreview,
   getDocumentVersionFile,
+  suggestDocument,
   updateDocument,
   type AuditEntry,
   type DocumentDetail as Detail,
@@ -212,12 +214,50 @@ export default function DocumentDetail({
     }
   }
 
+  async function dismiss(field: string) {
+    setApplying(true);
+    setApplyError(null);
+    try {
+      const updated = await dismissSuggestions(id, [field]);
+      setDoc(updated);
+    } catch (e) {
+      setApplyError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setApplying(false);
+    }
+  }
+
+  // Regeneriert die KI-Vorschläge synchron; bei fehlendem Provider Hinweis anzeigen.
+  const [regenerating, setRegenerating] = useState(false);
+  const [regenNote, setRegenNote] = useState<string | null>(null);
+
+  async function regenerate() {
+    setRegenerating(true);
+    setRegenNote(null);
+    setApplyError(null);
+    try {
+      const updated = await suggestDocument(id);
+      const { source, ...rest } = updated;
+      setDoc(rest as Detail);
+      if (source === "unavailable") {
+        setRegenNote("KI nicht verfügbar – es wurden keine Vorschläge erzeugt.");
+      }
+    } catch (e) {
+      setApplyError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRegenerating(false);
+    }
+  }
+
   const versions = [...(doc?.versions ?? [])].sort(
     (a, b) => b.version_no - a.version_no,
   );
 
   const s = doc?.ai_suggestions ?? {};
   const suggestionRows: { key: string; label: string; value: string }[] = [];
+  // Belegdatum zuerst und hervorgehoben (ISO YYYY-MM-DD → de-DE); Übernehmen setzt created_at.
+  if (s.date)
+    suggestionRows.push({ key: "date", label: "Belegdatum", value: formatIsoDate(s.date) });
   if (s.title) suggestionRows.push({ key: "title", label: "Titel", value: s.title });
   if (s.correspondent)
     suggestionRows.push({ key: "correspondent", label: "Korrespondent", value: s.correspondent });
@@ -315,7 +355,7 @@ export default function DocumentDetail({
             ) : (
               <>
                 <DetailTabs tab={tab} onChange={setTab} />
-                {canEdit && suggestionRows.length > 0 && (
+                {canEdit && (
                   <div className="ai-panel">
                     <div className="ai-panel__head">
                       <span>
@@ -845,6 +885,19 @@ function VersionsPanel({
       )}
     </div>
   );
+}
+
+// ISO-Belegdatum (YYYY-MM-DD) menschenlesbar; ungültige Werte unverändert lassen.
+function formatIsoDate(iso: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso);
+  if (!m) return iso;
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString("de-DE", {
+    day: "2-digit",
+    month: "long",
+    year: "numeric",
+  });
 }
 
 function formatBytes(bytes: number): string {

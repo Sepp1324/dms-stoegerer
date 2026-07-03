@@ -5,13 +5,18 @@ Cross-User-Zugriff (Liste, Detail, Download, Update, Delete, Audit) mit
 404 abgewiesen wird – auf Objekt-Ebene, nicht nur in der UI.
 """
 from django.contrib.auth import get_user_model
+from django.test import TestCase
 from rest_framework.test import APITestCase
 
+from .classification import apply_rules, rule_matches
 from .models import (
     AuditLogEntry,
+    ClassificationRule,
     Correspondent,
     Document,
+    DocumentType,
     DocumentVersion,
+    StoragePath,
     Tag,
 )
 
@@ -419,3 +424,163 @@ class AISuggestionsTests(APITestCase):
                 format="json",
             )
             self.assertEqual(resp.status_code, 403, path)
+
+
+class StoragePathFilterTests(APITestCase):
+    """Listenfilter nach Speicherpfad und Mehrfach-Tag (STOAA-49)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(
+            username="pathfilter", password="pw", role="user"
+        )
+        cls.sp_a = StoragePath.objects.create(name="Archiv A")
+        cls.sp_b = StoragePath.objects.create(name="Archiv B")
+        cls.tag_x = Tag.objects.create(name="Steuer")
+        cls.tag_y = Tag.objects.create(name="Versicherung")
+
+        cls.doc_a = Document.objects.create(
+            title="Doc A", owner=cls.user, storage_path=cls.sp_a
+        )
+        cls.doc_a.tags.add(cls.tag_x)
+        cls.doc_b = Document.objects.create(
+            title="Doc B", owner=cls.user, storage_path=cls.sp_b
+        )
+        cls.doc_b.tags.add(cls.tag_y)
+        # Ohne Speicherpfad → darf bei storage_path-Filter nie auftauchen.
+        cls.doc_none = Document.objects.create(title="Doc ohne Pfad", owner=cls.user)
+
+    def _ids(self, resp):
+        data = resp.json()
+        results = data["results"] if isinstance(data, dict) else data
+        return {d["id"] for d in results}
+
+    def test_storage_path_filter(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.get(f"/api/documents/?storage_path={self.sp_a.id}")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._ids(resp), {self.doc_a.id})
+
+    def test_ohne_filter_alle_sichtbar(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.get("/api/documents/")
+        self.assertEqual(
+            self._ids(resp), {self.doc_a.id, self.doc_b.id, self.doc_none.id}
+        )
+
+    def test_multi_tag_filter_oder(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.get(
+            f"/api/documents/?tag={self.tag_x.id}&tag={self.tag_y.id}"
+        )
+        self.assertEqual(self._ids(resp), {self.doc_a.id, self.doc_b.id})
+
+    def test_single_tag_filter_abwaertskompatibel(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.get(f"/api/documents/?tag={self.tag_x.id}")
+        self.assertEqual(self._ids(resp), {self.doc_a.id})
+
+
+class MailClassificationRuleTests(TestCase):
+    """E-Mail-spezifische Regeln (STOAA Stufe 4): subject_contains / from_contains.
+
+    Belegt, dass Regeln zusätzlich zum OCR-Text auf Betreff und Absender der
+    Quell-Mail matchen, dass reine Text-Regeln unverändert greifen und dass
+    Mail-Bedingungen bei Nicht-Mail-Dokumenten (leere Felder) nicht feuern.
+    """
+
+    def _doc(self, *, title="", mail_subject="", mail_sender=""):
+        return Document.objects.create(
+            title=title,
+            mail_subject=mail_subject,
+            mail_sender=mail_sender,
+        )
+
+    def test_regel_matcht_per_betreff(self):
+        ClassificationRule.objects.create(
+            name="Betreff-Rechnung",
+            match={"subject_contains": ["Rechnung", "Invoice"]},
+            then={"document_type": "Rechnung", "tags": ["Finanzen"]},
+        )
+        doc = self._doc(title="anhang", mail_subject="Ihre RECHNUNG Nr. 4711")
+
+        result = apply_rules(doc)
+
+        self.assertEqual(result["rules"], ["Betreff-Rechnung"])
+        doc.refresh_from_db()
+        self.assertEqual(doc.document_type.name, "Rechnung")
+        self.assertTrue(doc.tags.filter(name="Finanzen").exists())
+        self.assertEqual(doc.classification["rules"], ["Betreff-Rechnung"])
+        self.assertTrue(
+            AuditLogEntry.objects.filter(
+                action="classify", object_id=str(doc.id)
+            ).exists()
+        )
+
+    def test_regel_matcht_per_absender(self):
+        ClassificationRule.objects.create(
+            name="Absender-Stadtwerke",
+            match={"from_contains": ["@stadtwerke.de"]},
+            then={"correspondent": "Stadtwerke"},
+        )
+        doc = self._doc(
+            title="anhang", mail_sender="Stadtwerke Musterstadt <abrechnung@stadtwerke.de>"
+        )
+
+        result = apply_rules(doc)
+
+        self.assertEqual(result["rules"], ["Absender-Stadtwerke"])
+        doc.refresh_from_db()
+        self.assertEqual(doc.correspondent.name, "Stadtwerke")
+
+    def test_text_only_regel_unveraendert(self):
+        ClassificationRule.objects.create(
+            name="Text-Rechnung",
+            match={"text_contains": ["rechnung"]},
+            then={"document_type": "Rechnung"},
+        )
+        # Nicht-Mail-Dokument (leere Mail-Felder), Treffer nur über Titel/Text.
+        doc = self._doc(title="Monatsrechnung Strom")
+
+        result = apply_rules(doc)
+
+        self.assertEqual(result["rules"], ["Text-Rechnung"])
+        doc.refresh_from_db()
+        self.assertEqual(doc.document_type.name, "Rechnung")
+
+    def test_mail_bedingung_feuert_nicht_ohne_mail_metadaten(self):
+        ClassificationRule.objects.create(
+            name="Nur-Betreff",
+            match={"subject_contains": ["Rechnung"]},
+            then={"document_type": "Rechnung"},
+        )
+        # Kein Betreff gesetzt -> Bedingung greift nicht (keine Alles-Treffer).
+        doc = self._doc(title="Enthält das Wort Rechnung im Titel")
+
+        result = apply_rules(doc)
+
+        self.assertEqual(result["rules"], [])
+        doc.refresh_from_db()
+        self.assertIsNone(doc.document_type)
+
+    def test_kombinierte_bedingungen_und_verknuepft(self):
+        # subject UND text müssen beide treffen (AND über Bedingungsarten).
+        rule = ClassificationRule.objects.create(
+            name="Betreff+Text",
+            match={"subject_contains": ["Rechnung"], "text_contains": ["strom"]},
+            then={"tags": ["Energie"]},
+        )
+        self.assertTrue(
+            rule_matches(rule, "monatsstrom abrechnung", subject="Rechnung Juni")
+        )
+        # Betreff passt, Text nicht -> kein Treffer.
+        self.assertFalse(rule_matches(rule, "irgendwas", subject="Rechnung Juni"))
+
+    def test_leere_liste_ist_keine_bedingung(self):
+        # Leere subject_contains-Liste darf nicht zum Alles-Treffer führen.
+        rule = ClassificationRule.objects.create(
+            name="Leer",
+            match={"subject_contains": []},
+            then={"tags": ["X"]},
+        )
+        self.assertFalse(rule_matches(rule, "text", subject="beliebig"))
