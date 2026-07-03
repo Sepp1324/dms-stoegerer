@@ -104,7 +104,7 @@ def extract_text(pdf_path: str | Path) -> str:
         return ""
 
 
-def generate_thumbnail(version, *, max_width: int = 400) -> str | None:
+def generate_thumbnail(version, *, max_width: int = 700) -> str | None:
     """Erzeugt ein JPEG-Miniaturbild der ersten Seite und speichert den Pfad.
 
     Quelle: bevorzugt das Archiv-PDF, sonst das Original. Für Bild-Originale
