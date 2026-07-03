@@ -30,6 +30,8 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   const [correspondent, setCorrespondent] = useState<number | "">("");
   const [documentType, setDocumentType] = useState<number | "">("");
   const [tag, setTag] = useState<number | "">("");
+  // Sortierung; "" = Backend-Standard (FTS-Relevanz bei Suche, sonst Datum neu→alt).
+  const [ordering, setOrdering] = useState("");
 
   const [correspondents, setCorrespondents] = useState<NamedRef[]>([]);
   const [documentTypes, setDocumentTypes] = useState<NamedRef[]>([]);
@@ -117,6 +119,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
       correspondent,
       document_type: documentType,
       tag,
+      ordering,
       page,
     })
       .then((res) => {
@@ -131,7 +134,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     return () => {
       active = false;
     };
-  }, [debouncedQ, correspondent, documentType, tag, page, reloadKey]);
+  }, [debouncedQ, correspondent, documentType, tag, ordering, page, reloadKey]);
 
   const hasFilters = useMemo(
     () => !!(debouncedQ || correspondent || documentType || tag),
@@ -156,12 +159,17 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     setTag(v);
     setPage(1);
   }
+  function onOrderingChange(v: string) {
+    setOrdering(v);
+    setPage(1);
+  }
 
   function resetFilters() {
     setQ("");
     setCorrespondent("");
     setDocumentType("");
     setTag("");
+    setOrdering("");
     setPage(1);
   }
 
@@ -261,6 +269,16 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
                     options={documentTypes}
                   />
                   <Select label="Tag" value={tag} onChange={onTagChange} options={tags} />
+                  <label className="filter">
+                    <span>Sortierung</span>
+                    <select value={ordering} onChange={(e) => onOrderingChange(e.target.value)}>
+                      <option value="">Standard</option>
+                      <option value="-added_at">Datum (neu → alt)</option>
+                      <option value="added_at">Datum (alt → neu)</option>
+                      <option value="title">Titel (A–Z)</option>
+                      <option value="-title">Titel (Z–A)</option>
+                    </select>
+                  </label>
                   {hasFilters && (
                     <button className="link" onClick={resetFilters}>
                       Zurücksetzen

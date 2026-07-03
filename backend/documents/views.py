@@ -5,6 +5,7 @@ from django.db.models import Q
 from django.http import FileResponse, Http404
 from rest_framework import status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
+from rest_framework.filters import OrderingFilter
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import (
     SAFE_METHODS,
@@ -122,11 +123,21 @@ class DocumentViewSet(viewsets.ModelViewSet):
       * ``correspondent`` – Filter auf Korrespondenten-ID
       * ``document_type`` – Filter auf Dokumenttyp-ID
       * ``tag``           – Filter auf Tag-ID
+      * ``ordering``      – Sortierung, z. B. ``added_at``/``-added_at`` (Datum)
+                            oder ``title``/``-title`` (A–Z). Ohne Angabe gilt die
+                            Standard-Sortierung (bei ``q`` nach FTS-Relevanz,
+                            sonst ``-added_at`` aus ``Document.Meta.ordering``).
     """
 
     serializer_class = DocumentSerializer
     queryset = Document.objects.all()  # für Basename-Ableitung im Router
     permission_classes = [ReadOnlyOrCanWrite]
+    # Nur der explizite ``ordering``-Param sortiert um; ohne Param bleibt die
+    # Reihenfolge aus get_queryset() erhalten (FTS-Rang bei ``q``, sonst
+    # Meta.ordering). Kein view-weites ``ordering``-Default, damit die
+    # Relevanz-Sortierung der Volltextsuche nicht überschrieben wird.
+    filter_backends = [OrderingFilter]
+    ordering_fields = ["added_at", "title"]
 
     def get_queryset(self):
         qs = (

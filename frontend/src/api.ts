@@ -189,6 +189,10 @@ export interface DocumentQuery {
   document_type?: number | "";
   tag?: number | "";
   page?: number;
+  // Sortierung, z. B. "-added_at" (Datum neu→alt), "added_at" (alt→neu),
+  // "title" (A–Z). Leer = Backend-Standard (FTS-Relevanz bei ``q``, sonst
+  // ``-added_at``). Wird von getDocuments nur gesetzt, wenn nicht leer.
+  ordering?: string;
 }
 
 export async function getDocuments(

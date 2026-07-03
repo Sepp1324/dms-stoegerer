@@ -119,3 +119,58 @@ class OwnerIsolationTests(APITestCase):
         self.assertEqual(resp.status_code, 200)
         mine.refresh_from_db()
         self.assertEqual(mine.owner_id, self.manfred.id)
+
+
+class OrderingTests(APITestCase):
+    """Sortier-Parameter der Dokumentliste (STOAA-36).
+
+    Belegt: ohne ``ordering`` gilt der Standard (``-added_at``); mit
+    explizitem ``ordering`` sortiert der whitelisted OrderingFilter um,
+    nicht-whitelisted Felder werden ignoriert.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(
+            username="sortuser", password="pw", role="user"
+        )
+        # added_at ist auto_now_add → nach dem Anlegen explizit setzen, damit
+        # die Reihenfolge deterministisch prüfbar ist. Titel bewusst gegen die
+        # Datums-Reihenfolge gewählt, um beide Sortierungen zu unterscheiden.
+        cls.beta = Document.objects.create(title="Beta", owner=cls.user)
+        cls.alpha = Document.objects.create(title="Alpha", owner=cls.user)
+        cls.gamma = Document.objects.create(title="Gamma", owner=cls.user)
+        Document.objects.filter(id=cls.beta.id).update(added_at="2026-01-01T00:00:00Z")
+        Document.objects.filter(id=cls.alpha.id).update(added_at="2026-02-01T00:00:00Z")
+        Document.objects.filter(id=cls.gamma.id).update(added_at="2026-03-01T00:00:00Z")
+
+    def _titles(self, resp):
+        return [row["title"] for row in resp.data["results"]]
+
+    def test_default_ordering_neueste_zuerst(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.get("/api/documents/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._titles(resp), ["Gamma", "Alpha", "Beta"])
+
+    def test_ordering_added_at_aufsteigend(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.get("/api/documents/?ordering=added_at")
+        self.assertEqual(self._titles(resp), ["Beta", "Alpha", "Gamma"])
+
+    def test_ordering_title_az(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.get("/api/documents/?ordering=title")
+        self.assertEqual(self._titles(resp), ["Alpha", "Beta", "Gamma"])
+
+    def test_ordering_title_za(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.get("/api/documents/?ordering=-title")
+        self.assertEqual(self._titles(resp), ["Gamma", "Beta", "Alpha"])
+
+    def test_ordering_nicht_whitelisted_wird_ignoriert(self):
+        """Nicht freigegebenes Feld (owner) fällt auf Standard-Sortierung zurück."""
+        self.client.force_authenticate(self.user)
+        resp = self.client.get("/api/documents/?ordering=owner")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._titles(resp), ["Gamma", "Alpha", "Beta"])
