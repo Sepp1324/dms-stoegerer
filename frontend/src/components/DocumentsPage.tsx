@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   createCorrespondent,
   createDocumentType,
@@ -41,7 +41,10 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   const [reloadKey, setReloadKey] = useState(0);
   // Aktuell geöffnetes Dokument (Detailansicht) oder null (Liste).
   const [selectedId, setSelectedId] = useState<number | null>(null);
-  const [showRules, setShowRules] = useState(false);
+  // Aktive Hauptansicht (persistente linke Navigation).
+  const [view, setView] = useState<"docs" | "rules">("docs");
+  // Sidebar auf schmalen Screens ein-/ausklappbar.
+  const [navOpen, setNavOpen] = useState(false);
 
   // Profil + Filter-Stammdaten einmalig laden.
   useEffect(() => {
@@ -132,10 +135,6 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     onLogout();
   }
 
-  if (showRules) {
-    return <RulesPage onBack={() => setShowRules(false)} canEdit={!!me?.can_write} />;
-  }
-
   if (selectedId !== null) {
     return (
       <DocumentDetail
@@ -157,74 +156,260 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     );
   }
 
+  const navigate = (v: "docs" | "rules") => {
+    setView(v);
+    setNavOpen(false); // Overlay auf Mobil nach Auswahl schließen
+  };
+
   return (
-    <div className="shell">
-      <header className="topbar">
-        <h1>DMS</h1>
-        <div className="topbar-right">
-          {me && <span className="muted user">{me.username}</span>}
-          <button className="link" onClick={() => setShowRules(true)}>
-            Regeln
-          </button>
-          <button className="link" onClick={handleLogout}>
-            Abmelden
-          </button>
-        </div>
-      </header>
+    <div className="layout">
+      <Sidebar
+        view={view}
+        onNavigate={navigate}
+        username={me?.username}
+        onLogout={handleLogout}
+        open={navOpen}
+        onClose={() => setNavOpen(false)}
+      />
 
-      {me?.can_write && (
-        <UploadZone onUploaded={() => setReloadKey((k) => k + 1)} />
-      )}
+      <div className="content">
+        <header className="content-topbar">
+          <button
+            className="nav-toggle"
+            aria-label="Navigation öffnen"
+            onClick={() => setNavOpen(true)}
+          >
+            <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+              <path fill="currentColor" d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z" />
+            </svg>
+          </button>
+          <h1 className="content-title">
+            {view === "rules" ? "Regeln" : "Dokumente"}
+          </h1>
+          {view === "docs" && (
+            <input
+              className="search topbar-search"
+              placeholder="Volltextsuche (Titel & Inhalt) …"
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+            />
+          )}
+        </header>
 
-      <section className="filters card">
-        <input
-          className="search"
-          placeholder="Volltextsuche (Titel & Inhalt) …"
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-        />
-        <div className="filter-row">
-          <Select
-            label="Korrespondent"
-            value={correspondent}
-            onChange={setCorrespondent}
-            options={correspondents}
-          />
-          <Select
-            label="Typ"
-            value={documentType}
-            onChange={setDocumentType}
-            options={documentTypes}
-          />
-          <Select label="Tag" value={tag} onChange={setTag} options={tags} />
-          {hasFilters && (
-            <button className="link" onClick={resetFilters}>
-              Zurücksetzen
-            </button>
+        <div className="content-body">
+          {view === "rules" ? (
+            <RulesPage canEdit={!!me?.can_write} />
+          ) : (
+            <>
+              {me?.can_write && (
+                <UploadZone onUploaded={() => setReloadKey((k) => k + 1)} />
+              )}
+
+              <section className="filters card">
+                <div className="filter-row">
+                  <Select
+                    label="Korrespondent"
+                    value={correspondent}
+                    onChange={setCorrespondent}
+                    options={correspondents}
+                  />
+                  <Select
+                    label="Typ"
+                    value={documentType}
+                    onChange={setDocumentType}
+                    options={documentTypes}
+                  />
+                  <Select label="Tag" value={tag} onChange={setTag} options={tags} />
+                  {hasFilters && (
+                    <button className="link" onClick={resetFilters}>
+                      Zurücksetzen
+                    </button>
+                  )}
+                </div>
+              </section>
+
+              <section>
+                {loading ? (
+                  <SkeletonGrid />
+                ) : error ? (
+                  <StateBlock
+                    title="Dokumente konnten nicht geladen werden"
+                    detail={error}
+                    tone="error"
+                    action={
+                      <button onClick={() => setReloadKey((k) => k + 1)}>
+                        Erneut versuchen
+                      </button>
+                    }
+                  />
+                ) : docs.length === 0 ? (
+                  <StateBlock
+                    title={
+                      hasFilters
+                        ? "Keine Treffer für die aktuellen Filter"
+                        : "Noch keine Dokumente"
+                    }
+                    detail={
+                      hasFilters
+                        ? "Passe die Suche oder Filter an."
+                        : "Lade ein Dokument hoch, um zu beginnen."
+                    }
+                    action={
+                      hasFilters ? (
+                        <button className="link" onClick={resetFilters}>
+                          Filter zurücksetzen
+                        </button>
+                      ) : undefined
+                    }
+                  />
+                ) : (
+                  <>
+                    <p className="muted result-count">
+                      {count} {count === 1 ? "Dokument" : "Dokumente"}
+                    </p>
+                    <div className="doc-grid">
+                      {docs.map((d) => (
+                        <DocumentCard
+                          key={d.id}
+                          doc={d}
+                          onOpen={() => setSelectedId(d.id)}
+                        />
+                      ))}
+                    </div>
+                  </>
+                )}
+              </section>
+            </>
           )}
         </div>
-      </section>
+      </div>
 
-      <section>
-        {loading && <p className="muted">Lade …</p>}
-        {error && <p className="status status--error">{error}</p>}
-        {!loading && !error && (
-          <>
-            <p className="muted result-count">
-              {count} {count === 1 ? "Dokument" : "Dokumente"}
-            </p>
-            {docs.length === 0 ? (
-              <p className="muted">Keine Dokumente gefunden.</p>
-            ) : (
-              <div className="doc-grid">
-                {docs.map((d) => (
-                  <DocumentCard key={d.id} doc={d} onOpen={() => setSelectedId(d.id)} />
-                ))}
-              </div>
-            )}
-          </>
-        )}
-      </section>
+      {navOpen && (
+        <div className="nav-backdrop" onClick={() => setNavOpen(false)} />
+      )}
+    </div>
+  );
+}
+
+// Persistente linke Navigation (paperless-like). Auf schmalen Screens als
+// Overlay über `open` gesteuert; Aktiv-Zustand über `view`.
+function Sidebar({
+  view,
+  onNavigate,
+  username,
+  onLogout,
+  open,
+  onClose,
+}: {
+  view: "docs" | "rules";
+  onNavigate: (v: "docs" | "rules") => void;
+  username?: string;
+  onLogout: () => void;
+  open: boolean;
+  onClose: () => void;
+}) {
+  return (
+    <aside className={`sidebar${open ? " sidebar--open" : ""}`}>
+      <div className="sidebar__brand">
+        <span className="sidebar__logo">DMS</span>
+        <button
+          className="nav-toggle sidebar__close"
+          aria-label="Navigation schließen"
+          onClick={onClose}
+        >
+          <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+            <path
+              fill="currentColor"
+              d="M6.4 5 5 6.4 10.6 12 5 17.6 6.4 19 12 13.4 17.6 19 19 17.6 13.4 12 19 6.4 17.6 5 12 10.6z"
+            />
+          </svg>
+        </button>
+      </div>
+
+      <nav className="nav">
+        <NavItem
+          active={view === "docs"}
+          onClick={() => onNavigate("docs")}
+          label="Dokumente"
+          icon="M6 2h7l5 5v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2m7 1.5V8h4.5z"
+        />
+        <NavItem
+          active={view === "rules"}
+          onClick={() => onNavigate("rules")}
+          label="Regeln"
+          icon="M3 5h18v2H3zm0 6h12v2H3zm0 6h18v2H3z"
+        />
+      </nav>
+
+      <div className="sidebar__footer">
+        {username && <span className="muted sidebar__user">{username}</span>}
+        <button className="link" onClick={onLogout}>
+          Abmelden
+        </button>
+      </div>
+    </aside>
+  );
+}
+
+function NavItem({
+  active,
+  onClick,
+  label,
+  icon,
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+  icon: string;
+}) {
+  return (
+    <button
+      className={`nav-item${active ? " nav-item--active" : ""}`}
+      onClick={onClick}
+      aria-current={active ? "page" : undefined}
+    >
+      <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+        <path fill="currentColor" d={icon} />
+      </svg>
+      {label}
+    </button>
+  );
+}
+
+// Skeleton-Karten während des Ladens (gleiches Raster wie die echte Liste).
+function SkeletonGrid() {
+  return (
+    <div className="doc-grid" aria-hidden="true">
+      {Array.from({ length: 8 }).map((_, i) => (
+        <div key={i} className="doc-card doc-card--skeleton">
+          <div className="doc-card__preview skeleton" />
+          <div className="doc-card__body">
+            <div className="skeleton skeleton-line" />
+            <div className="skeleton skeleton-line skeleton-line--short" />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Einheitlicher Leer-/Fehler-Zustand (gleiche Gestaltung überall).
+function StateBlock({
+  title,
+  detail,
+  action,
+  tone,
+}: {
+  title: string;
+  detail?: string;
+  action?: ReactNode;
+  tone?: "error";
+}) {
+  return (
+    <div className={`state-block${tone === "error" ? " state-block--error" : ""}`}>
+      <p className="state-block__title">{title}</p>
+      {detail && <p className="state-block__detail">{detail}</p>}
+      {action && <div className="state-block__action">{action}</div>}
     </div>
   );
 }

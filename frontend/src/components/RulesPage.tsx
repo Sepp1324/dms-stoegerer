@@ -13,13 +13,7 @@ function splitList(value: string): string[] {
     .filter(Boolean);
 }
 
-export default function RulesPage({
-  onBack,
-  canEdit,
-}: {
-  onBack: () => void;
-  canEdit: boolean;
-}) {
+export default function RulesPage({ canEdit }: { canEdit: boolean }) {
   const [rules, setRules] = useState<ClassificationRule[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -86,14 +80,7 @@ export default function RulesPage({
   }
 
   return (
-    <div className="shell">
-      <header className="topbar">
-        <button className="link" onClick={onBack}>
-          ← Zurück zu den Dokumenten
-        </button>
-        <h1 style={{ fontSize: "1.2rem" }}>Klassifizierungsregeln</h1>
-      </header>
-
+    <div className="rules-view">
       <p className="muted" style={{ marginTop: 0 }}>
         Regeln werden nach dem OCR automatisch angewendet und setzen Metadaten
         direkt (nachvollziehbar). Fehlende Korrespondenten/Typen/Tags werden dabei
