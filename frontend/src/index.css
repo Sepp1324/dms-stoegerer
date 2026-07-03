@@ -339,6 +339,108 @@ select:focus {
   font-size: 0.75rem;
   color: var(--muted);
 }
+
+/* --- Versionen + Integritäts-Kette --- */
+.versions-panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.integrity-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  border-radius: 999px;
+  padding: 0.1rem 0.6rem;
+  font-size: 0.72rem;
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+.integrity-badge--ok {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+.integrity-badge--broken {
+  color: var(--error);
+  border-color: var(--error);
+}
+.integrity-badge--unknown {
+  color: var(--muted);
+}
+.version-list {
+  list-style: none;
+  margin: 0.6rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.version-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.6rem 0.7rem;
+}
+.version-row--selected {
+  border-color: var(--accent);
+}
+.version-row__top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.version-row__no {
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.version-row__current {
+  font-size: 0.65rem;
+  font-weight: 500;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  padding: 0 0.4rem;
+}
+.version-row__meta {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.15rem 0.7rem;
+  margin: 0.5rem 0 0;
+}
+.version-row__meta dt {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.version-row__meta dd {
+  margin: 0;
+  font-size: 0.8rem;
+}
+.version-row__hash {
+  word-break: break-all;
+}
+.version-row__warn {
+  margin: 0.4rem 0 0;
+}
+.version-row__actions {
+  display: flex;
+  gap: 0.8rem;
+  margin-top: 0.5rem;
+}
+.version-add {
+  margin-top: 0.8rem;
+  padding-top: 0.8rem;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.version-add input[type="file"] {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
 .tag {
   display: inline-block;
   border: 1px solid var(--accent);

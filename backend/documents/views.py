@@ -163,15 +163,33 @@ class DocumentViewSet(viewsets.ModelViewSet):
 
         return qs.distinct()
 
+    def _resolve_version(self, document):
+        """Wählt die Version aus ``?version=<nr>`` oder fällt auf die aktuelle zurück.
+
+        Die Nummer wird gegen die DB validiert (kein Nutzerpfad) – keine Traversal-Gefahr.
+        """
+        raw = self.request.query_params.get("version")
+        if raw:
+            try:
+                version_no = int(raw)
+            except (TypeError, ValueError):
+                raise Http404("Ungültige Versionsnummer.")
+            version = document.versions.filter(version_no=version_no).first()
+            if version is None:
+                raise Http404("Version nicht vorhanden.")
+            return version
+        return document.current_version
+
     @action(detail=True, methods=["get"])
     def preview(self, request, pk=None):
-        """Liefert das Archiv-PDF der aktuellen Version zur Inline-Vorschau.
+        """Liefert das Archiv-PDF einer Version zur Inline-Vorschau.
 
+        Standard ist die aktuelle Version; ``?version=<nr>`` wählt eine ältere.
         Fällt auf das Original zurück, falls (noch) kein OCR-Archiv existiert.
         Der Pfad stammt aus der DB (nicht aus Nutzereingaben) – keine Traversal-Gefahr.
         """
         document = self.get_object()
-        version = document.current_version
+        version = self._resolve_version(document)
         if version is None:
             raise Http404("Keine Version vorhanden.")
 
@@ -186,6 +204,78 @@ class DocumentViewSet(viewsets.ModelViewSet):
         )
         # as_attachment=False → inline anzeigen (PDF-Vorschau im Browser)
         return FileResponse(open(path, "rb"), content_type=content_type)
+
+    @action(detail=True, methods=["get"])
+    def download(self, request, pk=None):
+        """Lädt die Originaldatei einer Version herunter (Basis der Hash-Prüfung).
+
+        Standard ist die aktuelle Version; ``?version=<nr>`` wählt eine ältere.
+        Es wird bewusst das Original (``file_path``) geliefert – über genau diese
+        Bytes wird der ``sha256`` gebildet, sie sind damit verifizierbar.
+        """
+        document = self.get_object()
+        version = self._resolve_version(document)
+        if version is None:
+            raise Http404("Keine Version vorhanden.")
+
+        path = version.file_path
+        if not path or not os.path.exists(path):
+            raise Http404("Datei nicht gefunden.")
+
+        filename = f"{document.title}-v{version.version_no}{os.path.splitext(path)[1]}"
+        return FileResponse(
+            open(path, "rb"),
+            as_attachment=True,
+            filename=filename,
+            content_type=version.mime_type or "application/octet-stream",
+        )
+
+    @action(detail=True, methods=["get"])
+    def integrity(self, request, pk=None):
+        """Prüft die Hash-Kette des Dokuments (Datei-Hash + prev_hash-Verkettung).
+
+        Nur-Lesen – auch für Gäste. Rechnet die Datei-Hashes frisch nach.
+        """
+        document = self.get_object()
+        return Response(pipeline.verify_document_integrity(document))
+
+    @action(
+        detail=True,
+        methods=["post"],
+        parser_classes=[MultiPartParser, FormParser],
+    )
+    def add_version(self, request, pk=None):
+        """Hängt eine neue Datei als nächste Version an das bestehende Dokument.
+
+        Feld: ``file`` (Pflicht). OCR/Hash-Kette laufen asynchron im Worker.
+        Schreiben nur für ``can_write`` (Gäste nicht).
+        """
+        if not request.user.can_write:
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        document = self.get_object()
+        uploaded = request.FILES.get("file")
+        if uploaded is None:
+            return Response(
+                {"detail": "Feld 'file' fehlt."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        file_path, size, mime = storage.save_upload(uploaded)
+        version = pipeline.create_version_for_document(
+            document, file_path, created_by=request.user, mime=mime, size=size
+        )
+        # OCR/Hash-Kette asynchron im Celery-Worker.
+        process_document_version.delay(version.id)
+
+        document.refresh_from_db()
+        return Response(
+            self.get_serializer(document).data,
+            status=status.HTTP_201_CREATED,
+        )
 
     @action(detail=True, methods=["get"])
     def thumbnail(self, request, pk=None):

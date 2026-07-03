@@ -47,6 +47,9 @@ class ClassificationRuleSerializer(serializers.ModelSerializer):
 
 
 class DocumentVersionSerializer(serializers.ModelSerializer):
+    created_by_name = serializers.SerializerMethodField()
+    has_archive = serializers.SerializerMethodField()
+
     class Meta:
         model = DocumentVersion
         fields = (
@@ -58,8 +61,22 @@ class DocumentVersionSerializer(serializers.ModelSerializer):
             "size",
             "page_count",
             "is_immutable",
+            "created_by",
+            "created_by_name",
+            "has_archive",
             "created_at",
         )
+
+    def get_created_by_name(self, obj) -> str | None:
+        """Anzeigename des Erstellers (voller Name, sonst Login) – Altdaten: ``None``."""
+        user = obj.created_by
+        if user is None:
+            return None
+        return user.get_full_name() or user.get_username()
+
+    def get_has_archive(self, obj) -> bool:
+        """Ob ein OCR-Archiv-PDF existiert (bestimmt die Inline-Vorschaubarkeit)."""
+        return bool(obj.archive_path)
 
 
 class AuditLogEntrySerializer(serializers.ModelSerializer):

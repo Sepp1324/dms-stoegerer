@@ -50,6 +50,7 @@ def create_document_from_file(
         file_path=str(path),
         mime_type=mime,
         size=size if size is not None else path.stat().st_size,
+        created_by=owner,
     )
     document.current_version = version
     document.save(update_fields=["current_version"])
@@ -62,6 +63,96 @@ def create_document_from_file(
         detail={"filename": path.name, "size": version.size},
     )
     return document, version
+
+
+def create_version_for_document(
+    document: Document,
+    file_path: str,
+    *,
+    created_by=None,
+    mime: str = "",
+    size: int | None = None,
+) -> DocumentVersion:
+    """Hängt eine neue Version an ein bestehendes Dokument (fortlaufende Nr.).
+
+    Setzt die neue Version als ``current_version`` und protokolliert die Aufnahme.
+    Hash-Kette (``sha256``/``prev_hash``) füllt anschließend ``process_version``.
+    """
+    path = Path(file_path)
+    last_no = (
+        document.versions.order_by("-version_no")
+        .values_list("version_no", flat=True)
+        .first()
+        or 0
+    )
+    version = DocumentVersion.objects.create(
+        document=document,
+        version_no=last_no + 1,
+        file_path=str(path),
+        mime_type=mime,
+        size=size if size is not None else path.stat().st_size,
+        created_by=created_by,
+    )
+    document.current_version = version
+    document.save(update_fields=["current_version"])
+
+    AuditLogEntry.objects.create(
+        actor=created_by,
+        action="add_version",
+        object_type="Document",
+        object_id=str(document.id),
+        detail={
+            "filename": path.name,
+            "size": version.size,
+            "version_no": version.version_no,
+        },
+    )
+    return version
+
+
+def verify_document_integrity(document: Document) -> dict:
+    """Prüft die Hash-Kette eines Dokuments – Grundlage der prüfbaren Versionierung.
+
+    Zwei unabhängige Prüfungen je Version:
+      * **file_ok** – die Datei auf der Platte wird neu gehasht und mit dem
+        gespeicherten ``sha256`` verglichen (Beweis der Unverändertheit).
+      * **prev_ok** – der gespeicherte ``prev_hash`` entspricht dem ``sha256``
+        der Vorgängerversion (Beweis der lückenlosen Verkettung).
+
+    Rückgabe: ``{"chain_ok": bool, "versions": [ {…}, … ]}`` – aufsteigend nach
+    Versionsnummer. ``chain_ok`` ist nur wahr, wenn ALLE Prüfungen bestehen.
+    """
+    versions = list(document.versions.order_by("version_no"))
+    results = []
+    chain_ok = True
+    prev_sha = ""
+
+    for version in versions:
+        source = version.file_path
+        file_present = bool(source) and os.path.exists(source)
+        computed = sha256_of(source) if file_present else ""
+        # Nur prüfbar, wenn ein Hash hinterlegt ist (unverarbeitete Version: offen).
+        file_ok = bool(version.sha256) and file_present and computed == version.sha256
+        prev_ok = (version.prev_hash or "") == (prev_sha or "")
+
+        if not (file_ok and prev_ok):
+            chain_ok = False
+
+        results.append(
+            {
+                "version_no": version.version_no,
+                "sha256": version.sha256,
+                "computed_sha256": computed,
+                "prev_hash": version.prev_hash,
+                "expected_prev_hash": prev_sha,
+                "file_present": file_present,
+                "file_ok": file_ok,
+                "prev_ok": prev_ok,
+            }
+        )
+        prev_sha = version.sha256
+
+    return {"chain_ok": chain_ok, "versions": results}
 
 
 def run_ocr(
