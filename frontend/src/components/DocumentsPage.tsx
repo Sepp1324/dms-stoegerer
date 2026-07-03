@@ -26,12 +26,10 @@ import RulesPage from "./RulesPage";
 // die Rand-Buttons werden zusätzlich über next/previous der Antwort abgesichert.
 const PAGE_SIZE = 25;
 
-// Der Speicherpfad-Filter wartet auf den Backend-Query-Param (`storage_path`)
-// aus dem Kind-Ticket. Bis dieser gemergt ist, wird der Abschnitt zwar gerendert,
-// aber ausgegraut/deaktiviert – ein aktiver Klick würde sonst (Param wird
-// serverseitig ignoriert) fälschlich „alle Dokumente" als gefiltert markieren.
-// Nach dem Backend-Merge genügt es, dieses Flag auf `true` zu setzen.
-const STORAGE_PATH_FILTER_ENABLED = false;
+// Der Speicherpfad-Filter nutzt den Backend-Query-Param `storage_path`
+// (Kind-Ticket STOAA-49, PR #29 gemergt → DocumentViewSet.get_queryset filtert
+// via `storage_path_id`). Der Abschnitt ist damit voll funktionsfähig aktiviert.
+const STORAGE_PATH_FILTER_ENABLED = true;
 
 export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   const [q, setQ] = useState("");
