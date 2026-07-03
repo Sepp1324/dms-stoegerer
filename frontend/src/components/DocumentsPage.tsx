@@ -272,7 +272,9 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
                   <label className="filter">
                     <span>Sortierung</span>
                     <select value={ordering} onChange={(e) => onOrderingChange(e.target.value)}>
-                      <option value="">Standard</option>
+                      <option value="">
+                        {debouncedQ ? "Relevanz (Standard)" : "Standard"}
+                      </option>
                       <option value="-added_at">Datum (neu → alt)</option>
                       <option value="added_at">Datum (alt → neu)</option>
                       <option value="title">Titel (A–Z)</option>
