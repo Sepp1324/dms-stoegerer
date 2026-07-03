@@ -672,3 +672,164 @@ class MailFetchLockTests(TestCase):
             result = tasks.fetch_mail_account(acc.id)
         self.assertEqual(result["status"], "ok")
         fetched.assert_called_once()
+
+
+class ApprovalWorkflowTests(APITestCase):
+    """STOAA-63: Freigabe-Workflow – submit/approve/reject, Übergänge, Audit.
+
+    Deckt den Kontrakt für FE (STOAA-59) und QA (STOAA-60) ab: gültige und
+    ungültige Statusübergänge (409, Status unverändert), Gast-403 auf allen
+    drei Actions sowie je Übergang genau ein ``AuditLogEntry`` mit from/to.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.owner = User.objects.create_user(
+            username="owner", password="pw", role="user"
+        )
+        cls.other = User.objects.create_user(
+            username="other", password="pw", role="user"
+        )
+        cls.guest = User.objects.create_user(
+            username="guest", password="pw", role="guest"
+        )
+
+    def _doc(self, status=Document.ApprovalStatus.ENTWURF, owner=None):
+        return Document.objects.create(
+            title="Freigabe-Doc", owner=owner or self.owner, status=status
+        )
+
+    def _audit(self, doc, action):
+        return AuditLogEntry.objects.filter(
+            object_type="Document", object_id=str(doc.id), action=action
+        )
+
+    # --- Default & Übergänge ---------------------------------------------
+    def test_default_status_entwurf(self):
+        doc = Document.objects.create(title="Neu", owner=self.owner)
+        self.assertEqual(doc.status, Document.ApprovalStatus.ENTWURF)
+
+    def test_submit_dann_approve(self):
+        doc = self._doc()
+        self.client.force_authenticate(self.owner)
+
+        resp = self.client.post(f"/api/documents/{doc.id}/submit/", {}, format="json")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["status"], "zur_freigabe")
+        doc.refresh_from_db()
+        self.assertEqual(doc.status, Document.ApprovalStatus.ZUR_FREIGABE)
+
+        resp = self.client.post(f"/api/documents/{doc.id}/approve/", {}, format="json")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["status"], "freigegeben")
+        doc.refresh_from_db()
+        self.assertEqual(doc.status, Document.ApprovalStatus.FREIGEGEBEN)
+
+        # je Übergang genau ein Audit-Eintrag mit korrektem from/to.
+        submit = self._audit(doc, "submit")
+        self.assertEqual(submit.count(), 1)
+        self.assertEqual(submit.first().detail["from"], "entwurf")
+        self.assertEqual(submit.first().detail["to"], "zur_freigabe")
+        approve = self._audit(doc, "approve")
+        self.assertEqual(approve.count(), 1)
+        self.assertEqual(approve.first().detail["from"], "zur_freigabe")
+        self.assertEqual(approve.first().detail["to"], "freigegeben")
+
+    def test_submit_dann_reject_mit_grund(self):
+        doc = self._doc()
+        self.client.force_authenticate(self.owner)
+        self.client.post(f"/api/documents/{doc.id}/submit/", {}, format="json")
+
+        resp = self.client.post(
+            f"/api/documents/{doc.id}/reject/",
+            {"reason": "Unterschrift fehlt"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["status"], "abgelehnt")
+        doc.refresh_from_db()
+        self.assertEqual(doc.status, Document.ApprovalStatus.ABGELEHNT)
+
+        reject = self._audit(doc, "reject")
+        self.assertEqual(reject.count(), 1)
+        self.assertEqual(reject.first().detail["from"], "zur_freigabe")
+        self.assertEqual(reject.first().detail["to"], "abgelehnt")
+        self.assertEqual(reject.first().detail["reason"], "Unterschrift fehlt")
+
+    def test_abgelehnt_kann_erneut_eingereicht_werden(self):
+        doc = self._doc(status=Document.ApprovalStatus.ABGELEHNT)
+        self.client.force_authenticate(self.owner)
+        resp = self.client.post(f"/api/documents/{doc.id}/submit/", {}, format="json")
+        self.assertEqual(resp.status_code, 200)
+        doc.refresh_from_db()
+        self.assertEqual(doc.status, Document.ApprovalStatus.ZUR_FREIGABE)
+
+    def test_reject_ohne_grund_erlaubt(self):
+        doc = self._doc(status=Document.ApprovalStatus.ZUR_FREIGABE)
+        self.client.force_authenticate(self.owner)
+        resp = self.client.post(f"/api/documents/{doc.id}/reject/", {}, format="json")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIsNone(self._audit(doc, "reject").first().detail["reason"])
+
+    # --- Ungültige Übergänge → 409, Status unverändert, kein Audit -------
+    def test_approve_aus_entwurf_unzulaessig(self):
+        doc = self._doc()  # entwurf
+        self.client.force_authenticate(self.owner)
+        resp = self.client.post(f"/api/documents/{doc.id}/approve/", {}, format="json")
+        self.assertEqual(resp.status_code, 409)
+        doc.refresh_from_db()
+        self.assertEqual(doc.status, Document.ApprovalStatus.ENTWURF)
+        self.assertEqual(self._audit(doc, "approve").count(), 0)
+
+    def test_reject_aus_entwurf_unzulaessig(self):
+        doc = self._doc()  # entwurf
+        self.client.force_authenticate(self.owner)
+        resp = self.client.post(f"/api/documents/{doc.id}/reject/", {}, format="json")
+        self.assertEqual(resp.status_code, 409)
+        doc.refresh_from_db()
+        self.assertEqual(doc.status, Document.ApprovalStatus.ENTWURF)
+
+    def test_submit_aus_freigegeben_unzulaessig(self):
+        doc = self._doc(status=Document.ApprovalStatus.FREIGEGEBEN)
+        self.client.force_authenticate(self.owner)
+        resp = self.client.post(f"/api/documents/{doc.id}/submit/", {}, format="json")
+        self.assertEqual(resp.status_code, 409)
+        doc.refresh_from_db()
+        self.assertEqual(doc.status, Document.ApprovalStatus.FREIGEGEBEN)
+
+    # --- Owner-Scoping & Gast-Rechte -------------------------------------
+    def test_fremd_404(self):
+        doc = self._doc(status=Document.ApprovalStatus.ZUR_FREIGABE)
+        self.client.force_authenticate(self.other)
+        for path in ("submit", "approve", "reject"):
+            resp = self.client.post(
+                f"/api/documents/{doc.id}/{path}/", {}, format="json"
+            )
+            self.assertEqual(resp.status_code, 404, path)
+
+    def test_gast_403_auf_allen_actions(self):
+        guest_doc = self._doc(
+            status=Document.ApprovalStatus.ZUR_FREIGABE, owner=self.guest
+        )
+        self.client.force_authenticate(self.guest)
+        for path in ("submit", "approve", "reject"):
+            resp = self.client.post(
+                f"/api/documents/{guest_doc.id}/{path}/", {}, format="json"
+            )
+            self.assertEqual(resp.status_code, 403, path)
+        # Gast-403 darf keinen Statuswechsel bewirkt haben.
+        guest_doc.refresh_from_db()
+        self.assertEqual(guest_doc.status, Document.ApprovalStatus.ZUR_FREIGABE)
+
+    def test_status_nicht_per_patch_aenderbar(self):
+        doc = self._doc()  # entwurf
+        self.client.force_authenticate(self.owner)
+        resp = self.client.patch(
+            f"/api/documents/{doc.id}/",
+            {"status": "freigegeben"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        doc.refresh_from_db()
+        # read_only → PATCH ignoriert den Statuswechsel.
+        self.assertEqual(doc.status, Document.ApprovalStatus.ENTWURF)
