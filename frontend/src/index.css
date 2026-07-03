@@ -237,7 +237,7 @@ select:focus {
 }
 .doc-card__preview {
   position: relative;
-  height: 150px;
+  aspect-ratio: 1 / 1.3;
   display: grid;
   place-items: center;
   overflow: hidden;
@@ -248,8 +248,9 @@ select:focus {
 .doc-card__thumb {
   width: 100%;
   height: 100%;
-  object-fit: cover;
-  object-position: top center;
+  /* Ganze erste Seite zeigen (wie paperless); leere Ränder sind weiß = unsichtbar. */
+  object-fit: contain;
+  object-position: center;
   display: block;
 }
 .doc-card__pages {
