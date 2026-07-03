@@ -1,6 +1,7 @@
 from rest_framework import serializers
 
 from .models import (
+    AuditLogEntry,
     ClassificationRule,
     Correspondent,
     Document,
@@ -59,6 +60,32 @@ class DocumentVersionSerializer(serializers.ModelSerializer):
             "is_immutable",
             "created_at",
         )
+
+
+class AuditLogEntrySerializer(serializers.ModelSerializer):
+    """Ein Audit-Eintrag für die Verlauf-Ansicht (read-only, append-only)."""
+
+    # Anzeigename des Akteurs; „System" für automatische Schritte (actor=None).
+    actor_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = AuditLogEntry
+        fields = (
+            "id",
+            "timestamp",
+            "actor",
+            "actor_name",
+            "action",
+            "object_type",
+            "object_id",
+            "detail",
+        )
+        read_only_fields = fields
+
+    def get_actor_name(self, obj) -> str:
+        if obj.actor is None:
+            return "System"
+        return obj.actor.get_full_name() or obj.actor.username
 
 
 class DocumentSerializer(serializers.ModelSerializer):

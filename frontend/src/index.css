@@ -525,3 +525,99 @@ select:focus {
 .status--error {
   color: var(--error);
 }
+
+/* --- Verlauf / Audit-Trail (STOAA-2) --- */
+.detail-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 16px;
+}
+.detail-tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+.detail-tab:hover {
+  color: var(--text);
+}
+.detail-tab--active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
+.audit h3 {
+  margin: 0 0 12px;
+  font-size: 1rem;
+}
+.audit .muted {
+  color: var(--muted);
+}
+.audit-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.audit-item {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.audit-item__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+}
+.audit-item__action {
+  font-weight: 600;
+}
+.audit-item__time {
+  color: var(--muted);
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+.audit-item__actor {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin-top: 2px;
+}
+.audit-detail {
+  margin: 6px 0 0;
+  font-size: 0.85rem;
+  color: var(--text);
+}
+.audit-changes {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.85rem;
+}
+.audit-changes li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+}
+.audit-changes__field {
+  color: var(--muted);
+  min-width: 92px;
+}
+.audit-changes__from {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+.audit-changes__to {
+  color: var(--ok);
+}
