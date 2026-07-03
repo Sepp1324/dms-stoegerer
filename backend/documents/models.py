@@ -5,8 +5,12 @@ Ein `Document` ist ein logisches Objekt mit mehreren `DocumentVersion`s.
 Jede Version trägt einen SHA-256-Hash und den Hash der Vorgängerversion
 (Hash-Kette) – die Grundlage für Versionierung und spätere Revisionssicherheit.
 """
+import os
+
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import models
+from django.utils import timezone
 
 
 # ---------------------------------------------------------------------------
@@ -30,6 +34,10 @@ class DocumentType(models.Model):
     """Was? Rechnung, Vertrag, Bescheid …"""
 
     name = models.CharField(max_length=255, unique=True)
+    retention_months = models.PositiveIntegerField(
+        default=0,
+        help_text="Aufbewahrungsfrist in Monaten (0 = keine Frist)",
+    )
 
     class Meta:
         verbose_name = "Dokumenttyp"
@@ -167,6 +175,12 @@ class Document(models.Model):
         related_name="+",
     )
 
+    retention_until = models.DateField(
+        null=True,
+        blank=True,
+        help_text="Löschen gesperrt bis zu diesem Datum (aus DocumentType.retention_months berechnet)",
+    )
+
     # KI-Metadatenvorschläge (nach OCR erzeugt) – zum Bestätigen durch den Nutzer,
     # nicht bindend. z. B. {"title": "...", "document_type": "Rechnung",
     # "correspondent": "Stadtwerke", "tags": ["Finanzen"], "summary": "..."}
@@ -227,7 +241,13 @@ class DocumentVersion(models.Model):
 
     is_immutable = models.BooleanField(
         default=False,
-        help_text="WORM-Flag – wird in Stufe 4 (Revisionssicherheit) erzwungen",
+        help_text="WORM-Flag – nach erfolgreichem process_version() gesetzt",
+    )
+
+    retention_until = models.DateField(
+        null=True,
+        blank=True,
+        help_text="Löschen gesperrt bis zu diesem Datum",
     )
 
     class Meta:
@@ -238,6 +258,33 @@ class DocumentVersion(models.Model):
 
     def __str__(self) -> str:
         return f"{self.document.title} · v{self.version_no}"
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            original = DocumentVersion.objects.filter(pk=self.pk).values("is_immutable").first()
+            if original and original["is_immutable"]:
+                from .audit import log_immutable_block
+                log_immutable_block("DocumentVersion", self.pk)
+                raise ValidationError(
+                    "Diese Version ist unveränderlich (WORM) und kann nicht überschrieben werden."
+                )
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        if self.is_immutable:
+            from .audit import log_immutable_block
+            log_immutable_block("DocumentVersion", self.pk)
+            raise ValidationError(
+                "Diese Version ist unveränderlich (WORM) und kann nicht gelöscht werden."
+            )
+        today = timezone.now().date()
+        if self.retention_until and today < self.retention_until:
+            from .audit import log_retention_block
+            log_retention_block("DocumentVersion", self.pk, self.retention_until)
+            raise ValidationError(
+                f"Aufbewahrungsfrist läuft bis {self.retention_until} – Löschen gesperrt."
+            )
+        super().delete(*args, **kwargs)
 
 
 # ---------------------------------------------------------------------------
