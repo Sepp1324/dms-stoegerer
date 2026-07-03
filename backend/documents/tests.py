@@ -7,7 +7,13 @@ Cross-User-Zugriff (Liste, Detail, Download, Update, Delete, Audit) mit
 from django.contrib.auth import get_user_model
 from rest_framework.test import APITestCase
 
-from .models import Document, DocumentVersion
+from .models import (
+    AuditLogEntry,
+    Correspondent,
+    Document,
+    DocumentVersion,
+    Tag,
+)
 
 User = get_user_model()
 
@@ -174,3 +180,242 @@ class OrderingTests(APITestCase):
         resp = self.client.get("/api/documents/?ordering=owner")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(self._titles(resp), ["Gamma", "Alpha", "Beta"])
+
+
+class AISuggestionsTests(APITestCase):
+    """STOAA-45: Datum-Mapping, Dedup, Validierung, Regenerate/Dismiss.
+
+    Deckt den API-Kontrakt ab, an dem Frontend + QA hängen: ``date`` →
+    ``created_at``, case-insensitive Stammdaten-Wiederverwendung, Sanitierung,
+    ``POST /suggest/`` und ``POST /dismiss_suggestions/`` – jeweils owner-gescoped,
+    can_write-gegated und audit-geloggt.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.owner = User.objects.create_user(
+            username="owner", password="pw", role="user"
+        )
+        cls.other = User.objects.create_user(
+            username="other", password="pw", role="user"
+        )
+        cls.guest = User.objects.create_user(
+            username="guest", password="pw", role="guest"
+        )
+
+    def _doc(self, **suggestions):
+        doc = Document.objects.create(title="Original", owner=self.owner)
+        if suggestions:
+            doc.ai_suggestions = suggestions
+            doc.save(update_fields=["ai_suggestions"])
+        return doc
+
+    # --- 1. Datum-Vorschlag → created_at ---------------------------------
+    def test_datum_roundtrip_setzt_created_at(self):
+        doc = self._doc(date="2023-05-17")
+        self.client.force_authenticate(self.owner)
+        resp = self.client.post(
+            f"/api/documents/{doc.id}/apply_suggestions/",
+            {"fields": ["date"]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        doc.refresh_from_db()
+        self.assertIsNotNone(doc.created_at)
+        self.assertEqual(doc.created_at.date().isoformat(), "2023-05-17")
+        # tz-aware (created_at ist DateTime, USE_TZ=True)
+        self.assertIsNotNone(doc.created_at.tzinfo)
+        # angewendeter Schlüssel wurde entfernt
+        self.assertNotIn("date", doc.ai_suggestions)
+
+    def test_ungueltiges_datum_wird_ignoriert(self):
+        doc = self._doc(date="17.05.2023")  # nicht ISO
+        self.client.force_authenticate(self.owner)
+        resp = self.client.post(
+            f"/api/documents/{doc.id}/apply_suggestions/",
+            {"fields": ["date"]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        doc.refresh_from_db()
+        self.assertIsNone(doc.created_at)
+        # nicht angewendet → Vorschlag bleibt stehen
+        self.assertEqual(doc.ai_suggestions.get("date"), "17.05.2023")
+
+    def test_leeres_datum_wird_ignoriert(self):
+        doc = self._doc(date="")
+        self.client.force_authenticate(self.owner)
+        self.client.post(
+            f"/api/documents/{doc.id}/apply_suggestions/",
+            {"fields": ["date"]},
+            format="json",
+        )
+        doc.refresh_from_db()
+        self.assertIsNone(doc.created_at)
+
+    # --- 3. Case-insensitive Dedup ---------------------------------------
+    def test_correspondent_case_insensitive_wiederverwendet(self):
+        existing = Correspondent.objects.create(name="Finanzamt")
+        doc = self._doc(correspondent="finanzamt")
+        self.client.force_authenticate(self.owner)
+        self.client.post(
+            f"/api/documents/{doc.id}/apply_suggestions/",
+            {"fields": ["correspondent"]},
+            format="json",
+        )
+        doc.refresh_from_db()
+        self.assertEqual(doc.correspondent_id, existing.id)
+        # kein Groß/Klein-Duplikat angelegt
+        self.assertEqual(Correspondent.objects.filter(name__iexact="finanzamt").count(), 1)
+
+    def test_document_type_neu_wenn_kein_bestand(self):
+        doc = self._doc(document_type="Rechnung")
+        self.client.force_authenticate(self.owner)
+        self.client.post(
+            f"/api/documents/{doc.id}/apply_suggestions/",
+            {"fields": ["document_type"]},
+            format="json",
+        )
+        doc.refresh_from_db()
+        self.assertEqual(doc.document_type.name, "Rechnung")
+
+    def test_tags_case_insensitive_dedup(self):
+        existing = Tag.objects.create(name="Finanzen")
+        doc = self._doc(tags=["finanzen", "Steuer"])
+        self.client.force_authenticate(self.owner)
+        self.client.post(
+            f"/api/documents/{doc.id}/apply_suggestions/",
+            {"fields": ["tags"]},
+            format="json",
+        )
+        doc.refresh_from_db()
+        names = sorted(t.name for t in doc.tags.all())
+        # 'finanzen' auf Bestand 'Finanzen' gemappt, 'Steuer' neu
+        self.assertEqual(names, ["Finanzen", "Steuer"])
+        self.assertEqual(Tag.objects.filter(name__iexact="finanzen").count(), 1)
+        self.assertIn(existing, doc.tags.all())
+
+    # --- 4. Validierung / Sanitierung ------------------------------------
+    def test_title_wird_gestrippt_und_gekappt(self):
+        doc = self._doc(title="   " + "X" * 300 + "   ")
+        self.client.force_authenticate(self.owner)
+        self.client.post(
+            f"/api/documents/{doc.id}/apply_suggestions/",
+            {"fields": ["title"]},
+            format="json",
+        )
+        doc.refresh_from_db()
+        self.assertEqual(doc.title, "X" * 255)
+
+    def test_nicht_string_vorschlag_wird_ignoriert(self):
+        doc = self._doc(correspondent=123, title=["nope"])
+        self.client.force_authenticate(self.owner)
+        self.client.post(
+            f"/api/documents/{doc.id}/apply_suggestions/",
+            {"fields": ["correspondent", "title"]},
+            format="json",
+        )
+        doc.refresh_from_db()
+        self.assertIsNone(doc.correspondent_id)
+        self.assertEqual(doc.title, "Original")
+        self.assertEqual(Correspondent.objects.count(), 0)
+
+    def test_tags_nicht_strings_werden_uebersprungen(self):
+        doc = self._doc(tags=["Gut", 5, None, "  ", "Auch"])
+        self.client.force_authenticate(self.owner)
+        self.client.post(
+            f"/api/documents/{doc.id}/apply_suggestions/",
+            {"fields": ["tags"]},
+            format="json",
+        )
+        doc.refresh_from_db()
+        self.assertEqual(sorted(t.name for t in doc.tags.all()), ["Auch", "Gut"])
+
+    # --- 5. Regenerate-Endpoint ------------------------------------------
+    def test_suggest_provider_unavailable_liefert_200(self):
+        doc = self._doc()
+        self.client.force_authenticate(self.owner)
+        with self.settings(AI_PROVIDER="disabled"):
+            resp = self.client.post(f"/api/documents/{doc.id}/suggest/", {}, format="json")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["source"], "unavailable")
+        doc.refresh_from_db()
+        self.assertEqual(doc.ai_suggestions, {})
+        self.assertIsNone(doc.ai_suggested_at)
+
+    def test_suggest_schreibt_ai_suggestions(self):
+        from unittest import mock
+
+        doc = self._doc()
+        fake = {
+            "source": "ai",
+            "provider": "anthropic",
+            "suggestions": {"title": "Stromrechnung", "date": "2024-01-02"},
+        }
+        self.client.force_authenticate(self.owner)
+        with mock.patch("ai.services.suggest_metadata", return_value=fake):
+            resp = self.client.post(f"/api/documents/{doc.id}/suggest/", {}, format="json")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["source"], "ai")
+        doc.refresh_from_db()
+        self.assertEqual(doc.ai_suggestions["title"], "Stromrechnung")
+        self.assertEqual(doc.ai_suggestions["date"], "2024-01-02")
+        self.assertIsNotNone(doc.ai_suggested_at)
+        self.assertTrue(
+            AuditLogEntry.objects.filter(
+                action="suggest", object_id=str(doc.id)
+            ).exists()
+        )
+
+    # --- 6. Dismiss-Endpoint ---------------------------------------------
+    def test_dismiss_entfernt_felder(self):
+        doc = self._doc(title="A", correspondent="B", date="2024-01-01")
+        self.client.force_authenticate(self.owner)
+        resp = self.client.post(
+            f"/api/documents/{doc.id}/dismiss_suggestions/",
+            {"fields": ["title", "date"]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        doc.refresh_from_db()
+        self.assertNotIn("title", doc.ai_suggestions)
+        self.assertNotIn("date", doc.ai_suggestions)
+        # nicht genannter Vorschlag bleibt stehen
+        self.assertEqual(doc.ai_suggestions.get("correspondent"), "B")
+        self.assertTrue(
+            AuditLogEntry.objects.filter(
+                action="dismiss_suggestions", object_id=str(doc.id)
+            ).exists()
+        )
+
+    # --- Owner-Scoping & can_write ---------------------------------------
+    def test_suggest_fremd_404(self):
+        doc = self._doc()
+        self.client.force_authenticate(self.other)
+        resp = self.client.post(f"/api/documents/{doc.id}/suggest/", {}, format="json")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_dismiss_fremd_404(self):
+        doc = self._doc(title="A")
+        self.client.force_authenticate(self.other)
+        resp = self.client.post(
+            f"/api/documents/{doc.id}/dismiss_suggestions/",
+            {"fields": ["title"]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_guest_kein_schreibrecht(self):
+        doc = self._doc(title="A")
+        # Gast ist nicht owner → 404 schützt bereits; eigener Gast-Doc → 403.
+        guest_doc = Document.objects.create(title="G", owner=self.guest)
+        guest_doc.ai_suggestions = {"title": "Neu"}
+        guest_doc.save(update_fields=["ai_suggestions"])
+        self.client.force_authenticate(self.guest)
+        for path in ("apply_suggestions", "suggest", "dismiss_suggestions"):
+            resp = self.client.post(
+                f"/api/documents/{guest_doc.id}/{path}/",
+                {"fields": ["title"]},
+                format="json",
+            )
+            self.assertEqual(resp.status_code, 403, path)
