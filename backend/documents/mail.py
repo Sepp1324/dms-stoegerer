@@ -162,6 +162,14 @@ def ingest_message(account, raw_bytes: bytes) -> int | None:
         # aus der Datei erneut – identischer Wert).
         version.sha256 = sha
         version.save(update_fields=["sha256"])
+        # Betreff + Absender der Quell-Mail am Dokument hinterlegen, damit die
+        # (asynchrone) Rule-Engine per subject_contains/from_contains darauf
+        # matchen kann. Vor dem Enqueue setzen, sonst läuft die Klassifizierung
+        # ggf. bevor die Felder persistiert sind.
+        document.mail_subject = (subject or "")[:512]
+        document.mail_sender = ((sender_name and sender_addr and f"{sender_name} <{sender_addr}>")
+                                or sender_addr or sender_name or "")[:512]
+        document.save(update_fields=["mail_subject", "mail_sender"])
         _apply_sender_hint(document, sender_name, sender_addr)
         process_document_version.delay(version.id)
         imported += 1

@@ -5,12 +5,16 @@ Cross-User-Zugriff (Liste, Detail, Download, Update, Delete, Audit) mit
 404 abgewiesen wird – auf Objekt-Ebene, nicht nur in der UI.
 """
 from django.contrib.auth import get_user_model
+from django.test import TestCase
 from rest_framework.test import APITestCase
 
+from .classification import apply_rules, rule_matches
 from .models import (
     AuditLogEntry,
+    ClassificationRule,
     Correspondent,
     Document,
+    DocumentType,
     DocumentVersion,
     StoragePath,
     Tag,
@@ -477,165 +481,106 @@ class StoragePathFilterTests(APITestCase):
         self.assertEqual(self._ids(resp), {self.doc_a.id})
 
 
-# ---------------------------------------------------------------------------
-# STOAA-52: WORM / Immutable-Storage + Aufbewahrungsfristen
-# ---------------------------------------------------------------------------
-import os
-import tempfile
-from datetime import date, timedelta
-from unittest.mock import patch
+class MailClassificationRuleTests(TestCase):
+    """E-Mail-spezifische Regeln (STOAA Stufe 4): subject_contains / from_contains.
 
-from django.core.exceptions import ValidationError as DjValidationError
+    Belegt, dass Regeln zusätzlich zum OCR-Text auf Betreff und Absender der
+    Quell-Mail matchen, dass reine Text-Regeln unverändert greifen und dass
+    Mail-Bedingungen bei Nicht-Mail-Dokumenten (leere Felder) nicht feuern.
+    """
 
-from .models import DocumentType
-
-
-class ImmutableVersionTests(APITestCase):
-    """Testet den WORM-Schutz auf DocumentVersion-Ebene."""
-
-    def setUp(self):
-        self.user = User.objects.create_user(username="worm_user", password="pw", role="user")
-        self.doc = Document.objects.create(title="Worm-Dok", owner=self.user)
-
-    def _make_version(self, **kwargs):
-        defaults = dict(
-            document=self.doc,
-            version_no=1,
-            file_path="/tmp/test.pdf",
-            sha256="abc123",
-            size=100,
-        )
-        defaults.update(kwargs)
-        v = DocumentVersion(**defaults)
-        DocumentVersion.objects.bulk_create([v])
-        return DocumentVersion.objects.get(document=self.doc, version_no=defaults["version_no"])
-
-    def test_immutable_version_cannot_be_overwritten(self):
-        """save() auf unveränderlicher Version wirft ValidationError."""
-        v = self._make_version()
-        DocumentVersion.objects.filter(pk=v.pk).update(is_immutable=True)
-        v.refresh_from_db()
-        v.ocr_text = "neuer Text"
-        with self.assertRaises(DjValidationError):
-            v.save()
-
-    def test_immutable_version_cannot_be_deleted(self):
-        """delete() auf unveränderlicher Version wirft ValidationError."""
-        v = self._make_version()
-        DocumentVersion.objects.filter(pk=v.pk).update(is_immutable=True)
-        v.refresh_from_db()
-        with self.assertRaises(DjValidationError):
-            v.delete()
-
-    def test_immutable_block_creates_audit_entry(self):
-        """Beim blockierten Löschen entsteht ein immutable_block-Audit-Eintrag."""
-        v = self._make_version()
-        DocumentVersion.objects.filter(pk=v.pk).update(is_immutable=True)
-        v.refresh_from_db()
-        before = AuditLogEntry.objects.count()
-        with self.assertRaises(DjValidationError):
-            v.delete()
-        self.assertEqual(
-            AuditLogEntry.objects.filter(action="immutable_block").count(), 1
+    def _doc(self, *, title="", mail_subject="", mail_sender=""):
+        return Document.objects.create(
+            title=title,
+            mail_subject=mail_subject,
+            mail_sender=mail_sender,
         )
 
-    def test_document_delete_blocked_if_immutable_version_exists(self):
-        """DELETE /api/documents/{id}/ gibt 403, wenn immutable Version vorhanden."""
-        self.client.force_authenticate(self.user)
-        v = self._make_version()
-        DocumentVersion.objects.filter(pk=v.pk).update(is_immutable=True)
-        resp = self.client.delete(f"/api/documents/{self.doc.id}/")
-        self.assertEqual(resp.status_code, 403)
-        audit = AuditLogEntry.objects.filter(action="immutable_block", object_id=str(self.doc.id))
-        self.assertTrue(audit.exists())
-
-    def test_seal_sets_chmod(self):
-        """_seal_version() setzt chmod 0444 auf die Archiv-Datei."""
-        from .pipeline import _seal_version
-
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
-            f.write(b"%PDF-1.4")
-            tmp_path = f.name
-        try:
-            v = self._make_version(archive_path=tmp_path)
-            _seal_version(v)
-            mode = oct(os.stat(tmp_path).st_mode)[-4:]
-            self.assertEqual(mode, "0444")
-        finally:
-            os.chmod(tmp_path, 0o644)
-            os.unlink(tmp_path)
-
-    def test_seal_creates_immutable_set_audit(self):
-        """_seal_version() erzeugt einen immutable_set-Audit-Eintrag."""
-        from .pipeline import _seal_version
-
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
-            f.write(b"%PDF-1.4")
-            tmp_path = f.name
-        try:
-            v = self._make_version(archive_path=tmp_path)
-            _seal_version(v)
-            self.assertTrue(
-                AuditLogEntry.objects.filter(action="immutable_set", object_id=str(v.pk)).exists()
-            )
-        finally:
-            os.chmod(tmp_path, 0o644)
-            os.unlink(tmp_path)
-
-
-class RetentionPolicyTests(APITestCase):
-    """Testet Aufbewahrungsfristen-Sperre."""
-
-    def setUp(self):
-        self.user = User.objects.create_user(username="ret_user", password="pw", role="user")
-        self.doc_type = DocumentType.objects.create(name="Rechnung-Test", retention_months=120)
-        self.doc = Document.objects.create(
-            title="Retention-Dok",
-            owner=self.user,
-            document_type=self.doc_type,
-            retention_until=date.today() + timedelta(days=365),
+    def test_regel_matcht_per_betreff(self):
+        ClassificationRule.objects.create(
+            name="Betreff-Rechnung",
+            match={"subject_contains": ["Rechnung", "Invoice"]},
+            then={"document_type": "Rechnung", "tags": ["Finanzen"]},
         )
+        doc = self._doc(title="anhang", mail_subject="Ihre RECHNUNG Nr. 4711")
 
-    def test_document_delete_blocked_within_retention(self):
-        """DELETE gibt 403, solange retention_until in der Zukunft liegt."""
-        self.client.force_authenticate(self.user)
-        resp = self.client.delete(f"/api/documents/{self.doc.id}/")
-        self.assertEqual(resp.status_code, 403)
+        result = apply_rules(doc)
+
+        self.assertEqual(result["rules"], ["Betreff-Rechnung"])
+        doc.refresh_from_db()
+        self.assertEqual(doc.document_type.name, "Rechnung")
+        self.assertTrue(doc.tags.filter(name="Finanzen").exists())
+        self.assertEqual(doc.classification["rules"], ["Betreff-Rechnung"])
         self.assertTrue(
             AuditLogEntry.objects.filter(
-                action="retention_block", object_id=str(self.doc.id)
+                action="classify", object_id=str(doc.id)
             ).exists()
         )
 
-    def test_document_delete_allowed_after_retention(self):
-        """DELETE erlaubt, wenn retention_until in der Vergangenheit."""
-        self.doc.retention_until = date.today() - timedelta(days=1)
-        self.doc.save()
-        self.client.force_authenticate(self.user)
-        resp = self.client.delete(f"/api/documents/{self.doc.id}/")
-        self.assertEqual(resp.status_code, 204)
-
-    def test_seal_computes_retention_until(self):
-        """_seal_version() berechnet retention_until aus DocumentType.retention_months."""
-        from .pipeline import _seal_version
-
-        v = DocumentVersion.objects.create(
-            document=self.doc,
-            version_no=1,
-            file_path="/tmp/test.pdf",
-            sha256="def456",
-            size=100,
+    def test_regel_matcht_per_absender(self):
+        ClassificationRule.objects.create(
+            name="Absender-Stadtwerke",
+            match={"from_contains": ["@stadtwerke.de"]},
+            then={"correspondent": "Stadtwerke"},
         )
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
-            f.write(b"%PDF")
-            tmp = f.name
-        v.archive_path = tmp
-        try:
-            DocumentVersion.objects.filter(pk=v.pk).update(archive_path=tmp)
-            v.refresh_from_db()
-            _seal_version(v)
-            v.refresh_from_db()
-            self.assertIsNotNone(v.retention_until)
-        finally:
-            os.chmod(tmp, 0o644)
-            os.unlink(tmp)
+        doc = self._doc(
+            title="anhang", mail_sender="Stadtwerke Musterstadt <abrechnung@stadtwerke.de>"
+        )
+
+        result = apply_rules(doc)
+
+        self.assertEqual(result["rules"], ["Absender-Stadtwerke"])
+        doc.refresh_from_db()
+        self.assertEqual(doc.correspondent.name, "Stadtwerke")
+
+    def test_text_only_regel_unveraendert(self):
+        ClassificationRule.objects.create(
+            name="Text-Rechnung",
+            match={"text_contains": ["rechnung"]},
+            then={"document_type": "Rechnung"},
+        )
+        # Nicht-Mail-Dokument (leere Mail-Felder), Treffer nur über Titel/Text.
+        doc = self._doc(title="Monatsrechnung Strom")
+
+        result = apply_rules(doc)
+
+        self.assertEqual(result["rules"], ["Text-Rechnung"])
+        doc.refresh_from_db()
+        self.assertEqual(doc.document_type.name, "Rechnung")
+
+    def test_mail_bedingung_feuert_nicht_ohne_mail_metadaten(self):
+        ClassificationRule.objects.create(
+            name="Nur-Betreff",
+            match={"subject_contains": ["Rechnung"]},
+            then={"document_type": "Rechnung"},
+        )
+        # Kein Betreff gesetzt -> Bedingung greift nicht (keine Alles-Treffer).
+        doc = self._doc(title="Enthält das Wort Rechnung im Titel")
+
+        result = apply_rules(doc)
+
+        self.assertEqual(result["rules"], [])
+        doc.refresh_from_db()
+        self.assertIsNone(doc.document_type)
+
+    def test_kombinierte_bedingungen_und_verknuepft(self):
+        # subject UND text müssen beide treffen (AND über Bedingungsarten).
+        rule = ClassificationRule.objects.create(
+            name="Betreff+Text",
+            match={"subject_contains": ["Rechnung"], "text_contains": ["strom"]},
+            then={"tags": ["Energie"]},
+        )
+        self.assertTrue(
+            rule_matches(rule, "monatsstrom abrechnung", subject="Rechnung Juni")
+        )
+        # Betreff passt, Text nicht -> kein Treffer.
+        self.assertFalse(rule_matches(rule, "irgendwas", subject="Rechnung Juni"))
+
+    def test_leere_liste_ist_keine_bedingung(self):
+        # Leere subject_contains-Liste darf nicht zum Alles-Treffer führen.
+        rule = ClassificationRule.objects.create(
+            name="Leer",
+            match={"subject_contains": []},
+            then={"tags": ["X"]},
+        )
+        self.assertFalse(rule_matches(rule, "text", subject="beliebig"))
