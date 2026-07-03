@@ -177,6 +177,13 @@ class Document(models.Model):
     # {"rules": ["Rechnungen"], "applied": {"document_type": "Rechnung", "tags": ["Finanzen"]}}
     classification = models.JSONField(default=dict, blank=True)
 
+    # E-Mail-Metadaten der Quell-Mail (nur bei IMAP-Ingest belegt) – persistiert,
+    # damit die asynchrone Regel-Engine (siehe classification.apply_rules) auf
+    # Betreff/Absender matchen kann; ein Runtime-Kwarg würde die Celery-Task-
+    # Grenze nicht überleben. Leer bei Nicht-Mail-Dokumenten (rückwärtskompatibel).
+    email_subject = models.CharField(max_length=512, blank=True, default="")
+    email_from = models.CharField(max_length=512, blank=True, default="")
+
     class Meta:
         verbose_name = "Dokument"
         verbose_name_plural = "Dokumente"

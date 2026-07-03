@@ -5,10 +5,13 @@ Cross-User-Zugriff (Liste, Detail, Download, Update, Delete, Audit) mit
 404 abgewiesen wird – auf Objekt-Ebene, nicht nur in der UI.
 """
 from django.contrib.auth import get_user_model
+from django.test import TestCase
 from rest_framework.test import APITestCase
 
+from .classification import apply_rules, rule_matches
 from .models import (
     AuditLogEntry,
+    ClassificationRule,
     Correspondent,
     Document,
     DocumentVersion,
@@ -475,3 +478,108 @@ class StoragePathFilterTests(APITestCase):
         self.client.force_authenticate(self.user)
         resp = self.client.get(f"/api/documents/?tag={self.tag_x.id}")
         self.assertEqual(self._ids(resp), {self.doc_a.id})
+
+
+class EmailMetadataClassificationTests(TestCase):
+    """Regel-Engine matcht auf E-Mail-Betreff/-Absender (STOAA-59).
+
+    Deckt ab: (a) Treffer per Betreff, (b) Treffer per Absender, (c) reine
+    Text-Regeln unverändert (Regression), (d) leeres subject/from bei Text-Regel
+    ohne Fehler.
+    """
+
+    def _doc(self, *, title="Beleg", ocr="", subject="", sender=""):
+        doc = Document.objects.create(
+            title=title, email_subject=subject, email_from=sender
+        )
+        version = DocumentVersion.objects.create(
+            document=doc,
+            version_no=1,
+            file_path="/data/originals/beleg.pdf",
+            ocr_text=ocr,
+        )
+        doc.current_version = version
+        doc.save(update_fields=["current_version"])
+        return doc
+
+    # --- rule_matches (Einheit) ---------------------------------------------
+
+    def test_a_subject_contains_matcht_per_betreff(self):
+        rule = ClassificationRule(match={"subject_contains": ["Rechnung"]})
+        self.assertTrue(rule_matches(rule, "", subject="ihre rechnung nr 5"))
+        self.assertFalse(rule_matches(rule, "", subject="newsletter juli"))
+
+    def test_b_from_contains_matcht_per_absender(self):
+        rule = ClassificationRule(match={"from_contains": ["@stadtwerke.de"]})
+        self.assertTrue(
+            rule_matches(rule, "", sender="stadtwerke graz <info@stadtwerke.de>")
+        )
+        self.assertFalse(rule_matches(rule, "", sender="privat <hans@gmx.at>"))
+
+    def test_from_contains_matcht_anzeigename_und_domain(self):
+        rule = ClassificationRule(match={"from_contains": ["stadtwerke"]})
+        # Anzeigename ODER Adresse/Domain – hier über den Anzeigenamen.
+        self.assertTrue(
+            rule_matches(rule, "", sender="stadtwerke graz <info@sw-graz.at>")
+        )
+
+    def test_c_reine_text_regel_unveraendert(self):
+        rule = ClassificationRule(match={"text_contains": ["rechnung"]})
+        # Ohne subject/sender – wie bisher, nur Text zählt.
+        self.assertTrue(rule_matches(rule, "diese rechnung ist fällig"))
+        self.assertFalse(rule_matches(rule, "nur ein memo"))
+
+    def test_bedingungen_und_verknuepft(self):
+        rule = ClassificationRule(
+            match={"text_contains": ["rechnung"], "from_contains": ["@sw.de"]}
+        )
+        # Beide müssen zutreffen (UND).
+        self.assertTrue(
+            rule_matches(rule, "rechnung", sender="sw <billing@sw.de>")
+        )
+        self.assertFalse(rule_matches(rule, "rechnung", sender="x <a@gmx.at>"))
+
+    def test_d_leeres_subject_from_kein_fehler(self):
+        rule = ClassificationRule(match={"text_contains": ["rechnung"]})
+        # Leerstrings (Nicht-Mail-Dokument) dürfen nicht crashen.
+        self.assertTrue(rule_matches(rule, "rechnung", subject="", sender=""))
+
+    def test_leere_match_greift_nicht(self):
+        # Guard: ohne erkannte Bedingung kein Treffer (kein Alles-Match).
+        self.assertFalse(rule_matches(ClassificationRule(match={}), "irgendwas"))
+        self.assertFalse(
+            rule_matches(
+                ClassificationRule(match={"subject_contains": []}), "x", subject="y"
+            )
+        )
+
+    # --- apply_rules (Integration inkl. Persistenz + Audit) -----------------
+
+    def test_apply_rules_klassifiziert_per_absender(self):
+        ClassificationRule.objects.create(
+            name="Stadtwerke-Post",
+            match={"from_contains": ["@stadtwerke.de"]},
+            then={"tags": ["Energie"], "document_type": "Rechnung"},
+        )
+        doc = self._doc(sender="Stadtwerke <info@stadtwerke.de>")
+        result = apply_rules(doc)
+
+        self.assertEqual(result["rules"], ["Stadtwerke-Post"])
+        self.assertEqual(doc.classification["rules"], ["Stadtwerke-Post"])
+        self.assertTrue(doc.tags.filter(name="Energie").exists())
+        self.assertEqual(doc.document_type.name, "Rechnung")
+        self.assertTrue(
+            AuditLogEntry.objects.filter(
+                action="classify", object_id=str(doc.id)
+            ).exists()
+        )
+
+    def test_apply_rules_reine_textregel_ohne_mailfelder(self):
+        ClassificationRule.objects.create(
+            name="Text-Rechnung", match={"text_contains": ["rechnung"]}, then={"tags": ["Finanzen"]}
+        )
+        # Dokument ohne E-Mail-Metadaten (Upload) – darf nicht crashen und matcht per OCR-Text.
+        doc = self._doc(ocr="Diese Rechnung ist fällig")
+        result = apply_rules(doc)
+        self.assertEqual(result["rules"], ["Text-Rechnung"])
+        self.assertTrue(doc.tags.filter(name="Finanzen").exists())

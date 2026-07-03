@@ -5,9 +5,15 @@ Bestätigen) setzen Regeln Metadaten **direkt** – nachvollziehbar über ein
 Audit-Log und das Feld ``Document.classification``.
 
 Regel-Schema (``ClassificationRule``):
-  match: {"text_contains": ["Rechnung", "Invoice"], "text_regex": "SR-\\d+"}
+  match: {"text_contains": ["Rechnung", "Invoice"], "text_regex": "SR-\\d+",
+          "subject_contains": ["Rechnung"], "from_contains": ["@stadtwerke.de"]}
          – mehrere Bedingungen werden UND-verknüpft; eine Wortliste bei
-           text_contains ist ODER-verknüpft (irgendeines enthalten).
+           text_contains/subject_contains/from_contains ist jeweils ODER-verknüpft
+           (irgendeines enthalten). ``subject_contains`` matcht gegen den Betreff,
+           ``from_contains`` gegen den Absender der Quell-E-Mail (bei IMAP-Ingest
+           an ``Document.email_subject``/``email_from`` persistiert). Leere bzw.
+           fehlende Felder sind keine Bedingung (rückwärtskompatibel zu reinen
+           Text-Regeln).
   then:  {"document_type": "Rechnung", "correspondent": "Stadtwerke",
           "tags": ["Finanzen"], "storage_path": "Rechnungen"}
          – Einzelwerte (Typ/Korrespondent/Ablagepfad) werden nur gesetzt, wenn
@@ -26,18 +32,27 @@ def _searchable_text(document) -> str:
     return " ".join(parts).lower()
 
 
-def rule_matches(rule, text: str) -> bool:
+def rule_matches(rule, text: str, subject: str = "", sender: str = "") -> bool:
     match = rule.match or {}
     checks = []
 
-    contains = match.get("text_contains")
-    if contains:
+    # ODER-verknüpfte Wortlisten gegen den jeweiligen Text; leer/fehlend = keine
+    # Bedingung. subject/sender werden lower-case erwartet (siehe apply_rules).
+    for key, haystack in (
+        ("text_contains", text),
+        ("subject_contains", subject),
+        ("from_contains", sender),
+    ):
+        raw = match.get(key)
+        if not raw:
+            continue
         needles = [
             str(n).lower()
-            for n in (contains if isinstance(contains, list) else [contains])
+            for n in (raw if isinstance(raw, list) else [raw])
             if str(n).strip()
         ]
-        checks.append(any(n in text for n in needles))
+        if needles:
+            checks.append(any(n in haystack for n in needles))
 
     regex = match.get("text_regex")
     if regex:
@@ -62,11 +77,13 @@ def apply_rules(document) -> dict:
     )
 
     text = _searchable_text(document)
+    subject = (document.email_subject or "").lower()
+    sender = (document.email_from or "").lower()
     matched: list[str] = []
     applied: dict = {}
 
     for rule in ClassificationRule.objects.filter(enabled=True).order_by("priority", "name"):
-        if not rule_matches(rule, text):
+        if not rule_matches(rule, text, subject=subject, sender=sender):
             continue
         matched.append(rule.name)
         then = rule.then or {}
