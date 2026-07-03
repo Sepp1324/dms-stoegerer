@@ -177,6 +177,12 @@ class Document(models.Model):
     # {"rules": ["Rechnungen"], "applied": {"document_type": "Rechnung", "tags": ["Finanzen"]}}
     classification = models.JSONField(default=dict, blank=True)
 
+    # Herkunfts-Metadaten aus der E-Mail-Ingestion (IMAP): Betreff und Absender
+    # der Quell-Mail. Für Nicht-Mail-Dokumente leer. Die Rule-Engine nutzt sie
+    # für ``subject_contains``/``from_contains`` (siehe classification.py).
+    mail_subject = models.CharField(max_length=512, blank=True, default="")
+    mail_sender = models.CharField(max_length=512, blank=True, default="")
+
     class Meta:
         verbose_name = "Dokument"
         verbose_name_plural = "Dokumente"
