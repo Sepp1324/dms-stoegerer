@@ -119,6 +119,8 @@ export interface AiSuggestions {
   correspondent?: string;
   tags?: string[];
   summary?: string;
+  // Belegdatum als ISO-String (YYYY-MM-DD); beim Übernehmen auf created_at gemappt.
+  date?: string;
 }
 export interface DocumentDetail extends DocumentItem {
   storage_path: number | null;
@@ -324,6 +326,54 @@ export async function applySuggestions(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(fields ? { fields } : {}),
+  });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const data = await res.json();
+      detail = data.detail || JSON.stringify(data);
+    } catch {
+      /* keine JSON-Fehlermeldung */
+    }
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+// Regeneriert die KI-Vorschläge synchron. Bei fehlendem Provider liefert das
+// Backend Status 200 mit source:"unavailable" (nichts wird überschrieben).
+export interface SuggestResult extends DocumentDetail {
+  source: "ai" | "unavailable" | string;
+}
+
+export async function suggestDocument(id: number): Promise<SuggestResult> {
+  const res = await apiFetch(`/documents/${id}/suggest/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const data = await res.json();
+      detail = data.detail || JSON.stringify(data);
+    } catch {
+      /* keine JSON-Fehlermeldung */
+    }
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+// Verwirft einzelne KI-Vorschlagsfelder, ohne sie anzuwenden.
+export async function dismissSuggestions(
+  id: number,
+  fields: string[],
+): Promise<DocumentDetail> {
+  const res = await apiFetch(`/documents/${id}/dismiss_suggestions/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ fields }),
   });
   if (!res.ok) {
     let detail = `HTTP ${res.status}`;

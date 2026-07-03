@@ -790,15 +790,38 @@ select:focus-visible {
   font-size: 0.9rem;
   color: #c4b5fd;
 }
+.ai-panel__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+}
 .ai-panel__head button {
   background: #8b5cf6;
   font-size: 0.8rem;
   padding: 0.35rem 0.7rem;
 }
+/* „Neu generieren" bleibt link-artig statt der lila Primär-Button-Optik. */
+.ai-panel__head button.link {
+  background: transparent;
+  color: #c4b5fd;
+}
+.ai-panel__head button.link:hover:not(:disabled) {
+  color: #ede9fe;
+}
+.ai-panel__summary-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
 .ai-panel__summary {
   margin: 0.6rem 0 0.2rem;
   font-size: 0.85rem;
   color: var(--muted);
+  flex: 1;
+}
+.ai-panel__empty {
+  margin: 0.6rem 0 0.1rem;
+  font-size: 0.85rem;
 }
 .ai-suggestions {
   list-style: none;
@@ -807,7 +830,7 @@ select:focus-visible {
 }
 .ai-suggestions li {
   display: grid;
-  grid-template-columns: 90px 1fr auto;
+  grid-template-columns: 90px 1fr auto auto;
   align-items: center;
   gap: 0.6rem;
   padding: 0.35rem 0;
@@ -819,6 +842,15 @@ select:focus-visible {
 }
 .ai-suggestions__value {
   word-break: break-word;
+}
+/* Verwerfen: dezenter als Übernehmen, damit die Primäraktion führt. */
+.ai-suggestions__dismiss {
+  color: var(--muted);
+  font-size: 0.8rem;
+  padding: 0.2rem 0.4rem;
+}
+.ai-suggestions__dismiss:hover:not(:disabled) {
+  color: #fca5a5;
 }
 
 /* --- Bearbeiten-Formular --- */
