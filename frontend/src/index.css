@@ -357,6 +357,54 @@ select:focus {
   background: #fff;
 }
 
+/* --- KI-Vorschläge --- */
+.ai-panel {
+  border: 1px solid rgba(139, 92, 246, 0.4);
+  background: rgba(139, 92, 246, 0.08);
+  border-radius: 10px;
+  padding: 0.85rem 1rem;
+  margin-bottom: 1rem;
+}
+.ai-panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: #c4b5fd;
+}
+.ai-panel__head button {
+  background: #8b5cf6;
+  font-size: 0.8rem;
+  padding: 0.35rem 0.7rem;
+}
+.ai-panel__summary {
+  margin: 0.6rem 0 0.2rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.ai-suggestions {
+  list-style: none;
+  margin: 0.6rem 0 0;
+  padding: 0;
+}
+.ai-suggestions li {
+  display: grid;
+  grid-template-columns: 90px 1fr auto;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.35rem 0;
+  border-top: 1px solid rgba(148, 163, 184, 0.12);
+  font-size: 0.85rem;
+}
+.ai-suggestions__label {
+  color: var(--muted);
+}
+.ai-suggestions__value {
+  word-break: break-word;
+}
+
 /* --- Bearbeiten-Formular --- */
 .edit-form {
   display: flex;

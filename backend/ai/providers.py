@@ -58,15 +58,11 @@ class AnthropicProvider(AIProvider):
         client = anthropic.Anthropic(api_key=self.api_key)
         kwargs: dict = {
             "model": self.model,
-            "max_tokens": 4096,
+            "max_tokens": 1024,
             "messages": [{"role": "user", "content": prompt}],
         }
         if system:
             kwargs["system"] = system
-        # Adaptives Denken für anspruchsvollere Extraktion/Klassifizierung.
-        # (Auf älteren Modellen ignoriert das SDK dies bzw. es ist der Default.)
-        if self.model.startswith(("claude-opus-4", "claude-sonnet-5", "claude-fable")):
-            kwargs["thinking"] = {"type": "adaptive"}
 
         response = client.messages.create(**kwargs)
         return "".join(

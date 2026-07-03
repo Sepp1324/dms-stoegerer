@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import {
+  applySuggestions,
   getDocument,
   getDocumentPreview,
   updateDocument,
@@ -117,9 +118,35 @@ export default function DocumentDetail({
     }
   }
 
+  const [applying, setApplying] = useState(false);
+  const [applyError, setApplyError] = useState<string | null>(null);
+
+  async function apply(fields?: string[]) {
+    setApplying(true);
+    setApplyError(null);
+    try {
+      const updated = await applySuggestions(id, fields);
+      setDoc(updated);
+    } catch (e) {
+      setApplyError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setApplying(false);
+    }
+  }
+
   const versions = doc?.versions ?? [];
   const version =
     versions.find((v) => v.id === doc?.current_version) ?? versions[versions.length - 1];
+
+  const s = doc?.ai_suggestions ?? {};
+  const suggestionRows: { key: string; label: string; value: string }[] = [];
+  if (s.title) suggestionRows.push({ key: "title", label: "Titel", value: s.title });
+  if (s.correspondent)
+    suggestionRows.push({ key: "correspondent", label: "Korrespondent", value: s.correspondent });
+  if (s.document_type)
+    suggestionRows.push({ key: "document_type", label: "Typ", value: s.document_type });
+  if (s.tags && s.tags.length)
+    suggestionRows.push({ key: "tags", label: "Schlagworte", value: s.tags.join(", ") });
 
   return (
     <div className="shell">
@@ -204,6 +231,36 @@ export default function DocumentDetail({
               </div>
             ) : (
               <>
+                {canEdit && suggestionRows.length > 0 && (
+                  <div className="ai-panel">
+                    <div className="ai-panel__head">
+                      <span>
+                        <i aria-hidden="true">✦</i> KI-Vorschläge
+                      </span>
+                      <button onClick={() => apply()} disabled={applying}>
+                        {applying ? "…" : "Alle übernehmen"}
+                      </button>
+                    </div>
+                    {s.summary && <p className="ai-panel__summary">{s.summary}</p>}
+                    <ul className="ai-suggestions">
+                      {suggestionRows.map((row) => (
+                        <li key={row.key}>
+                          <span className="ai-suggestions__label">{row.label}</span>
+                          <span className="ai-suggestions__value">{row.value}</span>
+                          <button
+                            className="link"
+                            onClick={() => apply([row.key])}
+                            disabled={applying}
+                          >
+                            Übernehmen
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                    {applyError && <p className="status status--error">{applyError}</p>}
+                  </div>
+                )}
+
                 <h2>{doc.title}</h2>
                 <dl>
                   <dt>Korrespondent</dt>

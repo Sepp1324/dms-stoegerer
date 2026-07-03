@@ -97,6 +97,13 @@ class DocumentSerializer(serializers.ModelSerializer):
             "owner",
             "current_version",
             "page_count",
+            "ai_suggestions",
+            "ai_suggested_at",
             "versions",
         )
-        read_only_fields = ("added_at", "current_version")
+        read_only_fields = (
+            "added_at",
+            "current_version",
+            "ai_suggestions",
+            "ai_suggested_at",
+        )
