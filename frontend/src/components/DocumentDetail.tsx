@@ -1,13 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-<<<<<<< HEAD
-=======
-import PdfPreview from "./PdfPreview";
->>>>>>> 798893d (Adjusted PDF Preview)
 import {
   addDocumentVersion,
   applySuggestions,
   approveDocument,
-  dismissSuggestions,
   getDocument,
   getDocumentAudit,
   getDocumentIntegrity,
@@ -15,7 +10,6 @@ import {
   getDocumentVersionFile,
   rejectDocument,
   submitDocument,
-  suggestDocument,
   updateDocument,
   type AuditEntry,
   type DocumentDetail as Detail,
@@ -222,41 +216,6 @@ export default function DocumentDetail({
     }
   }
 
-  async function dismiss(field: string) {
-    setApplying(true);
-    setApplyError(null);
-    try {
-      const updated = await dismissSuggestions(id, [field]);
-      setDoc(updated);
-    } catch (e) {
-      setApplyError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setApplying(false);
-    }
-  }
-
-  // Regeneriert die KI-Vorschläge synchron; bei fehlendem Provider Hinweis anzeigen.
-  const [regenerating, setRegenerating] = useState(false);
-  const [regenNote, setRegenNote] = useState<string | null>(null);
-
-  async function regenerate() {
-    setRegenerating(true);
-    setRegenNote(null);
-    setApplyError(null);
-    try {
-      const updated = await suggestDocument(id);
-      const { source, ...rest } = updated;
-      setDoc(rest as Detail);
-      if (source === "unavailable") {
-        setRegenNote("KI nicht verfügbar – es wurden keine Vorschläge erzeugt.");
-      }
-    } catch (e) {
-      setApplyError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setRegenerating(false);
-    }
-  }
-
   // Freigabe-Workflow (Stufe 4): eine Aktion aktiv, Fehler separat anzeigen.
   const [freigabeBusy, setFreigabeBusy] = useState(false);
   const [freigabeError, setFreigabeError] = useState<string | null>(null);
@@ -307,7 +266,6 @@ export default function DocumentDetail({
 
       {doc && (
         <div className="detail">
-<<<<<<< HEAD
           <section className="card detail-meta">
             {editing ? (
               <div className="edit-form">
@@ -317,15 +275,6 @@ export default function DocumentDetail({
                     value={form.title}
                     onChange={(e) => setForm((f) => ({ ...f, title: e.target.value }))}
                   />
-=======
-          <section className="card detail-preview" style={{ padding: 0, overflow: "hidden" }}>
-            {pdfError && <p className="status status--warn" style={{ padding: "1rem" }}>Vorschau: {pdfError}</p>}
-            {!pdfError && !pdfUrl && <p className="muted" style={{ padding: "1rem" }}>Lade Vorschau …</p>}
-            {pdfUrl && (
-              <PdfPreview url={pdfUrl} />
-            )}
-          </section>
->>>>>>> 798893d (Adjusted PDF Preview)
                 </label>
 
                 <CreatableSelect

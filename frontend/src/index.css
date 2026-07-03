@@ -1202,9 +1202,3 @@ button.freigabe__reject {
 button.freigabe__reject:hover:not(:disabled) {
   background: rgba(239, 68, 68, 0.12);
 }
-<<<<<<< HEAD
-=======
-.pdf-page-shadow {
-  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-}
->>>>>>> 798893d (Adjusted PDF Preview)
