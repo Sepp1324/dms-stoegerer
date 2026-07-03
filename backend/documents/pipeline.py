@@ -30,6 +30,17 @@ def sha256_of(file_path: str | Path) -> str:
     return h.hexdigest()
 
 
+def find_duplicate_version(sha256_hex: str) -> DocumentVersion | None:
+    """Existierende Version mit identischem Inhalts-Hash (Dedup beim Ingest).
+
+    Grundlage für den Hash-Dedup der E-Mail-Ingestion: gleiche Bytes → gleicher
+    SHA-256 → kein Doppel-Import.
+    """
+    if not sha256_hex:
+        return None
+    return DocumentVersion.objects.filter(sha256=sha256_hex).first()
+
+
 def create_document_from_file(
     file_path: str,
     *,

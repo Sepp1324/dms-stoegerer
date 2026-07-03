@@ -36,7 +36,10 @@ def suggest_document_metadata(document_id: int) -> dict:
     if result.get("source") != "ai" or not suggestions:
         return {"status": result.get("source", "unavailable"), "document_id": document_id}
 
-    document.ai_suggestions = suggestions
+    # Bereits hinterlegte Vorschläge (z. B. Absender→Correspondent aus der
+    # E-Mail-Ingestion) erhalten; die KI hat bei Überschneidung Vorrang.
+    merged = {**(document.ai_suggestions or {}), **suggestions}
+    document.ai_suggestions = merged
     document.ai_suggested_at = timezone.now()
     document.save(update_fields=["ai_suggestions", "ai_suggested_at"])
-    return {"status": "done", "document_id": document_id, "suggestions": suggestions}
+    return {"status": "done", "document_id": document_id, "suggestions": merged}

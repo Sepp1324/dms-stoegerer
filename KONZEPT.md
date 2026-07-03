@@ -208,7 +208,11 @@ z. B. „Rechnungsbetrag", „Fälligkeitsdatum", „Vertragsnummer".
 - Audit-Trail-Ansicht
 
 **Stufe 3 – E-Mail-Ingestion + Automatisierung**
-- IMAP-Abruf, Regeln auf E-Mails
+- ✅ IMAP-Abruf: konfiguriertes Postfach (Admin: „E-Mail-Konto"), Passwort aus
+  k8s-Secret (`password_env`). Celery-Beat ruft periodisch ab, Anhänge (PDF/Bild)
+  durchlaufen die bestehende Pipeline; Idempotenz über Message-ID + Hash-Dedup;
+  Absender → Correspondent-Vorschlag. (STOAA-4)
+- ⬜ E-Mail-spezifische Regeln (Betreff→Tag), OAuth-Postfächer – spätere Stufe.
 
 **Stufe 4 – Revisionssicherheit & Workflows**
 - WORM/Immutable-Storage erzwingen, Retention/Aufbewahrungsfristen

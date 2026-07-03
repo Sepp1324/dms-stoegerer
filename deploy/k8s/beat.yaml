@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: beat
+  namespace: dms
+spec:
+  # Genau EINE Beat-Instanz, sonst würden Tasks doppelt geplant.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: beat
+  template:
+    metadata:
+      labels:
+        app: beat
+    spec:
+      containers:
+        - name: beat
+          image: registry.stoegerer-home.at/dms-backend:0.1.0
+          imagePullPolicy: IfNotPresent
+          # Beat plant nur (dispatcht Tasks an den Worker) – kein Daten-Volume nötig.
+          # Der Zeitplan steht in den Settings (CELERY_BEAT_SCHEDULE); die
+          # Schedule-Datei liegt ephemer in /tmp.
+          command:
+            - celery
+            - -A
+            - config
+            - beat
+            - -l
+            - info
+            - --schedule
+            - /tmp/celerybeat-schedule
+          envFrom:
+            - configMapRef:
+                name: dms-config
+            - secretRef:
+                name: dms-secrets

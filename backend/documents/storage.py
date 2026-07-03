@@ -47,6 +47,21 @@ def save_upload(uploaded_file) -> tuple[str, int, str]:
     return str(dest), dest.stat().st_size, mime
 
 
+def save_bytes(data: bytes, ext: str = "") -> Path:
+    """Schreibt Roh-Bytes (z. B. einen E-Mail-Anhang) nach ``originals/``.
+
+    Wie ``save_upload``, aber für bereits im Speicher liegende Bytes. Der
+    Dateiname wird randomisiert (Kollisions-/Injektionsschutz).
+    """
+    ORIGINALS_DIR.mkdir(parents=True, exist_ok=True)
+    ext = ext.lower()
+    if ext and not ext.startswith("."):
+        ext = "." + ext
+    dest = ORIGINALS_DIR / f"{uuid.uuid4().hex}{ext}"
+    dest.write_bytes(data)
+    return dest
+
+
 def build_archive_path(document) -> Path:
     """Bildet den Ziel-Pfad des Archiv-PDFs aus dem Ablage-Template.
 

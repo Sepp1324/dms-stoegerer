@@ -281,3 +281,76 @@ class AuditLogEntry(models.Model):
 
     def __str__(self) -> str:
         return f"[{self.timestamp:%Y-%m-%d %H:%M}] {self.action} {self.object_type}#{self.object_id}"
+
+
+# ---------------------------------------------------------------------------
+# E-Mail-Ingestion (Stufe 3) – IMAP-Postfach + Idempotenz-Log
+# ---------------------------------------------------------------------------
+class MailAccount(models.Model):
+    """IMAP-Postfach, dessen Anhänge periodisch ins DMS gezogen werden.
+
+    Sicherheit: Das Passwort gehört **nicht** in Git. Bevorzugt wird es aus
+    einem k8s-Secret über eine Umgebungsvariable (``password_env``) bezogen;
+    ``password`` ist nur der Fallback für lokale Entwicklung.
+    """
+
+    name = models.CharField(max_length=255, help_text="Bezeichnung, z. B. 'Rechnungen'")
+    host = models.CharField(max_length=255)
+    port = models.PositiveIntegerField(default=993)
+    use_ssl = models.BooleanField(
+        default=True, help_text="IMAPS (i. d. R. Port 993). Aus = unverschlüsselt/STARTTLS."
+    )
+    username = models.CharField(max_length=255)
+    folder = models.CharField(max_length=255, default="INBOX")
+    password_env = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="Name der Umgebungsvariable (k8s-Secret) mit dem Passwort – empfohlen.",
+    )
+    password = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="Alternativ direkt hinterlegtes App-Passwort (nur ohne Secret-Env).",
+    )
+    enabled = models.BooleanField(default=True)
+    last_checked_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.TextField(blank=True)
+
+    class Meta:
+        verbose_name = "E-Mail-Konto"
+        verbose_name_plural = "E-Mail-Konten"
+        ordering = ["name"]
+
+    def __str__(self) -> str:
+        return f"{self.name} <{self.username}@{self.host}>"
+
+    def resolve_password(self) -> str:
+        """Passwort auflösen: Secret-Env hat Vorrang vor dem DB-Feld."""
+        import os
+
+        if self.password_env:
+            return os.environ.get(self.password_env, "")
+        return self.password
+
+
+class ProcessedMail(models.Model):
+    """Idempotenz-Log bereits verarbeiteter Mails (Dedup über Message-ID)."""
+
+    account = models.ForeignKey(
+        MailAccount, on_delete=models.CASCADE, related_name="processed_mails"
+    )
+    message_id = models.CharField(max_length=998, help_text="RFC-822 Message-ID-Header")
+    subject = models.CharField(max_length=512, blank=True)
+    sender = models.CharField(max_length=512, blank=True)
+    attachment_count = models.PositiveIntegerField(default=0)
+    imported_count = models.PositiveIntegerField(default=0)
+    processed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Verarbeitete E-Mail"
+        verbose_name_plural = "Verarbeitete E-Mails"
+        ordering = ["-processed_at"]
+        unique_together = ("account", "message_id")
+
+    def __str__(self) -> str:
+        return f"{self.subject or '(ohne Betreff)'} · {self.processed_at:%Y-%m-%d %H:%M}"

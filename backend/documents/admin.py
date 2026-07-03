@@ -9,6 +9,8 @@ from .models import (
     Document,
     DocumentType,
     DocumentVersion,
+    MailAccount,
+    ProcessedMail,
     StoragePath,
     Tag,
 )
@@ -59,6 +61,46 @@ admin.site.register(DocumentType)
 admin.site.register(Tag)
 admin.site.register(StoragePath)
 admin.site.register(CustomField)
+
+@admin.register(MailAccount)
+class MailAccountAdmin(admin.ModelAdmin):
+    list_display = ("name", "username", "host", "folder", "enabled", "last_checked_at")
+    list_filter = ("enabled", "use_ssl")
+    search_fields = ("name", "username", "host")
+    readonly_fields = ("last_checked_at", "last_error")
+    fieldsets = (
+        (None, {"fields": ("name", "enabled")}),
+        ("Server", {"fields": ("host", "port", "use_ssl", "folder")}),
+        (
+            "Zugang",
+            {
+                "fields": ("username", "password_env", "password"),
+                "description": (
+                    "Passwort möglichst über ein k8s-Secret (password_env verweist "
+                    "auf die Umgebungsvariable). Das direkte Passwort-Feld ist nur "
+                    "der Fallback für lokale Entwicklung."
+                ),
+            },
+        ),
+        ("Status", {"fields": ("last_checked_at", "last_error")}),
+    )
+
+
+@admin.register(ProcessedMail)
+class ProcessedMailAdmin(admin.ModelAdmin):
+    list_display = ("subject", "sender", "account", "imported_count", "processed_at")
+    list_filter = ("account",)
+    search_fields = ("subject", "sender", "message_id")
+    readonly_fields = (
+        "account",
+        "message_id",
+        "subject",
+        "sender",
+        "attachment_count",
+        "imported_count",
+        "processed_at",
+    )
+
 
 admin.site.site_header = "DMS-Verwaltung"
 admin.site.site_title = "DMS"
