@@ -584,3 +584,62 @@ class MailClassificationRuleTests(TestCase):
             then={"tags": ["X"]},
         )
         self.assertFalse(rule_matches(rule, "text", subject="beliebig"))
+
+
+class MailIngestRegressionTests(TestCase):
+    """Regression zur Merge-Kollision #32/#34 (STOAA-72).
+
+    Der verwaiste ``email_subject``/``email_from``-Block in ``ingest_message``
+    schrieb ``save(update_fields=["email_subject", "email_from"])`` für Felder,
+    die es am Model nicht (mehr) gibt → ``ValueError`` bei jedem Anhang-Ingest.
+    Dieser Test belegt, dass ein Anhang wieder ohne Crash importiert wird und
+    Betreff/Absender auf den korrekten Feldern (``mail_subject``/``mail_sender``)
+    landen.
+    """
+
+    def _raw_mail(self, *, subject, from_header, filename, payload):
+        from email.mime.application import MIMEApplication
+        from email.mime.multipart import MIMEMultipart
+        from email.mime.text import MIMEText
+
+        msg = MIMEMultipart()
+        msg["Subject"] = subject
+        msg["From"] = from_header
+        msg["To"] = "postfach@example.org"
+        msg["Message-ID"] = "<stoaa72-regression@example.org>"
+        msg.attach(MIMEText("Siehe Anhang.", "plain"))
+        part = MIMEApplication(payload, _subtype="pdf")
+        part.add_header("Content-Disposition", "attachment", filename=filename)
+        msg.attach(part)
+        return msg.as_bytes()
+
+    def test_ingest_mit_anhang_crasht_nicht_und_persistiert_mail_meta(self):
+        from unittest import mock
+
+        from . import mail as mail_mod
+        from .models import MailAccount
+
+        account = MailAccount.objects.create(
+            name="Rechnungen", host="imap.example.org", username="postfach"
+        )
+        raw = self._raw_mail(
+            subject="Ihre RECHNUNG Nr. 4711",
+            from_header="Stadtwerke Musterstadt <abrechnung@stadtwerke.de>",
+            filename="rechnung.pdf",
+            payload=b"%PDF-1.4 regression-payload",
+        )
+
+        with mock.patch("documents.tasks.process_document_version.delay") as delay:
+            imported = mail_mod.ingest_message(account, raw)
+
+        # Kein ValueError mehr -> genau ein Anhang importiert und enqueued.
+        self.assertEqual(imported, 1)
+        delay.assert_called_once()
+
+        doc = Document.objects.get(mail_subject="Ihre RECHNUNG Nr. 4711")
+        self.assertEqual(
+            doc.mail_sender, "Stadtwerke Musterstadt <abrechnung@stadtwerke.de>"
+        )
+        # Die verwaisten #34-Felder existieren nicht mehr am Model.
+        self.assertFalse(hasattr(doc, "email_subject"))
+        self.assertFalse(hasattr(doc, "email_from"))
