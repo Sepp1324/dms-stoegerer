@@ -331,13 +331,15 @@ export default function DocumentDetail({
                         <li key={row.key}>
                           <span className="ai-suggestions__label">{row.label}</span>
                           <span className="ai-suggestions__value">{row.value}</span>
-                          <button
-                            className="link"
-                            onClick={() => apply([row.key])}
-                            disabled={applying}
-                          >
-                            Übernehmen
-                          </button>
+                          <div className="ai-suggestions__actions">
+                            <button
+                              className="link"
+                              onClick={() => apply([row.key])}
+                              disabled={applying}
+                            >
+                              Übernehmen
+                            </button>
+                          </div>
                         </li>
                       ))}
                     </ul>
