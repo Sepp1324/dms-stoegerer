@@ -1,3 +1,4 @@
+from django import forms
 from django.contrib import admin
 
 from .models import (
@@ -62,8 +63,30 @@ admin.site.register(Tag)
 admin.site.register(StoragePath)
 admin.site.register(CustomField)
 
+class MailAccountAdminForm(forms.ModelForm):
+    """Maskiert das Klartext-Fallback-Passwort im Admin (write-only-Verhalten)."""
+
+    class Meta:
+        model = MailAccount
+        fields = "__all__"
+        widgets = {
+            # render_value=False → der gespeicherte Wert wird nie zurückgerendert;
+            # das Feld zeigt sich stets leer und maskiert (Punkte statt Klartext).
+            "password": forms.PasswordInput(render_value=False),
+        }
+
+    def clean_password(self):
+        # Leer eingereicht = "unverändert": bestehendes Passwort beibehalten, damit
+        # das maskierte (immer leere) Feld beim Speichern nichts versehentlich löscht.
+        value = self.cleaned_data.get("password")
+        if not value and self.instance and self.instance.pk:
+            return self.instance.password
+        return value
+
+
 @admin.register(MailAccount)
 class MailAccountAdmin(admin.ModelAdmin):
+    form = MailAccountAdminForm
     list_display = ("name", "owner", "username", "host", "folder", "enabled", "last_checked_at")
     list_filter = ("enabled", "use_ssl", "owner")
     search_fields = ("name", "username", "host")
