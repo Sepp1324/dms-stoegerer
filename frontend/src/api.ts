@@ -173,6 +173,10 @@ export interface NamedRef {
   id: number;
   name: string;
 }
+// Tags tragen zusätzlich eine Hex-Farbe (für den Farbpunkt in Karte & Sidebar).
+export interface TagRef extends NamedRef {
+  color: string;
+}
 export interface Me {
   id: number;
   username: string;
@@ -188,6 +192,10 @@ export interface DocumentQuery {
   correspondent?: number | "";
   document_type?: number | "";
   tag?: number | "";
+  // Speicherpfad-Filter (STOAA-50). Backend-Query-Param ``storage_path`` kommt
+  // aus dem Kind-Ticket; unbekannte Params werden vom Backend ignoriert, daher
+  // hier bereits vorbereitet.
+  storage_path?: number | "";
   page?: number;
   // Sortierung, z. B. "-added_at" (Datum neu→alt), "added_at" (alt→neu),
   // "title" (A–Z). Leer = Backend-Standard (FTS-Relevanz bei ``q``, sonst
@@ -369,8 +377,8 @@ export async function getCorrespondents(): Promise<NamedRef[]> {
 export async function getDocumentTypes(): Promise<NamedRef[]> {
   return listAll<NamedRef>("/document-types/");
 }
-export async function getTags(): Promise<NamedRef[]> {
-  return listAll<NamedRef>("/tags/");
+export async function getTags(): Promise<TagRef[]> {
+  return listAll<TagRef>("/tags/");
 }
 export async function getStoragePaths(): Promise<NamedRef[]> {
   return listAll<NamedRef>("/storage-paths/");
@@ -415,7 +423,7 @@ export const createCorrespondent = (name: string) =>
 export const createDocumentType = (name: string) =>
   postJson<NamedRef>("/document-types/", { name });
 export const createTag = (name: string) =>
-  postJson<NamedRef>("/tags/", { name });
+  postJson<TagRef>("/tags/", { name });
 export const createStoragePath = (name: string) =>
   postJson<NamedRef>("/storage-paths/", {
     name,

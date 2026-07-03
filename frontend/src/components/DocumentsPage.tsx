@@ -15,6 +15,7 @@ import {
   type DocumentItem,
   type Me,
   type NamedRef,
+  type TagRef,
 } from "../api";
 import UploadZone from "./UploadZone";
 import DocumentDetail from "./DocumentDetail";
@@ -25,17 +26,27 @@ import RulesPage from "./RulesPage";
 // die Rand-Buttons werden zusätzlich über next/previous der Antwort abgesichert.
 const PAGE_SIZE = 25;
 
+// Der Speicherpfad-Filter wartet auf den Backend-Query-Param (`storage_path`)
+// aus dem Kind-Ticket. Bis dieser gemergt ist, wird der Abschnitt zwar gerendert,
+// aber ausgegraut/deaktiviert – ein aktiver Klick würde sonst (Param wird
+// serverseitig ignoriert) fälschlich „alle Dokumente" als gefiltert markieren.
+// Nach dem Backend-Merge genügt es, dieses Flag auf `true` zu setzen.
+const STORAGE_PATH_FILTER_ENABLED = false;
+
 export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   const [q, setQ] = useState("");
   const [correspondent, setCorrespondent] = useState<number | "">("");
   const [documentType, setDocumentType] = useState<number | "">("");
   const [tag, setTag] = useState<number | "">("");
+  // Speicherpfad-Filter (STOAA-50). Bis der Backend-Query-Param gemergt ist,
+  // bleibt der Speicherpfad-Abschnitt in der Sidebar ausgegraut (no-op).
+  const [storagePath, setStoragePath] = useState<number | "">("");
   // Sortierung; "" = Backend-Standard (FTS-Relevanz bei Suche, sonst Datum neu→alt).
   const [ordering, setOrdering] = useState("");
 
   const [correspondents, setCorrespondents] = useState<NamedRef[]>([]);
   const [documentTypes, setDocumentTypes] = useState<NamedRef[]>([]);
-  const [tags, setTags] = useState<NamedRef[]>([]);
+  const [tags, setTags] = useState<TagRef[]>([]);
   const [storagePaths, setStoragePaths] = useState<NamedRef[]>([]);
 
   const [docs, setDocs] = useState<DocumentItem[]>([]);
@@ -119,6 +130,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
       correspondent,
       document_type: documentType,
       tag,
+      storage_path: storagePath,
       ordering,
       page,
     })
@@ -134,11 +146,11 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     return () => {
       active = false;
     };
-  }, [debouncedQ, correspondent, documentType, tag, ordering, page, reloadKey]);
+  }, [debouncedQ, correspondent, documentType, tag, storagePath, ordering, page, reloadKey]);
 
   const hasFilters = useMemo(
-    () => !!(debouncedQ || correspondent || documentType || tag),
-    [debouncedQ, correspondent, documentType, tag],
+    () => !!(debouncedQ || correspondent || documentType || tag || storagePath),
+    [debouncedQ, correspondent, documentType, tag, storagePath],
   );
 
   // Jede Filter-/Suchänderung springt zurück auf Seite 1 – sonst zeigt eine
@@ -159,6 +171,10 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     setTag(v);
     setPage(1);
   }
+  function onStoragePathChange(v: number | "") {
+    setStoragePath(v);
+    setPage(1);
+  }
   function onOrderingChange(v: string) {
     setOrdering(v);
     setPage(1);
@@ -169,6 +185,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     setCorrespondent("");
     setDocumentType("");
     setTag("");
+    setStoragePath("");
     setOrdering("");
     setPage(1);
   }
@@ -213,6 +230,19 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
         onLogout={handleLogout}
         open={navOpen}
         onClose={() => setNavOpen(false)}
+        correspondents={correspondents}
+        tags={tags}
+        documentTypes={documentTypes}
+        storagePaths={storagePaths}
+        correspondent={correspondent}
+        tag={tag}
+        documentType={documentType}
+        storagePath={storagePath}
+        onCorrespondentChange={onCorrespondentChange}
+        onTagChange={onTagChange}
+        onDocumentTypeChange={onDocumentTypeChange}
+        onStoragePathChange={onStoragePathChange}
+        storagePathEnabled={STORAGE_PATH_FILTER_ENABLED}
       />
 
       <div className="content">
@@ -254,21 +284,10 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
                 />
               )}
 
+              {/* Stammdaten-Filter leben jetzt in der Sidebar (STOAA-50); die
+                  Topleiste beschränkt sich auf Sortierung + Zurücksetzen. */}
               <section className="filters card">
                 <div className="filter-row">
-                  <Select
-                    label="Korrespondent"
-                    value={correspondent}
-                    onChange={onCorrespondentChange}
-                    options={correspondents}
-                  />
-                  <Select
-                    label="Typ"
-                    value={documentType}
-                    onChange={onDocumentTypeChange}
-                    options={documentTypes}
-                  />
-                  <Select label="Tag" value={tag} onChange={onTagChange} options={tags} />
                   <label className="filter">
                     <span>Sortierung</span>
                     <select value={ordering} onChange={(e) => onOrderingChange(e.target.value)}>
@@ -359,7 +378,9 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
 }
 
 // Persistente linke Navigation (paperless-like). Auf schmalen Screens als
-// Overlay über `open` gesteuert; Aktiv-Zustand über `view`.
+// Overlay über `open` gesteuert; Aktiv-Zustand über `view`. Unter der Haupt-
+// navigation zeigen ausklappbare Stammdaten-Abschnitte (Korrespondenten, Tags,
+// Dokumenttypen, Speicherpfade) klickbare Filterlisten (STOAA-50).
 function Sidebar({
   view,
   onNavigate,
@@ -367,6 +388,19 @@ function Sidebar({
   onLogout,
   open,
   onClose,
+  correspondents,
+  tags,
+  documentTypes,
+  storagePaths,
+  correspondent,
+  tag,
+  documentType,
+  storagePath,
+  onCorrespondentChange,
+  onTagChange,
+  onDocumentTypeChange,
+  onStoragePathChange,
+  storagePathEnabled,
 }: {
   view: "docs" | "rules";
   onNavigate: (v: "docs" | "rules") => void;
@@ -374,7 +408,26 @@ function Sidebar({
   onLogout: () => void;
   open: boolean;
   onClose: () => void;
+  correspondents: NamedRef[];
+  tags: TagRef[];
+  documentTypes: NamedRef[];
+  storagePaths: NamedRef[];
+  correspondent: number | "";
+  tag: number | "";
+  documentType: number | "";
+  storagePath: number | "";
+  onCorrespondentChange: (v: number | "") => void;
+  onTagChange: (v: number | "") => void;
+  onDocumentTypeChange: (v: number | "") => void;
+  onStoragePathChange: (v: number | "") => void;
+  storagePathEnabled: boolean;
 }) {
+  // Nach einer Filterauswahl auf Mobil das Overlay schließen (Desktop no-op).
+  const pick = (fn: (v: number | "") => void) => (v: number | "") => {
+    fn(v);
+    onClose();
+  };
+
   return (
     <aside className={`sidebar${open ? " sidebar--open" : ""}`}>
       <div className="sidebar__brand">
@@ -406,6 +459,38 @@ function Sidebar({
           label="Regeln"
           icon="M3 5h18v2H3zm0 6h12v2H3zm0 6h18v2H3z"
         />
+
+        {view === "docs" && (
+          <div className="nav-filters">
+            <FilterSection
+              title="Korrespondenten"
+              items={correspondents}
+              activeId={correspondent}
+              onSelect={pick(onCorrespondentChange)}
+            />
+            <FilterSection
+              title="Tags"
+              items={tags}
+              activeId={tag}
+              onSelect={pick(onTagChange)}
+              colored
+            />
+            <FilterSection
+              title="Dokumenttypen"
+              items={documentTypes}
+              activeId={documentType}
+              onSelect={pick(onDocumentTypeChange)}
+            />
+            <FilterSection
+              title="Speicherpfade"
+              items={storagePaths}
+              activeId={storagePath}
+              onSelect={pick(onStoragePathChange)}
+              disabled={!storagePathEnabled}
+              note={storagePathEnabled ? undefined : "Backend folgt"}
+            />
+          </div>
+        )}
       </nav>
 
       <div className="sidebar__footer">
@@ -415,6 +500,83 @@ function Sidebar({
         </button>
       </div>
     </aside>
+  );
+}
+
+// Ausklappbarer Stammdaten-Abschnitt der Sidebar: Titel + Anzahl, darunter eine
+// scrollbare Liste klickbarer Filter. Klick auf den aktiven Eintrag hebt den
+// Filter wieder auf. `disabled` graut den Abschnitt aus (z. B. Speicherpfade,
+// solange der Backend-Filter fehlt). Leere Listen werden ausgeblendet.
+function FilterSection({
+  title,
+  items,
+  activeId,
+  onSelect,
+  colored,
+  disabled,
+  note,
+}: {
+  title: string;
+  items: (NamedRef & { color?: string })[];
+  activeId: number | "";
+  onSelect: (v: number | "") => void;
+  colored?: boolean;
+  disabled?: boolean;
+  note?: string;
+}) {
+  const [expanded, setExpanded] = useState(true);
+  if (items.length === 0) return null;
+
+  return (
+    <div className={`nav-section${disabled ? " nav-section--disabled" : ""}`}>
+      <button
+        className="nav-section__head"
+        onClick={() => setExpanded((e) => !e)}
+        aria-expanded={expanded}
+      >
+        <svg
+          className={`nav-section__chevron${expanded ? " nav-section__chevron--open" : ""}`}
+          viewBox="0 0 24 24"
+          width="14"
+          height="14"
+          aria-hidden="true"
+        >
+          <path fill="currentColor" d="M8 5l8 7-8 7z" />
+        </svg>
+        <span className="nav-section__title">{title}</span>
+        {note ? (
+          <span className="nav-section__note">{note}</span>
+        ) : (
+          <span className="nav-section__count">{items.length}</span>
+        )}
+      </button>
+      {expanded && (
+        <ul className="nav-section__list">
+          {items.map((it) => {
+            const active = activeId === it.id;
+            return (
+              <li key={it.id}>
+                <button
+                  className={`nav-filter${active ? " nav-filter--active" : ""}`}
+                  onClick={() => onSelect(active ? "" : it.id)}
+                  aria-current={active ? "true" : undefined}
+                  disabled={disabled}
+                  title={it.name}
+                >
+                  {colored && (
+                    <span
+                      className="nav-filter__dot"
+                      style={{ background: it.color ?? "var(--muted)" }}
+                    />
+                  )}
+                  <span className="nav-filter__label">{it.name}</span>
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
   );
 }
 
@@ -578,31 +740,3 @@ function DocumentCard({ doc, onOpen }: { doc: DocumentItem; onOpen: () => void }
   );
 }
 
-function Select({
-  label,
-  value,
-  onChange,
-  options,
-}: {
-  label: string;
-  value: number | "";
-  onChange: (v: number | "") => void;
-  options: NamedRef[];
-}) {
-  return (
-    <label className="filter">
-      <span>{label}</span>
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value ? Number(e.target.value) : "")}
-      >
-        <option value="">Alle</option>
-        {options.map((o) => (
-          <option key={o.id} value={o.id}>
-            {o.name}
-          </option>
-        ))}
-      </select>
-    </label>
-  );
-}
