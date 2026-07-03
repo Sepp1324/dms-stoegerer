@@ -80,7 +80,26 @@ export interface DocumentVersion {
   size: number;
   page_count: number | null;
   is_immutable: boolean;
+  created_by: number | null;
+  created_by_name: string | null;
+  has_archive: boolean;
   created_at: string;
+}
+
+// Ergebnis der Integritätsprüfung einer einzelnen Version (Hash-Kette).
+export interface VersionIntegrity {
+  version_no: number;
+  sha256: string;
+  computed_sha256: string;
+  prev_hash: string;
+  expected_prev_hash: string;
+  file_present: boolean;
+  file_ok: boolean;
+  prev_ok: boolean;
+}
+export interface DocumentIntegrity {
+  chain_ok: boolean;
+  versions: VersionIntegrity[];
 }
 export interface DocumentItem {
   id: number;
@@ -204,10 +223,56 @@ export async function getDocumentAudit(
 
 // Lädt das Vorschau-PDF als Blob (mit Auth-Header) – ein <iframe src="…/preview/">
 // würde den Bearer-Token nicht mitschicken, daher der Umweg über fetch + Blob-URL.
-export async function getDocumentPreview(id: number): Promise<Blob> {
-  const res = await apiFetch(`/documents/${id}/preview/`);
+// Ohne ``versionNo`` die aktuelle Version, sonst gezielt eine ältere.
+export async function getDocumentPreview(
+  id: number,
+  versionNo?: number,
+): Promise<Blob> {
+  const suffix = versionNo ? `?version=${versionNo}` : "";
+  const res = await apiFetch(`/documents/${id}/preview/${suffix}`);
   if (!res.ok) throw new Error(`Vorschau nicht verfügbar (HTTP ${res.status})`);
   return res.blob();
+}
+
+// Integritätsprüfung der Hash-Kette eines Dokuments (rechnet Datei-Hashes nach).
+export async function getDocumentIntegrity(id: number): Promise<DocumentIntegrity> {
+  const res = await apiFetch(`/documents/${id}/integrity/`);
+  if (!res.ok) throw new Error(`Integritätsprüfung fehlgeschlagen (HTTP ${res.status})`);
+  return res.json();
+}
+
+// Lädt die Originaldatei einer Version als Blob (mit Auth-Header) zum Download.
+export async function getDocumentVersionFile(
+  id: number,
+  versionNo: number,
+): Promise<Blob> {
+  const res = await apiFetch(`/documents/${id}/download/?version=${versionNo}`);
+  if (!res.ok) throw new Error(`Download fehlgeschlagen (HTTP ${res.status})`);
+  return res.blob();
+}
+
+// Hängt eine neue Datei als nächste Version an ein bestehendes Dokument.
+export async function addDocumentVersion(
+  id: number,
+  file: File,
+): Promise<DocumentDetail> {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await apiFetch(`/documents/${id}/add_version/`, {
+    method: "POST",
+    body: form,
+  });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const data = await res.json();
+      detail = data.detail || detail;
+    } catch {
+      /* keine JSON-Fehlermeldung */
+    }
+    throw new Error(detail);
+  }
+  return res.json();
 }
 
 // Miniaturbild der ersten Seite (JPEG) – ebenfalls per fetch+Blob wegen JWT.
