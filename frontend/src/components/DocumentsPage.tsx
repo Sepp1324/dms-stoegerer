@@ -30,7 +30,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   const [correspondent, setCorrespondent] = useState<number | "">("");
   const [documentType, setDocumentType] = useState<number | "">("");
   const [tag, setTag] = useState<number | "">("");
-  // Sortierung; "" = Backend-Standard (FTS-Relevanz bei Suche, sonst -added_at).
+  // Sortierung; "" = Backend-Standard (FTS-Relevanz bei Suche, sonst Datum neu→alt).
   const [ordering, setOrdering] = useState("");
 
   const [correspondents, setCorrespondents] = useState<NamedRef[]>([]);
@@ -169,6 +169,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     setCorrespondent("");
     setDocumentType("");
     setTag("");
+    setOrdering("");
     setPage(1);
   }
 
@@ -270,13 +271,12 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
                   <Select label="Tag" value={tag} onChange={onTagChange} options={tags} />
                   <label className="filter">
                     <span>Sortierung</span>
-                    <select
-                      value={ordering}
-                      onChange={(e) => onOrderingChange(e.target.value)}
-                    >
-                      <option value="">Datum ↓ (Standard)</option>
-                      <option value="added_at">Datum ↑</option>
-                      <option value="title">Titel A–Z</option>
+                    <select value={ordering} onChange={(e) => onOrderingChange(e.target.value)}>
+                      <option value="">Standard</option>
+                      <option value="-added_at">Datum (neu → alt)</option>
+                      <option value="added_at">Datum (alt → neu)</option>
+                      <option value="title">Titel (A–Z)</option>
+                      <option value="-title">Titel (Z–A)</option>
                     </select>
                   </label>
                   {hasFilters && (
