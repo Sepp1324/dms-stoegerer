@@ -31,6 +31,10 @@ logger = logging.getLogger(__name__)
 ALLOWED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".gif", ".webp"}
 ALLOWED_MIME_PREFIXES = ("application/pdf", "image/")
 
+# Socket-Timeout (Sekunden) für die IMAP-Verbindung – verhindert, dass ein
+# nicht antwortender Server den Abruf-Worker unbegrenzt blockiert.
+IMAP_TIMEOUT = 30
+
 
 def _decode(value: str | None) -> str:
     """MIME-kodierte Header (=?utf-8?...?=) in lesbaren Text wandeln."""
@@ -76,10 +80,14 @@ def iter_attachments(msg: Message):
 def connect(account) -> imaplib.IMAP4:
     """Baut die IMAP-Verbindung auf und meldet sich an (Passwort aus Secret/DB)."""
     password = account.resolve_password()
+    # Expliziter Timeout: ohne ihn blockiert ein toter IMAP-Server den
+    # Celery-Worker unbegrenzt (der Default ist der globale Socket-Timeout, i.
+    # d. R. None). 30 s reichen für Login + Fetch und geben eine Mail beim
+    # nächsten Lauf wieder frei.
     if account.use_ssl:
-        conn = imaplib.IMAP4_SSL(account.host, account.port)
+        conn = imaplib.IMAP4_SSL(account.host, account.port, timeout=IMAP_TIMEOUT)
     else:
-        conn = imaplib.IMAP4(account.host, account.port)
+        conn = imaplib.IMAP4(account.host, account.port, timeout=IMAP_TIMEOUT)
     conn.login(account.username, password)
     return conn
 
@@ -141,6 +149,11 @@ def ingest_message(account, raw_bytes: bytes) -> int | None:
         document, version = pipeline.create_document_from_file(
             str(path),
             title=title or subject or "E-Mail-Anhang",
+            # Standard-Empfänger des Postfachs als Eigentümer setzen, sonst sind
+            # die Dokumente für Nicht-Admins durch die Owner-Isolation (STOAA-7)
+            # unsichtbar. ``owner=None`` bleibt bewusstes Admin-Triage-Verhalten
+            # (siehe MailAccount-Docstring). Setzt auch AuditLogEntry.actor.
+            owner=account.owner,
             mime=ctype,
             size=len(payload),
         )

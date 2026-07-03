@@ -292,9 +292,31 @@ class MailAccount(models.Model):
     Sicherheit: Das Passwort gehört **nicht** in Git. Bevorzugt wird es aus
     einem k8s-Secret über eine Umgebungsvariable (``password_env``) bezogen;
     ``password`` ist nur der Fallback für lokale Entwicklung.
+
+    Eigentümer-Zuordnung (Kohärenz mit der Owner-Isolation, STOAA-7): Der
+    ``owner`` ist der Standard-Empfänger dieses Postfachs. Er wird beim Import
+    an jedes eingespeiste Dokument durchgereicht (``Document.owner`` /
+    ``AuditLogEntry.actor``), damit die für Nicht-Admins geltende Isolation
+    (``qs.filter(owner=user)``) die Mail-Dokumente **sichtbar und abrufbar**
+    macht. Bleibt ``owner`` leer, ist das Postfach ein bewusstes
+    **Admin-Triage-Postfach**: Dokumente ohne Eigentümer sind ausschließlich
+    für Nutzer mit ``is_dms_admin`` sichtbar und müssen dort manuell zugeordnet
+    werden. Der Leer-Fall ist damit dokumentierte Absicht, nicht Zufall.
     """
 
     name = models.CharField(max_length=255, help_text="Bezeichnung, z. B. 'Rechnungen'")
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="mail_accounts",
+        help_text=(
+            "Standard-Empfänger: Eigentümer der aus diesem Postfach importierten "
+            "Dokumente. Leer lassen = Admin-Triage-Postfach (nur für DMS-Admins "
+            "sichtbar, bis manuell zugeordnet)."
+        ),
+    )
     host = models.CharField(max_length=255)
     port = models.PositiveIntegerField(default=993)
     use_ssl = models.BooleanField(

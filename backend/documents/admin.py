@@ -64,12 +64,25 @@ admin.site.register(CustomField)
 
 @admin.register(MailAccount)
 class MailAccountAdmin(admin.ModelAdmin):
-    list_display = ("name", "username", "host", "folder", "enabled", "last_checked_at")
-    list_filter = ("enabled", "use_ssl")
+    list_display = ("name", "owner", "username", "host", "folder", "enabled", "last_checked_at")
+    list_filter = ("enabled", "use_ssl", "owner")
     search_fields = ("name", "username", "host")
     readonly_fields = ("last_checked_at", "last_error")
+    raw_id_fields = ("owner",)
     fieldsets = (
         (None, {"fields": ("name", "enabled")}),
+        (
+            "Eigentümer",
+            {
+                "fields": ("owner",),
+                "description": (
+                    "Standard-Empfänger: Eigentümer der importierten Dokumente. "
+                    "Ohne Eigentümer bleibt das Postfach ein Admin-Triage-Postfach "
+                    "– die Dokumente sind dann nur für DMS-Admins sichtbar, bis sie "
+                    "manuell zugeordnet werden (Kohärenz mit der Owner-Isolation)."
+                ),
+            },
+        ),
         ("Server", {"fields": ("host", "port", "use_ssl", "folder")}),
         (
             "Zugang",
