@@ -34,3 +34,21 @@ jobs:
       - name: CI-Image aufräumen
         if: always()
         run: docker rmi "dms-backend-ci:${GITHUB_SHA}" 2>/dev/null || true
+
+  # Dynamisches Grün-Signal für Frontend-PRs: baut das Frontend-Image, dessen
+  # Build-Stufe `npm run build` (= tsc -b && vite build) ausführt. Ein TS-Fehler
+  # oder ein unaufgelöster Merge-Konflikt-Marker lässt den Build – und damit den
+  # PR – rot werden, BEVOR gemergt wird (siehe STOAA-85/86). Bisher lief dieser
+  # Build nur im Deploy (post-merge), sodass kaputter Code auf main landen konnte.
+  frontend-build:
+    runs-on: [self-hosted, dms]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Frontend-Image bauen (flüchtiger CI-Tag)
+        run: docker build -t "dms-frontend-ci:${GITHUB_SHA}" ./frontend
+
+      - name: CI-Image aufräumen
+        if: always()
+        run: docker rmi "dms-frontend-ci:${GITHUB_SHA}" 2>/dev/null || true
