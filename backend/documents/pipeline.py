@@ -71,21 +71,37 @@ def run_ocr(input_path: str | Path, output_path: Path) -> tuple[str, int | None]
     import ocrmypdf
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    sidecar = output_path.with_suffix(".txt")
 
     ocrmypdf.ocr(
         str(input_path),
         str(output_path),
         output_type="pdfa",
         language="deu+eng",
-        sidecar=str(sidecar),
         skip_text=True,
         progress_bar=False,
     )
 
-    text = sidecar.read_text(encoding="utf-8", errors="ignore") if sidecar.exists() else ""
+    # Text aus dem fertigen PDF/A ziehen – erfasst native UND OCR'te Textebenen.
+    # (Das ocrmypdf-Sidecar bliebe bei *digitalen* PDFs leer, weil skip_text die
+    #  OCR überspringt und nur OCR-Ausgabe ins Sidecar schreibt.)
+    text = extract_text(output_path)
     pages = _page_count(output_path)
     return text, pages
+
+
+def extract_text(pdf_path: str | Path) -> str:
+    """Extrahiert den gesamten Text eines PDFs via poppler ``pdftotext``."""
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["pdftotext", "-q", str(pdf_path), "-"],
+            capture_output=True,
+            timeout=180,
+        )
+        return result.stdout.decode("utf-8", errors="ignore")
+    except Exception:  # pragma: no cover - Textextraktion ist best effort
+        return ""
 
 
 def generate_thumbnail(version, *, max_width: int = 400) -> str | None:
