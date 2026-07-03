@@ -11,7 +11,9 @@ gunicorn==23.0.0
 # OCR-Pipeline
 ocrmypdf==16.10.0
 img2pdf==0.6.0
-# pikepdf wird von ocrmypdf mitgebracht (Seitenzahl-Ermittlung)
+# pikepdf explizit auf 8.x pinnen: ocrmypdf 16.10 ruft noch Pdf.check() auf,
+# das in pikepdf 9.x entfernt wurde (sonst AttributeError → OCR schlägt fehl).
+pikepdf==8.15.1
 # Miniaturbilder (erste Seite → JPEG)
 pdf2image==1.17.0
 Pillow==11.0.0

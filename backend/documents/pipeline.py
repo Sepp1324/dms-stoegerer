@@ -11,11 +11,14 @@ Backend auch ohne installierte OCR-Binaries lädt (z. B. für `manage.py check`)
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 from pathlib import Path
 
 from . import storage
 from .models import AuditLogEntry, Document, DocumentVersion
+
+logger = logging.getLogger(__name__)
 
 
 def sha256_of(file_path: str | Path) -> str:
@@ -61,32 +64,40 @@ def create_document_from_file(
     return document, version
 
 
-def run_ocr(input_path: str | Path, output_path: Path) -> tuple[str, int | None]:
-    """Erzeugt aus der Eingabe ein durchsuchbares PDF/A und liefert (Text, Seiten).
+def run_ocr(
+    input_path: str | Path, output_path: Path
+) -> tuple[str, int | None, bool]:
+    """Erzeugt ein durchsuchbares PDF/A und liefert (Text, Seiten, Archiv-erzeugt?).
 
-    Nutzt OCRmyPDF (Tesseract, deu+eng). Bereits vorhandene Textebenen werden
-    übersprungen (``skip_text``), Bilder werden – bei installiertem img2pdf –
-    automatisch als PDF verarbeitet.
+    Nutzt OCRmyPDF (Tesseract, deu+eng). Schlägt die OCR fehl (z. B. verschlüsselte
+    oder problematische PDFs), wird **nicht** abgebrochen: Text und Seitenzahl
+    werden dann aus dem Original gezogen (nativer Text, falls vorhanden), und es
+    wird kein Archiv-PDF gesetzt. So bleibt das Dokument nutzbar (Vorschau/Suche).
     """
     import ocrmypdf
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    archive_created = False
+    source: str | Path = input_path
 
-    ocrmypdf.ocr(
-        str(input_path),
-        str(output_path),
-        output_type="pdfa",
-        language="deu+eng",
-        skip_text=True,
-        progress_bar=False,
-    )
+    try:
+        ocrmypdf.ocr(
+            str(input_path),
+            str(output_path),
+            output_type="pdfa",
+            language="deu+eng",
+            skip_text=True,
+            progress_bar=False,
+        )
+        archive_created = True
+        source = output_path
+    except Exception as exc:  # pragma: no cover - abhängig von Eingabe-PDF
+        logger.warning("OCR fehlgeschlagen für %s: %s", input_path, exc)
 
-    # Text aus dem fertigen PDF/A ziehen – erfasst native UND OCR'te Textebenen.
-    # (Das ocrmypdf-Sidecar bliebe bei *digitalen* PDFs leer, weil skip_text die
-    #  OCR überspringt und nur OCR-Ausgabe ins Sidecar schreibt.)
-    text = extract_text(output_path)
-    pages = _page_count(output_path)
-    return text, pages
+    # Text aus PDF/A (falls erzeugt) oder aus dem Original ziehen.
+    text = extract_text(source)
+    pages = _page_count(source)
+    return text, pages, archive_created
 
 
 def extract_text(pdf_path: str | Path) -> str:
@@ -163,9 +174,9 @@ def process_version(version: DocumentVersion) -> dict:
     version.prev_hash = previous.sha256 if previous else ""
 
     archive_path = storage.build_archive_path(version.document)
-    text, pages = run_ocr(version.file_path, archive_path)
+    text, pages, archive_created = run_ocr(version.file_path, archive_path)
 
-    version.archive_path = str(archive_path)
+    version.archive_path = str(archive_path) if archive_created else ""
     version.ocr_text = text
     version.page_count = pages
     version.save(
