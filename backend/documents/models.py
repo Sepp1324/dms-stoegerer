@@ -208,6 +208,15 @@ class Document(models.Model):
     mail_subject = models.CharField(max_length=512, blank=True, default="")
     mail_sender = models.CharField(max_length=512, blank=True, default="")
 
+    # Freigabe-Workflow (Stufe 4). Bestand via Spalten-Default in Migration
+    # 0007_document_status auf "entwurf" gesetzt. Statuswechsel NUR über die
+    # Actions submit/approve/reject (Serializer read_only), nie per PATCH.
+    status = models.CharField(
+        max_length=16,
+        choices=ApprovalStatus.choices,
+        default=ApprovalStatus.ENTWURF,
+    )
+
     class Meta:
         verbose_name = "Dokument"
         verbose_name_plural = "Dokumente"
