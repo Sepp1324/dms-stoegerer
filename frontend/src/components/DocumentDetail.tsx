@@ -1,4 +1,8 @@
 import { useEffect, useRef, useState } from "react";
+<<<<<<< HEAD
+=======
+import PdfPreview from "./PdfPreview";
+>>>>>>> 798893d (Adjusted PDF Preview)
 import {
   addDocumentVersion,
   applySuggestions,
@@ -303,6 +307,7 @@ export default function DocumentDetail({
 
       {doc && (
         <div className="detail">
+<<<<<<< HEAD
           <section className="card detail-meta">
             {editing ? (
               <div className="edit-form">
@@ -312,6 +317,15 @@ export default function DocumentDetail({
                     value={form.title}
                     onChange={(e) => setForm((f) => ({ ...f, title: e.target.value }))}
                   />
+=======
+          <section className="card detail-preview" style={{ padding: 0, overflow: "hidden" }}>
+            {pdfError && <p className="status status--warn" style={{ padding: "1rem" }}>Vorschau: {pdfError}</p>}
+            {!pdfError && !pdfUrl && <p className="muted" style={{ padding: "1rem" }}>Lade Vorschau …</p>}
+            {pdfUrl && (
+              <PdfPreview url={pdfUrl} />
+            )}
+          </section>
+>>>>>>> 798893d (Adjusted PDF Preview)
                 </label>
 
                 <CreatableSelect
