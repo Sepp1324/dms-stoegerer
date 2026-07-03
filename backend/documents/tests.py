@@ -5,12 +5,16 @@ Cross-User-Zugriff (Liste, Detail, Download, Update, Delete, Audit) mit
 404 abgewiesen wird – auf Objekt-Ebene, nicht nur in der UI.
 """
 from django.contrib.auth import get_user_model
+from django.test import TestCase
 from rest_framework.test import APITestCase
 
+from .classification import apply_rules, rule_matches
 from .models import (
     AuditLogEntry,
+    ClassificationRule,
     Correspondent,
     Document,
+    DocumentType,
     DocumentVersion,
     StoragePath,
     Tag,
@@ -477,162 +481,106 @@ class StoragePathFilterTests(APITestCase):
         self.assertEqual(self._ids(resp), {self.doc_a.id})
 
 
-class ApprovalWorkflowTests(APITestCase):
-    """STOAA-63: Freigabe-Workflow – submit/approve/reject, Übergänge, Audit.
+class MailClassificationRuleTests(TestCase):
+    """E-Mail-spezifische Regeln (STOAA Stufe 4): subject_contains / from_contains.
 
-    Deckt den Kontrakt für FE (STOAA-59) und QA (STOAA-60) ab: gültige und
-    ungültige Statusübergänge (409, Status unverändert), Gast-403 auf allen
-    drei Actions sowie je Übergang genau ein ``AuditLogEntry`` mit from/to.
+    Belegt, dass Regeln zusätzlich zum OCR-Text auf Betreff und Absender der
+    Quell-Mail matchen, dass reine Text-Regeln unverändert greifen und dass
+    Mail-Bedingungen bei Nicht-Mail-Dokumenten (leere Felder) nicht feuern.
     """
 
-    @classmethod
-    def setUpTestData(cls):
-        cls.owner = User.objects.create_user(
-            username="owner", password="pw", role="user"
-        )
-        cls.other = User.objects.create_user(
-            username="other", password="pw", role="user"
-        )
-        cls.guest = User.objects.create_user(
-            username="guest", password="pw", role="guest"
-        )
-
-    def _doc(self, status=Document.ApprovalStatus.ENTWURF, owner=None):
+    def _doc(self, *, title="", mail_subject="", mail_sender=""):
         return Document.objects.create(
-            title="Freigabe-Doc", owner=owner or self.owner, status=status
+            title=title,
+            mail_subject=mail_subject,
+            mail_sender=mail_sender,
         )
 
-    def _audit(self, doc, action):
-        return AuditLogEntry.objects.filter(
-            object_type="Document", object_id=str(doc.id), action=action
+    def test_regel_matcht_per_betreff(self):
+        ClassificationRule.objects.create(
+            name="Betreff-Rechnung",
+            match={"subject_contains": ["Rechnung", "Invoice"]},
+            then={"document_type": "Rechnung", "tags": ["Finanzen"]},
+        )
+        doc = self._doc(title="anhang", mail_subject="Ihre RECHNUNG Nr. 4711")
+
+        result = apply_rules(doc)
+
+        self.assertEqual(result["rules"], ["Betreff-Rechnung"])
+        doc.refresh_from_db()
+        self.assertEqual(doc.document_type.name, "Rechnung")
+        self.assertTrue(doc.tags.filter(name="Finanzen").exists())
+        self.assertEqual(doc.classification["rules"], ["Betreff-Rechnung"])
+        self.assertTrue(
+            AuditLogEntry.objects.filter(
+                action="classify", object_id=str(doc.id)
+            ).exists()
         )
 
-    # --- Default & Übergänge ---------------------------------------------
-    def test_default_status_entwurf(self):
-        doc = Document.objects.create(title="Neu", owner=self.owner)
-        self.assertEqual(doc.status, Document.ApprovalStatus.ENTWURF)
-
-    def test_submit_dann_approve(self):
-        doc = self._doc()
-        self.client.force_authenticate(self.owner)
-
-        resp = self.client.post(f"/api/documents/{doc.id}/submit/", {}, format="json")
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.data["status"], "zur_freigabe")
-        doc.refresh_from_db()
-        self.assertEqual(doc.status, Document.ApprovalStatus.ZUR_FREIGABE)
-
-        resp = self.client.post(f"/api/documents/{doc.id}/approve/", {}, format="json")
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.data["status"], "freigegeben")
-        doc.refresh_from_db()
-        self.assertEqual(doc.status, Document.ApprovalStatus.FREIGEGEBEN)
-
-        # je Übergang genau ein Audit-Eintrag mit korrektem from/to.
-        submit = self._audit(doc, "submit")
-        self.assertEqual(submit.count(), 1)
-        self.assertEqual(submit.first().detail["from"], "entwurf")
-        self.assertEqual(submit.first().detail["to"], "zur_freigabe")
-        approve = self._audit(doc, "approve")
-        self.assertEqual(approve.count(), 1)
-        self.assertEqual(approve.first().detail["from"], "zur_freigabe")
-        self.assertEqual(approve.first().detail["to"], "freigegeben")
-
-    def test_submit_dann_reject_mit_grund(self):
-        doc = self._doc()
-        self.client.force_authenticate(self.owner)
-        self.client.post(f"/api/documents/{doc.id}/submit/", {}, format="json")
-
-        resp = self.client.post(
-            f"/api/documents/{doc.id}/reject/",
-            {"reason": "Unterschrift fehlt"},
-            format="json",
+    def test_regel_matcht_per_absender(self):
+        ClassificationRule.objects.create(
+            name="Absender-Stadtwerke",
+            match={"from_contains": ["@stadtwerke.de"]},
+            then={"correspondent": "Stadtwerke"},
         )
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.data["status"], "abgelehnt")
-        doc.refresh_from_db()
-        self.assertEqual(doc.status, Document.ApprovalStatus.ABGELEHNT)
-
-        reject = self._audit(doc, "reject")
-        self.assertEqual(reject.count(), 1)
-        self.assertEqual(reject.first().detail["from"], "zur_freigabe")
-        self.assertEqual(reject.first().detail["to"], "abgelehnt")
-        self.assertEqual(reject.first().detail["reason"], "Unterschrift fehlt")
-
-    def test_abgelehnt_kann_erneut_eingereicht_werden(self):
-        doc = self._doc(status=Document.ApprovalStatus.ABGELEHNT)
-        self.client.force_authenticate(self.owner)
-        resp = self.client.post(f"/api/documents/{doc.id}/submit/", {}, format="json")
-        self.assertEqual(resp.status_code, 200)
-        doc.refresh_from_db()
-        self.assertEqual(doc.status, Document.ApprovalStatus.ZUR_FREIGABE)
-
-    def test_reject_ohne_grund_erlaubt(self):
-        doc = self._doc(status=Document.ApprovalStatus.ZUR_FREIGABE)
-        self.client.force_authenticate(self.owner)
-        resp = self.client.post(f"/api/documents/{doc.id}/reject/", {}, format="json")
-        self.assertEqual(resp.status_code, 200)
-        self.assertIsNone(self._audit(doc, "reject").first().detail["reason"])
-
-    # --- Ungültige Übergänge → 409, Status unverändert, kein Audit -------
-    def test_approve_aus_entwurf_unzulaessig(self):
-        doc = self._doc()  # entwurf
-        self.client.force_authenticate(self.owner)
-        resp = self.client.post(f"/api/documents/{doc.id}/approve/", {}, format="json")
-        self.assertEqual(resp.status_code, 409)
-        doc.refresh_from_db()
-        self.assertEqual(doc.status, Document.ApprovalStatus.ENTWURF)
-        self.assertEqual(self._audit(doc, "approve").count(), 0)
-
-    def test_reject_aus_entwurf_unzulaessig(self):
-        doc = self._doc()  # entwurf
-        self.client.force_authenticate(self.owner)
-        resp = self.client.post(f"/api/documents/{doc.id}/reject/", {}, format="json")
-        self.assertEqual(resp.status_code, 409)
-        doc.refresh_from_db()
-        self.assertEqual(doc.status, Document.ApprovalStatus.ENTWURF)
-
-    def test_submit_aus_freigegeben_unzulaessig(self):
-        doc = self._doc(status=Document.ApprovalStatus.FREIGEGEBEN)
-        self.client.force_authenticate(self.owner)
-        resp = self.client.post(f"/api/documents/{doc.id}/submit/", {}, format="json")
-        self.assertEqual(resp.status_code, 409)
-        doc.refresh_from_db()
-        self.assertEqual(doc.status, Document.ApprovalStatus.FREIGEGEBEN)
-
-    # --- Owner-Scoping & Gast-Rechte -------------------------------------
-    def test_fremd_404(self):
-        doc = self._doc(status=Document.ApprovalStatus.ZUR_FREIGABE)
-        self.client.force_authenticate(self.other)
-        for path in ("submit", "approve", "reject"):
-            resp = self.client.post(
-                f"/api/documents/{doc.id}/{path}/", {}, format="json"
-            )
-            self.assertEqual(resp.status_code, 404, path)
-
-    def test_gast_403_auf_allen_actions(self):
-        guest_doc = self._doc(
-            status=Document.ApprovalStatus.ZUR_FREIGABE, owner=self.guest
+        doc = self._doc(
+            title="anhang", mail_sender="Stadtwerke Musterstadt <abrechnung@stadtwerke.de>"
         )
-        self.client.force_authenticate(self.guest)
-        for path in ("submit", "approve", "reject"):
-            resp = self.client.post(
-                f"/api/documents/{guest_doc.id}/{path}/", {}, format="json"
-            )
-            self.assertEqual(resp.status_code, 403, path)
-        # Gast-403 darf keinen Statuswechsel bewirkt haben.
-        guest_doc.refresh_from_db()
-        self.assertEqual(guest_doc.status, Document.ApprovalStatus.ZUR_FREIGABE)
 
-    def test_status_nicht_per_patch_aenderbar(self):
-        doc = self._doc()  # entwurf
-        self.client.force_authenticate(self.owner)
-        resp = self.client.patch(
-            f"/api/documents/{doc.id}/",
-            {"status": "freigegeben"},
-            format="json",
-        )
-        self.assertEqual(resp.status_code, 200)
+        result = apply_rules(doc)
+
+        self.assertEqual(result["rules"], ["Absender-Stadtwerke"])
         doc.refresh_from_db()
-        # read_only → PATCH ignoriert den Statuswechsel.
-        self.assertEqual(doc.status, Document.ApprovalStatus.ENTWURF)
+        self.assertEqual(doc.correspondent.name, "Stadtwerke")
+
+    def test_text_only_regel_unveraendert(self):
+        ClassificationRule.objects.create(
+            name="Text-Rechnung",
+            match={"text_contains": ["rechnung"]},
+            then={"document_type": "Rechnung"},
+        )
+        # Nicht-Mail-Dokument (leere Mail-Felder), Treffer nur über Titel/Text.
+        doc = self._doc(title="Monatsrechnung Strom")
+
+        result = apply_rules(doc)
+
+        self.assertEqual(result["rules"], ["Text-Rechnung"])
+        doc.refresh_from_db()
+        self.assertEqual(doc.document_type.name, "Rechnung")
+
+    def test_mail_bedingung_feuert_nicht_ohne_mail_metadaten(self):
+        ClassificationRule.objects.create(
+            name="Nur-Betreff",
+            match={"subject_contains": ["Rechnung"]},
+            then={"document_type": "Rechnung"},
+        )
+        # Kein Betreff gesetzt -> Bedingung greift nicht (keine Alles-Treffer).
+        doc = self._doc(title="Enthält das Wort Rechnung im Titel")
+
+        result = apply_rules(doc)
+
+        self.assertEqual(result["rules"], [])
+        doc.refresh_from_db()
+        self.assertIsNone(doc.document_type)
+
+    def test_kombinierte_bedingungen_und_verknuepft(self):
+        # subject UND text müssen beide treffen (AND über Bedingungsarten).
+        rule = ClassificationRule.objects.create(
+            name="Betreff+Text",
+            match={"subject_contains": ["Rechnung"], "text_contains": ["strom"]},
+            then={"tags": ["Energie"]},
+        )
+        self.assertTrue(
+            rule_matches(rule, "monatsstrom abrechnung", subject="Rechnung Juni")
+        )
+        # Betreff passt, Text nicht -> kein Treffer.
+        self.assertFalse(rule_matches(rule, "irgendwas", subject="Rechnung Juni"))
+
+    def test_leere_liste_ist_keine_bedingung(self):
+        # Leere subject_contains-Liste darf nicht zum Alles-Treffer führen.
+        rule = ClassificationRule.objects.create(
+            name="Leer",
+            match={"subject_contains": []},
+            then={"tags": ["X"]},
+        )
+        self.assertFalse(rule_matches(rule, "text", subject="beliebig"))

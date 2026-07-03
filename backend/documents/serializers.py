@@ -61,6 +61,7 @@ class DocumentVersionSerializer(serializers.ModelSerializer):
             "size",
             "page_count",
             "is_immutable",
+            "retention_until",
             "created_by",
             "created_by_name",
             "has_archive",

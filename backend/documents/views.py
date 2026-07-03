@@ -450,6 +450,36 @@ class DocumentViewSet(viewsets.ModelViewSet):
         Audit-Einträge referenzieren die ID als String (keine FK) und überleben
         die Löschung des Dokuments – das Protokoll bleibt append-only lückenlos.
         """
+        from django.core.exceptions import ValidationError as DjValidationError
+        from rest_framework.exceptions import PermissionDenied
+
+        # WORM: Dokument mit unveränderlichen Versionen darf nicht gelöscht werden.
+        if instance.versions.filter(is_immutable=True).exists():
+            AuditLogEntry.objects.create(
+                actor=self.request.user,
+                action="immutable_block",
+                object_type="Document",
+                object_id=str(instance.id),
+                detail={"title": instance.title, "reason": "unveränderliche Version vorhanden"},
+            )
+            raise PermissionDenied(
+                "Dokument enthält unveränderliche Versionen und kann nicht gelöscht werden."
+            )
+
+        # Aufbewahrungsfrist: retention_until am Dokument prüfen.
+        today = timezone.now().date()
+        if instance.retention_until and today < instance.retention_until:
+            AuditLogEntry.objects.create(
+                actor=self.request.user,
+                action="retention_block",
+                object_type="Document",
+                object_id=str(instance.id),
+                detail={"title": instance.title, "retention_until": str(instance.retention_until)},
+            )
+            raise PermissionDenied(
+                f"Aufbewahrungsfrist bis {instance.retention_until} aktiv – Löschen gesperrt."
+            )
+
         AuditLogEntry.objects.create(
             actor=self.request.user,
             action="delete",
