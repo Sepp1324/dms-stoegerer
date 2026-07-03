@@ -19,6 +19,36 @@ reproduzierbar (kein `latest`).
 
 ---
 
+## Test-Gate (PR & Deploy)
+
+Damit QA für Backend-PRs ein **echtes dynamisches Grün-Signal** hat, läuft die
+Django-Testsuite in der CI – im gebauten Backend-Image gegen eine wegwerfbare
+**Postgres 16** (SQLite scheidet aus, weil das Backend `django.contrib.postgres`
+für die Volltextsuche nutzt).
+
+Workflow: [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)
+Runner-Skript: [`backend/ci/run-tests.sh`](../backend/ci/run-tests.sh)
+
+```
+Pull Request  ─▶  ci.yml (Runner "dms")
+                    1. docker build backend  (flüchtiger CI-Tag)
+                    2. Wegwerf-Postgres starten
+                    3. python manage.py makemigrations --check --dry-run
+                    4. python manage.py test
+```
+
+- **PR-Gate:** `ci.yml` läuft auf `pull_request`. Ein roter Test blockt – via
+  **Branch-Protection** (Pflicht-Check `backend-tests` auf `main`) – den Merge
+  und damit den Deploy.
+- **Deploy-Gate:** `deploy.yml` führt dasselbe Skript vor dem `docker push`
+  aus. So blockt ein roter Test auch bei direktem Push nach `main` den Rollout.
+
+> Branch-Protection einrichten (einmalig, GitHub → Settings → Branches):
+> Regel für `main`, „Require status checks to pass“ → Check **`backend-tests`**
+> auswählen. Erst danach blockt ein roter Test den Merge zuverlässig.
+
+---
+
 ## 1. Voraussetzungen auf dem Runner-Host (k3s-01)
 
 Der Runner nutzt das, was auf dem Node schon da ist:

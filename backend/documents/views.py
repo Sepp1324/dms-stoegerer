@@ -1,6 +1,7 @@
 import os
 from datetime import date as date_cls
 from datetime import datetime, time
+from datetime import timezone as dt_timezone
 
 from django.conf import settings
 from django.db import connection
@@ -79,12 +80,15 @@ def _get_or_create_ci(model, name, **extra):
 
 
 def _parse_iso_date(raw):
-    """Parst ein striktes ISO-Datum (``YYYY-MM-DD``) zu tz-awarem 00:00 Uhr.
+    """Parst ein striktes ISO-Datum (``YYYY-MM-DD``) zu tz-awarem 00:00 Uhr UTC.
 
     Gibt ``None`` bei Nicht-Strings, Leerwerten oder ungültigem Format zurück –
-    der Aufrufer ignoriert solche Werte still (kein Fehler). Das Ergebnis ist an
-    ``settings.TIME_ZONE`` ausgerichtet, da ``Document.created_at`` ein DateTime
-    ist.
+    der Aufrufer ignoriert solche Werte still (kein Fehler). Das Belegdatum ist
+    ein reines Kalenderdatum; wir verankern es bewusst auf **UTC-Mitternacht**
+    (nicht lokale Mitternacht), damit ``created_at.date()`` unabhängig von der
+    Lese-Zeitzone das eingegebene Datum ergibt. Lokale Mitternacht (Europe/Berlin)
+    würde in der DB als Vortag-22:00 UTC landen und beim Zurücklesen um einen Tag
+    kippen.
     """
     if not isinstance(raw, str):
         return None
@@ -97,7 +101,7 @@ def _parse_iso_date(raw):
         return None
     dt = datetime.combine(parsed, time.min)
     if settings.USE_TZ:
-        dt = timezone.make_aware(dt)
+        dt = dt.replace(tzinfo=dt_timezone.utc)
     return dt
 
 

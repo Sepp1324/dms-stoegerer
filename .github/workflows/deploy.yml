@@ -40,6 +40,11 @@ jobs:
       - name: Django-Check (im frischen Backend-Image)
         run: docker run --rm "$REGISTRY/dms-backend:$TAG" python manage.py check
 
+      - name: Testsuite + Migrations-Check (Deploy-Gate)
+        # Zweites Sicherheitsnetz neben dem PR-Gate (ci.yml): fängt auch direkte
+        # Pushes nach main ab. Roter Test → kein Push, kein Rollout.
+        run: backend/ci/run-tests.sh "$REGISTRY/dms-backend:$TAG"
+
       - name: Images pushen
         run: |
           set -euo pipefail
