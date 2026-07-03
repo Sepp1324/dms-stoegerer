@@ -3,19 +3,36 @@
 Beim **Merge nach `main`** baut ein **self-hosted GitHub-Actions-Runner** im
 Heimnetz die Images, pusht sie in die Registry und rollt sie im k3s-Cluster aus.
 
-Workflow: [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml)
+Workflows:
+- [`.github/workflows/pr-check.yml`](../.github/workflows/pr-check.yml) – **PR-Gate** (bei `pull_request`)
+- [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml) – **Deploy** (bei Push nach `main`)
 
 ```
+PR öffnen → PR-Check  ─▶  GitHub Actions (Runner auf k3s-01, Label "dms")
+                           1. Backend-Image bauen (Git-SHA-Tag)
+                           2. Django-Check (Systemkonfiguration)
+                           3. makemigrations --check (fehlende Migrations)
+                           4. Multi-Leaf-Detection (Migrations-Kollision)
+                           ✅ Grün → Merge freigegeben
+                           ❌ Rot → Merge blockiert
+
 PR mergen → main  ─▶  GitHub Actions (Runner auf k3s-01, Label "dms")
                         1. Django-Check im frischen Image
-                        2. docker build backend + frontend  (Tag = Git-SHA)
-                        3. docker push → registry.stoegerer-home.at
-                        4. Manifeste rendern, Image-Tags → Git-SHA, kubectl apply
-                        5. rollout status abwarten
+                        2. Multi-Leaf-Detection (fail-fast vor Push)
+                        3. docker build backend + frontend  (Tag = Git-SHA)
+                        4. docker push → registry.stoegerer-home.at
+                        5. Manifeste rendern, Image-Tags → Git-SHA, kubectl apply
+                        6. rollout status abwarten
 ```
 
 Der Image-Tag ist der **kurze Git-SHA** – jeder Deploy ist damit eindeutig und
 reproduzierbar (kein `latest`).
+
+**PR-Gate-Absicherung:** Der `pr-check`-Workflow verhindert, dass parallele
+Feature-Branches mit je eigener Migration gleicher Nummer (z. B. `0007`-Kollision,
+Multi-Leaf-Nodes) gemergt werden. Django's `migrate --plan` erkennt solche
+Kollisionen; der Workflow schlägt fehl und blockiert den Merge. Lösung: Einen
+Branch rebasen und die Migration neu nummerieren lassen.
 
 ---
 
@@ -91,9 +108,12 @@ Danach erscheint der Runner in GitHub unter *Settings → Actions → Runners* a
 
 1. Einen **PR** gegen `main` erstellen und nach Review mergen — kein Direkt-Push
    auf `main` (verbindlicher Standard: CONTRIBUTING.md). Push-Credential: docs/secrets.md.
-2. Der Merge löst den Workflow aus – live verfolgbar unter dem **Actions**-Tab
-   des Repos.
-3. Nach erfolgreichem Lauf laufen die neuen Images im Cluster; der Schritt
+2. Der **PR-Check-Workflow** läuft automatisch und prüft:
+   - Django-Systemkonfiguration (`manage.py check`)
+   - Fehlende Migrations (`makemigrations --check`)
+   - **Migrations-Kollisionen** (Multi-Leaf-Nodes durch parallele PRs)
+3. Nach grünem PR-Check: Merge → der **Deploy-Workflow** läuft auf `main`.
+4. Nach erfolgreichem Deploy laufen die neuen Images im Cluster; der Schritt
    *Zusammenfassung* zeigt `kubectl get pods`.
 
 **Manueller Trigger / erneuter Lauf:** im Actions-Tab den letzten Lauf öffnen →
@@ -101,6 +121,24 @@ Danach erscheint der Runner in GitHub unter *Settings → Actions → Runners* a
 
 **Rollback:** `git revert <commit>` und mergen → die Pipeline deployt den
 vorherigen Stand. (Alternativ einen älteren Lauf erneut ausführen.)
+
+### Branch Protection (empfohlen)
+
+Um sicherzustellen, dass der PR-Check vor jedem Merge läuft und Migrations-Kollisionen
+blockiert werden, sollte **Branch Protection** für `main` aktiviert werden:
+
+**GitHub → Repo Settings → Branches → Add branch protection rule:**
+
+- **Branch name pattern:** `main`
+- **☑ Require status checks to pass before merging**
+  - **☑ Require branches to be up to date before merging**
+  - **Status checks that are required:** `migration-check` (der Job-Name aus `pr-check.yml`)
+- **☑ Require a pull request before merging** (verhindert Direct-Push)
+
+**Hinweis für Owner:** Die Branch-Protection-Aktivierung erfordert Admin-Rechte
+und muss vom Repository-Owner durchgeführt werden. Der PR-Check-Workflow ist
+bereits implementiert und läuft bei jedem PR; Branch Protection macht ihn zu
+einer harten Anforderung für den Merge.
 
 ---
 

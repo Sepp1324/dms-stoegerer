@@ -40,6 +40,17 @@ jobs:
       - name: Django-Check (im frischen Backend-Image)
         run: docker run --rm "$REGISTRY/dms-backend:$TAG" python manage.py check
 
+      - name: Multi-Leaf-Detection (fail-fast vor Push)
+        run: |
+          set -euo pipefail
+          PLAN=$(docker run --rm "$REGISTRY/dms-backend:$TAG" python manage.py migrate --plan)
+          echo "$PLAN"
+          if echo "$PLAN" | grep -qi "multiple leaf"; then
+            echo "❌ FEHLER: Migration-Kollision auf main – Deploy abgebrochen!"
+            exit 1
+          fi
+          echo "✅ Keine Multi-Leaf-Kollision."
+
       - name: Images pushen
         run: |
           set -euo pipefail

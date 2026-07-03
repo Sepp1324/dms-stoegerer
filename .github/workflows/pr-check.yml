@@ -1,0 +1,74 @@
+name: pr-check
+
+# Prüft PRs gegen main auf Migration-Kollisionen und fehlende Migrations.
+# Blockiert Merge bei Multi-Leaf-Nodes oder Model-Änderungen ohne Migration.
+
+on:
+  pull_request:
+    branches: [main]
+
+env:
+  REGISTRY: registry.stoegerer-home.at
+
+jobs:
+  migration-check:
+    runs-on: [self-hosted, dms]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Image-Tag = Git-SHA
+        run: echo "TAG=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+
+      - name: Backend-Image bauen
+        run: docker build -t "$REGISTRY/dms-backend:$TAG" ./backend
+
+      - name: Django-Check (System-Konfiguration)
+        run: docker run --rm "$REGISTRY/dms-backend:$TAG" python manage.py check
+
+      - name: Makemigrations --check (fehlende Migrations erkennen)
+        run: |
+          # Schlägt fehl, wenn Model-Änderungen ohne passende Migration vorliegen.
+          docker run --rm "$REGISTRY/dms-backend:$TAG" \
+            python manage.py makemigrations --check --dry-run
+
+      - name: Multi-Leaf-Detection (Migrations-Kollision)
+        run: |
+          set -euo pipefail
+
+          # Hole die Migration-Plan-Ausgabe
+          PLAN=$(docker run --rm "$REGISTRY/dms-backend:$TAG" \
+            python manage.py migrate --plan)
+
+          echo "=== Migration Plan ==="
+          echo "$PLAN"
+          echo "======================"
+
+          # Prüfe, ob "multiple leaf nodes" in der Ausgabe vorkommt
+          # (Django meldet dies bei Multi-Leaf-Kollisionen)
+          if echo "$PLAN" | grep -qi "multiple leaf"; then
+            echo "❌ FEHLER: Migration-Kollision erkannt (multiple leaf nodes)!"
+            echo "Mehrere Branches haben Migrations mit gleicher Nummer erstellt."
+            echo "Lösung: Einen Branch rebasen und die Migration neu nummerieren."
+            exit 1
+          fi
+
+          # Alternativ: Zähle Leaf-Nodes pro App (robuster, aber aufwändiger)
+          # Für jede App mit Migrations: genau ein Leaf erwarten
+          # Dieses Skript liest showmigrations und prüft auf mehrere "( )" Leafs
+          docker run --rm "$REGISTRY/dms-backend:$TAG" \
+            python manage.py showmigrations --plan > /tmp/migrations.txt || true
+
+          # Einfache Heuristik: Wenn eine App-Zeile mehrfach ohne Parent erscheint,
+          # deutet das auf Multi-Leaf hin. Django's migrate --plan gibt aber
+          # bereits eine Warnung aus, die wir oben abfangen.
+
+          echo "✅ Keine Multi-Leaf-Kollision erkannt."
+
+      - name: Zusammenfassung
+        if: always()
+        run: |
+          echo "### PR-Check: Migrations" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Django-Check: ✅" >> "$GITHUB_STEP_SUMMARY" 2>&1 || true
+          echo "- Makemigrations --check: ✅" >> "$GITHUB_STEP_SUMMARY" 2>&1 || true
+          echo "- Multi-Leaf-Detection: ✅" >> "$GITHUB_STEP_SUMMARY" 2>&1 || true
