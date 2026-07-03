@@ -79,17 +79,24 @@ def fetch_mail_account(account_id: int) -> dict:
     """Ruft ein einzelnes IMAP-Konto ab und speist Anhänge in die Pipeline.
 
     Fehler einzelner Mails brechen den Abruf nicht ab (siehe ``mail.fetch_account``).
+
+    Ein Advisory-Lock pro Konto verhindert, dass sich überlappende Beat-Läufe
+    (bzw. mehrere Worker) denselben Postfachabruf doppelt starten.
     """
     from . import mail
     from .models import MailAccount
 
-    try:
-        account = MailAccount.objects.get(pk=account_id)
-    except MailAccount.DoesNotExist:
-        return {"status": "missing", "account_id": account_id}
-    if not account.enabled:
-        return {"status": "disabled", "account_id": account_id}
-    return mail.fetch_account(account)
+    with mail.account_fetch_lock(account_id) as acquired:
+        if not acquired:
+            # Ein Abruf für dieses Konto läuft bereits – diesen Lauf überspringen.
+            return {"status": "locked", "account_id": account_id}
+        try:
+            account = MailAccount.objects.get(pk=account_id)
+        except MailAccount.DoesNotExist:
+            return {"status": "missing", "account_id": account_id}
+        if not account.enabled:
+            return {"status": "disabled", "account_id": account_id}
+        return mail.fetch_account(account)
 
 
 def _unique(path: Path) -> Path:

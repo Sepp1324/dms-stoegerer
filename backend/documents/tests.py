@@ -4,6 +4,8 @@ Belegt, dass ein Nutzer ausschließlich eigene Dokumente sieht und jeder
 Cross-User-Zugriff (Liste, Detail, Download, Update, Delete, Audit) mit
 404 abgewiesen wird – auf Objekt-Ebene, nicht nur in der UI.
 """
+from contextlib import contextmanager
+
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 from rest_framework.test import APITestCase
@@ -16,6 +18,7 @@ from .models import (
     Document,
     DocumentType,
     DocumentVersion,
+    MailAccount,
     StoragePath,
     Tag,
 )
@@ -584,3 +587,88 @@ class MailClassificationRuleTests(TestCase):
             then={"tags": ["X"]},
         )
         self.assertFalse(rule_matches(rule, "text", subject="beliebig"))
+
+
+class MailAccountAdminFormTests(TestCase):
+    """STOAA-33 Punkt 1: Klartext-Passwort im Admin maskiert (write-only)."""
+
+    def _acc(self, password="geheim"):
+        return MailAccount.objects.create(
+            name="Rechnungen", host="imap.example.org", username="u", password=password
+        )
+
+    def _data(self, **over):
+        data = {
+            "name": "Rechnungen",
+            "host": "imap.example.org",
+            "port": 993,
+            "use_ssl": True,
+            "username": "u",
+            "folder": "INBOX",
+            "password_env": "",
+            "password": "",
+        }
+        data.update(over)
+        return data
+
+    def test_leeres_passwort_behaelt_bestehendes(self):
+        from .admin import MailAccountAdminForm
+
+        acc = self._acc(password="geheim")
+        form = MailAccountAdminForm(data=self._data(password=""), instance=acc)
+        self.assertTrue(form.is_valid(), form.errors)
+        obj = form.save()
+        self.assertEqual(obj.password, "geheim")
+
+    def test_neues_passwort_ersetzt(self):
+        from .admin import MailAccountAdminForm
+
+        acc = self._acc(password="alt")
+        form = MailAccountAdminForm(data=self._data(password="neu"), instance=acc)
+        self.assertTrue(form.is_valid(), form.errors)
+        obj = form.save()
+        self.assertEqual(obj.password, "neu")
+
+    def test_gespeichertes_passwort_nicht_im_html(self):
+        from .admin import MailAccountAdminForm
+
+        acc = self._acc(password="geheim")
+        form = MailAccountAdminForm(instance=acc)
+        # render_value=False → der gespeicherte Wert darf nicht zurückgerendert werden.
+        self.assertNotIn("geheim", str(form["password"]))
+
+
+class MailFetchLockTests(TestCase):
+    """STOAA-33 Punkt 3: Overlap-Lock überspringt einen laufenden Konto-Abruf."""
+
+    def test_belegter_lock_ueberspringt_abruf(self):
+        from unittest import mock
+
+        from . import mail, tasks
+
+        @contextmanager
+        def _busy(_account_id):
+            yield False
+
+        with mock.patch.object(mail, "account_fetch_lock", _busy):
+            result = tasks.fetch_mail_account(123)
+        self.assertEqual(result["status"], "locked")
+
+    def test_freier_lock_ruft_ab(self):
+        from unittest import mock
+
+        from . import mail, tasks
+
+        @contextmanager
+        def _free(_account_id):
+            yield True
+
+        acc = MailAccount.objects.create(
+            name="R", host="h", username="u", enabled=True
+        )
+        with mock.patch.object(mail, "account_fetch_lock", _free), mock.patch.object(
+            mail, "fetch_account", return_value={"status": "ok", "account_id": acc.id}
+        ) as fetched:
+            result = tasks.fetch_mail_account(acc.id)
+        self.assertEqual(result["status"], "ok")
+        fetched.assert_called_once()

@@ -15,6 +15,7 @@ Idempotenz: Bereits verarbeitete Mails werden über die Message-ID (``ProcessedM
 """
 from __future__ import annotations
 
+import contextlib
 import email as email_mod
 import hashlib
 import imaplib
@@ -23,9 +24,39 @@ from email.header import decode_header, make_header
 from email.message import Message
 from email.utils import parseaddr
 
+from django.db import connection
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
+
+# Namespace für Postgres-Advisory-Locks dieses Features ("MAIL"), damit sich
+# der Abruf-Lock nicht mit Advisory-Locks anderer Stellen überschneidet.
+_FETCH_LOCK_NAMESPACE = 0x4D41494C
+
+
+@contextlib.contextmanager
+def account_fetch_lock(account_id: int):
+    """Nicht-blockierender Abruf-Lock pro Konto gegen überlappende Beat-Läufe.
+
+    Nutzt ``pg_try_advisory_lock`` (kehrt sofort zurück): Läuft für dasselbe Konto
+    bereits ein Abruf, liefert der Kontextmanager ``False`` und der Aufrufer
+    überspringt den Lauf. Der Lock ist verbindungsgebunden und wird im ``finally``
+    – spätestens beim Verbindungsabbruch (Worker-Crash) – wieder freigegeben.
+    """
+    with connection.cursor() as cur:
+        cur.execute(
+            "SELECT pg_try_advisory_lock(%s, %s)", [_FETCH_LOCK_NAMESPACE, account_id]
+        )
+        acquired = bool(cur.fetchone()[0])
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            with connection.cursor() as cur:
+                cur.execute(
+                    "SELECT pg_advisory_unlock(%s, %s)",
+                    [_FETCH_LOCK_NAMESPACE, account_id],
+                )
 
 # Anhänge, die in die Pipeline gegeben werden (Rechnungen, Scans …).
 ALLOWED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".gif", ".webp"}
