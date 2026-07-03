@@ -63,6 +63,35 @@ def scan_consume_folder() -> dict:
     return {"found": len(ingested), "ingested": ingested}
 
 
+@shared_task
+def fetch_all_mail_accounts() -> dict:
+    """Beat-Task: stößt für jedes aktive IMAP-Konto einen Abruf an (fan-out)."""
+    from .models import MailAccount
+
+    ids = list(MailAccount.objects.filter(enabled=True).values_list("id", flat=True))
+    for account_id in ids:
+        fetch_mail_account.delay(account_id)
+    return {"dispatched": len(ids)}
+
+
+@shared_task
+def fetch_mail_account(account_id: int) -> dict:
+    """Ruft ein einzelnes IMAP-Konto ab und speist Anhänge in die Pipeline.
+
+    Fehler einzelner Mails brechen den Abruf nicht ab (siehe ``mail.fetch_account``).
+    """
+    from . import mail
+    from .models import MailAccount
+
+    try:
+        account = MailAccount.objects.get(pk=account_id)
+    except MailAccount.DoesNotExist:
+        return {"status": "missing", "account_id": account_id}
+    if not account.enabled:
+        return {"status": "disabled", "account_id": account_id}
+    return mail.fetch_account(account)
+
+
 def _unique(path: Path) -> Path:
     counter = 1
     candidate = path

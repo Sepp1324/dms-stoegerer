@@ -146,6 +146,19 @@ CELERY_RESULT_BACKEND = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 CELERY_TASK_TRACK_STARTED = True
 CELERY_TIMEZONE = TIME_ZONE
 
+# Periodische Aufgaben (benötigt einen laufenden ``celery beat``-Prozess, siehe
+# deploy/k8s/beat.yaml). Intervalle in Sekunden, per Env übersteuerbar.
+CELERY_BEAT_SCHEDULE = {
+    "fetch-mail-accounts": {
+        "task": "documents.tasks.fetch_all_mail_accounts",
+        "schedule": float(os.getenv("MAIL_FETCH_INTERVAL", "300")),
+    },
+    "scan-consume-folder": {
+        "task": "documents.tasks.scan_consume_folder",
+        "schedule": float(os.getenv("CONSUME_SCAN_INTERVAL", "120")),
+    },
+}
+
 # --- AI-Anbindung ---
 AI_PROVIDER = os.getenv("AI_PROVIDER", "anthropic")
 # Default: leistungsfähigstes Modell. Für Massen-Klassifizierung ist

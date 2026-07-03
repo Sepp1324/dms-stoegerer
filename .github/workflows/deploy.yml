@@ -59,6 +59,7 @@ jobs:
           set -euo pipefail
           kubectl -n dms rollout status deploy/backend  --timeout=240s
           kubectl -n dms rollout status deploy/worker   --timeout=240s
+          kubectl -n dms rollout status deploy/beat     --timeout=180s
           kubectl -n dms rollout status deploy/frontend --timeout=180s
 
       - name: Zusammenfassung
