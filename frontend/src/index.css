@@ -1134,3 +1134,63 @@ select:focus-visible {
 .audit-changes__to {
   color: var(--ok);
 }
+
+/* --- Freigabe-Workflow (STOAA-65): Statusanzeige + Aktions-Buttons --- */
+.freigabe {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin: 0.2rem 0 1.1rem;
+}
+.freigabe__head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.freigabe__label {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.freigabe-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: var(--radius-pill);
+  padding: 0.15rem 0.7rem;
+  font-size: 0.78rem;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.freigabe-badge--zur_freigabe {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+.freigabe-badge--freigegeben {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+.freigabe-badge--abgelehnt {
+  color: var(--error);
+  border-color: var(--error);
+}
+.freigabe__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+.freigabe__reject-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+/* Ablehnen als rot umrandete Sekundär-Aktion (statt gefülltem Akzent). */
+button.freigabe__reject {
+  background: transparent;
+  color: var(--error);
+  border: 1px solid var(--error);
+}
+button.freigabe__reject:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.12);
+}
