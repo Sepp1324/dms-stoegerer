@@ -437,6 +437,19 @@ select:focus {
   margin: 0 0 0.5rem;
   font-size: 0.85rem;
 }
+/* --- Seiten-Navigation --- */
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  margin-top: 1.5rem;
+}
+.pagination__status {
+  font-size: 0.9rem;
+  min-width: 8rem;
+  text-align: center;
+}
 /* --- Dokument-Karten (Grid) --- */
 .doc-grid {
   display: grid;
