@@ -43,6 +43,231 @@ h1 {
   padding: 1.5rem;
 }
 
+/* --- App-Layout mit persistenter Sidebar (STOAA-6) --- */
+.layout {
+  display: flex;
+  min-height: 100vh;
+}
+.sidebar {
+  width: 240px;
+  flex-shrink: 0;
+  background: #0b1220;
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 1.25rem 0.9rem;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+}
+.sidebar__brand {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 0.4rem;
+}
+.sidebar__logo {
+  font-size: 1.4rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.sidebar__close {
+  display: none;
+}
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  flex: 1;
+}
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  color: var(--muted);
+  padding: 0.6rem 0.7rem;
+  border-radius: 8px;
+  font-size: 0.95rem;
+  transition: background 0.15s, color 0.15s;
+}
+.nav-item:hover {
+  background: rgba(148, 163, 184, 0.08);
+  color: var(--text);
+}
+.nav-item--active {
+  background: rgba(59, 130, 246, 0.14);
+  color: var(--text);
+  font-weight: 600;
+}
+.nav-item--active svg {
+  color: var(--accent);
+}
+.sidebar__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  border-top: 1px solid var(--border);
+  padding-top: 0.9rem;
+}
+.sidebar__user {
+  font-size: 0.85rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.content-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 1rem;
+  padding: 1rem 1.75rem;
+  background: rgba(15, 23, 42, 0.85);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--border);
+}
+.content-title {
+  margin: 0;
+  font-size: 1.35rem;
+}
+.topbar-search {
+  margin-left: auto;
+  width: min(420px, 45vw);
+}
+.nav-toggle {
+  display: none;
+  background: transparent;
+  color: var(--muted);
+  padding: 0.3rem;
+}
+.nav-toggle:hover {
+  color: var(--text);
+  background: transparent;
+}
+.content-body {
+  width: 100%;
+  max-width: 1200px;
+  padding: 1.5rem 1.75rem 2.5rem;
+}
+.nav-backdrop {
+  display: none;
+}
+
+/* Skeleton-Ladezustand */
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    rgba(148, 163, 184, 0.08) 25%,
+    rgba(148, 163, 184, 0.18) 37%,
+    rgba(148, 163, 184, 0.08) 63%
+  );
+  background-size: 400% 100%;
+  animation: skeleton-shimmer 1.4s ease infinite;
+  border-radius: 6px;
+}
+@keyframes skeleton-shimmer {
+  0% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0 50%;
+  }
+}
+.doc-card--skeleton {
+  cursor: default;
+  pointer-events: none;
+}
+.doc-card--skeleton:hover {
+  border-color: var(--border);
+  transform: none;
+}
+.skeleton-line {
+  height: 0.8rem;
+  margin-top: 0.35rem;
+}
+.skeleton-line--short {
+  width: 60%;
+}
+
+/* Einheitliche Leer-/Fehler-Zustände */
+.state-block {
+  text-align: center;
+  padding: 3rem 1.5rem;
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  color: var(--muted);
+}
+.state-block--error {
+  border-color: rgba(239, 68, 68, 0.4);
+}
+.state-block__title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text);
+}
+.state-block__detail {
+  margin: 0.4rem 0 0;
+  font-size: 0.9rem;
+}
+.state-block__action {
+  margin-top: 1rem;
+}
+
+/* Sidebar als Overlay auf schmalen Screens */
+@media (max-width: 860px) {
+  .sidebar {
+    position: fixed;
+    left: 0;
+    top: 0;
+    z-index: 20;
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+    box-shadow: 0 0 40px rgba(0, 0, 0, 0.5);
+  }
+  .sidebar--open {
+    transform: translateX(0);
+  }
+  .sidebar__close {
+    display: inline-flex;
+  }
+  .nav-toggle {
+    display: inline-flex;
+  }
+  .nav-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 15;
+    background: rgba(0, 0, 0, 0.5);
+  }
+  .content-topbar {
+    padding: 0.9rem 1rem;
+  }
+  .content-body {
+    padding: 1.25rem 1rem 2rem;
+  }
+  .topbar-search {
+    margin-left: 0;
+    width: 100%;
+    flex-basis: 100%;
+  }
+}
+
 .card {
   background: var(--card);
   border-radius: 12px;
@@ -448,6 +673,9 @@ select:focus {
   padding: 0.1rem 0.6rem;
   margin: 0 0.3rem 0.3rem 0;
   font-size: 0.75rem;
+  font-weight: 500;
+  line-height: 1.5;
+  background: rgba(148, 163, 184, 0.08);
 }
 .detail-preview {
   padding: 0.5rem;
