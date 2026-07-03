@@ -173,6 +173,10 @@ class Document(models.Model):
     ai_suggestions = models.JSONField(default=dict, blank=True)
     ai_suggested_at = models.DateTimeField(null=True, blank=True)
 
+    # Nachvollziehbarkeit der regelbasierten Klassifizierung (erklärbar):
+    # {"rules": ["Rechnungen"], "applied": {"document_type": "Rechnung", "tags": ["Finanzen"]}}
+    classification = models.JSONField(default=dict, blank=True)
+
     class Meta:
         verbose_name = "Dokument"
         verbose_name_plural = "Dokumente"

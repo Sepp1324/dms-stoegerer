@@ -1,6 +1,7 @@
 from rest_framework import serializers
 
 from .models import (
+    ClassificationRule,
     Correspondent,
     Document,
     DocumentType,
@@ -36,6 +37,12 @@ class StoragePathSerializer(serializers.ModelSerializer):
             # Beim Inline-Anlegen genügt ein Name; Template hat einen Default.
             "path_template": {"required": False},
         }
+
+
+class ClassificationRuleSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ClassificationRule
+        fields = ("id", "name", "priority", "enabled", "match", "then")
 
 
 class DocumentVersionSerializer(serializers.ModelSerializer):
@@ -99,6 +106,7 @@ class DocumentSerializer(serializers.ModelSerializer):
             "page_count",
             "ai_suggestions",
             "ai_suggested_at",
+            "classification",
             "versions",
         )
         read_only_fields = (
@@ -106,4 +114,5 @@ class DocumentSerializer(serializers.ModelSerializer):
             "current_version",
             "ai_suggestions",
             "ai_suggested_at",
+            "classification",
         )

@@ -357,6 +357,53 @@ select:focus {
   background: #fff;
 }
 
+/* --- Klassifizierung --- */
+.class-note {
+  margin: 0.4rem 0 0.8rem;
+  font-size: 0.8rem;
+  color: #86efac;
+}
+.rule-form {
+  margin-bottom: 1.25rem;
+}
+.rule-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 0.75rem;
+}
+.rule-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.rule-section {
+  margin: 1rem 0 0.4rem;
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+.rule-item {
+  margin-bottom: 0.75rem;
+  padding: 0.85rem 1rem;
+}
+.rule-item__head {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.4rem;
+}
+.rule-item__name {
+  font-weight: 600;
+}
+.rule-item__head .link {
+  margin-left: auto;
+}
+.rule-item__body {
+  font-size: 0.85rem;
+  line-height: 1.6;
+}
+
 /* --- KI-Vorschläge --- */
 .ai-panel {
   border: 1px solid rgba(139, 92, 246, 0.4);

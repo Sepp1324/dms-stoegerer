@@ -108,7 +108,30 @@ export interface DocumentDetail extends DocumentItem {
   current_version: number | null;
   ai_suggestions: AiSuggestions;
   ai_suggested_at: string | null;
+  classification: Classification;
   versions: DocumentVersion[];
+}
+export interface Classification {
+  rules?: string[];
+  applied?: {
+    document_type?: string;
+    correspondent?: string;
+    storage_path?: string;
+    tags?: string[];
+  };
+}
+export interface ClassificationRule {
+  id: number;
+  name: string;
+  priority: number;
+  enabled: boolean;
+  match: { text_contains?: string[]; text_regex?: string };
+  then: {
+    document_type?: string;
+    correspondent?: string;
+    storage_path?: string;
+    tags?: string[];
+  };
 }
 export interface Paginated<T> {
   count: number;
@@ -261,6 +284,20 @@ export async function getTags(): Promise<NamedRef[]> {
 }
 export async function getStoragePaths(): Promise<NamedRef[]> {
   return listAll<NamedRef>("/storage-paths/");
+}
+
+// --- Klassifizierungsregeln ---
+export async function getRules(): Promise<ClassificationRule[]> {
+  return listAll<ClassificationRule>("/classification-rules/");
+}
+export function createRule(
+  rule: Omit<ClassificationRule, "id">,
+): Promise<ClassificationRule> {
+  return postJson<ClassificationRule>("/classification-rules/", rule);
+}
+export async function deleteRule(id: number): Promise<void> {
+  const res = await apiFetch(`/classification-rules/${id}/`, { method: "DELETE" });
+  if (!res.ok && res.status !== 204) throw new Error(`Löschen fehlgeschlagen: HTTP ${res.status}`);
 }
 
 // --- Stammdaten inline anlegen ---

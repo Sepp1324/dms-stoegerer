@@ -16,6 +16,11 @@ def process_document_version(version_id: int) -> dict:
     version = DocumentVersion.objects.select_related("document").get(pk=version_id)
     result = pipeline.process_version(version)
 
+    # Regelbasierte Klassifizierung (deterministisch, direkt anwendend) vor der KI.
+    from . import classification
+
+    classification.apply_rules(version.document)
+
     # KI-Vorschläge nach dem OCR (eigener Task, damit OCR nicht daran hängt).
     from ai.tasks import suggest_document_metadata
 
