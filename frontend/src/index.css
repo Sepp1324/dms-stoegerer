@@ -943,10 +943,10 @@ select:focus-visible {
 }
 .ai-suggestions li {
   display: grid;
-  grid-template-columns: 90px 1fr auto auto;
-  align-items: center;
-  gap: 0.6rem;
-  padding: 0.35rem 0;
+  grid-template-columns: 90px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 0.25rem 0.6rem;
+  padding: 0.5rem 0;
   border-top: 1px solid rgba(148, 163, 184, 0.12);
   font-size: 0.85rem;
 }
@@ -954,7 +954,15 @@ select:focus-visible {
   color: var(--muted);
 }
 .ai-suggestions__value {
-  word-break: break-word;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.ai-suggestions__actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.4rem 0.75rem;
 }
 /* Verwerfen: dezenter als Übernehmen, damit die Primäraktion führt. */
 .ai-suggestions__dismiss {

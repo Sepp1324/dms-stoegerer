@@ -361,66 +361,28 @@ export default function DocumentDetail({
                       <span>
                         <i aria-hidden="true">✦</i> KI-Vorschläge
                       </span>
-                      <div className="ai-panel__actions">
-                        <button
-                          className="link"
-                          onClick={regenerate}
-                          disabled={regenerating || applying}
-                        >
-                          {regenerating ? "Generiere …" : "Neu generieren"}
-                        </button>
-                        {suggestionRows.length > 0 && (
-                          <button onClick={() => apply()} disabled={applying || regenerating}>
-                            {applying ? "…" : "Alle übernehmen"}
-                          </button>
-                        )}
-                      </div>
+                      <button onClick={() => apply()} disabled={applying}>
+                        {applying ? "…" : "Alle übernehmen"}
+                      </button>
                     </div>
-                    {s.summary && (
-                      <div className="ai-panel__summary-row">
-                        <p className="ai-panel__summary">{s.summary}</p>
-                        <button
-                          className="link ai-suggestions__dismiss"
-                          onClick={() => dismiss("summary")}
-                          disabled={applying || regenerating}
-                          title="Zusammenfassung verwerfen"
-                        >
-                          Verwerfen
-                        </button>
-                      </div>
-                    )}
-                    {suggestionRows.length > 0 ? (
-                      <ul className="ai-suggestions">
-                        {suggestionRows.map((row) => (
-                          <li key={row.key}>
-                            <span className="ai-suggestions__label">{row.label}</span>
-                            <span className="ai-suggestions__value">{row.value}</span>
+                    {s.summary && <p className="ai-panel__summary">{s.summary}</p>}
+                    <ul className="ai-suggestions">
+                      {suggestionRows.map((row) => (
+                        <li key={row.key}>
+                          <span className="ai-suggestions__label">{row.label}</span>
+                          <span className="ai-suggestions__value">{row.value}</span>
+                          <div className="ai-suggestions__actions">
                             <button
                               className="link"
                               onClick={() => apply([row.key])}
-                              disabled={applying || regenerating}
+                              disabled={applying}
                             >
                               Übernehmen
                             </button>
-                            <button
-                              className="link ai-suggestions__dismiss"
-                              onClick={() => dismiss(row.key)}
-                              disabled={applying || regenerating}
-                              title={`${row.label} verwerfen`}
-                            >
-                              Verwerfen
-                            </button>
-                          </li>
-                        ))}
-                      </ul>
-                    ) : (
-                      !s.summary && (
-                        <p className="muted ai-panel__empty">
-                          Keine KI-Vorschläge vorhanden.
-                        </p>
-                      )
-                    )}
-                    {regenNote && <p className="status status--warn">{regenNote}</p>}
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
                     {applyError && <p className="status status--error">{applyError}</p>}
                   </div>
                 )}
