@@ -20,6 +20,11 @@ import UploadZone from "./UploadZone";
 import DocumentDetail from "./DocumentDetail";
 import RulesPage from "./RulesPage";
 
+// Muss dem Backend entsprechen (DRF PageNumberPagination, config/settings.py:
+// REST_FRAMEWORK["PAGE_SIZE"] = 25). Nur für die Anzeige „Seite X von N" nötig;
+// die Rand-Buttons werden zusätzlich über next/previous der Antwort abgesichert.
+const PAGE_SIZE = 25;
+
 export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   const [q, setQ] = useState("");
   const [correspondent, setCorrespondent] = useState<number | "">("");
@@ -33,6 +38,13 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
 
   const [docs, setDocs] = useState<DocumentItem[]>([]);
   const [count, setCount] = useState(0);
+  // Aktuelle Seite (1-basiert, wie das DRF-`page`-Query). Jede Filter-/Such-
+  // änderung setzt zurück auf 1 (siehe onSearchChange & Co.).
+  const [page, setPage] = useState(1);
+  // Ob es eine nächste/vorige Seite gibt – direkt aus der API-Antwort, damit die
+  // Rand-Buttons auch ohne PAGE_SIZE-Annahme korrekt deaktiviert werden.
+  const [hasNext, setHasNext] = useState(false);
+  const [hasPrev, setHasPrev] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -105,29 +117,52 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
       correspondent,
       document_type: documentType,
       tag,
+      page,
     })
-      .then((page) => {
+      .then((res) => {
         if (!active) return;
-        setDocs(page.results);
-        setCount(page.count);
+        setDocs(res.results);
+        setCount(res.count);
+        setHasNext(res.next !== null);
+        setHasPrev(res.previous !== null);
       })
       .catch((err) => active && setError(err instanceof Error ? err.message : String(err)))
       .finally(() => active && setLoading(false));
     return () => {
       active = false;
     };
-  }, [debouncedQ, correspondent, documentType, tag, reloadKey]);
+  }, [debouncedQ, correspondent, documentType, tag, page, reloadKey]);
 
   const hasFilters = useMemo(
     () => !!(debouncedQ || correspondent || documentType || tag),
     [debouncedQ, correspondent, documentType, tag],
   );
 
+  // Jede Filter-/Suchänderung springt zurück auf Seite 1 – sonst zeigt eine
+  // hohe Seitenzahl nach dem Einschränken u. U. „keine Treffer".
+  function onSearchChange(v: string) {
+    setQ(v);
+    setPage(1);
+  }
+  function onCorrespondentChange(v: number | "") {
+    setCorrespondent(v);
+    setPage(1);
+  }
+  function onDocumentTypeChange(v: number | "") {
+    setDocumentType(v);
+    setPage(1);
+  }
+  function onTagChange(v: number | "") {
+    setTag(v);
+    setPage(1);
+  }
+
   function resetFilters() {
     setQ("");
     setCorrespondent("");
     setDocumentType("");
     setTag("");
+    setPage(1);
   }
 
   function handleLogout() {
@@ -191,7 +226,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
               className="search topbar-search"
               placeholder="Volltextsuche (Titel & Inhalt) …"
               value={q}
-              onChange={(e) => setQ(e.target.value)}
+              onChange={(e) => onSearchChange(e.target.value)}
             />
           )}
         </header>
@@ -202,7 +237,13 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
           ) : (
             <>
               {me?.can_write && (
-                <UploadZone onUploaded={() => setReloadKey((k) => k + 1)} />
+                <UploadZone
+                  onUploaded={() => {
+                    // Neue Dokumente stehen (ordering "-added_at") auf Seite 1.
+                    setPage(1);
+                    setReloadKey((k) => k + 1);
+                  }}
+                />
               )}
 
               <section className="filters card">
@@ -210,16 +251,16 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
                   <Select
                     label="Korrespondent"
                     value={correspondent}
-                    onChange={setCorrespondent}
+                    onChange={onCorrespondentChange}
                     options={correspondents}
                   />
                   <Select
                     label="Typ"
                     value={documentType}
-                    onChange={setDocumentType}
+                    onChange={onDocumentTypeChange}
                     options={documentTypes}
                   />
-                  <Select label="Tag" value={tag} onChange={setTag} options={tags} />
+                  <Select label="Tag" value={tag} onChange={onTagChange} options={tags} />
                   {hasFilters && (
                     <button className="link" onClick={resetFilters}>
                       Zurücksetzen
@@ -276,6 +317,14 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
                         />
                       ))}
                     </div>
+                    <Pagination
+                      page={page}
+                      totalPages={Math.max(1, Math.ceil(count / PAGE_SIZE))}
+                      hasPrev={hasPrev}
+                      hasNext={hasNext}
+                      onPrev={() => setPage((p) => Math.max(1, p - 1))}
+                      onNext={() => setPage((p) => p + 1)}
+                    />
                   </>
                 )}
               </section>
@@ -411,6 +460,40 @@ function StateBlock({
       {detail && <p className="state-block__detail">{detail}</p>}
       {action && <div className="state-block__action">{action}</div>}
     </div>
+  );
+}
+
+// Seiten-Navigation für die Dokumentliste. Wird nur gerendert, wenn es mehr als
+// eine Seite gibt. Die Rand-Buttons sind über die tatsächlichen next/previous der
+// API deaktiviert; die Beschriftung „Seite X von N" nutzt count + PAGE_SIZE.
+function Pagination({
+  page,
+  totalPages,
+  hasPrev,
+  hasNext,
+  onPrev,
+  onNext,
+}: {
+  page: number;
+  totalPages: number;
+  hasPrev: boolean;
+  hasNext: boolean;
+  onPrev: () => void;
+  onNext: () => void;
+}) {
+  if (totalPages <= 1) return null;
+  return (
+    <nav className="pagination" aria-label="Seiten-Navigation">
+      <button className="pagination__btn" onClick={onPrev} disabled={!hasPrev}>
+        ← Zurück
+      </button>
+      <span className="pagination__status muted" aria-live="polite">
+        Seite {page} von {totalPages}
+      </span>
+      <button className="pagination__btn" onClick={onNext} disabled={!hasNext}>
+        Weiter →
+      </button>
+    </nav>
   );
 }
 
