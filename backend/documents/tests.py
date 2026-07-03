@@ -15,6 +15,8 @@ from .models import (
     AuditLogEntry,
     ClassificationRule,
     Correspondent,
+    CustomField,
+    CustomFieldValue,
     Document,
     DocumentType,
     DocumentVersion,
@@ -833,3 +835,255 @@ class ApprovalWorkflowTests(APITestCase):
         doc.refresh_from_db()
         # read_only → PATCH ignoriert den Statuswechsel.
         self.assertEqual(doc.status, Document.ApprovalStatus.ENTWURF)
+
+
+class CustomFieldTests(APITestCase):
+    """Zusatzfeld-Definitionen: CRUD, DELETE-Sperre, Typ-Einfrieren (STOAA-109)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(
+            username="cf_user", password="pw", role="user"
+        )
+        cls.guest = User.objects.create_user(
+            username="cf_guest", password="pw", role="guest"
+        )
+        cls.betrag = CustomField.objects.create(
+            name="Rechnungsbetrag", data_type=CustomField.DataType.CURRENCY
+        )
+
+    def test_list_und_get(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.get("/api/custom-fields/")
+        self.assertEqual(resp.status_code, 200)
+        names = [f["name"] for f in resp.json()]
+        self.assertIn("Rechnungsbetrag", names)
+        # Kontrakt: genau id/name/data_type.
+        self.assertEqual(
+            set(resp.json()[0].keys()), {"id", "name", "data_type"}
+        )
+
+    def test_create(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.post(
+            "/api/custom-fields/",
+            {"name": "Vertragsnummer", "data_type": "text"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertTrue(CustomField.objects.filter(name="Vertragsnummer").exists())
+
+    def test_guest_darf_nicht_anlegen(self):
+        self.client.force_authenticate(self.guest)
+        resp = self.client.post(
+            "/api/custom-fields/",
+            {"name": "X", "data_type": "text"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_data_type_beim_update_read_only(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.patch(
+            f"/api/custom-fields/{self.betrag.id}/",
+            {"name": "Betrag", "data_type": "text"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.betrag.refresh_from_db()
+        self.assertEqual(self.betrag.name, "Betrag")  # Name änderbar
+        # Typwechsel ignoriert (read_only) – bleibt currency.
+        self.assertEqual(self.betrag.data_type, CustomField.DataType.CURRENCY)
+
+    def test_delete_ohne_werte_erlaubt(self):
+        field = CustomField.objects.create(name="Temp", data_type="text")
+        self.client.force_authenticate(self.user)
+        resp = self.client.delete(f"/api/custom-fields/{field.id}/")
+        self.assertEqual(resp.status_code, 204)
+        self.assertFalse(CustomField.objects.filter(id=field.id).exists())
+
+    def test_delete_mit_werten_geblockt(self):
+        doc = Document.objects.create(title="Rg", owner=self.user)
+        CustomFieldValue.objects.create(document=doc, field=self.betrag, value="42")
+        self.client.force_authenticate(self.user)
+        resp = self.client.delete(f"/api/custom-fields/{self.betrag.id}/")
+        self.assertEqual(resp.status_code, 409)
+        self.assertIn("detail", resp.json())
+        # Feld bleibt erhalten.
+        self.assertTrue(CustomField.objects.filter(id=self.betrag.id).exists())
+
+
+class CustomFieldValueOnDocumentTests(APITestCase):
+    """Zusatzfeld-Werte im Document-GET/PATCH: Nested + Upsert (STOAA-109)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(
+            username="cfv_user", password="pw", role="user"
+        )
+        cls.betrag = CustomField.objects.create(
+            name="Rechnungsbetrag", data_type=CustomField.DataType.CURRENCY
+        )
+        cls.nummer = CustomField.objects.create(
+            name="Vertragsnummer", data_type=CustomField.DataType.TEXT
+        )
+        cls.doc = Document.objects.create(title="Rechnung", owner=cls.user)
+
+    def test_get_zeigt_nested_werte_mit_typinfo(self):
+        CustomFieldValue.objects.create(
+            document=self.doc, field=self.betrag, value="199.90"
+        )
+        self.client.force_authenticate(self.user)
+        resp = self.client.get(f"/api/documents/{self.doc.id}/")
+        self.assertEqual(resp.status_code, 200)
+        cfv = resp.json()["custom_field_values"]
+        self.assertEqual(len(cfv), 1)
+        self.assertEqual(cfv[0]["field"], self.betrag.id)
+        self.assertEqual(cfv[0]["value"], "199.90")
+        # Read-only Zusatzangaben für FE-Formatierung ohne Zweit-Request.
+        self.assertEqual(cfv[0]["field_name"], "Rechnungsbetrag")
+        self.assertEqual(cfv[0]["data_type"], "currency")
+
+    def test_patch_legt_wert_an(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.patch(
+            f"/api/documents/{self.doc.id}/",
+            {"custom_field_values": [{"field": self.betrag.id, "value": "50"}]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(
+            CustomFieldValue.objects.get(document=self.doc, field=self.betrag).value,
+            "50",
+        )
+
+    def test_patch_upsert_aktualisiert_bestehenden_wert(self):
+        CustomFieldValue.objects.create(
+            document=self.doc, field=self.betrag, value="10"
+        )
+        self.client.force_authenticate(self.user)
+        resp = self.client.patch(
+            f"/api/documents/{self.doc.id}/",
+            {"custom_field_values": [{"field": self.betrag.id, "value": "99"}]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        # Kein Duplikat (unique_together), Wert aktualisiert.
+        self.assertEqual(
+            CustomFieldValue.objects.filter(
+                document=self.doc, field=self.betrag
+            ).count(),
+            1,
+        )
+        self.assertEqual(
+            CustomFieldValue.objects.get(document=self.doc, field=self.betrag).value,
+            "99",
+        )
+
+    def test_patch_laesst_nicht_genannte_werte_unberuehrt(self):
+        CustomFieldValue.objects.create(
+            document=self.doc, field=self.nummer, value="V-123"
+        )
+        self.client.force_authenticate(self.user)
+        resp = self.client.patch(
+            f"/api/documents/{self.doc.id}/",
+            {"custom_field_values": [{"field": self.betrag.id, "value": "5"}]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        # Upsert (kein Replace): der Vertragsnummer-Wert bleibt bestehen.
+        self.assertEqual(
+            CustomFieldValue.objects.get(document=self.doc, field=self.nummer).value,
+            "V-123",
+        )
+
+    def test_patch_ohne_key_laesst_werte_unveraendert(self):
+        CustomFieldValue.objects.create(
+            document=self.doc, field=self.betrag, value="7"
+        )
+        self.client.force_authenticate(self.user)
+        resp = self.client.patch(
+            f"/api/documents/{self.doc.id}/",
+            {"title": "Neuer Titel"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(
+            CustomFieldValue.objects.get(document=self.doc, field=self.betrag).value,
+            "7",
+        )
+
+
+class CustomFieldFilterTests(APITestCase):
+    """Bereichsfilter custom_field_<id>_gte/_lte auf Zusatzfeld-Werten (§7.3)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(
+            username="cff_user", password="pw", role="user"
+        )
+        cls.betrag = CustomField.objects.create(
+            name="Rechnungsbetrag", data_type=CustomField.DataType.CURRENCY
+        )
+        # Drei Dokumente mit numerischen Beträgen + eines mit nicht-numerischem Wert.
+        cls.d10 = cls._doc_with_value("D10", "10")
+        cls.d100 = cls._doc_with_value("D100", "100.50")
+        cls.d500 = cls._doc_with_value("D500", "500")
+        cls.d_text = cls._doc_with_value("Dtext", "keine Angabe")
+
+    @classmethod
+    def _doc_with_value(cls, title, value):
+        doc = Document.objects.create(title=title, owner=cls.user)
+        CustomFieldValue.objects.create(document=doc, field=cls.betrag, value=value)
+        return doc
+
+    def _titles(self, resp):
+        data = resp.json()
+        results = data["results"] if isinstance(data, dict) else data
+        return {d["title"] for d in results}
+
+    def test_gte_filter(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.get(
+            f"/api/documents/?custom_field_{self.betrag.id}_gte=100"
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._titles(resp), {"D100", "D500"})
+
+    def test_lte_filter(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.get(
+            f"/api/documents/?custom_field_{self.betrag.id}_lte=100"
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._titles(resp), {"D10"})
+
+    def test_gte_und_lte_kombiniert(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.get(
+            f"/api/documents/?custom_field_{self.betrag.id}_gte=10"
+            f"&custom_field_{self.betrag.id}_lte=100.50"
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._titles(resp), {"D10", "D100"})
+
+    def test_nicht_numerischer_wert_kein_500(self):
+        # Der "keine Angabe"-Wert darf keinen Cast-Fehler auslösen.
+        self.client.force_authenticate(self.user)
+        resp = self.client.get(
+            f"/api/documents/?custom_field_{self.betrag.id}_gte=0"
+        )
+        self.assertEqual(resp.status_code, 200)
+        # Nur numerische Werte matchen; der Textwert fällt heraus.
+        self.assertEqual(self._titles(resp), {"D10", "D100", "D500"})
+
+    def test_ungueltige_grenze_kein_500(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.get(
+            f"/api/documents/?custom_field_{self.betrag.id}_gte=abc"
+        )
+        # Ungültige Grenze wird ignoriert → alle eigenen Dokumente.
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(
+            self._titles(resp), {"D10", "D100", "D500", "Dtext"}
+        )
