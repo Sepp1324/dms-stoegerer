@@ -91,6 +91,8 @@ h1 {
   flex-direction: column;
   gap: 0.25rem;
   flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 .nav-item {
   display: flex;
@@ -130,6 +132,117 @@ h1 {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* --- Stammdaten-Filter in der Sidebar (paperless-artig, STOAA-50) --- */
+.nav-filters {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  margin-top: 0.5rem;
+  border-top: 1px solid var(--border);
+  padding-top: 0.5rem;
+  min-height: 0;
+}
+.nav-section {
+  display: flex;
+  flex-direction: column;
+}
+.nav-section__head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  width: 100%;
+  background: transparent;
+  color: var(--muted);
+  padding: 0.45rem 0.5rem;
+  border-radius: 8px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.nav-section__head:hover {
+  color: var(--text);
+  background: var(--hover-tint);
+}
+.nav-section__chevron {
+  flex-shrink: 0;
+  transition: transform 0.15s ease;
+  transform: rotate(0deg);
+}
+.nav-section__chevron--open {
+  transform: rotate(90deg);
+}
+.nav-section__title {
+  flex: 1;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nav-section__count {
+  flex-shrink: 0;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--muted);
+  background: var(--hover-tint);
+  border-radius: 999px;
+  padding: 0.05rem 0.45rem;
+}
+.nav-section__note {
+  flex-shrink: 0;
+  font-size: 0.62rem;
+  font-weight: 600;
+  color: var(--muted);
+  opacity: 0.8;
+}
+.nav-section__list {
+  list-style: none;
+  margin: 0.1rem 0 0.3rem;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.nav-filter {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  color: var(--muted);
+  padding: 0.4rem 0.55rem 0.4rem 1.4rem;
+  border-radius: 7px;
+  font-size: 0.88rem;
+  transition: background 0.15s, color 0.15s;
+}
+.nav-filter:hover:not(:disabled) {
+  background: var(--hover-tint);
+  color: var(--text);
+}
+.nav-filter--active {
+  background: var(--accent-tint);
+  color: var(--text);
+  font-weight: 600;
+}
+.nav-filter__dot {
+  flex-shrink: 0;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+}
+.nav-filter__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nav-section--disabled .nav-filter {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .content {
