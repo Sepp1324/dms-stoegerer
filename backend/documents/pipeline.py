@@ -17,10 +17,7 @@ from pathlib import Path
 
 from . import storage
 from .models import AuditLogEntry, Document, DocumentVersion
-<<<<<<< HEAD
-=======
 from documents.services.ocr.engine import run_ocr
->>>>>>> a7e415a (Reworked OCR)
 
 logger = logging.getLogger(__name__)
 

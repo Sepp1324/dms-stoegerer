@@ -8,10 +8,7 @@ from django.conf import settings
 
 from . import pipeline, storage
 from .models import DocumentVersion
-<<<<<<< HEAD
-=======
 from documents.pipeline import process_version
->>>>>>> a7e415a (Reworked OCR)
 
 logger = logging.getLogger(__name__)
 
