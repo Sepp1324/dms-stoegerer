@@ -555,7 +555,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
         }
 
     def perform_update(self, serializer):
-        """Speichert und protokolliert geänderte Metadatenfelder (vorher/nachher)."""
+        """Speichert, protokolliert Metadaten-Änderungen und feuert Workflow-Engine."""
         before = self._metadata_snapshot(serializer.instance)
         super().perform_update(serializer)
         document = serializer.instance
@@ -573,6 +573,9 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 object_id=str(document.id),
                 detail={"changes": changes},
             )
+        # Workflow-Engine: document_updated
+        from . import workflows
+        workflows.run_workflows(document, trigger_type="document_updated", source="api")
 
     def perform_destroy(self, instance):
         """Protokolliert die Löschung, bevor das Dokument entfernt wird.

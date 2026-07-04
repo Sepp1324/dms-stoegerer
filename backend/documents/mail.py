@@ -187,6 +187,7 @@ def ingest_message(account, raw_bytes: bytes) -> int | None:
             owner=account.owner,
             mime=ctype,
             size=len(payload),
+            ingest_source="mail",
         )
         # Hash sofort setzen, damit weitere identische Anhänge im selben Lauf
         # zuverlässig dedupliziert werden (die OCR-Pipeline berechnet ihn später

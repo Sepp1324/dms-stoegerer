@@ -50,6 +50,7 @@ def create_document_from_file(
     owner=None,
     mime: str = "",
     size: int | None = None,
+    ingest_source: str = "upload",
 ) -> tuple[Document, DocumentVersion]:
     """Legt Dokument + erste Version an und protokolliert die Aufnahme.
 
@@ -64,6 +65,7 @@ def create_document_from_file(
         mime_type=mime,
         size=size if size is not None else path.stat().st_size,
         created_by=owner,
+        ingest_source=ingest_source,
     )
     document.current_version = version
     document.save(update_fields=["current_version"])
@@ -317,15 +319,25 @@ def ocr_version(version: DocumentVersion) -> dict:
 
 
 def classify_version(version: DocumentVersion) -> dict:
-    """Regelbasierte Klassifizierung ausführen und State ``CLASSIFIED`` setzen."""
-    from . import classification
+    """Regelbasierte Klassifizierung + Workflow-Engine ausführen."""
+    from . import classification, workflows
 
-    version.refresh_from_db(fields=["processing_state"])
+    version.refresh_from_db(fields=["processing_state", "ingest_source"])
     version.transition_to(
         DocumentVersion.ProcessingState.CLASSIFICATION_RUNNING,
         actor=version.created_by,
     )
     result = classification.apply_rules(version.document)
+
+    # Workflow-Engine (STOAA-263): document_added nach apply_rules
+    source = version.ingest_source or "upload"
+    wf_result = workflows.run_workflows(
+        version.document,
+        trigger_type="document_added",
+        source=source,
+    )
+    result["workflows"] = wf_result.get("workflows", [])
+
     version.document.refresh_from_db(fields=["classification"])
     version.transition_to(
         DocumentVersion.ProcessingState.CLASSIFIED,
