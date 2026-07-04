@@ -48,13 +48,15 @@ def scan_consume_folder() -> dict:
     übrigen nicht ab und verschluckt die Datei nicht – sie wandert nach
     ``consume/_failed/`` und wird protokolliert.
 
-    Pro-User-Attribution (``settings.CONSUME_PER_USER``): Ist das Flag aktiv,
-    liegen die Scans in pro-User-Unterordnern (``CONSUME_DIR/<username>/``). Der
-    Ordnername wird auf einen Django-User aufgelöst; alle darin reifen Dateien
-    werden diesem als ``owner`` zugeordnet (``_processed/``/``_failed/`` liegen
-    pro User-Ordner). Ordner ohne passenden User werden komplett übersprungen
-    und protokolliert – niemals owner-los aufgenommen. Default (Flag off) ist
-    das unveränderte Flat-Verhalten.
+    Pro-User-Attribution (``settings.CONSUME_PER_USER``, STOAA-260, Default an):
+    Ist das Flag aktiv, wird je direktem Unterordner von ``CONSUME_DIR``
+    gescannt. Der Ordnername wird case-insensitiv auf einen Django-User
+    aufgelöst; alle darin reifen Dateien werden diesem als ``owner`` zugeordnet
+    (``_processed/``/``_failed/`` liegen pro User-Ordner). Ordner ohne passenden
+    User werden **trotzdem aufgenommen** – mit ``owner=None`` und einer Warnung
+    zur Admin-Triage (NICHT übersprungen). Dateien direkt in der Wurzel von
+    ``CONSUME_DIR`` bleiben rückwärtskompatibel ``owner=None``. Mit Flag ``off``
+    (Kill-Switch) gilt das reine Flat-Verhalten.
     """
     consume = storage.CONSUME_DIR
     if not consume.exists():
@@ -72,32 +74,38 @@ def scan_consume_folder() -> dict:
 
 
 def _scan_per_user(consume: Path, min_age: float, now: float) -> dict:
-    """Pro-User-Modus: iteriert die Top-Level-Unterordner von ``consume``.
+    """Pro-User-Modus (STOAA-260): Wurzel-Dateien + je Top-Level-Unterordner.
 
-    Ordnername = Username. Nur Ordner mit passendem Django-User werden
-    verarbeitet (case-insensitiv); alle Dateien darin erhalten diesen als
-    ``owner``. Ordner mit führendem ``_``/``.`` (z. B. ``_processed`` auf
-    Consume-Ebene) und unbekannte Benutzer werden übersprungen.
+    Dateien direkt in der Wurzel von ``consume`` werden rückwärtskompatibel mit
+    ``owner=None`` aufgenommen. Anschließend wird je direktem Unterordner
+    gescannt: Ordnername = Username (case-insensitiv aufgelöst); alle Dateien
+    darin erhalten diesen als ``owner``. Ordner ohne passenden User werden
+    **nicht übersprungen**, sondern mit ``owner=None`` aufgenommen und
+    protokolliert (Admin-Triage). Verwaltungs-/Dot-Ordner (führendes ``_``/``.``,
+    z. B. ``_processed`` auf Consume-Ebene) werden übersprungen.
     """
     user_model = get_user_model()
 
-    ingested = []
-    skipped = 0
-    failed = 0
+    # Wurzel-Dateien: rückwärtskompatibel ohne Owner (STOAA-260 Punkt 5).
+    root = _ingest_consume_dir(consume, None, min_age, now)
+    ingested = list(root["ingested"])
+    skipped = root["skipped"]
+    failed = root["failed"]
+
     for entry in sorted(consume.iterdir()):
         if not entry.is_dir() or entry.name.startswith(("_", ".")):
             continue
 
         user = user_model.objects.filter(username__iexact=entry.name).first()
         if user is None:
-            # Keine stille Fehl-Attribution: unbekannter Ordner wird komplett
-            # übersprungen (nicht als owner=None aufgenommen) und protokolliert.
+            # STOAA-260: unbekannter Ordner wird NICHT übersprungen, sondern mit
+            # owner=None aufgenommen (Admin triagiert das Dokument) + Warnung.
             logger.warning(
-                "scan_consume_folder: Unbekannter Benutzer-Ordner %r übersprungen "
-                "– kein passender Django-User, keine owner-lose Aufnahme.",
+                "scan_consume_folder: Unterordner %r passt zu keinem Django-User "
+                "(username__iexact) – Dateien werden mit owner=None aufgenommen "
+                "(Admin-Triage).",
                 entry.name,
             )
-            continue
 
         result = _ingest_consume_dir(entry, user, min_age, now)
         ingested.extend(result["ingested"])
@@ -156,7 +164,13 @@ def _ingest_consume_dir(base: Path, owner, min_age: float, now: float) -> dict:
             )
             process_document_version.delay(version.id)
             entry.rename(processed_dir / entry.name)
-            ingested.append({"document_id": document.id, "title": title})
+            ingested.append(
+                {
+                    "document_id": document.id,
+                    "title": title,
+                    "owner": owner.username if owner is not None else None,
+                }
+            )
         except Exception:
             # Eine fehlerhafte Datei darf weder den Scan abbrechen noch
             # verschluckt werden: nach ``_failed/`` verschieben + loggen.

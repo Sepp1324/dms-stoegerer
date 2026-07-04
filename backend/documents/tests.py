@@ -1279,6 +1279,10 @@ class ConsumePerUserScanTests(TestCase):
         self.assertEqual(Document.objects.count(), 1)
         doc = Document.objects.get()
         self.assertEqual(doc.owner, self.sebastian)
+        # Attribution setzt via Pipeline auch created_by der Version.
+        self.assertEqual(doc.current_version.created_by, self.sebastian)
+        # ingested-Eintrag trägt den owner-Username (STOAA-260, optional).
+        self.assertEqual(result["ingested"][0]["owner"], "sebastian")
         # _processed/ liegt IM User-Ordner, nicht auf Consume-Ebene.
         self.assertTrue((self.consume / "sebastian" / "_processed" / "reif.pdf").exists())
         self.assertFalse((self.consume / "_processed" / "reif.pdf").exists())
@@ -1293,22 +1297,46 @@ class ConsumePerUserScanTests(TestCase):
         self.assertEqual(result["found"], 1)
         self.assertEqual(Document.objects.get().owner, self.sebastian)
 
-    def test_unbekannter_ordner_wird_uebersprungen_und_geloggt(self):
-        """(b) Ordner ohne passenden User -> nicht aufgenommen + WARN-Log."""
+    def test_unbekannter_ordner_wird_owner_none_aufgenommen_und_geloggt(self):
+        """(b) STOAA-260: Ordner ohne passenden User -> owner=None-Aufnahme +
+        WARN-Log (NICHT übersprungen, NICHT nach _failed/)."""
         self._write("unbekannt", "reif.pdf", age_seconds=3600)
 
         with self.settings(CONSUME_PER_USER=True, CONSUME_MIN_AGE=15):
             with self.assertLogs("documents.tasks", level="WARNING") as cm:
                 result, delay = self._run_scan()
 
-        self.assertEqual(result["found"], 0)
+        self.assertEqual(result["found"], 1)
         self.assertEqual(result["failed"], 0)
-        self.assertEqual(Document.objects.count(), 0)
-        # Datei bleibt liegen (keine stille owner=None-Aufnahme).
-        self.assertTrue((self.consume / "unbekannt" / "reif.pdf").exists())
-        self.assertFalse((self.consume / "unbekannt" / "_processed" / "reif.pdf").exists())
-        delay.assert_not_called()
+        self.assertEqual(Document.objects.count(), 1)
+        doc = Document.objects.get()
+        self.assertIsNone(doc.owner)
+        # Aufgenommen und im _processed/ IM Unterordner, nicht verschluckt.
+        self.assertTrue(
+            (self.consume / "unbekannt" / "_processed" / "reif.pdf").exists()
+        )
+        delay.assert_called_once()
         self.assertTrue(any("unbekannt" in line for line in cm.output))
+
+    def test_wurzel_datei_bleibt_owner_none_im_per_user_modus(self):
+        """(f) STOAA-260 Punkt 5: Datei direkt in consume/ -> owner=None
+        (rückwärtskompatibel, auch mit aktiver Attribution)."""
+        import os
+        import time
+
+        flat = self.consume / "wurzel.pdf"
+        flat.write_bytes(b"%PDF-1.4 dummy")
+        mtime = time.time() - 3600
+        os.utime(flat, (mtime, mtime))
+
+        with self.settings(CONSUME_PER_USER=True, CONSUME_MIN_AGE=15):
+            result, delay = self._run_scan()
+
+        self.assertEqual(result["found"], 1)
+        doc = Document.objects.get()
+        self.assertIsNone(doc.owner)
+        self.assertTrue((self.consume / "_processed" / "wurzel.pdf").exists())
+        delay.assert_called_once()
 
     def test_zu_junge_datei_im_user_ordner_wird_uebersprungen(self):
         """(c) Datei jünger als CONSUME_MIN_AGE -> übersprungen, nicht verschoben."""
