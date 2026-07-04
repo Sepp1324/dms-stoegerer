@@ -227,6 +227,25 @@ export interface Me {
   can_write: boolean;
 }
 
+// --- Freigabelinks (Share-Links, STOAA-190/192) ---
+// Verwaltungs-Sicht eines Freigabelinks. Enthält bewusst KEINEN Klartext-Token
+// (der kommt einmalig nur aus der Create-Response, siehe ShareLinkCreated).
+// ``is_valid`` liefert das Backend read-only (nicht widerrufen UND nicht abgelaufen).
+export interface ShareLink {
+  id: number;
+  document: number;
+  created_at: string;
+  expires_at: string;
+  revoked_at: string | null;
+  is_valid: boolean;
+}
+
+// Antwort der Create-API: wie ShareLink, aber mit dem Klartext-Token, der nur
+// EINMALIG zurückkommt und danach nie wieder abrufbar ist.
+export interface ShareLinkCreated extends ShareLink {
+  token: string;
+}
+
 // --- Endpunkte ---
 export interface DocumentQuery {
   q?: string;
@@ -591,6 +610,39 @@ export function createRule(
 export async function deleteRule(id: number): Promise<void> {
   const res = await apiFetch(`/classification-rules/${id}/`, { method: "DELETE" });
   if (!res.ok && res.status !== 204) throw new Error(`Löschen fehlgeschlagen: HTTP ${res.status}`);
+}
+
+// --- Freigabelinks (STOAA-192) ---
+// Erstellt einen Freigabelink mit Pflicht-Ablauf. ``expires_at`` als ISO-8601
+// (UTC). Die Response enthält den Klartext-Token EINMALIG (Feld ``token``).
+export function createShareLink(
+  document: number,
+  expires_at: string,
+): Promise<ShareLinkCreated> {
+  return postJson<ShareLinkCreated>("/document-share-links/", {
+    document,
+    expires_at,
+  });
+}
+// Listet die Freigabelinks eines Dokuments (owner-gescoped im Backend).
+export async function getShareLinks(document: number): Promise<ShareLink[]> {
+  return listAll<ShareLink>(`/document-share-links/?document=${document}`);
+}
+// Widerruft einen Link (Soft-Delete): setzt ``revoked_at``. Backend liefert den
+// aktualisierten Datensatz (is_valid=false) zurück.
+export async function revokeShareLink(id: number): Promise<ShareLink> {
+  const res = await apiFetch(`/document-share-links/${id}/`, { method: "DELETE" });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const data = await res.json();
+      detail = data.detail || JSON.stringify(data);
+    } catch {
+      /* keine JSON-Fehlermeldung */
+    }
+    throw new Error(detail);
+  }
+  return res.json();
 }
 
 // --- Stammdaten inline anlegen ---
