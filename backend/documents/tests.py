@@ -1691,172 +1691,125 @@ class MailAccountApiTests(APITestCase):
         self.assertEqual(resp.status_code, 403)
 
 
-class BulkActionTests(APITestCase):
-    """Massenaktionen POST /api/documents/bulk/ (P3/STOAA-206).
+class BulkClassifyEndpointTests(APITestCase):
+    """Bulk-Klassifizierung POST /api/documents/bulk-classify/ (STOAA-208).
 
-    Deckt ab: Bulk-Tag/Typ/Korrespondent/Rules über eigene Dokumente,
-    Owner-Isolation (fremde IDs → skipped, kein Leak/Fehler), can_write-Gate,
-    Validierung (leere ids / unbekannte Operation / unbekannte Stammdaten-IDs)
-    und Audit-Protokollierung.
+    Belegt: synchrone Verarbeitung kleiner Batches mit updated/unchanged/errors,
+    Celery-Dispatch großer Batches, can_write-Gate, Owner-Isolation (fremde IDs
+    als Teilfehler, kein Leak) und Eingabevalidierung.
     """
+
+    URL = "/api/documents/bulk-classify/"
 
     @classmethod
     def setUpTestData(cls):
-        cls.owner = User.objects.create_user(
-            username="owner", password="pw", role="user"
-        )
-        cls.other = User.objects.create_user(
-            username="other", password="pw", role="user"
-        )
-        cls.guest = User.objects.create_user(
-            username="guest", password="pw", role="guest"
-        )
-        cls.d1 = Document.objects.create(title="Eins", owner=cls.owner)
-        cls.d2 = Document.objects.create(title="Zwei", owner=cls.owner)
-        cls.fremd = Document.objects.create(title="Fremd", owner=cls.other)
-        cls.tag_a = Tag.objects.create(name="Finanzen")
-        cls.tag_b = Tag.objects.create(name="Wichtig")
-        cls.typ = DocumentType.objects.create(name="Rechnung")
-        cls.korr = Correspondent.objects.create(name="Stadtwerke")
-
-    def _post(self, payload):
-        return self.client.post("/api/documents/bulk/", payload, format="json")
-
-    # --- add/remove tags --------------------------------------------------
-    def test_add_tags_ueber_mehrere_eigene_dokumente(self):
-        self.client.force_authenticate(self.owner)
-        resp = self._post(
-            {"ids": [self.d1.id, self.d2.id], "operation": "add_tags",
-             "value": [self.tag_a.id, self.tag_b.id]}
-        )
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.data["updated"], 2)
-        self.assertEqual(resp.data["skipped"], [])
-        self.assertSetEqual(set(self.d1.tags.values_list("id", flat=True)),
-                            {self.tag_a.id, self.tag_b.id})
-        self.assertSetEqual(set(self.d2.tags.values_list("id", flat=True)),
-                            {self.tag_a.id, self.tag_b.id})
-
-    def test_remove_tags(self):
-        self.d1.tags.add(self.tag_a, self.tag_b)
-        self.client.force_authenticate(self.owner)
-        resp = self._post(
-            {"ids": [self.d1.id], "operation": "remove_tags", "value": [self.tag_a.id]}
-        )
-        self.assertEqual(resp.status_code, 200)
-        self.assertSetEqual(set(self.d1.tags.values_list("id", flat=True)), {self.tag_b.id})
-
-    # --- set type / correspondent ----------------------------------------
-    def test_set_document_type(self):
-        self.client.force_authenticate(self.owner)
-        resp = self._post(
-            {"ids": [self.d1.id, self.d2.id], "operation": "set_document_type",
-             "value": self.typ.id}
-        )
-        self.assertEqual(resp.status_code, 200)
-        self.d1.refresh_from_db()
-        self.d2.refresh_from_db()
-        self.assertEqual(self.d1.document_type_id, self.typ.id)
-        self.assertEqual(self.d2.document_type_id, self.typ.id)
-
-    def test_set_correspondent_null_loescht(self):
-        self.d1.correspondent = self.korr
-        self.d1.save(update_fields=["correspondent"])
-        self.client.force_authenticate(self.owner)
-        resp = self._post(
-            {"ids": [self.d1.id], "operation": "set_correspondent", "value": None}
-        )
-        self.assertEqual(resp.status_code, 200)
-        self.d1.refresh_from_db()
-        self.assertIsNone(self.d1.correspondent_id)
-
-    # --- apply_rules ------------------------------------------------------
-    def test_apply_rules_setzt_typ_aus_regel(self):
+        cls.user = User.objects.create_user(username="u208", password="pw", role="user")
+        cls.other = User.objects.create_user(username="o208", password="pw", role="user")
+        cls.guest = User.objects.create_user(username="g208", password="pw", role="guest")
+        # Regel greift auf Dokumente, deren Titel „rechnung" enthält.
         ClassificationRule.objects.create(
-            name="Rechnungs-Regel", enabled=True,
-            match={"text_contains": "Eins"}, then={"document_type": "Rechnung"},
+            name="Text-Rechnung",
+            match={"text_contains": ["rechnung"]},
+            then={"document_type": "Rechnung"},
         )
-        self.client.force_authenticate(self.owner)
-        resp = self._post({"ids": [self.d1.id], "operation": "apply_rules"})
-        self.assertEqual(resp.status_code, 200)
-        self.d1.refresh_from_db()
-        self.assertIsNotNone(self.d1.document_type)
-        self.assertEqual(self.d1.document_type.name, "Rechnung")
 
-    # --- Owner-Isolation --------------------------------------------------
-    def test_fremde_ids_werden_uebersprungen_kein_leak(self):
-        self.client.force_authenticate(self.owner)
-        resp = self._post(
-            {"ids": [self.d1.id, self.fremd.id], "operation": "add_tags",
-             "value": [self.tag_a.id]}
+    def _doc(self, title, owner=None):
+        return Document.objects.create(title=title, owner=owner or self.user)
+
+    def test_sync_klein_batch_updated_unchanged_zaehlung(self):
+        treffer = self._doc("Monatsrechnung Strom")  # Regel greift → updated
+        kein_treffer = self._doc("Urlaubsfoto")       # keine Regel → unchanged
+        self.client.force_authenticate(self.user)
+
+        resp = self.client.post(
+            self.URL, {"ids": [treffer.id, kein_treffer.id]}, format="json"
         )
+
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.data["updated"], 1)
-        self.assertEqual(resp.data["skipped"], [self.fremd.id])
-        # Fremddokument bleibt unberührt.
-        self.assertEqual(self.fremd.tags.count(), 0)
-
-    def test_admin_darf_fremde_dokumente_aendern(self):
-        admin = User.objects.create_user(username="root", password="pw", role="admin")
-        self.client.force_authenticate(admin)
-        resp = self._post(
-            {"ids": [self.d1.id, self.fremd.id], "operation": "add_tags",
-             "value": [self.tag_a.id]}
+        self.assertEqual(resp.data["unchanged"], 1)
+        self.assertEqual(resp.data["errors"], [])
+        treffer.refresh_from_db()
+        self.assertEqual(treffer.document_type.name, "Rechnung")
+        # Audit-Eintrag der Massenaktion.
+        self.assertTrue(
+            AuditLogEntry.objects.filter(action="bulk_classify").exists()
         )
+
+    def test_grosser_batch_spawnt_celery_task(self):
+        from unittest import mock
+
+        docs = [self._doc(f"Rechnung {i}") for i in range(11)]  # > Limit (10)
+        self.client.force_authenticate(self.user)
+
+        class _Result:
+            id = "task-abc-123"
+
+        with mock.patch(
+            "documents.views.bulk_classify_documents.delay", return_value=_Result()
+        ) as delay:
+            resp = self.client.post(
+                self.URL, {"ids": [d.id for d in docs]}, format="json"
+            )
+
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.data["updated"], 2)
-        self.assertEqual(resp.data["skipped"], [])
+        self.assertEqual(resp.data, {"task_id": "task-abc-123", "status": "processing"})
+        delay.assert_called_once()
+        args, kwargs = delay.call_args
+        self.assertEqual(sorted(args[0]), sorted(d.id for d in docs))
+        self.assertEqual(kwargs["actor_id"], self.user.id)
 
-    # --- Berechtigung -----------------------------------------------------
-    def test_gast_ohne_schreibrecht_403(self):
+    def test_rechte_check_403_fuer_gast(self):
+        doc = self._doc("Rechnung", owner=self.guest)
         self.client.force_authenticate(self.guest)
-        resp = self._post(
-            {"ids": [self.d1.id], "operation": "add_tags", "value": [self.tag_a.id]}
-        )
+        resp = self.client.post(self.URL, {"ids": [doc.id]}, format="json")
         self.assertEqual(resp.status_code, 403)
 
-    def test_anonym_abgewiesen(self):
-        resp = self._post(
-            {"ids": [self.d1.id], "operation": "add_tags", "value": [self.tag_a.id]}
-        )
-        self.assertIn(resp.status_code, (401, 403))
+    def test_fremde_ids_als_errors_kein_leak(self):
+        mine = self._doc("Meine Rechnung")
+        fremd = self._doc("Fremde Rechnung", owner=self.other)
+        self.client.force_authenticate(self.user)
 
-    # --- Validierung ------------------------------------------------------
+        resp = self.client.post(
+            self.URL, {"ids": [mine.id, fremd.id]}, format="json"
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        # Nur das eigene Dokument wurde verarbeitet.
+        self.assertEqual(resp.data["updated"] + resp.data["unchanged"], 1)
+        fehler_ids = [e["id"] for e in resp.data["errors"]]
+        self.assertIn(fremd.id, fehler_ids)
+        fremd.refresh_from_db()
+        self.assertIsNone(fremd.document_type)  # unangetastet
+
     def test_leere_ids_400(self):
-        self.client.force_authenticate(self.owner)
-        resp = self._post({"ids": [], "operation": "add_tags", "value": [self.tag_a.id]})
+        self.client.force_authenticate(self.user)
+        resp = self.client.post(self.URL, {"ids": []}, format="json")
         self.assertEqual(resp.status_code, 400)
 
-    def test_unbekannte_operation_400(self):
-        self.client.force_authenticate(self.owner)
-        resp = self._post({"ids": [self.d1.id], "operation": "delete_all"})
+    def test_ungueltige_id_400(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.post(self.URL, {"ids": ["abc"]}, format="json")
         self.assertEqual(resp.status_code, 400)
 
-    def test_unbekannte_tag_id_400(self):
-        self.client.force_authenticate(self.owner)
-        resp = self._post(
-            {"ids": [self.d1.id], "operation": "add_tags", "value": [999999]}
+    def test_celery_task_klassifiziert_und_auditiert(self):
+        # Task-Funktion direkt aufrufen (kein Broker nötig).
+        from .tasks import bulk_classify_documents
+
+        treffer = self._doc("Stromrechnung Januar")
+        neutral = self._doc("Notiz")
+
+        result = bulk_classify_documents(
+            [treffer.id, neutral.id], actor_id=self.user.id
         )
-        self.assertEqual(resp.status_code, 400)
 
-    def test_unbekannte_document_type_id_400(self):
-        self.client.force_authenticate(self.owner)
-        resp = self._post(
-            {"ids": [self.d1.id], "operation": "set_document_type", "value": 999999}
+        self.assertEqual(result["updated"], 1)
+        self.assertEqual(result["unchanged"], 1)
+        self.assertEqual(result["errors"], [])
+        treffer.refresh_from_db()
+        self.assertEqual(treffer.document_type.name, "Rechnung")
+        self.assertTrue(
+            AuditLogEntry.objects.filter(
+                action="bulk_classify", actor=self.user
+            ).exists()
         )
-        self.assertEqual(resp.status_code, 400)
-
-    # --- Audit ------------------------------------------------------------
-    def test_audit_eintrag_wird_geschrieben(self):
-        self.client.force_authenticate(self.owner)
-        before = AuditLogEntry.objects.filter(action="bulk_add_tags").count()
-        self._post(
-            {"ids": [self.d1.id, self.d2.id], "operation": "add_tags",
-             "value": [self.tag_a.id]}
-        )
-        entries = AuditLogEntry.objects.filter(action="bulk_add_tags")
-        self.assertEqual(entries.count(), before + 1)
-        entry = entries.latest("timestamp")
-        self.assertEqual(entry.actor, self.owner)
-        self.assertEqual(entry.detail["operation"], "add_tags")
-        self.assertSetEqual(set(entry.detail["ids"]), {self.d1.id, self.d2.id})

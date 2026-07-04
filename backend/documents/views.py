@@ -49,8 +49,7 @@ class IsDmsAdmin(BasePermission):
             return False
         return bool(getattr(request.user, "is_dms_admin", False))
 
-from . import pipeline, storage
-from .classification import apply_rules
+from . import classification, pipeline, storage
 from .models import (
     AuditLogEntry,
     ClassificationRule,
@@ -76,7 +75,7 @@ from .serializers import (
     StoragePathSerializer,
     TagSerializer,
 )
-from .tasks import process_document_version
+from .tasks import bulk_classify_documents, process_document_version
 
 # Erkennt Bereichsfilter auf Zusatzfeldern: ``custom_field_<id>_gte`` / ``_lte``.
 _CUSTOM_FIELD_PARAM_RE = re.compile(r"^custom_field_(\d+)_(gte|lte)$")
@@ -824,52 +823,38 @@ class DocumentViewSet(viewsets.ModelViewSet):
             action_name="reject",
         )
 
-    # -- Massenaktionen (Bulk, P3/STOAA-206) --------------------------------
-    #: Erlaubte Bulk-Operationen. Werte-Schema pro Operation siehe ``bulk``.
-    _BULK_OPS = frozenset(
-        {
-            "add_tags",
-            "remove_tags",
-            "set_document_type",
-            "set_correspondent",
-            "apply_rules",
-        }
-    )
+    # Bis zu so vielen Dokumenten wird synchron im Request klassifiziert;
+    # größere Batches wandern in einen Celery-Task (Timeout-/Lastschutz).
+    BULK_CLASSIFY_SYNC_LIMIT = 10
 
-    @action(detail=False, methods=["post"], url_path="bulk")
-    def bulk(self, request):
-        """Massenaktion über mehrere Dokumente in einem Request (P3).
+    @action(detail=False, methods=["post"], url_path="bulk-classify")
+    def bulk_classify(self, request):
+        """Klassifizierungsregeln auf mehrere Dokumente anwenden (Massenaktion).
 
         Body::
 
-            {"ids": [<int>, ...], "operation": "<op>", "value": <op-abhängig>}
+            {"ids": [<int>, ...]}
 
-        Operationen (``value``):
-          * ``add_tags`` / ``remove_tags`` – ``value`` = Liste Tag-IDs.
-          * ``set_document_type``          – ``value`` = DocumentType-ID **oder** null (löschen).
-          * ``set_correspondent``          – ``value`` = Correspondent-ID **oder** null (löschen).
-          * ``apply_rules``                – ``value`` ignoriert; Klassifizierungsregeln
-                                             (``classification.apply_rules``) neu anwenden.
+        Für jedes eigene Dokument wird ``classification.apply_rules`` erneut
+        angewandt. Kleine Batches (≤ ``BULK_CLASSIFY_SYNC_LIMIT``) werden synchron
+        verarbeitet und liefern direkt die Zählung zurück::
+
+            {"updated": 8, "unchanged": 2, "errors": [...]}
+
+        Größere Batches (> Limit) werden an den Celery-Task
+        ``bulk_classify_documents`` übergeben; die Antwort enthält die Task-ID::
+
+            {"task_id": "abc-123", "status": "processing"}
 
         Owner-Isolation (STOAA-7): Es wird ausschließlich über ``get_queryset()``
-        gescopet – fremde/unbekannte IDs wirken **nicht** und werden in ``skipped``
-        gemeldet (kein 404-Enumeration, kein Leak). Schreibrecht (``can_write``)
-        erforderlich; ein Audit-Eintrag ``bulk_<op>`` hält Actor + betroffene IDs fest.
+        gescopet – fremde/unbekannte IDs wirken nicht und werden (synchron) als
+        ``errors``-Eintrag gemeldet (kein 404-Enumeration, kein Leak).
+        Schreibrecht (``can_write``) erforderlich.
         """
         if not getattr(request.user, "can_write", False):
             return Response(
                 {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
                 status=status.HTTP_403_FORBIDDEN,
-            )
-
-        operation = str(request.data.get("operation", "")).strip()
-        if operation not in self._BULK_OPS:
-            return Response(
-                {
-                    "detail": "Unbekannte Operation.",
-                    "allowed": sorted(self._BULK_OPS),
-                },
-                status=status.HTTP_400_BAD_REQUEST,
             )
 
         raw_ids = request.data.get("ids")
@@ -891,105 +876,42 @@ class DocumentViewSet(viewsets.ModelViewSet):
         requested_ids = list(dict.fromkeys(requested_ids))
 
         # Owner-Scoping: nur eigene (bzw. als Admin: alle) Dokumente.
-        owned = self.get_queryset().filter(id__in=requested_ids)
-        owned_ids = set(owned.values_list("id", flat=True))
-        skipped = [rid for rid in requested_ids if rid not in owned_ids]
+        owned_ids = list(
+            self.get_queryset().filter(id__in=requested_ids).values_list("id", flat=True)
+        )
+        # Nicht auffindbare/fremde IDs → als Teilfehler melden (kein Leak).
+        skipped = [rid for rid in requested_ids if rid not in set(owned_ids)]
+        errors = [
+            {"id": rid, "error": "nicht gefunden oder keine Berechtigung"}
+            for rid in skipped
+        ]
 
-        # Ziel-Stammdaten vorab auflösen/validieren (ein 400 statt Teilfehler).
-        value = request.data.get("value")
-        tags = []
-        target = None
-        audit_extra = {}  # nur JSON-serialisierbare Werte (IDs, keine Instanzen)
-        if operation in ("add_tags", "remove_tags"):
-            tags, err = self._resolve_ids(Tag, value, "value (Tag-IDs)")
-            if err:
-                return err
-            audit_extra["tags"] = [t.id for t in tags]
-        elif operation == "set_document_type":
-            target, err = self._resolve_fk(DocumentType, value, "value (DocumentType-ID)")
-            if err:
-                return err
-            audit_extra["document_type"] = getattr(target, "id", None)
-        elif operation == "set_correspondent":
-            target, err = self._resolve_fk(Correspondent, value, "value (Correspondent-ID)")
-            if err:
-                return err
-            audit_extra["correspondent"] = getattr(target, "id", None)
+        # Große Batches asynchron verarbeiten (Timeout-/Lastschutz).
+        if len(owned_ids) > self.BULK_CLASSIFY_SYNC_LIMIT:
+            task = bulk_classify_documents.delay(owned_ids, actor_id=request.user.id)
+            return Response({"task_id": task.id, "status": "processing"})
 
-        documents = list(owned)
-        for document in documents:
-            if operation == "add_tags":
-                document.tags.add(*tags)
-            elif operation == "remove_tags":
-                document.tags.remove(*tags)
-            elif operation == "set_document_type":
-                document.document_type = target
-                document.save(update_fields=["document_type"])
-            elif operation == "set_correspondent":
-                document.correspondent = target
-                document.save(update_fields=["correspondent"])
-            elif operation == "apply_rules":
-                apply_rules(document)
+        # Kleine Batches synchron; frische Instanzen mit Prefetch für apply_rules.
+        documents = list(self.get_queryset().filter(id__in=owned_ids))
+        result = classification.classify_documents(documents)
+        result["errors"] = result["errors"] + errors
 
         if documents:
             AuditLogEntry.objects.create(
                 actor=request.user,
-                action=f"bulk_{operation}",
+                action="bulk_classify",
                 object_type="Document",
-                object_id=",".join(str(d.id) for d in documents),
-                detail={"operation": operation, "ids": sorted(owned_ids), **audit_extra},
+                object_id=f"{len(documents)} Dokumente",
+                detail={
+                    "mode": "sync",
+                    "ids": sorted(owned_ids),
+                    "updated": result["updated"],
+                    "unchanged": result["unchanged"],
+                    "errors": result["errors"],
+                },
             )
 
-        return Response(
-            {
-                "operation": operation,
-                "updated": len(documents),
-                "skipped": skipped,
-            }
-        )
-
-    def _resolve_ids(self, model, value, label):
-        """Validiert eine Liste von PKs; gibt (Objektliste, None) oder (None, 400-Response)."""
-        if not isinstance(value, list) or not value:
-            return None, Response(
-                {"detail": f"Feld '{label}' muss eine nicht-leere Liste sein."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        try:
-            ids = [int(v) for v in value]
-        except (TypeError, ValueError):
-            return None, Response(
-                {"detail": f"Feld '{label}' enthält ungültige IDs."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        objs = list(model.objects.filter(id__in=ids))
-        found = {o.id for o in objs}
-        missing = [i for i in ids if i not in found]
-        if missing:
-            return None, Response(
-                {"detail": f"Unbekannte {model.__name__}-IDs: {missing}."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        return objs, None
-
-    def _resolve_fk(self, model, value, label):
-        """Validiert eine einzelne PK oder null (= löschen). (Objekt|None, None) / (None, 400)."""
-        if value in (None, "", "null"):
-            return None, None
-        try:
-            pk = int(value)
-        except (TypeError, ValueError):
-            return None, Response(
-                {"detail": f"Feld '{label}' ist ungültig."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        obj = model.objects.filter(id=pk).first()
-        if obj is None:
-            return None, Response(
-                {"detail": f"Unbekannte {model.__name__}-ID: {pk}."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        return obj, None
+        return Response(result)
 
 
 class TagViewSet(viewsets.ModelViewSet):
