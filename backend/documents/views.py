@@ -36,6 +36,21 @@ class ReadOnlyOrCanWrite(BasePermission):
             return True
         return bool(getattr(request.user, "can_write", False))
 
+
+class IsDmsAdmin(BasePermission):
+    """Nur DMS-Admins (Rolle admin / superuser) – für Infrastruktur-Ressourcen.
+
+    Mail-Konten sind Ingestion-Infrastruktur fürs ganze DMS, keine
+    per-Nutzer-Ressource (STOAA-214). Deshalb kein ``owner``-Scoping, sondern
+    harte Admin-Schranke: alle anderen (auch Gäste) erhalten 403 – inklusive
+    Lesezugriff, da Konten Zugangsdaten und Fehlermeldungen enthalten.
+    """
+
+    def has_permission(self, request, view):
+        if not (request.user and request.user.is_authenticated):
+            return False
+        return bool(getattr(request.user, "is_dms_admin", False))
+
 from . import pipeline, storage
 from .models import (
     AuditLogEntry,
@@ -46,6 +61,7 @@ from .models import (
     Document,
     DocumentShareLink,
     DocumentType,
+    MailAccount,
     StoragePath,
     Tag,
 )
@@ -57,6 +73,7 @@ from .serializers import (
     DocumentSerializer,
     DocumentShareLinkSerializer,
     DocumentTypeSerializer,
+    MailAccountSerializer,
     StoragePathSerializer,
     TagSerializer,
 )
@@ -1086,3 +1103,81 @@ class ShareDownloadView(_ShareAccessView):
         if version is None:
             raise Http404("Keine Version vorhanden.")
         return _serve_version_download(link.document, version)
+
+
+class MailAccountViewSet(viewsets.ModelViewSet):
+    """CRUD + Verbindungstest für IMAP-Postfächer (STOAA-214).
+
+    Zugriff ausschließlich für DMS-Admins (``IsDmsAdmin``): Mail-Konten sind
+    Ingestion-Infrastruktur fürs ganze DMS, nicht per-Nutzer. Kein
+    ``owner``-Scoping – ``owner`` ist der Standard-Empfänger (frei wählbar,
+    leer = Admin-Triage-Postfach), nicht der Verwalter des Kontos.
+    """
+
+    queryset = MailAccount.objects.all()
+    serializer_class = MailAccountSerializer
+    permission_classes = [IsDmsAdmin]
+
+    @action(detail=True, methods=["post"])
+    def test_connection(self, request, pk=None):
+        """Echter IMAP-Login-Test (interaktiv, 10 s Timeout, ohne Celery).
+
+        Persistiert das Ergebnis in ``last_checked_at`` / ``last_error`` und
+        gibt ``{success, error_code, message}`` zurück. Es werden NIE
+        Zugangsdaten oder Tracebacks in der Response oder in ``last_error``
+        geleakt – nur die vordefinierten, generischen Meldungen.
+        """
+        import imaplib
+        import socket
+        import ssl
+
+        account = self.get_object()
+        password = account.resolve_password()
+
+        success = False
+        error_code = None
+        message = "Verbindung erfolgreich: Login und Ordner-Auswahl OK."
+
+        imap = None
+        try:
+            if account.use_ssl:
+                imap = imaplib.IMAP4_SSL(
+                    account.host, account.port, timeout=10
+                )
+            else:
+                imap = imaplib.IMAP4(account.host, account.port, timeout=10)
+            imap.login(account.username, password)
+            # ``select`` liefert bei fehlendem Ordner status != "OK".
+            typ, _ = imap.select(account.folder, readonly=True)
+            if typ != "OK":
+                error_code = "folder_not_found"
+                message = f"Ordner '{account.folder}' nicht gefunden."
+            else:
+                success = True
+        except imaplib.IMAP4.error:
+            # imaplib meldet fehlgeschlagenen Login als IMAP4.error.
+            error_code = "auth_failed"
+            message = "Anmeldung fehlgeschlagen (Benutzername/Passwort prüfen)."
+        except (socket.timeout, TimeoutError):
+            error_code = "timeout"
+            message = "Zeitüberschreitung: Server nicht innerhalb von 10 s erreichbar."
+        except ssl.SSLError:
+            error_code = "ssl_error"
+            message = "SSL-/TLS-Fehler beim Verbindungsaufbau."
+        except (socket.gaierror, ConnectionError, OSError):
+            error_code = "connection_failed"
+            message = "Verbindung zum Server fehlgeschlagen (Host/Port prüfen)."
+        finally:
+            if imap is not None:
+                try:
+                    imap.logout()
+                except Exception:
+                    pass
+
+        account.last_checked_at = timezone.now()
+        account.last_error = "" if success else message
+        account.save(update_fields=["last_checked_at", "last_error"])
+
+        return Response(
+            {"success": success, "error_code": error_code, "message": message}
+        )

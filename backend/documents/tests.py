@@ -1480,3 +1480,261 @@ class ShareAccessRouteTests(APITestCase):
         # Der Link liefert NUR self.doc; ein Direktzugriff auf `other` bleibt 404.
         resp_other = self.client.get(f"/api/documents/{other.id}/")
         self.assertEqual(resp_other.status_code, 404)
+
+
+class MailAccountSerializerTests(TestCase):
+    """Serializer-Verhalten: Passwort write_only + PATCH-leer bewahrt (STOAA-214)."""
+
+    def _make(self, **over):
+        from .serializers import MailAccountSerializer
+
+        data = {
+            "name": "Rechnungen",
+            "host": "imap.example.com",
+            "port": 993,
+            "use_ssl": True,
+            "username": "post@example.com",
+            "folder": "INBOX",
+            "enabled": True,
+            "password": "geheim",
+        }
+        data.update(over)
+        ser = MailAccountSerializer(data=data)
+        ser.is_valid(raise_exception=True)
+        return ser.save()
+
+    def test_create_sets_password(self):
+        acc = self._make()
+        acc.refresh_from_db()
+        self.assertEqual(acc.password, "geheim")
+
+    def test_password_never_in_output(self):
+        from .serializers import MailAccountSerializer
+
+        acc = self._make()
+        data = MailAccountSerializer(acc).data
+        self.assertNotIn("password", data)
+        # Aber die read-only-Felder sind sichtbar:
+        self.assertIn("password_env", data)
+        self.assertIn("last_error", data)
+
+    def test_update_blank_password_keeps_existing(self):
+        from .serializers import MailAccountSerializer
+
+        acc = self._make()
+        ser = MailAccountSerializer(
+            acc, data={"password": "", "name": "Neu"}, partial=True
+        )
+        ser.is_valid(raise_exception=True)
+        ser.save()
+        acc.refresh_from_db()
+        self.assertEqual(acc.password, "geheim")  # unverändert
+        self.assertEqual(acc.name, "Neu")
+
+    def test_update_nonblank_password_overwrites(self):
+        from .serializers import MailAccountSerializer
+
+        acc = self._make()
+        ser = MailAccountSerializer(acc, data={"password": "neu"}, partial=True)
+        ser.is_valid(raise_exception=True)
+        ser.save()
+        acc.refresh_from_db()
+        self.assertEqual(acc.password, "neu")
+
+    def test_password_env_read_only(self):
+        # Client-gesetztes password_env wird ignoriert (read-only).
+        acc = self._make(password_env="SOME_SECRET")
+        acc.refresh_from_db()
+        self.assertEqual(acc.password_env, "")
+
+    def test_owner_optional_null(self):
+        acc = self._make(owner=None)
+        acc.refresh_from_db()
+        self.assertIsNone(acc.owner)
+
+
+class MailAccountPermissionTests(APITestCase):
+    """Zugriff nur für DMS-Admin; Nutzer/Gast -> 403 (STOAA-214)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.admin = User.objects.create_user(
+            username="mailadmin", password="pw", role="admin"
+        )
+        cls.user = User.objects.create_user(
+            username="mailuser", password="pw", role="user"
+        )
+        cls.guest = User.objects.create_user(
+            username="mailguest", password="pw", role="guest"
+        )
+        cls.account = MailAccount.objects.create(
+            name="Bestand",
+            host="imap.example.com",
+            username="post@example.com",
+            password="geheim",
+        )
+
+    def test_admin_can_list(self):
+        self.client.force_authenticate(self.admin)
+        resp = self.client.get("/api/mail-accounts/")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_user_forbidden(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.get("/api/mail-accounts/")
+        self.assertEqual(resp.status_code, 403)
+
+    def test_guest_forbidden(self):
+        self.client.force_authenticate(self.guest)
+        resp = self.client.get("/api/mail-accounts/")
+        self.assertEqual(resp.status_code, 403)
+
+    def test_anonymous_forbidden(self):
+        resp = self.client.get("/api/mail-accounts/")
+        self.assertIn(resp.status_code, (401, 403))
+
+    def test_admin_create_and_password_hidden(self):
+        self.client.force_authenticate(self.admin)
+        resp = self.client.post(
+            "/api/mail-accounts/",
+            {
+                "name": "Neu",
+                "host": "imap.example.com",
+                "username": "x@example.com",
+                "password": "topsecret",
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertNotIn("password", resp.data)
+        acc = MailAccount.objects.get(name="Neu")
+        self.assertEqual(acc.password, "topsecret")
+
+    def test_user_cannot_create(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.post(
+            "/api/mail-accounts/",
+            {"name": "X", "host": "h", "username": "u"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 403)
+
+
+class MailAccountTestConnectionTests(APITestCase):
+    """Gemockter imaplib: success / auth_failed / timeout / folder (STOAA-214)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.admin = User.objects.create_user(
+            username="tcadmin", password="pw", role="admin"
+        )
+        cls.user = User.objects.create_user(
+            username="tcuser", password="pw", role="user"
+        )
+
+    def setUp(self):
+        self.account = MailAccount.objects.create(
+            name="Test",
+            host="imap.example.com",
+            port=993,
+            use_ssl=True,
+            username="post@example.com",
+            password="geheim",
+        )
+        self.url = f"/api/mail-accounts/{self.account.pk}/test_connection/"
+
+    def _mock_imap(self, *, login_exc=None, select_status="OK", conn_exc=None):
+        import unittest.mock as mock
+
+        imap = mock.MagicMock()
+        if login_exc is not None:
+            imap.login.side_effect = login_exc
+        imap.select.return_value = (select_status, [b"1"])
+        factory = mock.MagicMock()
+        if conn_exc is not None:
+            factory.side_effect = conn_exc
+        else:
+            factory.return_value = imap
+        return factory, imap
+
+    def test_success(self):
+        import unittest.mock as mock
+
+        factory, imap = self._mock_imap()
+        self.client.force_authenticate(self.admin)
+        with mock.patch("imaplib.IMAP4_SSL", factory):
+            resp = self.client.post(self.url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.data["success"])
+        self.assertIsNone(resp.data["error_code"])
+        self.account.refresh_from_db()
+        self.assertIsNotNone(self.account.last_checked_at)
+        self.assertEqual(self.account.last_error, "")
+        imap.select.assert_called_once()
+
+    def test_auth_failed(self):
+        import imaplib
+        import unittest.mock as mock
+
+        factory, _ = self._mock_imap(login_exc=imaplib.IMAP4.error("bad"))
+        self.client.force_authenticate(self.admin)
+        with mock.patch("imaplib.IMAP4_SSL", factory):
+            resp = self.client.post(self.url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.data["success"])
+        self.assertEqual(resp.data["error_code"], "auth_failed")
+        # Kein Credential-Leak in der Meldung.
+        self.assertNotIn("geheim", resp.data["message"])
+        self.account.refresh_from_db()
+        self.assertTrue(self.account.last_error)
+        self.assertNotIn("geheim", self.account.last_error)
+
+    def test_timeout(self):
+        import socket
+        import unittest.mock as mock
+
+        factory, _ = self._mock_imap(conn_exc=socket.timeout())
+        self.client.force_authenticate(self.admin)
+        with mock.patch("imaplib.IMAP4_SSL", factory):
+            resp = self.client.post(self.url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["error_code"], "timeout")
+
+    def test_folder_not_found(self):
+        import unittest.mock as mock
+
+        factory, _ = self._mock_imap(select_status="NO")
+        self.client.force_authenticate(self.admin)
+        with mock.patch("imaplib.IMAP4_SSL", factory):
+            resp = self.client.post(self.url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.data["success"])
+        self.assertEqual(resp.data["error_code"], "folder_not_found")
+
+    def test_connection_failed(self):
+        import unittest.mock as mock
+
+        factory, _ = self._mock_imap(conn_exc=ConnectionRefusedError())
+        self.client.force_authenticate(self.admin)
+        with mock.patch("imaplib.IMAP4_SSL", factory):
+            resp = self.client.post(self.url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["error_code"], "connection_failed")
+
+    def test_plain_imap_when_no_ssl(self):
+        import unittest.mock as mock
+
+        self.account.use_ssl = False
+        self.account.port = 143
+        self.account.save()
+        factory, imap = self._mock_imap()
+        self.client.force_authenticate(self.admin)
+        with mock.patch("imaplib.IMAP4", factory):
+            resp = self.client.post(self.url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.data["success"])
+
+    def test_non_admin_forbidden(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.post(self.url)
+        self.assertEqual(resp.status_code, 403)

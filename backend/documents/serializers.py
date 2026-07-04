@@ -1,3 +1,4 @@
+from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
 from .models import (
@@ -10,6 +11,7 @@ from .models import (
     DocumentShareLink,
     DocumentType,
     DocumentVersion,
+    MailAccount,
     StoragePath,
     Tag,
 )
@@ -34,6 +36,59 @@ class DocumentShareLinkSerializer(serializers.ModelSerializer):
             "revoked_at",
             "is_valid",
         )
+
+
+class MailAccountSerializer(serializers.ModelSerializer):
+    """CRUD-Serializer für IMAP-Postfächer (STOAA-214).
+
+    Sicherheit:
+      * ``password`` ist **write_only** – es taucht NIE in einer Response auf.
+        Bei ``update`` (PATCH) überschreibt ein **leeres** Passwort das
+        gespeicherte NICHT (kein versehentliches Löschen bei Teil-Updates).
+      * ``password_env`` (Name der Secret-Env), ``last_checked_at`` und
+        ``last_error`` sind **read_only** – sie werden vom Server / Test-Call
+        gepflegt, nicht vom Client gesetzt.
+      * ``owner`` ist ein **optionales** Auswahlfeld (Standard-Empfänger, PK
+        oder ``null``) und wird NICHT automatisch auf den Request-User gesetzt
+        (Mail-Konten sind DMS-Infrastruktur, keine Nutzer-Ressource).
+    """
+
+    password = serializers.CharField(
+        write_only=True,
+        required=False,
+        allow_blank=True,
+        style={"input_type": "password"},
+    )
+    owner = serializers.PrimaryKeyRelatedField(
+        queryset=get_user_model().objects.all(),
+        allow_null=True,
+        required=False,
+    )
+
+    class Meta:
+        model = MailAccount
+        fields = (
+            "id",
+            "name",
+            "owner",
+            "host",
+            "port",
+            "use_ssl",
+            "username",
+            "folder",
+            "enabled",
+            "password",
+            "password_env",
+            "last_checked_at",
+            "last_error",
+        )
+        read_only_fields = ("password_env", "last_checked_at", "last_error")
+
+    def update(self, instance, validated_data):
+        # Leeres Passwort bei (Teil-)Update bedeutet "unverändert" – nicht löschen.
+        if not validated_data.get("password"):
+            validated_data.pop("password", None)
+        return super().update(instance, validated_data)
 
 
 class TagSerializer(serializers.ModelSerializer):
