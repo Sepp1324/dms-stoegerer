@@ -893,6 +893,30 @@ select:focus-visible {
   line-height: 1.6;
 }
 
+/* --- Workflow-Editor (STOAA-263) --- */
+.wf-checkboxes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.9rem;
+  padding-top: 0.2rem;
+}
+.wf-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex-direction: row;
+  font-size: 0.8rem;
+  color: var(--text);
+}
+.wf-checkbox input {
+  width: auto;
+}
+.wf-action {
+  margin: 0.6rem 0;
+  padding: 0.75rem 0.9rem;
+  background: rgba(255, 255, 255, 0.02);
+}
+
 /* --- KI-Vorschläge --- */
 .ai-panel {
   border: 1px solid rgba(139, 92, 246, 0.4);

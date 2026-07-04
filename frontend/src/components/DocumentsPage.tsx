@@ -25,6 +25,7 @@ import { ProcessingBadge } from "./ProcessingStatus";
 import UploadZone from "./UploadZone";
 import DocumentDetail from "./DocumentDetail";
 import RulesPage from "./RulesPage";
+import WorkflowsPage from "./WorkflowsPage";
 import CustomFieldsAdmin from "./CustomFieldsAdmin";
 import MailAccountsAdmin from "./MailAccountsAdmin";
 
@@ -83,7 +84,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   // Aktuell geöffnetes Dokument (Detailansicht) oder null (Liste).
   const [selectedId, setSelectedId] = useState<number | null>(null);
   // Aktive Hauptansicht (persistente linke Navigation).
-  const [view, setView] = useState<"docs" | "rules" | "fields" | "mail">("docs");
+  const [view, setView] = useState<"docs" | "rules" | "workflows" | "fields" | "mail">("docs");
   // Sidebar auf schmalen Screens ein-/ausklappbar.
   const [navOpen, setNavOpen] = useState(false);
 
@@ -313,7 +314,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     );
   }
 
-  const navigate = (v: "docs" | "rules" | "fields" | "mail") => {
+  const navigate = (v: "docs" | "rules" | "workflows" | "fields" | "mail") => {
     setView(v);
     setNavOpen(false); // Overlay auf Mobil nach Auswahl schließen
   };
@@ -362,11 +363,13 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
           <h1 className="content-title">
             {view === "rules"
               ? "Regeln"
-              : view === "fields"
-                ? "Zusatzfelder"
-                : view === "mail"
-                  ? "Mailkonten"
-                  : "Dokumente"}
+              : view === "workflows"
+                ? "Workflows"
+                : view === "fields"
+                  ? "Zusatzfelder"
+                  : view === "mail"
+                    ? "Mailkonten"
+                    : "Dokumente"}
           </h1>
           {view === "docs" && (
             <input
@@ -381,6 +384,8 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
         <div className="content-body">
           {view === "rules" ? (
             <RulesPage canEdit={!!me?.can_write} />
+          ) : view === "workflows" ? (
+            <WorkflowsPage canEdit={!!me?.can_write} />
           ) : view === "fields" ? (
             <CustomFieldsAdmin
               canEdit={!!me?.can_write}
@@ -524,8 +529,8 @@ function Sidebar({
   currencyFilters,
   onCurrencyChange,
 }: {
-  view: "docs" | "rules" | "fields" | "mail";
-  onNavigate: (v: "docs" | "rules" | "fields" | "mail") => void;
+  view: "docs" | "rules" | "workflows" | "fields" | "mail";
+  onNavigate: (v: "docs" | "rules" | "workflows" | "fields" | "mail") => void;
   username?: string;
   onLogout: () => void;
   isAdmin: boolean;
@@ -590,6 +595,12 @@ function Sidebar({
           onClick={() => onNavigate("rules")}
           label="Regeln"
           icon="M3 5h18v2H3zm0 6h12v2H3zm0 6h18v2H3z"
+        />
+        <NavItem
+          active={view === "workflows"}
+          onClick={() => onNavigate("workflows")}
+          label="Workflows"
+          icon="M4 4h6v6H4zm10 0h6v6h-6zM4 14h6v6H4zm13 0v3h3v2h-3v3h-2v-3h-3v-2h3v-3z"
         />
         {isAdmin && (
           <NavItem
