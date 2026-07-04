@@ -122,6 +122,12 @@ class DocumentVersionSerializer(serializers.ModelSerializer):
             "processing_failed_step",
             "processing_failed_at",
             "processing_attempts",
+            "ocr_status",
+            "ocr_error",
+            "ocr_engine",
+            "ocr_duration_ms",
+            "ocr_started_at",
+            "ocr_finished_at",
             "mime_type",
             "size",
             "page_count",
@@ -132,11 +138,20 @@ class DocumentVersionSerializer(serializers.ModelSerializer):
             "has_archive",
             "created_at",
         )
+        # Fehler-/Retry-Felder (STOAA-228) und OCR-State-Machine (STOAA-225) sind
+        # beide serverseitig (Pipeline) gesetzt – nur lesbar, damit das Monitoring
+        # die Werte über die API sieht.
         read_only_fields = (
             "processing_error",
             "processing_failed_step",
             "processing_failed_at",
             "processing_attempts",
+            "ocr_status",
+            "ocr_error",
+            "ocr_engine",
+            "ocr_duration_ms",
+            "ocr_started_at",
+            "ocr_finished_at",
         )
 
     def get_created_by_name(self, obj) -> str | None:
@@ -198,6 +213,11 @@ class DocumentSerializer(serializers.ModelSerializer):
     page_count = serializers.IntegerField(
         source="current_version.page_count", read_only=True, default=None
     )
+    # OCR-Status der aktuellen Version direkt am Dokument – für Listen-Monitoring
+    # ohne die verschachtelte ``versions``-Liste durchsuchen zu müssen (STOAA-225).
+    ocr_status = serializers.CharField(
+        source="current_version.ocr_status", read_only=True, default=None
+    )
     storage_path_name = serializers.CharField(
         source="storage_path.name", read_only=True, default=None
     )
@@ -224,6 +244,7 @@ class DocumentSerializer(serializers.ModelSerializer):
             "owner",
             "current_version",
             "page_count",
+            "ocr_status",
             "ai_suggestions",
             "ai_suggested_at",
             "classification",

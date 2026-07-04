@@ -1935,6 +1935,79 @@ class DocumentProcessingStateMachineTests(TestCase):
             ],
         )
 
+    def test_ocr_fehlerfall_setzt_status_failed_ohne_crash(self):
+        """run_ocr liefert FAILED → ocr_status=failed + ocr_error gesetzt, kein Crash;
+        Hash-Kette, Audit ``ocr`` und WORM-Siegel bleiben trotzdem erhalten."""
+        from pathlib import Path
+        from unittest import mock
+
+        from documents.services.ocr.types import OCRResult, OCRStatusEnum
+        from .tasks import process_document_version
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "kaputt.pdf"
+            source.write_bytes(b"%PDF-1.4\n% broken\n")
+            _, document, version = self._version(str(source))
+
+            with mock.patch(
+                "documents.pipeline.run_ocr",
+                return_value=OCRResult(
+                    text="",
+                    pages=0,
+                    status=OCRStatusEnum.FAILED,
+                    error="ocrmypdf exit 2",
+                    engine="ocrmypdf",
+                ),
+            ), mock.patch(
+                "documents.pipeline.generate_thumbnail",
+                return_value=None,
+            ), mock.patch(
+                "ai.tasks.suggest_document_metadata.delay"
+            ):
+                result = process_document_version(version.id)
+
+        version.refresh_from_db()
+
+        self.assertEqual(result["status"], "done")
+        self.assertEqual(version.ocr_status, OCRStatusEnum.FAILED.value)
+        self.assertEqual(version.ocr_error, "ocrmypdf exit 2")
+        # Trotz OCR-Fehler: Hash-Kette gesetzt, versiegelt (WORM), Endzustand READY.
+        self.assertTrue(version.sha256)
+        self.assertTrue(version.is_immutable)
+        self.assertIsNotNone(version.ocr_started_at)
+        self.assertIsNotNone(version.ocr_finished_at)
+        self.assertEqual(
+            version.processing_state, DocumentVersion.ProcessingState.READY
+        )
+        self.assertTrue(
+            AuditLogEntry.objects.filter(
+                action="ocr",
+                object_type="DocumentVersion",
+                object_id=str(version.id),
+            ).exists()
+        )
+
+    def test_ocr_status_ist_in_der_api_response_sichtbar(self):
+        """Blocker 2: ocr_status ist über DocumentVersion- und Document-Serializer
+        (read-only) in der API-Response sichtbar – Sinn der State-Machine."""
+        from .serializers import DocumentSerializer, DocumentVersionSerializer
+
+        _, document, version = self._version()
+        DocumentVersion.objects.filter(pk=version.pk).update(
+            ocr_status="failed", ocr_error="boom", ocr_engine="ocrmypdf"
+        )
+        version.refresh_from_db()
+
+        vdata = DocumentVersionSerializer(version).data
+        self.assertEqual(vdata["ocr_status"], "failed")
+        self.assertEqual(vdata["ocr_error"], "boom")
+        self.assertIn("ocr_started_at", vdata)
+        self.assertIn("ocr_finished_at", vdata)
+
+        document.refresh_from_db()
+        ddata = DocumentSerializer(document).data
+        self.assertEqual(ddata["ocr_status"], "failed")
+
 
 class DocumentProcessingFailureRetryTests(TestCase):
     """Fehler-/Retry-Layer der Verarbeitungs-Pipeline (STOAA-228)."""

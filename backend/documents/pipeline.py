@@ -250,16 +250,30 @@ def hash_version(version: DocumentVersion) -> None:
 
 def ocr_version(version: DocumentVersion) -> dict:
     """OCR ausführen, technische OCR-Felder speichern und State ``OCR_DONE`` setzen."""
+    from django.utils import timezone
+
     from .models import OCRStatus
 
     version.transition_to(
         DocumentVersion.ProcessingState.OCR_RUNNING,
         actor=version.created_by,
     )
-    DocumentVersion.objects.filter(pk=version.pk).update(ocr_status=OCRStatus.RUNNING)
+    started_at = timezone.now()
+    DocumentVersion.objects.filter(pk=version.pk).update(
+        ocr_status=OCRStatus.RUNNING, ocr_started_at=started_at
+    )
     version.ocr_status = OCRStatus.RUNNING
+    version.ocr_started_at = started_at
 
+    # Weiche OCR-Fehler (``run_ocr`` liefert ein ``OCRResult`` mit status=FAILED)
+    # brechen die Pipeline NICHT ab: ocr_status=failed wird persistiert und die
+    # Verarbeitung läuft bis READY weiter (STOAA-225 Blocker 2, Monitoring).
+    # Eine *geworfene* Exception dagegen reicht der Retry-Layer bewusst an
+    # ``_run_from`` durch → processing_state=FAILED + Retry (STOAA-228). Deshalb
+    # hier KEIN eigenes try/except mehr.
     result = run_ocr(version.file_path)
+
+    finished_at = timezone.now()
     archive_candidate = Path(version.file_path).with_suffix(".ocr.pdf")
     archive_path = str(archive_candidate) if archive_candidate.exists() else ""
 
@@ -270,6 +284,7 @@ def ocr_version(version: DocumentVersion) -> dict:
     version.ocr_error = result.error or ""
     version.ocr_engine = result.engine
     version.ocr_duration_ms = result.duration_ms
+    version.ocr_finished_at = finished_at
     version.save(
         update_fields=[
             "archive_path",
@@ -279,6 +294,8 @@ def ocr_version(version: DocumentVersion) -> dict:
             "ocr_error",
             "ocr_engine",
             "ocr_duration_ms",
+            "ocr_started_at",
+            "ocr_finished_at",
         ]
     )
     version.transition_to(
