@@ -17,9 +17,11 @@ import {
   type DocumentItem,
   type Me,
   type NamedRef,
+  type ProcessingStateFilter,
   type TagRef,
 } from "../api";
 import { toCanonicalValue } from "../customFields";
+import { ProcessingBadge } from "./ProcessingStatus";
 import UploadZone from "./UploadZone";
 import DocumentDetail from "./DocumentDetail";
 import RulesPage from "./RulesPage";
@@ -47,6 +49,8 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   // Speicherpfad-Filter (STOAA-50). Bis der Backend-Query-Param gemergt ist,
   // bleibt der Speicherpfad-Abschnitt in der Sidebar ausgegraut (no-op).
   const [storagePath, setStoragePath] = useState<number | "">("");
+  // Verarbeitungsstatus-Filter (STOAA-249): leer = kein Filter, sonst UI-Bucket.
+  const [processingState, setProcessingState] = useState<ProcessingStateFilter | "">("");
   // Sortierung; "" = Backend-Standard (FTS-Relevanz bei Suche, sonst Datum neu→alt).
   const [ordering, setOrdering] = useState("");
 
@@ -189,6 +193,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
       document_type: documentType,
       tag,
       storage_path: storagePath,
+      processing_state: processingState,
       ordering,
       page,
       customFilters,
@@ -207,7 +212,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     };
     // customFilterKey serialisiert customFilters für einen stabilen Dep-Vergleich.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [debouncedQ, correspondent, documentType, tag, storagePath, ordering, page, reloadKey, customFilterKey]);
+  }, [debouncedQ, correspondent, documentType, tag, storagePath, processingState, ordering, page, reloadKey, customFilterKey]);
 
   // Sichtbarkeit von „Zurücksetzen" & Empty-State-Text: alle roh getippten Filter.
   const hasCurrencyInput = useMemo(
@@ -217,9 +222,9 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   );
   const hasFilters = useMemo(
     () =>
-      !!(debouncedQ || correspondent || documentType || tag || storagePath) ||
+      !!(debouncedQ || correspondent || documentType || tag || storagePath || processingState) ||
       hasCurrencyInput,
-    [debouncedQ, correspondent, documentType, tag, storagePath, hasCurrencyInput],
+    [debouncedQ, correspondent, documentType, tag, storagePath, processingState, hasCurrencyInput],
   );
 
   // Jede Filter-/Suchänderung springt zurück auf Seite 1 – sonst zeigt eine
@@ -244,6 +249,10 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     setStoragePath(v);
     setPage(1);
   }
+  function onProcessingStateChange(v: ProcessingStateFilter | "") {
+    setProcessingState(v);
+    setPage(1);
+  }
   function onOrderingChange(v: string) {
     setOrdering(v);
     setPage(1);
@@ -263,6 +272,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     setDocumentType("");
     setTag("");
     setStoragePath("");
+    setProcessingState("");
     setOrdering("");
     setCurrencyFilters({});
     setPage(1);
@@ -326,10 +336,12 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
         tag={tag}
         documentType={documentType}
         storagePath={storagePath}
+        processingState={processingState}
         onCorrespondentChange={onCorrespondentChange}
         onTagChange={onTagChange}
         onDocumentTypeChange={onDocumentTypeChange}
         onStoragePathChange={onStoragePathChange}
+        onProcessingStateChange={onProcessingStateChange}
         storagePathEnabled={STORAGE_PATH_FILTER_ENABLED}
         currencyFields={currencyFields}
         currencyFilters={currencyFilters}
@@ -501,10 +513,12 @@ function Sidebar({
   tag,
   documentType,
   storagePath,
+  processingState,
   onCorrespondentChange,
   onTagChange,
   onDocumentTypeChange,
   onStoragePathChange,
+  onProcessingStateChange,
   storagePathEnabled,
   currencyFields,
   currencyFilters,
@@ -525,10 +539,12 @@ function Sidebar({
   tag: number | "";
   documentType: number | "";
   storagePath: number | "";
+  processingState: ProcessingStateFilter | "";
   onCorrespondentChange: (v: number | "") => void;
   onTagChange: (v: number | "") => void;
   onDocumentTypeChange: (v: number | "") => void;
   onStoragePathChange: (v: number | "") => void;
+  onProcessingStateChange: (v: ProcessingStateFilter | "") => void;
   storagePathEnabled: boolean;
   currencyFields: CustomField[];
   currencyFilters: Record<number, CurrencyRange>;
@@ -594,6 +610,13 @@ function Sidebar({
 
         {view === "docs" && (
           <div className="nav-filters">
+            <ProcessingFilterSection
+              active={processingState}
+              onSelect={(v) => {
+                onProcessingStateChange(v);
+                onClose();
+              }}
+            />
             <FilterSection
               title="Korrespondenten"
               items={correspondents}
@@ -707,6 +730,67 @@ function FilterSection({
                     />
                   )}
                   <span className="nav-filter__label">{it.name}</span>
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+// Verarbeitungsstatus-Filter (STOAA-249): feste UI-Buckets auf den
+// ``processing_state`` der aktuellen Version. Klick auf den aktiven Bucket hebt
+// den Filter wieder auf. Analog zu FilterSection, aber string-basiert.
+const PROCESSING_FILTERS: { value: ProcessingStateFilter; label: string }[] = [
+  { value: "failed", label: "Fehlgeschlagen" },
+  { value: "processing", label: "In Verarbeitung" },
+  { value: "retry_pending", label: "Wartet auf Retry" },
+  { value: "ready", label: "Bereit" },
+];
+
+function ProcessingFilterSection({
+  active,
+  onSelect,
+}: {
+  active: ProcessingStateFilter | "";
+  onSelect: (v: ProcessingStateFilter | "") => void;
+}) {
+  const [expanded, setExpanded] = useState(true);
+
+  return (
+    <div className="nav-section">
+      <button
+        className="nav-section__head"
+        onClick={() => setExpanded((e) => !e)}
+        aria-expanded={expanded}
+      >
+        <svg
+          className={`nav-section__chevron${expanded ? " nav-section__chevron--open" : ""}`}
+          viewBox="0 0 24 24"
+          width="14"
+          height="14"
+          aria-hidden="true"
+        >
+          <path fill="currentColor" d="M8 5l8 7-8 7z" />
+        </svg>
+        <span className="nav-section__title">Verarbeitung</span>
+        <span className="nav-section__count">{PROCESSING_FILTERS.length}</span>
+      </button>
+      {expanded && (
+        <ul className="nav-section__list">
+          {PROCESSING_FILTERS.map((f) => {
+            const isActive = active === f.value;
+            return (
+              <li key={f.value}>
+                <button
+                  className={`nav-filter${isActive ? " nav-filter--active" : ""}`}
+                  onClick={() => onSelect(isActive ? "" : f.value)}
+                  aria-current={isActive ? "true" : undefined}
+                  title={f.label}
+                >
+                  <span className="nav-filter__label">{f.label}</span>
                 </button>
               </li>
             );
@@ -942,8 +1026,11 @@ function DocumentCard({ doc, onOpen }: { doc: DocumentItem; onOpen: () => void }
             ))}
           </div>
         )}
-        <p className="doc-card__date">
-          {new Date(doc.added_at).toLocaleDateString("de-DE")}
+        <p className="doc-card__footer">
+          <span className="doc-card__date">
+            {new Date(doc.added_at).toLocaleDateString("de-DE")}
+          </span>
+          <ProcessingBadge state={doc.processing_state} />
         </p>
       </div>
     </button>

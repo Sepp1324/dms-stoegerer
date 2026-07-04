@@ -12,6 +12,7 @@ import {
   getDocumentVersionFile,
   getShareLinks,
   rejectDocument,
+  retryProcessing,
   revokeShareLink,
   submitDocument,
   suggestDocument,
@@ -31,6 +32,11 @@ import {
   toCanonicalValue,
   toInputValue,
 } from "../customFields";
+import {
+  ProcessingBadge,
+  ocrStatusLabel,
+  processingStateLabel,
+} from "./ProcessingStatus";
 
 interface Props {
   id: number;
@@ -79,6 +85,9 @@ export default function DocumentDetail({
   const [refresh, setRefresh] = useState(0);
   const [addBusy, setAddBusy] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
+  // Retry der Dokumentverarbeitung (STOAA-249): nur bei processing_state=failed.
+  const [retryBusy, setRetryBusy] = useState(false);
+  const [retryError, setRetryError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [editing, setEditing] = useState(false);
@@ -160,6 +169,21 @@ export default function DocumentDetail({
     } finally {
       setAddBusy(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }
+
+  // Verarbeitung der aktuellen Version neu anstoßen und danach das Detail neu
+  // laden (der ``refresh``-Tick triggert getDocument + Integritätsprüfung).
+  async function onRetry() {
+    setRetryBusy(true);
+    setRetryError(null);
+    try {
+      await retryProcessing(id);
+      setRefresh((r) => r + 1);
+    } catch (e) {
+      setRetryError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRetryBusy(false);
     }
   }
 
@@ -302,6 +326,10 @@ export default function DocumentDetail({
   const versions = [...(doc?.versions ?? [])].sort(
     (a, b) => b.version_no - a.version_no,
   );
+  // Aktuelle Version für das Verarbeitungs-Widget (STOAA-249). Der Rollup
+  // ``doc.processing_state`` spiegelt genau diese Version; das Widget zeigt
+  // zusätzlich Fehlerdetails/Versuche aus dem vollen Versionsobjekt.
+  const currentVersion = versions.find((v) => v.id === doc?.current_version);
 
   const s = doc?.ai_suggestions ?? {};
   const suggestionRows: { key: string; label: string; value: string }[] = [];
@@ -484,6 +512,13 @@ export default function DocumentDetail({
                   onSubmit={() => runFreigabe(() => submitDocument(id))}
                   onApprove={() => runFreigabe(() => approveDocument(id))}
                   onReject={(reason) => runFreigabe(() => rejectDocument(id, reason))}
+                />
+                <ProcessingPanel
+                  version={currentVersion}
+                  canEdit={canEdit}
+                  retryBusy={retryBusy}
+                  retryError={retryError}
+                  onRetry={onRetry}
                 />
                 {doc.classification?.rules?.length ? (
                   <p className="class-note">
@@ -679,6 +714,100 @@ function DetailTabs({
       >
         Verlauf
       </button>
+    </div>
+  );
+}
+
+// Verarbeitungs-Widget (STOAA-249): kompaktes Monitoring der aktuellen Version –
+// processing_state, OCR-Status, fehlgeschlagener Schritt, letzter Fehlerzeitpunkt
+// und Versuche. Fehlerdetails (processing_error/ocr_error) sind aufklappbar; der
+// Retry-Button erscheint nur bei ``failed`` und Schreibrecht.
+function ProcessingPanel({
+  version,
+  canEdit,
+  retryBusy,
+  retryError,
+  onRetry,
+}: {
+  version: DocumentVersion | undefined;
+  canEdit: boolean;
+  retryBusy: boolean;
+  retryError: string | null;
+  onRetry: () => void;
+}) {
+  const [showErrors, setShowErrors] = useState(false);
+  if (!version) return null;
+
+  const state = version.processing_state ?? null;
+  const isFailed = state === "failed";
+  const hasErrorDetails = !!(version.processing_error || version.ocr_error);
+
+  return (
+    <div className="processing">
+      <div className="processing__head">
+        <span className="processing__label">Verarbeitung</span>
+        <ProcessingBadge state={state} />
+      </div>
+
+      <dl className="processing__grid">
+        <dt>Status</dt>
+        <dd>{processingStateLabel(state)}</dd>
+        <dt>OCR</dt>
+        <dd>{ocrStatusLabel(version.ocr_status ?? null)}</dd>
+        {version.processing_failed_step && (
+          <>
+            <dt>Fehlgeschlagener Schritt</dt>
+            <dd>{version.processing_failed_step}</dd>
+          </>
+        )}
+        {version.processing_failed_at && (
+          <>
+            <dt>Letzter Fehler</dt>
+            <dd>{new Date(version.processing_failed_at).toLocaleString("de-DE")}</dd>
+          </>
+        )}
+        <dt>Versuche</dt>
+        <dd>{version.processing_attempts}</dd>
+      </dl>
+
+      {hasErrorDetails && (
+        <div className="processing__errors">
+          <button
+            className="link processing__toggle"
+            onClick={() => setShowErrors((v) => !v)}
+            aria-expanded={showErrors}
+          >
+            {showErrors ? "Fehlerdetails ausblenden" : "Fehlerdetails anzeigen"}
+          </button>
+          {showErrors && (
+            <div className="processing__error-body">
+              {version.processing_error && (
+                <div>
+                  <p className="processing__error-title">Verarbeitungsfehler</p>
+                  <pre className="processing__error-text">{version.processing_error}</pre>
+                </div>
+              )}
+              {version.ocr_error && (
+                <div>
+                  <p className="processing__error-title">OCR-Fehler</p>
+                  <pre className="processing__error-text">{version.ocr_error}</pre>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {isFailed && canEdit && (
+        <button
+          className="processing__retry"
+          onClick={onRetry}
+          disabled={retryBusy}
+        >
+          {retryBusy ? "Wird neu gestartet …" : "Verarbeitung erneut starten"}
+        </button>
+      )}
+      {retryError && <p className="status status--error">{retryError}</p>}
     </div>
   );
 }

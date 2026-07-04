@@ -71,11 +71,49 @@ async function apiFetch(path: string, options: RequestInit = {}): Promise<Respon
 }
 
 // --- Typen ---
+// Fachliche State-Machine der asynchronen Dokumentverarbeitung (STOAA-248).
+// ``ocr_status`` bleibt das technische Detail-Monitoring des OCR-Schritts;
+// ``processing_state`` beschreibt den gesamten DMS-Fluss (uploaded → … → ready)
+// samt Fehler-/Retry-States. Serverseitig gesetzt, read-only.
+export type ProcessingState =
+  | "uploaded"
+  | "hashed"
+  | "ocr_running"
+  | "ocr_done"
+  | "classification_running"
+  | "classified"
+  | "thumbnail_done"
+  | "sealed"
+  | "ready"
+  | "failed"
+  | "retry_pending";
+
+// Technischer OCR-Detailstatus des aktuellen Verarbeitungsschritts (STOAA-225).
+export type OcrStatus = "pending" | "running" | "success" | "failed" | "skipped";
+
+// UI-Buckets für den Listen-Filter ``?processing_state=`` (STOAA-248). ``processing``
+// fasst alle In-Flight-States (uploaded…sealed) zusammen; failed/retry_pending/ready
+// sind eigene Buckets. Unbekannte Werte ignoriert das Backend (kein Filter).
+export type ProcessingStateFilter =
+  | "failed"
+  | "processing"
+  | "ready"
+  | "retry_pending";
+
 export interface DocumentVersion {
   id: number;
   version_no: number;
   sha256: string;
   prev_hash: string;
+  // Verarbeitungs-/Fehler-/Retry-Felder (STOAA-228/248) und OCR-Detailstatus
+  // (STOAA-225). Alle serverseitig (Pipeline) gesetzt und read-only.
+  processing_state: ProcessingState;
+  processing_error: string;
+  processing_failed_step: string;
+  processing_failed_at: string | null;
+  processing_attempts: number;
+  ocr_status: OcrStatus;
+  ocr_error: string;
   mime_type: string;
   size: number;
   page_count: number | null;
@@ -112,6 +150,10 @@ export interface DocumentItem {
   document_type_name: string | null;
   tags: { id: number; name: string; color: string }[];
   page_count: number | null;
+  // Verarbeitungs-Rollup der aktuellen Version (STOAA-248): spart der Liste den
+  // Durchgriff auf ``versions``. Altdaten ohne current_version liefern ``null``.
+  processing_state: ProcessingState | null;
+  ocr_status: OcrStatus | null;
 }
 export interface AiSuggestions {
   title?: string;
@@ -313,6 +355,8 @@ export interface DocumentQuery {
   // aus dem Kind-Ticket; unbekannte Params werden vom Backend ignoriert, daher
   // hier bereits vorbereitet.
   storage_path?: number | "";
+  // Verarbeitungsstatus-Filter (STOAA-248): grober UI-Bucket, leer = kein Filter.
+  processing_state?: ProcessingStateFilter | "";
   page?: number;
   // Sortierung, z. B. "-added_at" (Datum neu→alt), "added_at" (alt→neu),
   // "title" (A–Z). Leer = Backend-Standard (FTS-Relevanz bei ``q``, sonst
@@ -348,6 +392,27 @@ export async function getDocuments(
 export async function getDocument(id: number): Promise<DocumentDetail> {
   const res = await apiFetch(`/documents/${id}/`);
   if (!res.ok) throw new Error(`Dokument laden fehlgeschlagen: HTTP ${res.status}`);
+  return res.json();
+}
+
+// Verarbeitung der aktuellen Version neu anstoßen (STOAA-248). Nur erlaubt, wenn
+// ``processing_state === "failed"`` (sonst HTTP 400). Der Retry läuft asynchron;
+// die 202-Antwort enthält die aktuelle Version noch im Zustand ``failed`` – der
+// Rollup wechselt erst, wenn der Task greift, daher danach das Detail neu laden.
+export async function retryProcessing(id: number): Promise<DocumentVersion> {
+  const res = await apiFetch(`/documents/${id}/retry_processing/`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    let detail = `Neustart fehlgeschlagen: HTTP ${res.status}`;
+    try {
+      const data = await res.json();
+      if (data && typeof data.detail === "string") detail = data.detail;
+    } catch {
+      /* keine JSON-Fehlermeldung – Fallback bleibt */
+    }
+    throw new Error(detail);
+  }
   return res.json();
 }
 
