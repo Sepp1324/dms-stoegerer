@@ -14,6 +14,7 @@ from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APITestCase
 
+from . import pipeline
 from .classification import apply_rules, rule_matches
 from .models import (
     AuditLogEntry,
