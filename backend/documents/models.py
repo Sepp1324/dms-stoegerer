@@ -265,6 +265,12 @@ class DocumentVersion(models.Model):
         THUMBNAIL_DONE = "thumbnail_done", "Thumbnail done"
         SEALED = "sealed", "Sealed"
         READY = "ready", "Ready"
+        # Fehler-/Retry-Layer (STOAA-228): bewusst NICHT als Vorwärtsziele in
+        # PROCESSING_TRANSITIONS – die lineare Erfolgs-Map bleibt lesbar. Die
+        # Übergänge in/aus diesen States laufen über mark_processing_failed /
+        # begin_retry bzw. pipeline.retry_version.
+        FAILED = "failed", "Failed"
+        RETRY_PENDING = "retry_pending", "Retry pending"
 
     PROCESSING_TRANSITIONS = {
         ProcessingState.UPLOADED: {ProcessingState.HASHED},
@@ -304,6 +310,13 @@ class DocumentVersion(models.Model):
         db_index=True,
         help_text="State Machine der Dokumentverarbeitung (uploaded → ready)",
     )
+
+    # Fehler-/Retry-Layer (STOAA-228) – gehört zur technischen Verarbeitung,
+    # NICHT zur fachlichen Freigabe (Document.status). Read-only für die UI.
+    processing_error = models.TextField(blank=True, default="")
+    processing_failed_step = models.CharField(max_length=40, blank=True, default="")
+    processing_failed_at = models.DateTimeField(null=True, blank=True)
+    processing_attempts = models.PositiveIntegerField(default=0)
 
     ocr_status = models.CharField(
         max_length=20,
@@ -379,6 +392,75 @@ class DocumentVersion(models.Model):
             object_type="DocumentVersion",
             object_id=str(self.id),
             detail={"from": old_state, "to": new_state, **(detail or {})},
+        )
+
+    def mark_processing_failed(self, *, step, error, actor=None) -> None:
+        """Markiert die Version als fehlgeschlagen (Fehler-Layer, STOAA-228).
+
+        WORM/READY werden NIE auf FAILED gesetzt – eine gesiegelte oder final
+        freigegebene Version bleibt unangetastet. Der Schreibvorgang läuft wie
+        ``transition_to`` bewusst über ``QuerySet.update``, um den WORM-``save``-
+        Guard zu umgehen, und die lokalen Attribute werden nachgezogen.
+        """
+        if self.is_immutable or self.processing_state in {
+            self.ProcessingState.SEALED,
+            self.ProcessingState.READY,
+        }:
+            raise ValidationError(
+                "Gesiegelte/READY-Version kann nicht auf FAILED gesetzt werden."
+            )
+
+        old_state = self.processing_state
+        failed_at = timezone.now()
+        error_text = str(error)[:4000]
+        DocumentVersion.objects.filter(pk=self.pk).update(
+            processing_state=self.ProcessingState.FAILED,
+            processing_error=error_text,
+            processing_failed_step=step,
+            processing_failed_at=failed_at,
+        )
+        self.processing_state = self.ProcessingState.FAILED
+        self.processing_error = error_text
+        self.processing_failed_step = step
+        self.processing_failed_at = failed_at
+
+        AuditLogEntry.objects.create(
+            actor=actor,
+            action="processing_failed",
+            object_type="DocumentVersion",
+            object_id=str(self.id),
+            detail={"from": old_state, "step": step, "error": str(error)[:1000]},
+        )
+
+    def begin_retry(self, *, actor=None) -> None:
+        """Startet einen Retry aus dem FAILED-Zustand (Retry-Layer, STOAA-228).
+
+        Setzt ``processing_state`` auf RETRY_PENDING und zählt ``processing_attempts``
+        hoch. Der eigentliche Wiedereinstieg (Vorbedingung setzen + Pipeline ab
+        dem fehlgeschlagenen Schritt) übernimmt ``pipeline.retry_version``.
+        """
+        if self.processing_state != self.ProcessingState.FAILED:
+            raise ValidationError("Retry ist nur aus dem Zustand FAILED möglich.")
+        if self.is_immutable or self.processing_state in {
+            self.ProcessingState.SEALED,
+            self.ProcessingState.READY,
+        }:
+            raise ValidationError(
+                "Gesiegelte/READY-Version kann nicht erneut verarbeitet werden."
+            )
+
+        DocumentVersion.objects.filter(pk=self.pk).update(
+            processing_state=self.ProcessingState.RETRY_PENDING,
+            processing_attempts=models.F("processing_attempts") + 1,
+        )
+        self.refresh_from_db(fields=["processing_state", "processing_attempts"])
+
+        AuditLogEntry.objects.create(
+            actor=actor,
+            action="processing_retry",
+            object_type="DocumentVersion",
+            object_id=str(self.id),
+            detail={"attempt": self.processing_attempts, "step": self.processing_failed_step},
         )
 
     def save(self, *args, **kwargs):

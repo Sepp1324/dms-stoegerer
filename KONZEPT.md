@@ -123,6 +123,22 @@ Metadaten extrahieren → Klassifizierungsregeln anwenden →
 ML-Vorschläge ergänzen → in DB + Storage ablegen → Audit-Log-Eintrag
 ```
 
+**Fehler-/Retry-Layer der Pipeline (STOAA-228):** Auf der linearen Erfolgs-State-
+Machine (`processing_state`: `uploaded → … → ready`) sitzt ein Fehler-/Retry-Layer
+mit zwei zusätzlichen `processing_state`-Werten: `failed` und `retry_pending`.
+Schlägt ein Schritt fehl, markiert `mark_processing_failed()` die Version als
+`failed` (samt `processing_error`, `processing_failed_step`, `processing_failed_at`)
+und die Pipeline liefert ein strukturiertes Fehlerergebnis zurück statt zu
+werfen – das Dokument bleibt sichtbar `failed`. Ein Retry (`retry_version()` bzw.
+`manage.py retry_processing --failed`) zählt `processing_attempts` hoch
+(`failed → retry_pending`), setzt `processing_state` auf die **Vorbedingung** des
+fehlgeschlagenen Schritts (z. B. `hashed` vor dem OCR-Schritt) und läuft die
+Pipeline ab dort erneut – der Schritt führt seine eigene `transition_to(RUNNING)`
+aus (`retry_pending → hashed → ocr_running → …`). Bewusst über den bestehenden
+`processing_state` **statt `Document.status`**: Fehler-/Retry sind ein technisches
+Verarbeitungsdetail und dürfen von der fachlichen Freigabe (`Document.status`)
+entkoppelt bleiben. WORM/`ready`-Versionen werden nie auf `failed` gesetzt.
+
 ---
 
 ## 5. Datenmodell (Kern)

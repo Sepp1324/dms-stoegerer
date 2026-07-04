@@ -1933,3 +1933,218 @@ class DocumentProcessingStateMachineTests(TestCase):
                 DocumentVersion.ProcessingState.READY,
             ],
         )
+
+
+class DocumentProcessingFailureRetryTests(TestCase):
+    """Fehler-/Retry-Layer der Verarbeitungs-Pipeline (STOAA-228)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.user = User.objects.create_user(
+            username="retry-user", password="pw", role="user"
+        )
+
+    def _version(self):
+        from pathlib import Path
+
+        source = Path(self._tmp.name) / f"doc-{DocumentVersion.objects.count()}.pdf"
+        source.write_bytes(b"%PDF-1.4\n% test\n")
+        document = Document.objects.create(title="Retry Test", owner=self.user)
+        version = DocumentVersion.objects.create(
+            document=document,
+            version_no=1,
+            file_path=str(source),
+            created_by=self.user,
+        )
+        document.current_version = version
+        document.save(update_fields=["current_version"])
+        return document, version
+
+    def _ok_ocr(self):
+        from documents.services.ocr.types import OCRResult, OCRStatusEnum
+
+        return OCRResult(
+            text="Guter OCR-Text",
+            pages=1,
+            status=OCRStatusEnum.SUCCESS,
+            duration_ms=5,
+            engine="test-ocr",
+        )
+
+    def _fake_thumbnail(self, version, *, max_width=700):
+        from pathlib import Path
+
+        thumb = str(Path(self._tmp.name) / f"thumb-{version.id}.jpg")
+        DocumentVersion.objects.filter(pk=version.pk).update(thumbnail_path=thumb)
+        version.thumbnail_path = thumb
+        return thumb
+
+    def _run_to_ready(self, version):
+        from unittest import mock
+
+        with mock.patch(
+            "documents.pipeline.run_ocr", return_value=self._ok_ocr()
+        ), mock.patch(
+            "documents.pipeline.generate_thumbnail", side_effect=self._fake_thumbnail
+        ):
+            return pipeline.process_version(version)
+
+    def test_sealed_und_ready_nicht_auf_failed(self):
+        from django.core.exceptions import ValidationError
+
+        _, version = self._version()
+        self._run_to_ready(version)
+        version.refresh_from_db()
+        self.assertEqual(
+            version.processing_state, DocumentVersion.ProcessingState.READY
+        )
+        self.assertTrue(version.is_immutable)
+
+        with self.assertRaises(ValidationError):
+            version.mark_processing_failed(step="ocr", error="darf nicht")
+
+    def test_begin_retry_nur_aus_failed(self):
+        from django.core.exceptions import ValidationError
+
+        _, version = self._version()
+        # Frische Version ist UPLOADED, nicht FAILED → begin_retry wirft.
+        with self.assertRaises(ValidationError):
+            version.begin_retry()
+
+    def test_ocr_fehler_fuehrt_zu_failed(self):
+        from unittest import mock
+
+        _, version = self._version()
+        with mock.patch(
+            "documents.pipeline.run_ocr", side_effect=RuntimeError("OCR kaputt")
+        ):
+            result = pipeline.process_version(version)
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["step"], "ocr")
+        self.assertEqual(
+            result["processing_state"], DocumentVersion.ProcessingState.FAILED
+        )
+
+        version.refresh_from_db()
+        self.assertEqual(
+            version.processing_state, DocumentVersion.ProcessingState.FAILED
+        )
+        self.assertEqual(version.processing_failed_step, "ocr")
+        self.assertIn("OCR kaputt", version.processing_error)
+        self.assertIsNotNone(version.processing_failed_at)
+        self.assertTrue(
+            AuditLogEntry.objects.filter(
+                action="processing_failed", object_id=str(version.id)
+            ).exists()
+        )
+
+    def test_retry_startet_neu_bis_ready(self):
+        from unittest import mock
+
+        _, version = self._version()
+        with mock.patch(
+            "documents.pipeline.run_ocr", side_effect=RuntimeError("boom")
+        ):
+            pipeline.process_version(version)
+        version.refresh_from_db()
+        self.assertEqual(
+            version.processing_state, DocumentVersion.ProcessingState.FAILED
+        )
+
+        with mock.patch(
+            "documents.pipeline.run_ocr", return_value=self._ok_ocr()
+        ), mock.patch(
+            "documents.pipeline.generate_thumbnail", side_effect=self._fake_thumbnail
+        ):
+            result = pipeline.retry_version(version, actor=self.user)
+
+        self.assertEqual(result["status"], "done")
+        version.refresh_from_db()
+        self.assertEqual(
+            version.processing_state, DocumentVersion.ProcessingState.READY
+        )
+        self.assertEqual(version.processing_attempts, 1)
+
+        # FAILED -> RETRY_PENDING -> (HASHED) -> OCR_RUNNING deckt der Audit ab.
+        self.assertTrue(
+            AuditLogEntry.objects.filter(
+                action="processing_retry", object_id=str(version.id)
+            ).exists()
+        )
+        resume = AuditLogEntry.objects.filter(
+            action="processing_resume", object_id=str(version.id)
+        ).first()
+        self.assertIsNotNone(resume)
+        self.assertEqual(
+            resume.detail["to"], DocumentVersion.ProcessingState.HASHED
+        )
+        self.assertEqual(resume.detail["step"], "ocr")
+
+    def test_audit_enthaelt_fehler_und_retry(self):
+        from unittest import mock
+
+        _, version = self._version()
+        with mock.patch(
+            "documents.pipeline.run_ocr", side_effect=RuntimeError("boom")
+        ):
+            pipeline.process_version(version)
+        with mock.patch(
+            "documents.pipeline.run_ocr", return_value=self._ok_ocr()
+        ), mock.patch(
+            "documents.pipeline.generate_thumbnail", side_effect=self._fake_thumbnail
+        ):
+            pipeline.retry_version(version, actor=self.user)
+
+        actions = set(
+            AuditLogEntry.objects.filter(object_id=str(version.id)).values_list(
+                "action", flat=True
+            )
+        )
+        self.assertIn("processing_failed", actions)
+        self.assertIn("processing_retry", actions)
+
+    def test_command_ueberspringt_ready(self):
+        from django.core.management import call_command
+
+        _, version = self._version()
+        self._run_to_ready(version)
+        version.refresh_from_db()
+        self.assertEqual(
+            version.processing_state, DocumentVersion.ProcessingState.READY
+        )
+
+        before = AuditLogEntry.objects.filter(
+            action="processing_state", object_id=str(version.id)
+        ).count()
+        call_command("retry_processing", "--version-id", str(version.id))
+        after = AuditLogEntry.objects.filter(
+            action="processing_state", object_id=str(version.id)
+        ).count()
+        self.assertEqual(before, after)
+
+    def test_command_idempotent(self):
+        from io import StringIO
+        from unittest import mock
+
+        from django.core.management import call_command
+
+        _, version = self._version()
+        with mock.patch(
+            "documents.pipeline.run_ocr", side_effect=RuntimeError("boom")
+        ):
+            pipeline.process_version(version)
+
+        out = StringIO()
+        with mock.patch(
+            "documents.pipeline.run_ocr", return_value=self._ok_ocr()
+        ), mock.patch(
+            "documents.pipeline.generate_thumbnail", side_effect=self._fake_thumbnail
+        ):
+            call_command("retry_processing", "--failed", stdout=out)
+        self.assertIn("1 neu verarbeitet", out.getvalue())
+
+        out2 = StringIO()
+        call_command("retry_processing", "--failed", stdout=out2)
+        self.assertIn("0 neu verarbeitet", out2.getvalue())

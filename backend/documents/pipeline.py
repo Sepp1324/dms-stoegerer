@@ -344,35 +344,113 @@ def seal_version(version: DocumentVersion) -> None:
     )
 
 
-def process_version(version: DocumentVersion) -> dict:
-    """Vollständige Verarbeitung einer Version entlang der State Machine."""
-    hash_version(version)
-    ocr_result = ocr_version(version)
-    classify_version(version)
-    generate_version_thumbnail(version)
-    AuditLogEntry.objects.create(
-        actor=version.created_by,
-        action="ocr",
-        object_type="DocumentVersion",
-        object_id=str(version.id),
-        detail={
-            "pages": ocr_result["pages"],
-            "sha256": version.sha256,
-            "archive_path": ocr_result["archive_path"],
-            "ocr_status": ocr_result["ocr_status"],
-            "chars": ocr_result["chars"],
-        },
-    )
-    seal_version(version)
+# ---------------------------------------------------------------------------
+# Pipeline-Schritte als Daten: Name, Funktion und Vorbedingung (der Startzustand,
+# den der Schritt selbst per transition_to erwartet). Die Namen MÜSSEN zu
+# ``DocumentVersion.processing_failed_step`` passen – sie steuern den Retry-
+# Wiedereinstieg (STOAA-228). Die Erfolgs-Map PROCESSING_TRANSITIONS bleibt davon
+# bewusst unberührt.
+PIPELINE_STEPS = [
+    ("hashing",        hash_version,               DocumentVersion.ProcessingState.UPLOADED),
+    ("ocr",            ocr_version,                DocumentVersion.ProcessingState.HASHED),
+    ("classification", classify_version,           DocumentVersion.ProcessingState.OCR_DONE),
+    ("thumbnail",      generate_version_thumbnail, DocumentVersion.ProcessingState.CLASSIFIED),
+    ("sealing",        seal_version,               DocumentVersion.ProcessingState.THUMBNAIL_DONE),
+]
+
+
+def _run_from(version: DocumentVersion, start_index: int) -> dict:
+    """Läuft die Pipeline ab ``start_index`` und fängt Schrittfehler ab.
+
+    Ein fehlgeschlagener Schritt markiert die Version FAILED (sichtbar, kein
+    re-raise – Stil ``scan_consume_folder``) und liefert ein strukturiertes
+    Fehlerergebnis zurück. Der Erfolgsfall endet in READY.
+    """
+    ocr_result = None
+    for name, func, _precond in PIPELINE_STEPS[start_index:]:
+        try:
+            step_result = func(version)
+        except Exception as exc:  # noqa: BLE001 – jeder Schritt darf fehlschlagen
+            version.mark_processing_failed(
+                step=name, error=exc, actor=version.created_by
+            )
+            logger.exception(
+                "Verarbeitungsschritt %r für Version %s fehlgeschlagen",
+                name,
+                version.id,
+            )
+            return {
+                "version_id": version.id,
+                "status": "failed",
+                "step": name,
+                "processing_state": DocumentVersion.ProcessingState.FAILED,
+                "error": str(exc)[:1000],
+            }
+
+        if name == "ocr":
+            ocr_result = step_result
+            # Bestehenden Zwischen-Audit verhaltensgleich erhalten (PR#70).
+            AuditLogEntry.objects.create(
+                actor=version.created_by,
+                action="ocr",
+                object_type="DocumentVersion",
+                object_id=str(version.id),
+                detail={
+                    "pages": step_result["pages"],
+                    "sha256": version.sha256,
+                    "archive_path": step_result["archive_path"],
+                    "ocr_status": step_result["ocr_status"],
+                    "chars": step_result["chars"],
+                },
+            )
 
     return {
         "version_id": version.id,
         "sha256": version.sha256,
-        "pages": ocr_result["pages"],
-        "chars": ocr_result["chars"],
+        "pages": ocr_result["pages"] if ocr_result else version.page_count,
+        "chars": ocr_result["chars"] if ocr_result else len(version.ocr_text or ""),
         "processing_state": DocumentVersion.ProcessingState.READY,
         "status": "done",
     }
+
+
+def process_version(version: DocumentVersion) -> dict:
+    """Vollständige Verarbeitung einer Version entlang der State Machine."""
+    return _run_from(version, 0)
+
+
+def retry_version(version: DocumentVersion, actor=None) -> dict:
+    """Verarbeitet eine FAILED-Version ab dem fehlgeschlagenen Schritt erneut.
+
+    Ablauf (Beispiel OCR-Fehler): ``FAILED → RETRY_PENDING → (HASHED) →
+    OCR_RUNNING → …``. ``begin_retry`` zählt den Versuch hoch; anschließend wird
+    ``processing_state`` auf die Vorbedingung des fehlgeschlagenen Schritts
+    gesetzt, damit der Schritt seine eigene ``transition_to(RUNNING)`` ausführen
+    kann.
+    """
+    version.begin_retry(actor=actor)
+
+    failed_step = version.processing_failed_step
+    start_index = 0
+    name, _func, precond = PIPELINE_STEPS[0]
+    for idx, (step_name, _step_func, step_precond) in enumerate(PIPELINE_STEPS):
+        if step_name == failed_step:
+            start_index = idx
+            name = step_name
+            precond = step_precond
+            break
+
+    DocumentVersion.objects.filter(pk=version.pk).update(processing_state=precond)
+    version.processing_state = precond
+    AuditLogEntry.objects.create(
+        actor=actor,
+        action="processing_resume",
+        object_type="DocumentVersion",
+        object_id=str(version.id),
+        detail={"to": precond, "step": name},
+    )
+
+    return _run_from(version, start_index)
 
 
 def _add_months(d, months: int):
