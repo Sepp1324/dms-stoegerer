@@ -1,8 +1,11 @@
-# Worker-Deployment mit separatem NFS-Volume für den Consume-Ordner.
+# Worker-Deployment (Celery: OCR-Pipeline + Consume-Scanner).
 #
-# IMAGE-REBUILD: NEIN. Das NFS-Volume wird vom Kubelet auf dem **Node** gemountet,
-# nicht im Container. Voraussetzung: `nfs-common` (Debian/Ubuntu) bzw. `nfs-utils`
-# (RHEL/CentOS) auf dem Node installiert. Das Backend-Image bleibt unverändert.
+# Consume-Ordner: Die Basis nutzt den lokalen Pfad DMS_DATA_DIR/consume
+# (= /data/consume, ConfigMap CONSUME_FOLDER_PATH). Für den NAS-Betrieb wird
+# ein separates NFS-Volume als Overlay zugeschaltet – NICHT hier in der Basis,
+# damit das CD-Deployment (deploy.yml → `kubectl apply -k deploy/k8s`) ohne
+# echten NFS-Server nicht am Worker-Rollout hängen bleibt.
+# Aktivierung: deploy/k8s/overlays/consume-nfs/ (siehe README).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -41,19 +44,7 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
-            - name: consume-nfs
-              mountPath: /consume-nfs
       volumes:
         - name: data
           persistentVolumeClaim:
             claimName: dms-data
-        # Separates NFS-Volume für den Consume-Ordner (Scanner-Eingang).
-        # Konfiguration: NFS_SERVER und NFS_EXPORT_PATH per kustomize-Overlay
-        # oder ConfigMap-Generator setzen (nicht hier hartkodieren).
-        # Der Mount erfolgt auf Node-Ebene – nfs-common muss auf dem Node
-        # installiert sein (kein Image-Rebuild nötig).
-        - name: consume-nfs
-          nfs:
-            server: NFS_SERVER_PLACEHOLDER
-            path: NFS_EXPORT_PATH_PLACEHOLDER
-            readOnly: false

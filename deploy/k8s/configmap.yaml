@@ -13,9 +13,10 @@ data:
   POSTGRES_PORT: "5432"
   REDIS_URL: "redis://redis:6379/0"
   DMS_DATA_DIR: "/data"
-  # Consume-Ordner: separates NFS-Volume (siehe celery.yaml).
-  # Der Scanner schreibt direkt auf die NAS-Freigabe; der Worker liest von dort.
-  CONSUME_FOLDER_PATH: "/consume-nfs"
+  # Consume-Ordner (Scanner-Eingang). Basis-Default = lokaler Pfad im dms-data-PVC.
+  # Für NAS-Betrieb überschreibt das Overlay deploy/k8s/overlays/consume-nfs/
+  # diesen Wert auf den NFS-Mount-Pfad /consume-nfs (siehe README).
+  CONSUME_FOLDER_PATH: "/data/consume"
   # Beat-Intervalle in Sekunden (periodische Aufgaben).
   MAIL_FETCH_INTERVAL: "300"
   CONSUME_SCAN_INTERVAL: "120"

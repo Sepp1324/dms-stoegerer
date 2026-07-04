@@ -1,0 +1,31 @@
+# Overlay: Consume-Ordner auf ein separates NFS-Volume vom NAS umstellen.
+#
+# Zweck: Der Scanner (Netzwerkscanner/MFC) schreibt direkt auf eine NAS-Freigabe;
+# der Worker liest von dort. Das NFS-Volume ist BEWUSST nicht in der Basis, damit
+# das CD-Deployment ohne echten NFS-Server nicht am Worker-Rollout hängt.
+#
+# Aktivierung (siehe deploy/k8s/README.md):
+#   1. NAS-Export anlegen, `nfs-common` auf dem/den Node(s) installieren.
+#   2. In worker-nfs-patch.yaml die Platzhalter NFS_SERVER_PLACEHOLDER /
+#      NFS_EXPORT_PATH_PLACEHOLDER durch Server + Export-Pfad ersetzen.
+#   3. Einmalig anwenden:  kubectl apply -k deploy/k8s/overlays/consume-nfs
+#      Dauerhaft in der CD: in .github/workflows/deploy.yml den Pfad
+#      `kubectl kustomize deploy/k8s` → `deploy/k8s/overlays/consume-nfs` setzen.
+#
+# IMAGE-REBUILD: NEIN. Der NFS-Mount erfolgt durch das Kubelet auf dem Node
+# (Voraussetzung: nfs-common/nfs-utils), nicht im Container. Image unverändert.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../
+
+patches:
+  - path: worker-nfs-patch.yaml
+    target:
+      kind: Deployment
+      name: worker
+  - path: configmap-nfs-patch.yaml
+    target:
+      kind: ConfigMap
+      name: dms-config

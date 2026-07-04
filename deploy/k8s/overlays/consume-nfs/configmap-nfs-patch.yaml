@@ -1,0 +1,9 @@
+# Strategic-Merge-Patch: Consume-Ordner auf den NFS-Mount-Pfad umstellen.
+# Überschreibt nur CONSUME_FOLDER_PATH; alle übrigen Config-Werte bleiben.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dms-config
+  namespace: dms
+data:
+  CONSUME_FOLDER_PATH: "/consume-nfs"
