@@ -1,5 +1,7 @@
-# Strategic-Merge-Patch: Consume-Ordner auf den NFS-Mount-Pfad umstellen.
-# Überschreibt nur CONSUME_FOLDER_PATH; alle übrigen Config-Werte bleiben.
+# Strategic-Merge-Patch: Consume-Ordner auf den NFS-Mount-Pfad umstellen und
+# pro-User-Attribution aktivieren.
+# Überschreibt nur CONSUME_FOLDER_PATH + CONSUME_PER_USER; alle übrigen
+# Config-Werte bleiben.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -7,3 +9,10 @@ metadata:
   namespace: dms
 data:
   CONSUME_FOLDER_PATH: "/consume-nfs"
+  # Pro-User-Attribution (STOAA-246/261): Die NAS-Freigabe hat pro-User-
+  # Unterordner (/consume-nfs/<username>/). scan_consume_folder ordnet jede
+  # Datei dem Django-User (Document.owner) zu, dessen Ordnername case-insensitiv
+  # zum username passt; Ordner ohne passenden User werden übersprungen+geloggt
+  # (nie owner-los aufgenommen). Nur im Overlay aktiv – die Basis bleibt Flat
+  # (owner=None, Default CONSUME_PER_USER=false in settings.py).
+  CONSUME_PER_USER: "true"

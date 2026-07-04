@@ -62,6 +62,17 @@ else
     ((ERRORS++))
 fi
 
+# 4b. Verify CONSUME_PER_USER config (pro-User-Attribution, STOAA-246/261)
+echo ""
+echo "4b. Checking CONSUME_PER_USER environment variable..."
+PER_USER=$(kubectl -n dms exec deploy/worker -- printenv CONSUME_PER_USER 2>/dev/null || echo "")
+if [[ "$PER_USER" == "true" ]]; then
+    echo -e "${GREEN}✓${NC} CONSUME_PER_USER=true (pro-User-Attribution aktiv; /consume-nfs/<username>/ → Document.owner)"
+else
+    echo -e "${YELLOW}⚠${NC} CONSUME_PER_USER='$PER_USER' (erwartet 'true' – Overlay-configmap nicht angewandt? Scans würden owner=None aufgenommen)"
+    ((ERRORS++))
+fi
+
 # 5. Verify CONSUME_MIN_AGE
 echo ""
 echo "5. Checking CONSUME_MIN_AGE..."
