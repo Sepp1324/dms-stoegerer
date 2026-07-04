@@ -1,7 +1,15 @@
 import { useState } from "react";
 import { login } from "../api";
 
-export default function Login({ onSuccess }: { onSuccess: () => void }) {
+export default function Login({
+  onSuccess,
+  hint,
+}: {
+  onSuccess: () => void;
+  // Optionaler Kontext-Hinweis, z. B. wenn die Anmeldung für einen Freigabelink
+  // erzwungen wird (STOAA-193).
+  hint?: string;
+}) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -25,7 +33,7 @@ export default function Login({ onSuccess }: { onSuccess: () => void }) {
     <div className="login">
       <form className="card login-card" onSubmit={submit}>
         <h1>DMS</h1>
-        <p className="subtitle">Anmeldung</p>
+        <p className="subtitle">{hint ?? "Anmeldung"}</p>
 
         <label>
           Benutzername

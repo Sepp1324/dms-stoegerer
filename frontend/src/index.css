@@ -1047,6 +1047,14 @@ select:focus-visible {
   color: var(--error);
 }
 
+/* --- Freigabe-Aufrufseite /share/<token> (STOAA-193) --- */
+/* Zentrierte Meldungskarte für „Link nicht mehr gültig" / Fehler (nutzt das
+   Login-Layout wieder, nur textlastig statt Formular). */
+.share-message {
+  text-align: center;
+  gap: 0.6rem;
+}
+
 /* --- Verlauf / Audit-Trail (STOAA-2) --- */
 .detail-tabs {
   display: flex;

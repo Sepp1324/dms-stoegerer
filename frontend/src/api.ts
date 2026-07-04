@@ -593,6 +593,62 @@ export async function deleteRule(id: number): Promise<void> {
   if (!res.ok && res.status !== 204) throw new Error(`Löschen fehlgeschlagen: HTTP ${res.status}`);
 }
 
+// --- Freigabe-Aufruf (Share-Access, STOAA-193) ---
+// Abruf eines geteilten Dokuments über den Klartext-Token (Aufruf-Seite
+// /share/<token>). Login-PFLICHT: apiFetch hängt den JWT an und erneuert ihn bei
+// 401 einmalig; schlägt auch das fehl, wirft es ``AuthError`` (→ zur Anmeldung).
+// Ein unbekannter/widerrufener/abgelaufener Token liefert **410 Gone** → wir
+// werfen ``ShareGoneError``, damit die UI die klare Seite „Link nicht mehr
+// gültig" zeigt (kein Roh-404/500). Die Endpunkte tragen bewusst KEINEN
+// Trailing-Slash (Backend-Kontrakt STOAA-191), sonst verwürfe ein
+// APPEND_SLASH-Redirect den Authorization-Header.
+export class ShareGoneError extends Error {}
+
+// Vorschau-PDF des geteilten Dokuments als Blob (inline, für <iframe>).
+export async function getSharePreview(token: string): Promise<Blob> {
+  const res = await apiFetch(`/share/${encodeURIComponent(token)}/preview`);
+  if (res.status === 410) throw new ShareGoneError();
+  if (!res.ok) throw new Error(`Vorschau nicht verfügbar (HTTP ${res.status})`);
+  return res.blob();
+}
+
+// Ergebnis des Share-Downloads: die Original-Bytes plus der vom Backend
+// vorgeschlagene Dateiname (aus Content-Disposition, sonst generischer Fallback).
+export interface ShareDownload {
+  blob: Blob;
+  filename: string;
+}
+
+// Original-Datei des geteilten Dokuments herunterladen (Blob + Dateiname).
+export async function getShareDownload(token: string): Promise<ShareDownload> {
+  const res = await apiFetch(`/share/${encodeURIComponent(token)}/download`);
+  if (res.status === 410) throw new ShareGoneError();
+  if (!res.ok) throw new Error(`Download fehlgeschlagen (HTTP ${res.status})`);
+  const blob = await res.blob();
+  return {
+    blob,
+    filename: parseContentDispositionFilename(res.headers.get("Content-Disposition")),
+  };
+}
+
+// Liest den Dateinamen aus einem Content-Disposition-Header. Bevorzugt das
+// RFC-5987-``filename*`` (UTF-8, Umlaute), fällt auf schlichtes ``filename="…"``
+// und zuletzt auf einen generischen Namen zurück.
+function parseContentDispositionFilename(disposition: string | null): string {
+  const fallback = "freigegebenes-dokument";
+  if (!disposition) return fallback;
+  const star = /filename\*=(?:UTF-8'')?([^;]+)/i.exec(disposition);
+  if (star) {
+    try {
+      return decodeURIComponent(star[1].trim().replace(/^["']|["']$/g, ""));
+    } catch {
+      /* ungültige Kodierung – auf plain filename zurückfallen */
+    }
+  }
+  const plain = /filename="?([^";]+)"?/i.exec(disposition);
+  return plain ? plain[1].trim() : fallback;
+}
+
 // --- Stammdaten inline anlegen ---
 async function postJson<T>(path: string, body: unknown): Promise<T> {
   const res = await apiFetch(path, {
