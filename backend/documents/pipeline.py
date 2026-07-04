@@ -170,42 +170,6 @@ def verify_document_integrity(document: Document) -> dict:
     return {"chain_ok": chain_ok, "versions": results}
 
 
-<<<<<<< HEAD
-def run_ocr(
-    input_path: str | Path, output_path: Path
-) -> tuple[str, int | None, bool]:
-    """Erzeugt ein durchsuchbares PDF/A und liefert (Text, Seiten, Archiv-erzeugt?).
-
-    Nutzt OCRmyPDF (Tesseract, deu+eng). Schlägt die OCR fehl (z. B. verschlüsselte
-    oder problematische PDFs), wird **nicht** abgebrochen: Text und Seitenzahl
-    werden dann aus dem Original gezogen (nativer Text, falls vorhanden), und es
-    wird kein Archiv-PDF gesetzt. So bleibt das Dokument nutzbar (Vorschau/Suche).
-    """
-    import ocrmypdf
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    archive_created = False
-    source: str | Path = input_path
-
-    try:
-        ocrmypdf.ocr(
-            str(input_path),
-            str(output_path),
-            output_type="pdfa",
-            language="deu+eng",
-            skip_text=True,
-            progress_bar=False,
-        )
-        archive_created = True
-        source = output_path
-    except Exception as exc:  # pragma: no cover - abhängig von Eingabe-PDF
-        logger.warning("OCR fehlgeschlagen für %s: %s", input_path, exc)
-
-    # Text aus PDF/A (falls erzeugt) oder aus dem Original ziehen.
-    text = extract_text(source)
-    pages = _page_count(source)
-    return text, pages, archive_created
-=======
 from documents.services.ocr.engine import run_ocr
 
 
@@ -230,7 +194,6 @@ def process_version(version, file_path: str):
     version.ocr_duration_ms = result.duration_ms
 
     version.save()
->>>>>>> a7e415a (Reworked OCR)
 
 
 def extract_text(pdf_path: str | Path) -> str:
