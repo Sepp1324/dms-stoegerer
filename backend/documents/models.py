@@ -5,6 +5,7 @@ Ein `Document` ist ein logisches Objekt mit mehreren `DocumentVersion`s.
 Jede Version trägt einen SHA-256-Hash und den Hash der Vorgängerversion
 (Hash-Kette) – die Grundlage für Versionierung und spätere Revisionssicherheit.
 """
+
 import hashlib
 import os
 
@@ -12,6 +13,23 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
+
+
+class OCRStatus(models.TextChoices):
+    """
+    Stufe-2 OCR Statusmodell
+
+    WHY:
+    - erlaubt Monitoring
+    - erlaubt Retry-Logik
+    - verhindert "Black Box OCR"
+    """
+
+    PENDING = "pending", "Pending"
+    RUNNING = "running", "Running"
+    SUCCESS = "success", "Success"
+    FAILED = "failed", "Failed"
+    SKIPPED = "skipped", "Skipped"
 
 
 # ---------------------------------------------------------------------------
@@ -250,27 +268,30 @@ class DocumentVersion(models.Model):
         help_text="sha256 der Vorgängerversion – bildet die Hash-Kette",
     )
 
-    ocr_text = models.TextField(blank=True, help_text="Volltext (später FTS-indiziert)")
-    mime_type = models.CharField(max_length=127, blank=True)
-    size = models.BigIntegerField(default=0)
-    page_count = models.PositiveIntegerField(null=True, blank=True)
-
-    class OCRStatus(models.TextChoices):
-        PENDING = "pending"
-        RUNNING = "running"
-        SUCCESS = "success"
-        FAILED = "failed"
-        SKIPPED = "skipped"
-
     ocr_status = models.CharField(
         max_length=20,
         choices=OCRStatus.choices,
         default=OCRStatus.PENDING,
+        db_index=True,
     )
 
-ocr_error = models.TextField(blank=True)
-ocr_duration_ms = models.PositiveIntegerField(default=0)
-ocr_engine = models.CharField(max_length=30, default="ocrmypdf")
+    ocr_error = models.TextField(blank=True)
+
+    ocr_engine = models.CharField(
+        max_length=30,
+        default="ocrmypdf",
+    )
+
+    ocr_duration_ms = models.PositiveIntegerField(default=0)
+
+    ocr_text = models.TextField(blank=True)
+
+    ocr_started_at = models.DateTimeField(null=True, blank=True)
+    ocr_finished_at = models.DateTimeField(null=True, blank=True)
+
+    mime_type = models.CharField(max_length=127, blank=True)
+    size = models.BigIntegerField(default=0)
+    page_count = models.PositiveIntegerField(null=True, blank=True)
 
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL
@@ -299,9 +320,14 @@ ocr_engine = models.CharField(max_length=30, default="ocrmypdf")
 
     def save(self, *args, **kwargs):
         if self.pk:
-            original = DocumentVersion.objects.filter(pk=self.pk).values("is_immutable").first()
+            original = (
+                DocumentVersion.objects.filter(pk=self.pk)
+                .values("is_immutable")
+                .first()
+            )
             if original and original["is_immutable"]:
                 from .audit import log_immutable_block
+
                 log_immutable_block("DocumentVersion", self.pk)
                 raise ValidationError(
                     "Diese Version ist unveränderlich (WORM) und kann nicht überschrieben werden."
@@ -311,6 +337,7 @@ ocr_engine = models.CharField(max_length=30, default="ocrmypdf")
     def delete(self, *args, **kwargs):
         if self.is_immutable:
             from .audit import log_immutable_block
+
             log_immutable_block("DocumentVersion", self.pk)
             raise ValidationError(
                 "Diese Version ist unveränderlich (WORM) und kann nicht gelöscht werden."
@@ -318,6 +345,7 @@ ocr_engine = models.CharField(max_length=30, default="ocrmypdf")
         today = timezone.now().date()
         if self.retention_until and today < self.retention_until:
             from .audit import log_retention_block
+
             log_retention_block("DocumentVersion", self.pk, self.retention_until)
             raise ValidationError(
                 f"Aufbewahrungsfrist läuft bis {self.retention_until} – Löschen gesperrt."
@@ -411,7 +439,8 @@ class MailAccount(models.Model):
     host = models.CharField(max_length=255)
     port = models.PositiveIntegerField(default=993)
     use_ssl = models.BooleanField(
-        default=True, help_text="IMAPS (i. d. R. Port 993). Aus = unverschlüsselt/STARTTLS."
+        default=True,
+        help_text="IMAPS (i. d. R. Port 993). Aus = unverschlüsselt/STARTTLS.",
     )
     username = models.CharField(max_length=255)
     folder = models.CharField(max_length=255, default="INBOX")
@@ -483,7 +512,9 @@ class ProcessedMail(models.Model):
         unique_together = ("account", "message_id")
 
     def __str__(self) -> str:
-        return f"{self.subject or '(ohne Betreff)'} · {self.processed_at:%Y-%m-%d %H:%M}"
+        return (
+            f"{self.subject or '(ohne Betreff)'} · {self.processed_at:%Y-%m-%d %H:%M}"
+        )
 
 
 # ---------------------------------------------------------------------------
