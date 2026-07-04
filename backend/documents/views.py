@@ -1228,19 +1228,52 @@ class MailAccountViewSet(viewsets.ModelViewSet):
         instance.delete()
         self._audit("mailaccount_delete", account_id, {"name": name})
 
+    def _run_connection_test(self, account, *, persist):
+        """IMAP-Verbindung testen und ``(ok, message)`` liefern.
+
+        ``persist=True`` (nur bei gespeicherten Konten): Ergebnis am Konto
+        festhalten – ``last_checked_at`` = jetzt, ``last_error`` = "" bei Erfolg
+        bzw. die Fehlermeldung. So bleibt der Status nach Reload/Seitenwechsel
+        erhalten (STOAA-172: „Banner grün, ``last_checked_at`` aktualisiert").
+        """
+        from django.utils import timezone
+
+        from .mail import connect
+
+        try:
+            conn = connect(account)
+            try:
+                conn.logout()
+            except Exception:  # noqa: BLE001 – Logout-Fehler nach Erfolg ignorieren
+                pass
+            ok, message = True, "Verbindung erfolgreich."
+        except Exception as exc:  # noqa: BLE001 – jede IMAP-/Netzwerkstörung melden
+            ok, message = False, str(exc) or exc.__class__.__name__
+
+        if persist:
+            account.last_checked_at = timezone.now()
+            account.last_error = "" if ok else message
+            account.save(update_fields=["last_checked_at", "last_error"])
+            self._audit("mailaccount_test_connection", account.id, {"ok": ok})
+
+        return ok, message
+
     @action(detail=False, methods=["post"], url_path="test-connection")
     def test_connection(self, request):
         """IMAP-Verbindung mit übergebenen (oder gespeicherten) Zugangsdaten testen.
 
         Body: entweder ``{"id": <pk>}`` (testet ein gespeichertes Konto) **oder**
         vollständige Zugangsdaten ``{host, port, use_ssl, username, password}``
-        (bzw. ``password_env``). Es wird nichts gespeichert.
+        (bzw. ``password_env``).
+
+        Persistierung (STOAA-172): Wird ein **gespeichertes** Konto getestet
+        (``id`` gesetzt bzw. Detail-Route ``/{pk}/test-connection/``), werden
+        ``last_checked_at`` / ``last_error`` am Konto aktualisiert. Ein Test mit
+        rohen Zugangsdaten (Anlege-Formular, noch kein Konto) bleibt zustandslos.
 
         Antwort: ``{"ok": bool, "message": str}`` (HTTP 200 – ein fehlgeschlagener
         Test ist kein Client-Fehler, sondern ein erwartetes Ergebnis).
         """
-        from .mail import connect
-
         data = request.data
         account_id = data.get("id")
         if account_id is not None:
@@ -1250,6 +1283,7 @@ class MailAccountViewSet(viewsets.ModelViewSet):
                     {"detail": "Konto nicht gefunden."},
                     status=status.HTTP_404_NOT_FOUND,
                 )
+            persist = True
         else:
             host = (data.get("host") or "").strip()
             username = (data.get("username") or "").strip()
@@ -1269,13 +1303,19 @@ class MailAccountViewSet(viewsets.ModelViewSet):
                 password=data.get("password") or "",
                 password_env=data.get("password_env") or "",
             )
+            persist = False
 
-        try:
-            conn = connect(account)
-            try:
-                conn.logout()
-            except Exception:  # noqa: BLE001 – Logout-Fehler nach Erfolg ignorieren
-                pass
-            return Response({"ok": True, "message": "Verbindung erfolgreich."})
-        except Exception as exc:  # noqa: BLE001 – jede IMAP-/Netzwerkstörung melden
-            return Response({"ok": False, "message": str(exc) or exc.__class__.__name__})
+        ok, message = self._run_connection_test(account, persist=persist)
+        return Response({"ok": ok, "message": message})
+
+    @action(detail=True, methods=["post"], url_path="test-connection")
+    def test_connection_detail(self, request, pk=None):
+        """Verbindungstest für ein gespeichertes Konto (``/{pk}/test-connection/``).
+
+        Spec-konforme Detail-Route (STOAA-172): testet das adressierte Konto und
+        persistiert ``last_checked_at`` / ``last_error``. Alias-Bequemlichkeit zur
+        Collection-Route mit ``{"id": pk}``.
+        """
+        account = self.get_object()
+        ok, message = self._run_connection_test(account, persist=True)
+        return Response({"ok": ok, "message": message})
