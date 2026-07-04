@@ -29,3 +29,7 @@ resources:
   - beat.yaml
   - frontend.yaml
   - ingress.yaml
+  # Tägliches Offsite-Backup (DB + /data). Braucht das gitignored Secret
+  # dms-backup-secret (siehe backup-secret.example.yaml) – fehlt es, scheitert
+  # nur der CronJob-Pod, nicht das übrige Rollout.
+  - backup-cronjob.yaml

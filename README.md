@@ -88,6 +88,15 @@ kubectl apply -k deploy/k8s
 
 Danach ist das DMS unter `http://dms.local` erreichbar (Traefik-Ingress).
 
+## Backup & Restore
+
+Das DMS sichert täglich Datenbank + Dateiablage (`/data`) offsite. Der k8s-CronJob
+`dms-backup` läuft automatisch um 02:30 (Europe/Vienna) und lädt die Artefakte per
+rclone auf ein konfigurierbares Ziel (Standard: SFTP auf das NAS).
+
+Details zur Einrichtung, Überwachung, Restore-Ablauf und zum Restore-Drill:
+siehe **[docs/backup.md](docs/backup.md)**.
+
 ## Django-Migrationen: Konflikt-Prävention
 
 **Problem:** Wenn mehrere Feature-Branches parallel Modell-Änderungen vornehmen,
