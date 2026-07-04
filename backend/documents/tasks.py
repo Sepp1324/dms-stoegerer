@@ -5,6 +5,7 @@ from pathlib import Path
 
 from celery import shared_task
 from django.conf import settings
+from django.contrib.auth import get_user_model
 
 from . import pipeline, storage
 from .models import DocumentVersion
@@ -30,38 +31,28 @@ def process_document_version(version_id: int) -> dict:
     return result
 
 
-@shared_task
-def scan_consume_folder() -> dict:
-    """Nimmt alle reifen Dateien aus dem Consume-Ordner auf und stößt die Pipeline an.
+# Verwaltungsordner, die beim rekursiven Scan nie als User-Ordner gelten.
+_CONSUME_MGMT_DIRS = {"_processed", "_failed"}
 
-    Verarbeitete Dateien werden nach ``consume/_processed/`` verschoben, damit
-    sie nicht doppelt aufgenommen werden. (Beat-Zeitplan folgt später.)
 
-    NFS-/NAS-Reife: Eine Datei wird erst verarbeitet, wenn seit ihrer letzten
-    Änderung mindestens ``settings.CONSUME_MIN_AGE`` Sekunden vergangen sind.
-    Das verhindert Teil-Reads von Dateien, die noch langsam über NFS
-    geschrieben werden. Zu junge Dateien werden schlicht übersprungen (kein
-    Fehler, kein Verschieben) – der nächste Scan holt sie.
+def _scan_consume_dir(source, owner, min_age, now, ingested) -> tuple[int, int]:
+    """Scannt genau EIN Verzeichnis (nicht tiefer rekursiv) auf reife Dateien.
 
-    Robustheit: Ein Fehler bei einer einzelnen Datei bricht den Scan der
-    übrigen nicht ab und verschluckt die Datei nicht – sie wandert nach
-    ``consume/_failed/`` und wird protokolliert.
+    Reife (``CONSUME_MIN_AGE``), Robustheit (Einzelfehler → ``_failed/`` statt
+    Abbruch/Verschlucken), Kopie nach ``ORIGINALS_DIR`` + ``_unique()`` und der
+    async Pipeline-Anstoß sind identisch zum bisherigen Wurzel-Verhalten – nur
+    relativ zu ``source`` und mit ``owner``-Attribution.
+
+    Unterordner und Dot-Dateien in ``source`` werden übersprungen; verarbeitete
+    Dateien wandern nach ``<source>/_processed/``, fehlerhafte nach
+    ``<source>/_failed/``. Gibt ``(skipped, failed)`` zurück; erfolgreiche
+    Aufnahmen werden an ``ingested`` angehängt.
     """
-    consume = storage.CONSUME_DIR
-    if not consume.exists():
-        return {"found": 0, "ingested": [], "skipped": 0, "failed": 0}
-
-    processed_dir = consume / "_processed"
-    failed_dir = consume / "_failed"
-    processed_dir.mkdir(parents=True, exist_ok=True)
-
-    min_age = float(getattr(settings, "CONSUME_MIN_AGE", 15))
-    now = time.time()
-
-    ingested = []
+    processed_dir = source / "_processed"
+    failed_dir = source / "_failed"
     skipped = 0
     failed = 0
-    for entry in sorted(consume.iterdir()):
+    for entry in sorted(source.iterdir()):
         if entry.is_dir() or entry.name.startswith("."):
             continue
 
@@ -85,11 +76,18 @@ def scan_consume_folder() -> dict:
             target.write_bytes(entry.read_bytes())
 
             document, version = pipeline.create_document_from_file(
-                str(target), title=title, size=target.stat().st_size
+                str(target), title=title, size=target.stat().st_size, owner=owner
             )
             process_document_version.delay(version.id)
+            processed_dir.mkdir(parents=True, exist_ok=True)
             entry.rename(processed_dir / entry.name)
-            ingested.append({"document_id": document.id, "title": title})
+            ingested.append(
+                {
+                    "document_id": document.id,
+                    "title": title,
+                    "owner": owner.username if owner is not None else None,
+                }
+            )
         except Exception:
             # Eine fehlerhafte Datei darf weder den Scan abbrechen noch
             # verschluckt werden: nach ``_failed/`` verschieben + loggen.
@@ -105,6 +103,72 @@ def scan_consume_folder() -> dict:
                     "scan_consume_folder: Verschieben nach _failed/ fehlgeschlagen für %s",
                     entry,
                 )
+    return skipped, failed
+
+
+@shared_task
+def scan_consume_folder() -> dict:
+    """Nimmt alle reifen Dateien aus dem Consume-Ordner auf und stößt die Pipeline an.
+
+    Verarbeitete Dateien werden nach ``_processed/`` verschoben, damit sie nicht
+    doppelt aufgenommen werden.
+
+    Pro-User-Attribution (STOAA-260): Der Consume-Ordner wird rekursiv je
+    direktem Unterordner gescannt. Der Unterordnername wird ``case-insensitive``
+    gegen ``User.username`` gematcht; der gefundene User wird als ``owner`` an
+    die Pipeline durchgereicht (setzt zugleich ``AuditLogEntry.actor`` und
+    ``DocumentVersion.created_by``). Passt kein User, werden die Dateien
+    trotzdem mit ``owner=None`` aufgenommen (+ ``logger.warning`` zur
+    Admin-Triage) – NICHT übersprungen. Dateien direkt in der Wurzel bleiben
+    rückwärtskompatibel ``owner=None``. Verwaltungs-/Dot-Ordner werden beim
+    Iterieren übersprungen; jeder (Unter-)Ordner hat sein eigenes
+    ``_processed/``/``_failed/``.
+
+    NFS-/NAS-Reife: Eine Datei wird erst verarbeitet, wenn seit ihrer letzten
+    Änderung mindestens ``settings.CONSUME_MIN_AGE`` Sekunden vergangen sind.
+    Das verhindert Teil-Reads von Dateien, die noch langsam über NFS
+    geschrieben werden. Zu junge Dateien werden schlicht übersprungen (kein
+    Fehler, kein Verschieben) – der nächste Scan holt sie.
+
+    Robustheit: Ein Fehler bei einer einzelnen Datei bricht den Scan der
+    übrigen nicht ab und verschluckt die Datei nicht – sie wandert nach
+    ``_failed/`` und wird protokolliert.
+    """
+    consume = storage.CONSUME_DIR
+    if not consume.exists():
+        return {"found": 0, "ingested": [], "skipped": 0, "failed": 0}
+
+    min_age = float(getattr(settings, "CONSUME_MIN_AGE", 15))
+    now = time.time()
+
+    ingested = []
+    skipped = 0
+    failed = 0
+
+    # 1) Wurzel-Dateien: rückwärtskompatibel ohne Owner-Zuordnung.
+    s, f = _scan_consume_dir(consume, None, min_age, now, ingested)
+    skipped += s
+    failed += f
+
+    # 2) Direkte Unterordner: Ordnername → User (case-insensitive).
+    user_model = get_user_model()
+    for sub in sorted(consume.iterdir()):
+        if not sub.is_dir():
+            continue
+        if sub.name.startswith(".") or sub.name in _CONSUME_MGMT_DIRS:
+            continue
+
+        owner = user_model.objects.filter(username__iexact=sub.name).first()
+        if owner is None:
+            logger.warning(
+                "scan_consume_folder: Unterordner '%s' passt zu keinem User "
+                "(username__iexact) – Dateien werden mit owner=None aufgenommen "
+                "(Admin-Triage).",
+                sub.name,
+            )
+        s, f = _scan_consume_dir(sub, owner, min_age, now, ingested)
+        skipped += s
+        failed += f
 
     return {
         "found": len(ingested),

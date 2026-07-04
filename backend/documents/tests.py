@@ -1216,6 +1216,97 @@ class ConsumeFolderScanTests(TestCase):
         self.assertEqual(Document.objects.get().title, "good")
         delay.assert_called_once()
 
+    # --- STOAA-260: pro-User-Attribution je Unterordner -------------------
+    def _write_in(self, subdir, name, *, age_seconds):
+        """Wie ``_write``, aber in einem (ggf. neuen) Unterordner von consume."""
+        import os
+        import time
+
+        folder = self.consume / subdir
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / name
+        path.write_bytes(b"%PDF-1.4 dummy")
+        mtime = time.time() - age_seconds
+        os.utime(path, (mtime, mtime))
+        return path
+
+    def test_unterordner_attribuiert_owner_case_insensitive(self):
+        """(d) Datei in <consume>/<User>/ -> owner==User, auch Groß-/Kleinschreibung."""
+        user = User.objects.create_user(username="sebastian", password="pw", role="user")
+        with self.settings(CONSUME_MIN_AGE=15):
+            # Ordner 'Sebastian' (groß) matcht user 'sebastian' (klein).
+            self._write_in("Sebastian", "rechnung.pdf", age_seconds=3600)
+            result, delay = self._run_scan()
+
+        self.assertEqual(result["found"], 1)
+        self.assertEqual(result["failed"], 0)
+        doc = Document.objects.get()
+        self.assertEqual(doc.owner, user)
+        # created_by der Version + Audit-actor werden via Pipeline mitgesetzt.
+        self.assertEqual(doc.current_version.created_by, user)
+        # Verarbeitete Datei liegt im per-Unterordner-_processed/.
+        self.assertTrue(
+            (self.consume / "Sebastian" / "_processed" / "rechnung.pdf").exists()
+        )
+        self.assertEqual(result["ingested"][0]["owner"], "sebastian")
+        delay.assert_called_once()
+
+    def test_unbekannter_ordner_ingestiert_mit_owner_none_und_warnung(self):
+        """(e) Unbekannter Ordnername -> owner=None + WARNING-Log, nicht übersprungen."""
+        self._write_in("gibtsnicht", "x.pdf", age_seconds=3600)
+        with self.settings(CONSUME_MIN_AGE=15):
+            from unittest import mock
+
+            from . import storage, tasks
+
+            with self.assertLogs("documents.tasks", level="WARNING") as cm:
+                with mock.patch.object(
+                    storage, "CONSUME_DIR", self.consume
+                ), mock.patch.object(
+                    storage, "ORIGINALS_DIR", self.originals
+                ), mock.patch.object(tasks.process_document_version, "delay") as delay:
+                    result = tasks.scan_consume_folder()
+
+        self.assertEqual(result["found"], 1)
+        self.assertEqual(result["failed"], 0)
+        doc = Document.objects.get()
+        self.assertIsNone(doc.owner)
+        self.assertTrue(any("gibtsnicht" in line for line in cm.output))
+        self.assertTrue(
+            (self.consume / "gibtsnicht" / "_processed" / "x.pdf").exists()
+        )
+        delay.assert_called_once()
+
+    def test_wurzel_datei_bleibt_owner_none(self):
+        """(f) Datei direkt in <consume>/ -> owner=None (Rückwärtskompatibilität)."""
+        User.objects.create_user(username="sebastian", password="pw", role="user")
+        with self.settings(CONSUME_MIN_AGE=15):
+            self._write("wurzel.pdf", age_seconds=3600)
+            result, delay = self._run_scan()
+
+        self.assertEqual(result["found"], 1)
+        doc = Document.objects.get()
+        self.assertIsNone(doc.owner)
+        self.assertTrue((self.consume / "_processed" / "wurzel.pdf").exists())
+        delay.assert_called_once()
+
+    def test_reife_check_bleibt_je_unterordner_gruen(self):
+        """(g) Zu junge Datei in einem User-Ordner wird übersprungen (kein Verschieben)."""
+        User.objects.create_user(username="sebastian", password="pw", role="user")
+        with self.settings(CONSUME_MIN_AGE=15):
+            self._write_in("sebastian", "frisch.pdf", age_seconds=0)
+            result, delay = self._run_scan()
+
+        self.assertEqual(result["found"], 0)
+        self.assertEqual(result["skipped"], 1)
+        self.assertEqual(result["failed"], 0)
+        self.assertTrue((self.consume / "sebastian" / "frisch.pdf").exists())
+        self.assertFalse(
+            (self.consume / "sebastian" / "_processed" / "frisch.pdf").exists()
+        )
+        delay.assert_not_called()
+        self.assertEqual(Document.objects.count(), 0)
+
 
 class DocumentShareLinkTests(APITestCase):
     """Verwaltungs-API der Freigabelinks (STOAA-190).
