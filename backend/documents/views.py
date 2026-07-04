@@ -50,6 +50,7 @@ class IsDmsAdmin(BasePermission):
         return bool(getattr(request.user, "is_dms_admin", False))
 
 from . import classification, pipeline, storage
+from .services.version_compare import VersionCompareService
 from .models import (
     AuditLogEntry,
     ClassificationRule,
@@ -944,6 +945,48 @@ class DocumentViewSet(viewsets.ModelViewSet):
             DocumentVersionSerializer(version).data,
             status=status.HTTP_202_ACCEPTED,
         )
+
+    @action(
+        detail=True,
+        methods=["get"],
+        url_path=r"versions/(?P<from_version>\d+)/compare/(?P<to_version>\d+)",
+    )
+    def compare_versions(self, request, pk=None, from_version=None, to_version=None):
+        """Vergleicht zwei Versionen eines Dokuments (STOAA-288).
+
+        GET /api/documents/{id}/versions/{from}/compare/{to}/
+
+        Berechtigung: Leserecht auf das Dokument (Owner-Isolation via get_object).
+        Keine Schreibberechtigung nötig.
+        """
+        document = self.get_object()
+
+        try:
+            from_no = int(from_version)
+            to_no = int(to_version)
+        except (TypeError, ValueError):
+            return Response(
+                {"detail": "Ungültige Versionsnummer."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if from_no == to_no:
+            return Response(
+                {"detail": "from_version und to_version müssen unterschiedlich sein."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        service = VersionCompareService()
+        try:
+            result = service.compare(document, from_no, to_no)
+        except DocumentVersion.DoesNotExist:
+            return Response(
+                {"detail": "Eine oder beide Versionen existieren nicht."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        from .serializers import VersionCompareResultSerializer
+        return Response(VersionCompareResultSerializer(result).data)
 
     # Bis zu so vielen Dokumenten wird synchron im Request klassifiziert;
     # größere Batches wandern in einen Celery-Task (Timeout-/Lastschutz).

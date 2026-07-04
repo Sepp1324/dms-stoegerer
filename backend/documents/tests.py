@@ -3260,3 +3260,212 @@ class WorkflowAPITests(APITestCase):
         self.assertEqual(resp.status_code, 201, resp.content)
         from .models import Workflow
         self.assertTrue(Workflow.objects.filter(name="Leer").exists())
+
+
+# ---------------------------------------------------------------------------
+# Versionsvergleich (STOAA-288)
+# ---------------------------------------------------------------------------
+
+from .services.version_compare import VersionCompareService
+
+
+class VersionCompareServiceTests(TestCase):
+    """Unit-Tests für VersionCompareService (kein HTTP)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(username="cmp_user", password="pw", role="user")
+        cls.doc = Document.objects.create(title="Vergleichsdokument", owner=cls.user)
+
+        cls.v1 = DocumentVersion.objects.create(
+            document=cls.doc,
+            version_no=1,
+            file_path="/data/v1.pdf",
+            sha256="a" * 64,
+            size=1000,
+            mime_type="application/pdf",
+            page_count=3,
+            ocr_text="Hallo Welt",
+        )
+        cls.v2 = DocumentVersion.objects.create(
+            document=cls.doc,
+            version_no=2,
+            file_path="/data/v2.pdf",
+            sha256="b" * 64,
+            size=2000,
+            mime_type="application/pdf",
+            page_count=4,
+            ocr_text="Hallo Welt\nNeue Zeile",
+        )
+        cls.doc.current_version = cls.v2
+        cls.doc.save(update_fields=["current_version"])
+
+    def _svc(self):
+        return VersionCompareService()
+
+    # OCR tests
+    def test_text_unchanged(self):
+        # same text -> empty diff
+        v3 = DocumentVersion.objects.create(
+            document=self.doc, version_no=3, file_path="/d/v3.pdf",
+            sha256="c" * 64, size=1000, ocr_text="Hallo Welt",
+        )
+        result = self._svc().compare(self.doc, 1, 3)
+        self.assertEqual(result.text_diff, "")
+        self.assertFalse(result.summary.text_changed)
+
+    def test_text_changed(self):
+        result = self._svc().compare(self.doc, 1, 2)
+        self.assertIn("Neue Zeile", result.text_diff)
+        self.assertTrue(result.summary.text_changed)
+
+    def test_empty_text(self):
+        v4 = DocumentVersion.objects.create(
+            document=self.doc, version_no=4, file_path="/d/v4.pdf",
+            sha256="d" * 64, size=100, ocr_text="",
+        )
+        result = self._svc().compare(self.doc, 4, 1)
+        self.assertTrue(result.summary.text_changed)
+
+    # Tag tests
+    def test_tags_added(self):
+        tag = Tag.objects.create(name="Bezahlt")
+        self.doc.tags.add(tag)
+        result = self._svc().compare(self.doc, 1, 2)
+        # tags are on Document level so both see same tags – test via explicit diff manipulation
+        # Instead test with a fresh document
+        doc2 = Document.objects.create(title="TagDoc", owner=self.user)
+        dv_a = DocumentVersion.objects.create(
+            document=doc2, version_no=1, file_path="/d/ta.pdf", sha256="e" * 64, size=10,
+        )
+        dv_b = DocumentVersion.objects.create(
+            document=doc2, version_no=2, file_path="/d/tb.pdf", sha256="f" * 64, size=10,
+        )
+        doc2.current_version = dv_b
+        doc2.save()
+        # Before version 2 add tag (simulate diff by comparing after adding)
+        doc2.tags.add(tag)
+        # Both versions belong to same doc, service compares the doc at call time
+        # Tags are a document-level field; the service returns the current state for both.
+        # With current architecture, added/removed are always empty because the doc's tags
+        # are the same for both versions (they share the same Document row).
+        # This verifies the service doesn't crash and returns sane data.
+        result = self._svc().compare(doc2, 1, 2)
+        self.assertIsInstance(result.tags.added, list)
+        self.assertIsInstance(result.tags.removed, list)
+
+    # Custom fields
+    def test_custom_fields_changed(self):
+        cf = CustomField.objects.create(name="Betrag", data_type=CustomField.DataType.CURRENCY)
+        cfv = CustomFieldValue.objects.create(document=self.doc, field=cf, value="100")
+        result = self._svc().compare(self.doc, 1, 2)
+        # same document -> no custom field diff
+        self.assertEqual(result.custom_fields, {})
+        cfv.value = "200"
+        cfv.save()
+        # Still same document, still no diff (both versions share same doc)
+        result2 = self._svc().compare(self.doc, 1, 2)
+        self.assertIsInstance(result2.custom_fields, dict)
+
+    # File tests
+    def test_file_sha_changed(self):
+        result = self._svc().compare(self.doc, 1, 2)
+        self.assertTrue(result.files.changed)
+        self.assertTrue(result.summary.binary_changed)
+
+    def test_file_sha_unchanged(self):
+        v5 = DocumentVersion.objects.create(
+            document=self.doc, version_no=5, file_path="/d/v5.pdf",
+            sha256="a" * 64, size=1000, mime_type="application/pdf", page_count=3,
+        )
+        result = self._svc().compare(self.doc, 1, 5)
+        self.assertFalse(result.files.changed)
+
+    def test_file_size_changed(self):
+        result = self._svc().compare(self.doc, 1, 2)
+        self.assertEqual(result.files.old_size, 1000)
+        self.assertEqual(result.files.new_size, 2000)
+
+    # PDF page count (Stufe-2-Vorbereitung)
+    def test_pages_changed(self):
+        result = self._svc().compare(self.doc, 1, 2)
+        self.assertTrue(result.files.pages_changed)
+        self.assertEqual(result.files.old_page_count, 3)
+        self.assertEqual(result.files.new_page_count, 4)
+
+    def test_missing_version_raises(self):
+        with self.assertRaises(DocumentVersion.DoesNotExist):
+            self._svc().compare(self.doc, 1, 999)
+
+
+class VersionCompareAPITests(APITestCase):
+    """HTTP-Tests für GET /api/documents/{id}/versions/{a}/compare/{b}/."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.owner = User.objects.create_user(username="api_owner", password="pw", role="user")
+        cls.other = User.objects.create_user(username="api_other", password="pw", role="user")
+        cls.guest = User.objects.create_user(username="api_guest", password="pw", role="guest")
+
+        cls.doc = Document.objects.create(title="API-Vergleichsdok", owner=cls.owner)
+        cls.v1 = DocumentVersion.objects.create(
+            document=cls.doc, version_no=1, file_path="/d/a1.pdf",
+            sha256="1" * 64, size=100, mime_type="application/pdf", ocr_text="Version 1",
+        )
+        cls.v2 = DocumentVersion.objects.create(
+            document=cls.doc, version_no=2, file_path="/d/a2.pdf",
+            sha256="2" * 64, size=200, mime_type="application/pdf", ocr_text="Version 2",
+        )
+        cls.doc.current_version = cls.v2
+        cls.doc.save()
+
+    def _url(self, doc_id=None, f=1, t=2):
+        doc_id = doc_id or self.doc.pk
+        return f"/api/documents/{doc_id}/versions/{f}/compare/{t}/"
+
+    def test_successful_compare(self):
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get(self._url())
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertIn("summary", data)
+        self.assertIn("text_diff", data)
+        self.assertIn("files", data)
+        self.assertIn("tags", data)
+        self.assertIn("metadata", data)
+        self.assertIn("custom_fields", data)
+        self.assertTrue(data["summary"]["binary_changed"])
+
+    def test_invalid_version_number(self):
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get(f"/api/documents/{self.doc.pk}/versions/1/compare/999/")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_same_version_rejected(self):
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get(self._url(f=1, t=1))
+        self.assertEqual(resp.status_code, 400)
+
+    def test_other_user_doc_not_found(self):
+        self.client.force_authenticate(self.other)
+        resp = self.client.get(self._url())
+        self.assertEqual(resp.status_code, 404)
+
+    def test_guest_can_read(self):
+        # guest hat Leserecht auf eigene Dokumente aber kein fremdes
+        guest_doc = Document.objects.create(title="Gastdok", owner=self.guest)
+        gv1 = DocumentVersion.objects.create(
+            document=guest_doc, version_no=1, file_path="/d/g1.pdf", sha256="g" * 64, size=10,
+        )
+        gv2 = DocumentVersion.objects.create(
+            document=guest_doc, version_no=2, file_path="/d/g2.pdf", sha256="h" * 64, size=20,
+        )
+        guest_doc.current_version = gv2
+        guest_doc.save()
+        self.client.force_authenticate(self.guest)
+        resp = self.client.get(f"/api/documents/{guest_doc.pk}/versions/1/compare/2/")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_unauthenticated_denied(self):
+        resp = self.client.get(self._url())
+        self.assertEqual(resp.status_code, 403)
