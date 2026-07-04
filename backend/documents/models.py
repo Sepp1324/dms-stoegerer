@@ -390,6 +390,33 @@ class DocumentVersion(models.Model):
         help_text="Löschen gesperrt bis zu diesem Datum",
     )
 
+    # Versionsvergleich Stufe 2 (STOAA-312, Option A aus STOAA-292): beim Sealing
+    # wird ein deterministischer JSON-Snapshot der Metadaten/Tags/Custom-Fields auf
+    # die Version geschrieben (write-once, WORM). ``seal_hash`` bindet den Snapshot
+    # kanonisch an die Datei-/prev_hash-Siegelkette – Manipulation an eingefrorenen
+    # Metadaten wird damit erkennbar. Ältere (Stufe-1-)Versionen bleiben ``null``
+    # ('nicht verfügbar', GoBD – keine erfundenen historischen Zustände).
+    metadata_snapshot = models.JSONField(
+        null=True,
+        blank=True,
+        help_text="Eingefrorener Metadaten-/Tag-/Custom-Field-Stand beim Sealing",
+    )
+    snapshot_schema_version = models.PositiveSmallIntegerField(
+        default=0,
+        help_text="Schema-Version des metadata_snapshot (0 = nicht vorhanden)",
+    )
+    snapshot_taken_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Erfassungszeitpunkt des Snapshots (Sealing bzw. Backfill)",
+    )
+    seal_hash = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text="sha256(sha256 · prev_hash · Snapshot-Bytes) – Metadaten-Siegel",
+    )
+
     class Meta:
         verbose_name = "Dokumentversion"
         verbose_name_plural = "Dokumentversionen"

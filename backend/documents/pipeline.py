@@ -528,6 +528,18 @@ def _seal_version(version: DocumentVersion) -> None:
         base = ref.date() if hasattr(ref, "date") else date.today()
         retention_until = _add_months(base, doc_type.retention_months)
 
+    # Metadaten-Snapshot beim Sealing schreiben (Versionsvergleich Stufe 2,
+    # STOAA-312/Option A). Write-once, vor dem WORM-Flag – der Snapshot fließt in
+    # die Siegelkette (seal_hash) ein. Best effort: ein Snapshot-Fehler darf das
+    # eigentliche WORM-Siegel nicht verhindern (Integrität der Datei-Hash-Kette
+    # hat Vorrang; der Snapshot ist additiv).
+    from documents.services import version_snapshot
+
+    try:
+        version_snapshot.write_snapshot_on_seal(version, actor=version.created_by)
+    except Exception:  # noqa: BLE001 – Snapshot ist additiv, blockiert das Siegel nicht
+        logger.exception("Metadaten-Snapshot für Version %s fehlgeschlagen", version.id)
+
     # Direkt auf DB-Ebene setzen, ohne save()-Guard auszulösen
     DocumentVersion.objects.filter(pk=version.pk).update(
         is_immutable=True,

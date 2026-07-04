@@ -188,6 +188,82 @@ def _pages_changed(files: FileComparison) -> bool:
     return files.old_page_count != files.new_page_count
 
 
+# --- Snapshot-Diff (Stufe 2, STOAA-312) --------------------------------------
+# Leere Sektionen exakt wie Stufe 1 – die Shape bleibt stabil, wenn (mindestens)
+# eine Version keinen Snapshot hat (``metadata_versioning_supported == False``).
+_EMPTY_METADATA: Dict[str, Any] = {}
+_EMPTY_TAGS: Dict[str, List[Any]] = {"added": [], "removed": []}
+_EMPTY_CUSTOM_FIELDS: Dict[str, Any] = {}
+
+
+def _diff_dict(old: Dict[str, Any] | None, new: Dict[str, Any] | None) -> Dict[str, Any]:
+    """Flacher Dict-Vergleich → ``{added, removed, changed}``.
+
+    ``added``/``removed`` tragen die Werte der neu- bzw. weggefallenen Schlüssel,
+    ``changed`` je Schlüssel ``{"old": …, "new": …}``. Deterministisch (sortierte
+    Schlüssel).
+    """
+    old = old or {}
+    new = new or {}
+    added = {key: new[key] for key in sorted(new) if key not in old}
+    removed = {key: old[key] for key in sorted(old) if key not in new}
+    changed = {
+        key: {"old": old[key], "new": new[key]}
+        for key in sorted(old.keys() & new.keys())
+        if old[key] != new[key]
+    }
+    return {"added": added, "removed": removed, "changed": changed}
+
+
+def _diff_tags(
+    old_tags: List[Dict[str, Any]] | None, new_tags: List[Dict[str, Any]] | None
+) -> Dict[str, List[Any]]:
+    """Tag-Vergleich über die Tag-``id`` → ``{added, removed}`` (id+name Objekte)."""
+    old_by_id = {tag["id"]: tag for tag in (old_tags or [])}
+    new_by_id = {tag["id"]: tag for tag in (new_tags or [])}
+    added = [new_by_id[i] for i in sorted(new_by_id) if i not in old_by_id]
+    removed = [old_by_id[i] for i in sorted(old_by_id) if i not in new_by_id]
+    return {"added": added, "removed": removed}
+
+
+def _diff_snapshots(
+    from_version: "DocumentVersion", to_version: "DocumentVersion"
+) -> Dict[str, Any]:
+    """Diff der Metadaten/Tags/Custom-Fields aus BEIDEN Snapshots.
+
+    ``metadata_versioning_supported`` ist nur ``True``, wenn beide verglichenen
+    Versionen einen Snapshot tragen; sonst werden die (Stufe-1-)Leersektionen
+    zurückgegeben und die Flags bleiben ``False`` – die Stufe-1-UX bleibt exakt
+    unverändert.
+    """
+    old_snap = from_version.metadata_snapshot
+    new_snap = to_version.metadata_snapshot
+    supported = old_snap is not None and new_snap is not None
+    if not supported:
+        return {
+            "supported": False,
+            "metadata": dict(_EMPTY_METADATA),
+            "tags": {"added": [], "removed": []},
+            "custom_fields": dict(_EMPTY_CUSTOM_FIELDS),
+            "metadata_changed": False,
+            "tags_changed": False,
+            "custom_fields_changed": False,
+        }
+
+    metadata = _diff_dict(old_snap.get("metadata"), new_snap.get("metadata"))
+    custom_fields = _diff_dict(old_snap.get("custom_fields"), new_snap.get("custom_fields"))
+    tags = _diff_tags(old_snap.get("tags"), new_snap.get("tags"))
+    return {
+        "supported": True,
+        "metadata": metadata,
+        "tags": tags,
+        "custom_fields": custom_fields,
+        "metadata_changed": any(metadata[section] for section in metadata),
+        "tags_changed": bool(tags["added"] or tags["removed"]),
+        "custom_fields_changed": any(custom_fields[section] for section in custom_fields),
+    }
+
+
 def compare_versions(
     document: "Document",
     from_version: "DocumentVersion",
@@ -202,8 +278,10 @@ def compare_versions(
 
     Returns:
         Ein :class:`VersionComparison` mit real berechneten Text-/Datei-/PDF-
-        Flags. ``metadata``/``tags``/``custom_fields`` sind leer und
-        ``metadata_versioning_supported`` ist ``False`` (Stufe 1).
+        Flags. Tragen BEIDE Versionen einen Metadaten-Snapshot (Stufe 2,
+        STOAA-312), werden ``metadata``/``tags``/``custom_fields`` aus den
+        Snapshots gediffed und ``metadata_versioning_supported`` ist ``True``;
+        sonst bleiben diese Sektionen leer und das Flag ``False`` (Stufe-1-UX).
 
     Der Service ist seiteneffektfrei und berührt keine Request-/Permission-
     Ebene – Sichtbarkeit/Owner werden vom aufrufenden ViewSet erzwungen.
@@ -217,12 +295,21 @@ def compare_versions(
     text_changed = from_text != to_text
 
     files = _compare_files(from_version, to_version)
+    snap = _diff_snapshots(from_version, to_version)
 
     summary = CompareSummary(
         text_changed=text_changed,
         binary_changed=files.changed,
         pages_changed=_pages_changed(files),
+        metadata_changed=snap["metadata_changed"],
+        tags_changed=snap["tags_changed"],
+        custom_fields_changed=snap["custom_fields_changed"],
     )
+
+    # ``text_diff_html`` bleibt bei Gleichheit leer (Spec-Item 2 aus STOAA-288);
+    # nur bei tatsächlicher Textänderung wird die HtmlDiff-Tabelle erzeugt. Das FE
+    # sanitized die Ausgabe vor dem Rendern.
+    text_diff_html = _build_text_diff_html(from_text, to_text) if text_changed else ""
 
     return VersionComparison(
         document=document.id,
@@ -230,6 +317,10 @@ def compare_versions(
         to_version=to_version.version_no,
         summary=summary,
         text_diff=_build_text_diff(from_text, to_text),
-        text_diff_html=_build_text_diff_html(from_text, to_text),
+        text_diff_html=text_diff_html,
         files=files,
+        metadata_versioning_supported=snap["supported"],
+        metadata=snap["metadata"],
+        tags=snap["tags"],
+        custom_fields=snap["custom_fields"],
     )
