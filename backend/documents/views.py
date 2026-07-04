@@ -356,6 +356,12 @@ class DocumentViewSet(viewsets.ModelViewSet):
             # Dokumenttyp/Tags/Mail-Feldern (B), OCR-Fließtext (D) am schwächsten.
             # Query-Zeit-Vektor (keine materialisierte Spalte/GIN) – bewusst, da
             # der Vektor Join-Tabellen spannt; performant für Familien-Korpus.
+            # Known-Limitation: PostgreSQL-FTS tokenisiert reine E-Mail-Adressen
+            # als EIN atomares Token → Teilstrings der Sender-Domain (z. B. nur
+            # "energieanbieter") sind nicht als Lexeme suchbar. Der From-Header
+            # wird von mail.py als "Anzeigename <adresse>" gespeichert, sodass
+            # über den Anzeigenamen gesucht werden kann. Substring-Domainsuche
+            # bei anzeigenamenlosen Absendern ist ein optionales Folge-Ticket.
             vector = (
                 SearchVector("title", weight="A", config="german")
                 + SearchVector("correspondent__name", weight="A", config="german")

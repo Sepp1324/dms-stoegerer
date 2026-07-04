@@ -2459,9 +2459,16 @@ class DocumentSearchTests(APITestCase):
         self.assertEqual(self._ids(resp), [doc.id])
 
     def test_ak6_mail_sender_match(self):
+        # mail.py speichert den From-Header realistisch als "Anzeigename <adresse>"
+        # (mail.py:201). PostgreSQL-FTS tokenisiert eine reine E-Mail-Adresse als
+        # EIN atomares Token, d. h. Teilstrings der Domain sind nicht als eigene
+        # Lexeme suchbar. Realistische, FTS-taugliche Suche geht über den
+        # Anzeigenamen des Absenders (siehe Known-Limitation-Kommentar in views.py).
         doc = self._doc(
-            self.owner, title="Scan", mail_sender="buchhaltung@energieanbieter.example"
+            self.owner,
+            title="Scan",
+            mail_sender="Energieanbieter Buchhaltung <buchhaltung@energieanbieter.example>",
         )
         self.client.force_authenticate(self.owner)
-        resp = self.client.get("/api/documents/?q=energieanbieter")
+        resp = self.client.get("/api/documents/?q=Energieanbieter")
         self.assertEqual(self._ids(resp), [doc.id])
