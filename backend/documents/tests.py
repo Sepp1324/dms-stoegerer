@@ -856,12 +856,13 @@ class CustomFieldTests(APITestCase):
         self.client.force_authenticate(self.user)
         resp = self.client.get("/api/custom-fields/")
         self.assertEqual(resp.status_code, 200)
-        names = [f["name"] for f in resp.json()]
+        # Liste ist paginiert (globale DRF-Pagination wie tags/correspondents).
+        data = resp.json()
+        results = data["results"] if isinstance(data, dict) else data
+        names = [f["name"] for f in results]
         self.assertIn("Rechnungsbetrag", names)
         # Kontrakt: genau id/name/data_type.
-        self.assertEqual(
-            set(resp.json()[0].keys()), {"id", "name", "data_type"}
-        )
+        self.assertEqual(set(results[0].keys()), {"id", "name", "data_type"})
 
     def test_create(self):
         self.client.force_authenticate(self.user)
