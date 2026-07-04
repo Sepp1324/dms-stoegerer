@@ -318,6 +318,14 @@ class DocumentVersion(models.Model):
     processing_failed_at = models.DateTimeField(null=True, blank=True)
     processing_attempts = models.PositiveIntegerField(default=0)
 
+    # Ingest-Quelle für die Workflow-Engine (STOAA-263)
+    ingest_source = models.CharField(
+        max_length=16,
+        blank=True,
+        default="upload",
+        help_text="upload | consume | mail | api",
+    )
+
     ocr_status = models.CharField(
         max_length=20,
         choices=OCRStatus.choices,
@@ -894,3 +902,138 @@ class DocumentShareLink(models.Model):
     def is_valid(self) -> bool:
         """Nutzbar = weder widerrufen noch abgelaufen."""
         return self.revoked_at is None and not self.is_expired
+
+
+# ---------------------------------------------------------------------------
+# Workflow-Engine (STOAA-263) – Trigger → Bedingungen → Aktionen
+# ---------------------------------------------------------------------------
+class Workflow(models.Model):
+    """Geordnete Regel: Trigger + Bedingungen → Aktionsliste."""
+
+    name = models.CharField(max_length=255)
+    order = models.IntegerField(default=100, help_text="Kleiner = früher ausgeführt")
+    enabled = models.BooleanField(default=True)
+
+    class Meta:
+        verbose_name = "Workflow"
+        verbose_name_plural = "Workflows"
+        ordering = ["order", "name"]
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class WorkflowTrigger(models.Model):
+    """Wann und unter welchen Bedingungen ein Workflow feuert."""
+
+    class TriggerType(models.TextChoices):
+        DOCUMENT_ADDED = "document_added", "Dokument hinzugefügt"
+        DOCUMENT_UPDATED = "document_updated", "Dokument aktualisiert"
+
+    workflow = models.OneToOneField(
+        Workflow, on_delete=models.CASCADE, related_name="trigger"
+    )
+    trigger_type = models.CharField(
+        max_length=32,
+        choices=TriggerType.choices,
+        default=TriggerType.DOCUMENT_ADDED,
+    )
+
+    # Quell-Filter (Mehrfachauswahl als kommagetrennte Liste, leer = alle)
+    # Werte: upload, consume, mail, api
+    sources = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text="Kommagetrennte Liste: upload,consume,mail,api – leer = alle",
+    )
+
+    # Optionale Bedingungen
+    filter_path = models.CharField(
+        max_length=512, blank=True, default="",
+        help_text="Glob gegen den Dateipfad der Version (optional)",
+    )
+    filter_correspondent = models.ForeignKey(
+        Correspondent, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="+",
+    )
+    filter_document_type = models.ForeignKey(
+        DocumentType, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="+",
+    )
+    filter_has_tags = models.ManyToManyField(
+        Tag, blank=True, related_name="trigger_has",
+        help_text="Dokument muss ALLE diese Tags haben",
+    )
+    filter_has_not_tags = models.ManyToManyField(
+        Tag, blank=True, related_name="trigger_has_not",
+        help_text="Dokument darf KEINEN dieser Tags haben",
+    )
+    # Textbedingungen (nutzen rule_matches-Logik aus classification.py)
+    filter_text_contains = models.CharField(max_length=512, blank=True, default="")
+    filter_text_regex = models.CharField(max_length=512, blank=True, default="")
+
+    class Meta:
+        verbose_name = "Workflow-Trigger"
+        verbose_name_plural = "Workflow-Trigger"
+
+    def __str__(self) -> str:
+        return f"Trigger[{self.trigger_type}] für {self.workflow}"
+
+
+class WorkflowAction(models.Model):
+    """Eine Aktion, die ein Workflow in gegebener Reihenfolge ausführt."""
+
+    class ActionType(models.TextChoices):
+        ASSIGN = "assign", "Zuweisen"
+        REMOVE = "remove", "Entfernen"
+
+    workflow = models.ForeignKey(
+        Workflow, on_delete=models.CASCADE, related_name="actions"
+    )
+    order = models.IntegerField(default=10)
+    action_type = models.CharField(
+        max_length=16, choices=ActionType.choices, default=ActionType.ASSIGN
+    )
+
+    # Felder für action_type=assign
+    assign_title = models.CharField(
+        max_length=512, blank=True, default="",
+        help_text="Titel-Template: {correspondent}, {created}, {doc_type} erlaubt",
+    )
+    assign_correspondent = models.ForeignKey(
+        Correspondent, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="+",
+    )
+    assign_document_type = models.ForeignKey(
+        DocumentType, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="+",
+    )
+    assign_storage_path = models.ForeignKey(
+        StoragePath, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="+",
+    )
+    assign_tags = models.ManyToManyField(
+        Tag, blank=True, related_name="action_assign",
+        help_text="Tags ergänzen",
+    )
+    assign_owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="+",
+    )
+    # Benutzerdefinierte Feldwerte als JSON: {"field_id": wert, ...}
+    assign_custom_fields = models.JSONField(default=dict, blank=True)
+
+    # Felder für action_type=remove
+    remove_tags = models.ManyToManyField(
+        Tag, blank=True, related_name="action_remove",
+        help_text="Tags entfernen",
+    )
+
+    class Meta:
+        verbose_name = "Workflow-Aktion"
+        verbose_name_plural = "Workflow-Aktionen"
+        ordering = ["order"]
+
+    def __str__(self) -> str:
+        return f"Aktion[{self.action_type}] #{self.order} für {self.workflow}"

@@ -13,6 +13,9 @@ from .models import (
     MailAccount,
     StoragePath,
     Tag,
+    Workflow,
+    WorkflowAction,
+    WorkflowTrigger,
 )
 
 
@@ -218,6 +221,12 @@ class DocumentSerializer(serializers.ModelSerializer):
     ocr_status = serializers.CharField(
         source="current_version.ocr_status", read_only=True, default=None
     )
+    # Rollup des Verarbeitungsstatus der aktuellen Version (STOAA-248): erspart
+    # dem Frontend fürs Listen-Badge den Griff in die nested ``versions``-Liste.
+    # Read-only; ``None`` wenn (noch) keine current_version existiert.
+    processing_state = serializers.CharField(
+        source="current_version.processing_state", read_only=True, default=None
+    )
     storage_path_name = serializers.CharField(
         source="storage_path.name", read_only=True, default=None
     )
@@ -245,6 +254,7 @@ class DocumentSerializer(serializers.ModelSerializer):
             "current_version",
             "page_count",
             "ocr_status",
+            "processing_state",
             "ai_suggestions",
             "ai_suggested_at",
             "classification",
@@ -341,3 +351,99 @@ class MailAccountSerializer(serializers.ModelSerializer):
         if validated_data.get("password", None) == "":
             validated_data.pop("password")
         return super().update(instance, validated_data)
+
+
+# ---------------------------------------------------------------------------
+# Workflow-Engine (STOAA-263) – verschachtelte Serializer für Trigger/Aktionen
+# ---------------------------------------------------------------------------
+class WorkflowTriggerSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = WorkflowTrigger
+        fields = (
+            "id",
+            "trigger_type",
+            "sources",
+            "filter_path",
+            "filter_correspondent",
+            "filter_document_type",
+            "filter_has_tags",
+            "filter_has_not_tags",
+            "filter_text_contains",
+            "filter_text_regex",
+        )
+
+
+class WorkflowActionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = WorkflowAction
+        fields = (
+            "id",
+            "order",
+            "action_type",
+            "assign_title",
+            "assign_correspondent",
+            "assign_document_type",
+            "assign_storage_path",
+            "assign_tags",
+            "assign_owner",
+            "assign_custom_fields",
+            "remove_tags",
+        )
+
+
+class WorkflowSerializer(serializers.ModelSerializer):
+    """Workflow mit verschachteltem Trigger (1:1) und Aktionsliste (1:n).
+
+    Schreiben (POST/PUT/PATCH) akzeptiert ``trigger`` als Objekt und ``actions``
+    als Liste; die Engine liest sie deterministisch in ``order``-Reihenfolge.
+    Beim Update werden Aktionen vollständig ersetzt (idempotent, einfaches
+    Contract für den Frontend-Editor).
+    """
+
+    trigger = WorkflowTriggerSerializer(required=False)
+    actions = WorkflowActionSerializer(many=True, required=False)
+
+    class Meta:
+        model = Workflow
+        fields = ("id", "name", "order", "enabled", "trigger", "actions")
+
+    def _write_nested(self, workflow, trigger_data, actions_data):
+        # Trigger (OneToOne) – ersetzen/aktualisieren
+        if trigger_data is not None:
+            has_tags = trigger_data.pop("filter_has_tags", None)
+            has_not_tags = trigger_data.pop("filter_has_not_tags", None)
+            trigger, _ = WorkflowTrigger.objects.update_or_create(
+                workflow=workflow, defaults=trigger_data
+            )
+            if has_tags is not None:
+                trigger.filter_has_tags.set(has_tags)
+            if has_not_tags is not None:
+                trigger.filter_has_not_tags.set(has_not_tags)
+
+        # Aktionen (1:n) – vollständig ersetzen
+        if actions_data is not None:
+            workflow.actions.all().delete()
+            for action_data in actions_data:
+                assign_tags = action_data.pop("assign_tags", [])
+                remove_tags = action_data.pop("remove_tags", [])
+                action = WorkflowAction.objects.create(workflow=workflow, **action_data)
+                if assign_tags:
+                    action.assign_tags.set(assign_tags)
+                if remove_tags:
+                    action.remove_tags.set(remove_tags)
+
+    def create(self, validated_data):
+        trigger_data = validated_data.pop("trigger", None)
+        actions_data = validated_data.pop("actions", None)
+        workflow = Workflow.objects.create(**validated_data)
+        self._write_nested(workflow, trigger_data, actions_data)
+        return workflow
+
+    def update(self, instance, validated_data):
+        trigger_data = validated_data.pop("trigger", None)
+        actions_data = validated_data.pop("actions", None)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        self._write_nested(instance, trigger_data, actions_data)
+        return instance

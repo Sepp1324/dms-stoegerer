@@ -13,6 +13,7 @@ router.register("classification-rules", views.ClassificationRuleViewSet)
 router.register("custom-fields", views.CustomFieldViewSet)
 router.register("document-share-links", views.DocumentShareLinkViewSet)
 router.register("mail-accounts", views.MailAccountViewSet)
+router.register("workflows", views.WorkflowViewSet)
 
 urlpatterns = [
     # Explizit vor dem Router, sonst würde "upload" als Dokument-PK gelesen.

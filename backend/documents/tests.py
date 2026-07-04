@@ -2479,6 +2479,151 @@ class DocumentProcessingFailureRetryTests(TestCase):
         self.assertIn("0 neu verarbeitet", out2.getvalue())
 
 
+class ProcessingStatusAPITests(APITestCase):
+    """Processing-Status-API (STOAA-248): Rollup-Feld, ?processing_state-Filter,
+    dokument-scoped Retry-Endpoint."""
+
+    @classmethod
+    def setUpTestData(cls):
+        PS = DocumentVersion.ProcessingState
+        cls.owner = User.objects.create_user(
+            username="ps_owner", password="pw", role="user"
+        )
+        cls.other = User.objects.create_user(
+            username="ps_other", password="pw", role="user"
+        )
+        cls.guest = User.objects.create_user(
+            username="ps_guest", password="pw", role="guest"
+        )
+
+        # Ein Dokument des Owners je relevantem State (current_version gesetzt).
+        cls.docs = {}
+        for key, state in [
+            ("ready", PS.READY),
+            ("failed", PS.FAILED),
+            ("retry_pending", PS.RETRY_PENDING),
+            ("ocr_running", PS.OCR_RUNNING),  # zählt zu Bucket "processing"
+            ("classified", PS.CLASSIFIED),  # zählt zu Bucket "processing"
+        ]:
+            doc = Document.objects.create(title=f"Doc {key}", owner=cls.owner)
+            version = DocumentVersion.objects.create(
+                document=doc,
+                version_no=1,
+                file_path=f"/data/originals/{key}.pdf",
+                sha256=key.ljust(64, "0")[:64],
+                processing_state=state,
+                processing_failed_step="ocr" if state == PS.FAILED else "",
+            )
+            doc.current_version = version
+            doc.save(update_fields=["current_version"])
+            cls.docs[key] = doc
+
+    # --- Rollup-Feld ------------------------------------------------------
+    def test_rollup_feld_in_liste(self):
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get("/api/documents/")
+        self.assertEqual(resp.status_code, 200)
+        by_title = {d["title"]: d for d in resp.data["results"]}
+        self.assertEqual(by_title["Doc failed"]["processing_state"], "failed")
+        self.assertEqual(by_title["Doc ready"]["processing_state"], "ready")
+
+    # --- Filter-Buckets ---------------------------------------------------
+    def _titles_for(self, value):
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get(f"/api/documents/?processing_state={value}")
+        self.assertEqual(resp.status_code, 200)
+        return {d["title"] for d in resp.data["results"]}
+
+    def test_filter_failed_bucket(self):
+        self.assertEqual(self._titles_for("failed"), {"Doc failed"})
+
+    def test_filter_retry_pending_bucket(self):
+        self.assertEqual(self._titles_for("retry_pending"), {"Doc retry_pending"})
+
+    def test_filter_ready_bucket(self):
+        self.assertEqual(self._titles_for("ready"), {"Doc ready"})
+
+    def test_filter_processing_bucket_umfasst_alle_inflight_states(self):
+        self.assertEqual(
+            self._titles_for("processing"),
+            {"Doc ocr_running", "Doc classified"},
+        )
+
+    def test_filter_exakter_state_als_fallback(self):
+        self.assertEqual(self._titles_for("ocr_running"), {"Doc ocr_running"})
+
+    def test_filter_unbekannter_wert_wird_ignoriert(self):
+        # Kein 500, kein Filter → alle eigenen Dokumente.
+        titles = self._titles_for("voellig_unbekannt")
+        self.assertEqual(len(titles), len(self.docs))
+
+    # --- Retry-Endpoint ---------------------------------------------------
+    def _retry_url(self, doc):
+        return f"/api/documents/{doc.id}/retry_processing/"
+
+    def test_retry_failed_liefert_202_und_delayt(self):
+        from unittest import mock
+
+        self.client.force_authenticate(self.owner)
+        with mock.patch(
+            "documents.views.retry_document_version.delay"
+        ) as delayed:
+            resp = self.client.post(self._retry_url(self.docs["failed"]))
+        self.assertEqual(resp.status_code, 202)
+        version = self.docs["failed"].current_version
+        delayed.assert_called_once_with(version.id, actor_id=self.owner.id)
+        # Antwort serialisiert die (noch FAILED) aktuelle Version.
+        self.assertEqual(resp.data["id"], version.id)
+        self.assertEqual(resp.data["processing_state"], "failed")
+
+    def test_retry_nicht_failed_liefert_400(self):
+        from unittest import mock
+
+        self.client.force_authenticate(self.owner)
+        with mock.patch(
+            "documents.views.retry_document_version.delay"
+        ) as delayed:
+            resp = self.client.post(self._retry_url(self.docs["ready"]))
+        self.assertEqual(resp.status_code, 400)
+        delayed.assert_not_called()
+
+    def test_retry_gast_liefert_403(self):
+        from unittest import mock
+
+        # Gast besitzt selbst ein FAILED-Dokument → 403 kommt vom can_write-Guard,
+        # nicht von der Owner-Isolation.
+        guest_doc = Document.objects.create(title="Gast Doc", owner=self.guest)
+        gv = DocumentVersion.objects.create(
+            document=guest_doc,
+            version_no=1,
+            file_path="/data/originals/guest.pdf",
+            sha256="g" * 64,
+            processing_state=DocumentVersion.ProcessingState.FAILED,
+            processing_failed_step="ocr",
+        )
+        guest_doc.current_version = gv
+        guest_doc.save(update_fields=["current_version"])
+
+        self.client.force_authenticate(self.guest)
+        with mock.patch(
+            "documents.views.retry_document_version.delay"
+        ) as delayed:
+            resp = self.client.post(self._retry_url(guest_doc))
+        self.assertEqual(resp.status_code, 403)
+        delayed.assert_not_called()
+
+    def test_retry_fremdes_dokument_liefert_404(self):
+        from unittest import mock
+
+        self.client.force_authenticate(self.other)
+        with mock.patch(
+            "documents.views.retry_document_version.delay"
+        ) as delayed:
+            resp = self.client.post(self._retry_url(self.docs["failed"]))
+        self.assertEqual(resp.status_code, 404)
+        delayed.assert_not_called()
+
+
 class DocumentSearchTests(APITestCase):
     """Gewichtete PostgreSQL-Volltextsuche im DocumentViewSet (STOAA-256).
 
