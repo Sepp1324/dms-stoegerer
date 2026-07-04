@@ -2889,7 +2889,7 @@ class WorkflowEngineTests(TestCase):
     def test_action_assign_custom_field(self):
         from .workflows import run_workflows
         from .models import CustomFieldValue, Workflow, WorkflowAction
-        field = CustomField.objects.create(name="Betrag", field_type="text")
+        field = CustomField.objects.create(name="Betrag", data_type="text")
         wf, _ = self._make_workflow(name="WF_CF")
         WorkflowAction.objects.create(
             workflow=wf, order=10, action_type="assign",
