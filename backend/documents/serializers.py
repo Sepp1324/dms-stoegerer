@@ -221,6 +221,12 @@ class DocumentSerializer(serializers.ModelSerializer):
     ocr_status = serializers.CharField(
         source="current_version.ocr_status", read_only=True, default=None
     )
+    # Rollup des Verarbeitungsstatus der aktuellen Version (STOAA-248): erspart
+    # dem Frontend fürs Listen-Badge den Griff in die nested ``versions``-Liste.
+    # Read-only; ``None`` wenn (noch) keine current_version existiert.
+    processing_state = serializers.CharField(
+        source="current_version.processing_state", read_only=True, default=None
+    )
     storage_path_name = serializers.CharField(
         source="storage_path.name", read_only=True, default=None
     )
@@ -248,6 +254,7 @@ class DocumentSerializer(serializers.ModelSerializer):
             "current_version",
             "page_count",
             "ocr_status",
+            "processing_state",
             "ai_suggestions",
             "ai_suggested_at",
             "classification",
