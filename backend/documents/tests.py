@@ -3472,3 +3472,266 @@ class VersionCompareAPITests(APITestCase):
         # 403 für den anonymen Fall (Konvention: siehe test_anonymous_unauthorized).
         resp = self.client.get(self._url())
         self.assertIn(resp.status_code, (401, 403))
+
+
+class MailOwnerFallbackTests(TestCase):
+    """STOAA-295: Owner-Auflösung beim Mail-Ingest (Konto-Owner > Fallback > Triage).
+
+    Belegt, dass Mail-Anhänge nicht mehr still eigentümerlos aufgenommen werden:
+    Konto-Owner hat Vorrang, sonst greift ``MAIL_DEFAULT_OWNER``; bleibt beides
+    leer, ist ``owner=None`` ein explizit protokollierter Triage-Zustand.
+    ``process_document_version.delay`` und der Originals-Pfad werden gemockt.
+    """
+
+    def setUp(self):
+        from pathlib import Path
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.originals = Path(self._tmp.name) / "originals"
+        self.originals.mkdir(parents=True, exist_ok=True)
+        self.empfaenger = User.objects.create_user(
+            username="empfaenger", password="pw", role="user"
+        )
+
+    def _mail(self, message_id="<m1@test>"):
+        from email.message import EmailMessage
+
+        msg = EmailMessage()
+        msg["Subject"] = "Rechnung"
+        msg["From"] = "Absender <a@example.com>"
+        msg["Message-ID"] = message_id
+        msg.set_content("Text")
+        msg.add_attachment(
+            b"%PDF-1.4 dummy",
+            maintype="application",
+            subtype="pdf",
+            filename="rechnung.pdf",
+        )
+        return msg.as_bytes()
+
+    def _ingest(self, account, message_id="<m1@test>"):
+        from unittest import mock
+
+        from . import mail, storage, tasks
+
+        with mock.patch.object(storage, "ORIGINALS_DIR", self.originals), mock.patch.object(
+            tasks.process_document_version, "delay"
+        ):
+            return mail.ingest_message(account, self._mail(message_id))
+
+    def test_a_mail_mit_account_owner_setzt_owner(self):
+        """(a) Konto-Owner gesetzt -> Dokument gehört ihm, kein Zusatz-Audit."""
+        acc = MailAccount.objects.create(
+            name="R", host="h", username="u", owner=self.empfaenger
+        )
+        imported = self._ingest(acc)
+        self.assertEqual(imported, 1)
+        doc = Document.objects.get()
+        self.assertEqual(doc.owner_id, self.empfaenger.id)
+        self.assertFalse(
+            AuditLogEntry.objects.filter(
+                action__in=["owner_fallback", "triage_ingest"]
+            ).exists()
+        )
+
+    def test_b_ohne_account_owner_nutzt_default_owner(self):
+        """(b) Konto-Owner leer + MAIL_DEFAULT_OWNER -> Fallback-Owner + Audit."""
+        acc = MailAccount.objects.create(name="R", host="h", username="u", owner=None)
+        with self.settings(MAIL_DEFAULT_OWNER="empfaenger"):
+            self._ingest(acc)
+        doc = Document.objects.get()
+        self.assertEqual(doc.owner_id, self.empfaenger.id)
+        audit = AuditLogEntry.objects.get(action="owner_fallback")
+        self.assertEqual(audit.detail["source"], "mail")
+        self.assertEqual(audit.detail["chosen_owner"], "empfaenger")
+        self.assertEqual(audit.actor_id, self.empfaenger.id)
+
+    def test_c_ohne_owner_und_ohne_default_ist_triage(self):
+        """(c) Beides leer -> owner=None + triage_ingest (actor=None), nicht still."""
+        acc = MailAccount.objects.create(name="R", host="h", username="u", owner=None)
+        with self.settings(MAIL_DEFAULT_OWNER=""):
+            self._ingest(acc)
+        doc = Document.objects.get()
+        self.assertIsNone(doc.owner_id)
+        audit = AuditLogEntry.objects.get(action="triage_ingest")
+        self.assertEqual(audit.detail["source"], "mail")
+        self.assertIsNone(audit.actor_id)
+
+    def test_c2_unbekannter_default_owner_bleibt_triage(self):
+        """Fehlkonfigurierter MAIL_DEFAULT_OWNER bricht nicht ab -> Triage."""
+        acc = MailAccount.objects.create(name="R", host="h", username="u", owner=None)
+        with self.settings(MAIL_DEFAULT_OWNER="gibtsnicht"):
+            self._ingest(acc)
+        doc = Document.objects.get()
+        self.assertIsNone(doc.owner_id)
+        self.assertTrue(AuditLogEntry.objects.filter(action="triage_ingest").exists())
+
+
+class ConsumeDefaultOwnerTests(TestCase):
+    """STOAA-295: CONSUME_DEFAULT_OWNER (Flat) + Per-User-Pfad unverändert."""
+
+    def setUp(self):
+        from pathlib import Path
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        root = Path(self._tmp.name)
+        self.consume = root / "consume"
+        self.originals = root / "originals"
+        self.consume.mkdir(parents=True, exist_ok=True)
+        self.originals.mkdir(parents=True, exist_ok=True)
+        self.user = User.objects.create_user(
+            username="consumer", password="pw", role="user"
+        )
+
+    def _write(self, base, name, *, age_seconds=3600):
+        import os
+        import time
+
+        base.mkdir(parents=True, exist_ok=True)
+        path = base / name
+        path.write_bytes(b"%PDF-1.4 dummy")
+        mtime = time.time() - age_seconds
+        os.utime(path, (mtime, mtime))
+        return path
+
+    def _run_scan(self):
+        from unittest import mock
+
+        from . import storage, tasks
+
+        with mock.patch.object(storage, "CONSUME_DIR", self.consume), mock.patch.object(
+            storage, "ORIGINALS_DIR", self.originals
+        ), mock.patch.object(tasks.process_document_version, "delay"):
+            return tasks.scan_consume_folder()
+
+    def test_d_flat_mit_default_owner_setzt_owner(self):
+        """(d) Flat + CONSUME_DEFAULT_OWNER -> Owner gesetzt + owner_fallback."""
+        self._write(self.consume, "beleg.pdf")
+        with self.settings(
+            CONSUME_MIN_AGE=15, CONSUME_PER_USER=False, CONSUME_DEFAULT_OWNER="consumer"
+        ):
+            result = self._run_scan()
+        self.assertEqual(result["found"], 1)
+        doc = Document.objects.get()
+        self.assertEqual(doc.owner_id, self.user.id)
+        audit = AuditLogEntry.objects.get(action="owner_fallback")
+        self.assertEqual(audit.detail["source"], "consume")
+        self.assertEqual(audit.detail["chosen_owner"], "consumer")
+
+    def test_d2_flat_ohne_default_owner_ist_triage(self):
+        """Flat ohne Default-Owner -> owner=None + triage_ingest (source consume)."""
+        self._write(self.consume, "beleg.pdf")
+        with self.settings(
+            CONSUME_MIN_AGE=15, CONSUME_PER_USER=False, CONSUME_DEFAULT_OWNER=""
+        ):
+            self._run_scan()
+        doc = Document.objects.get()
+        self.assertIsNone(doc.owner_id)
+        self.assertTrue(
+            AuditLogEntry.objects.filter(
+                action="triage_ingest", object_id=str(doc.id)
+            ).exists()
+        )
+
+    def test_e_per_user_unveraendert(self):
+        """(e) Per-User-Modus: Owner aus Ordnername, KEIN Fallback-/Triage-Audit."""
+        self._write(self.consume / "consumer", "beleg.pdf")
+        with self.settings(
+            CONSUME_MIN_AGE=15,
+            CONSUME_PER_USER=True,
+            CONSUME_DEFAULT_OWNER="irgendwer",
+        ):
+            result = self._run_scan()
+        self.assertEqual(result["found"], 1)
+        doc = Document.objects.get()
+        self.assertEqual(doc.owner_id, self.user.id)
+        self.assertFalse(
+            AuditLogEntry.objects.filter(
+                action__in=["owner_fallback", "triage_ingest"]
+            ).exists()
+        )
+
+
+class TriageAndSetOwnerTests(APITestCase):
+    """STOAA-295: Triage-Filter ``?owner=none`` + ``set-owner``-Action.
+
+    Belegt: (c) Admin sieht Triage-Dokumente via ``?owner=none``; (f) die
+    Owner-Isolation (STOAA-7) bleibt für Nicht-Admins dicht (Param ignoriert);
+    (g) Admin kann Owner setzen (per ID/Username) inkl. ``owner_assigned``-Audit;
+    (h) Nicht-Admin -> 403.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.admin = User.objects.create_user(
+            username="admin295", password="pw", role="admin"
+        )
+        cls.user = User.objects.create_user(
+            username="user295", password="pw", role="user"
+        )
+        cls.triage = Document.objects.create(title="Triage-Beleg", owner=None)
+        cls.eigenes = Document.objects.create(title="Eigenes", owner=cls.user)
+
+    def test_c_admin_sieht_triage_via_owner_none(self):
+        self.client.force_authenticate(self.admin)
+        resp = self.client.get("/api/documents/?owner=none")
+        self.assertEqual(resp.status_code, 200)
+        ids = [d["id"] for d in resp.data["results"]]
+        self.assertIn(self.triage.id, ids)
+        self.assertNotIn(self.eigenes.id, ids)
+
+    def test_f_nicht_admin_owner_none_ignoriert_isolation_dicht(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.get("/api/documents/?owner=none")
+        self.assertEqual(resp.status_code, 200)
+        ids = [d["id"] for d in resp.data["results"]]
+        self.assertEqual(ids, [self.eigenes.id])
+        self.assertNotIn(self.triage.id, ids)
+
+    def test_g_set_owner_als_admin_per_id(self):
+        self.client.force_authenticate(self.admin)
+        resp = self.client.post(
+            f"/api/documents/{self.triage.id}/set-owner/",
+            {"owner": self.user.id},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.triage.refresh_from_db()
+        self.assertEqual(self.triage.owner_id, self.user.id)
+        audit = AuditLogEntry.objects.get(
+            action="owner_assigned", object_id=str(self.triage.id)
+        )
+        self.assertEqual(audit.actor_id, self.admin.id)
+        self.assertEqual(audit.detail["chosen_owner"], "user295")
+        self.assertIsNone(audit.detail["previous_owner"])
+
+    def test_g2_set_owner_per_username(self):
+        self.client.force_authenticate(self.admin)
+        resp = self.client.post(
+            f"/api/documents/{self.triage.id}/set-owner/",
+            {"owner": "user295"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.triage.refresh_from_db()
+        self.assertEqual(self.triage.owner_id, self.user.id)
+
+    def test_g3_set_owner_unbekannt_400(self):
+        self.client.force_authenticate(self.admin)
+        resp = self.client.post(
+            f"/api/documents/{self.triage.id}/set-owner/",
+            {"owner": "gibtsnicht"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_h_set_owner_als_nicht_admin_403(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.post(
+            f"/api/documents/{self.eigenes.id}/set-owner/",
+            {"owner": self.user.id},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 403)

@@ -188,6 +188,37 @@ User, Role (Admin/User/Guest), ACL (optional pro Tag/StoragePath)
 paperless lange fehlte und ecoDMS als „Klassifizierungsattribute" stark macht –
 z. B. „Rechnungsbetrag", „Fälligkeitsdatum", „Vertragsnummer".
 
+### 5.1 Eigentümer-Zuordnung & Triage (Owner-Isolation)
+
+Jeder Nutzer sieht/verwaltet ausschließlich **eigene** Dokumente
+(`owner`-Isolation, STOAA-7); DMS-Admins sehen alles. Damit darf kein
+Ingest-Pfad ein Dokument still ohne Eigentümer aufnehmen – sonst wäre es für
+den vorgesehenen Nutzer unsichtbar. Regeln:
+
+- **E-Mail-Ingest:** Der `owner` des `MailAccount` wird durchgereicht. Ist er
+  leer, greift die Env-Var **`MAIL_DEFAULT_OWNER`** (Username). Bei genutztem
+  Fallback wird `AuditLogEntry action=owner_fallback` protokolliert.
+- **Consume-Ordner (Flat-Modus):** Ohne Per-User-Ordner greift analog
+  **`CONSUME_DEFAULT_OWNER`** (Username). Der **Per-User-Modus**
+  (`CONSUME_PER_USER=true`, Ordnername = Username) bleibt unverändert und setzt
+  den Owner ohnehin selbst.
+- **Triage-Zustand:** Bleibt `owner=None` (kein Konto-Owner **und** kein/kein
+  auflösbarer Default-Owner), ist das ein **bewusster, admin-sichtbarer
+  Triage-Zustand** – protokolliert als `AuditLogEntry action=triage_ingest`
+  (kein stilles `owner=None` ohne Spur). Ein unbekannter Default-Owner-Username
+  bricht den Ingest nicht ab (Warn-Log) und führt in die Triage.
+- **Triage sichten & zuweisen (Admin):** `GET /api/documents/?owner=none`
+  listet für Admins die eigentümerlosen Dokumente (für Nicht-Admins wirkungslos,
+  Isolation bleibt dicht). `POST /api/documents/{id}/set-owner/` mit Body
+  `{"owner": <userId|username>}` weist den Eigentümer zu (nur `is_dms_admin`,
+  sonst 403; protokolliert `owner_assigned`).
+
+**Empfehlung Betrieb:** `CONSUME_PER_USER=true` setzen und jedem `MailAccount`
+einen `owner` geben – dann ist die Triage die Ausnahme, nicht der Normalfall.
+**Deployment-Hinweis:** Die neuen Env-Vars `MAIL_DEFAULT_OWNER` /
+`CONSUME_DEFAULT_OWNER` müssen in der Backend-Image-/Deployment-Env gesetzt
+werden. **Keine Migration** nötig (reine Settings + Query-/View-Logik).
+
 ---
 
 ## 6. Die drei Killer-Features (unser Alleinstellungsmerkmal)
