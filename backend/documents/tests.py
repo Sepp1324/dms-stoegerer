@@ -2994,3 +2994,124 @@ class WorkflowEngineTests(TestCase):
         # Ohne OCR-Text schlägt die Regel nicht an – das ist korrekt
         self.assertIsInstance(result, dict)
         self.assertIn("rules", result)
+
+
+# ---------------------------------------------------------------------------
+# Workflow-REST-API-Tests (STOAA-263 PR2)
+# ---------------------------------------------------------------------------
+class WorkflowAPITests(APITestCase):
+    """CRUD über /api/workflows/ inkl. verschachteltem Trigger + Aktionen."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(username="wf_api_user", password="pw", role="user")
+        cls.guest = User.objects.create_user(username="wf_api_guest", password="pw", role="guest")
+        cls.corr = Correspondent.objects.create(name="Stadtwerke")
+        cls.dt = DocumentType.objects.create(name="Rechnung")
+        cls.tag = Tag.objects.create(name="Finanzen")
+
+    def test_list_erfordert_login(self):
+        resp = self.client.get("/api/workflows/")
+        self.assertIn(resp.status_code, (401, 403))
+
+    def test_create_workflow_mit_trigger_und_aktionen(self):
+        self.client.force_authenticate(self.user)
+        payload = {
+            "name": "Rechnungs-Workflow",
+            "order": 5,
+            "enabled": True,
+            "trigger": {
+                "trigger_type": "document_added",
+                "sources": "upload,mail",
+                "filter_correspondent": self.corr.id,
+                "filter_has_tags": [self.tag.id],
+                "filter_text_contains": "rechnung",
+            },
+            "actions": [
+                {
+                    "order": 10,
+                    "action_type": "assign",
+                    "assign_document_type": self.dt.id,
+                    "assign_tags": [self.tag.id],
+                    "assign_title": "{correspondent} – Rechnung",
+                },
+                {
+                    "order": 20,
+                    "action_type": "remove",
+                    "remove_tags": [self.tag.id],
+                },
+            ],
+        }
+        resp = self.client.post("/api/workflows/", payload, format="json")
+        self.assertEqual(resp.status_code, 201, resp.content)
+        from .models import Workflow, WorkflowAction, WorkflowTrigger
+        wf = Workflow.objects.get(name="Rechnungs-Workflow")
+        self.assertEqual(wf.order, 5)
+        self.assertEqual(wf.trigger.trigger_type, "document_added")
+        self.assertEqual(wf.trigger.sources, "upload,mail")
+        self.assertEqual(wf.trigger.filter_correspondent, self.corr)
+        self.assertIn(self.tag, wf.trigger.filter_has_tags.all())
+        self.assertEqual(wf.actions.count(), 2)
+        first = wf.actions.order_by("order").first()
+        self.assertEqual(first.assign_document_type, self.dt)
+        self.assertIn(self.tag, first.assign_tags.all())
+
+    def test_retrieve_liefert_verschachtelte_struktur(self):
+        self.client.force_authenticate(self.user)
+        from .models import Workflow, WorkflowAction, WorkflowTrigger
+        wf = Workflow.objects.create(name="WF-Get", order=1)
+        WorkflowTrigger.objects.create(workflow=wf, trigger_type="document_added", sources="upload")
+        WorkflowAction.objects.create(workflow=wf, order=10, action_type="assign", assign_correspondent=self.corr)
+        resp = self.client.get(f"/api/workflows/{wf.id}/")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["name"], "WF-Get")
+        self.assertEqual(data["trigger"]["sources"], "upload")
+        self.assertEqual(len(data["actions"]), 1)
+        self.assertEqual(data["actions"][0]["assign_correspondent"], self.corr.id)
+
+    def test_update_ersetzt_aktionen(self):
+        self.client.force_authenticate(self.user)
+        from .models import Workflow, WorkflowAction, WorkflowTrigger
+        wf = Workflow.objects.create(name="WF-Update", order=1)
+        WorkflowTrigger.objects.create(workflow=wf, trigger_type="document_added")
+        WorkflowAction.objects.create(workflow=wf, order=10, action_type="assign", assign_correspondent=self.corr)
+        payload = {
+            "name": "WF-Update",
+            "order": 2,
+            "enabled": False,
+            "trigger": {"trigger_type": "document_updated", "sources": "api"},
+            "actions": [
+                {"order": 5, "action_type": "assign", "assign_document_type": self.dt.id},
+            ],
+        }
+        resp = self.client.put(f"/api/workflows/{wf.id}/", payload, format="json")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        wf.refresh_from_db()
+        self.assertFalse(wf.enabled)
+        self.assertEqual(wf.order, 2)
+        self.assertEqual(wf.trigger.trigger_type, "document_updated")
+        self.assertEqual(wf.actions.count(), 1)
+        self.assertEqual(wf.actions.first().assign_document_type, self.dt)
+
+    def test_delete_workflow(self):
+        self.client.force_authenticate(self.user)
+        from .models import Workflow, WorkflowTrigger
+        wf = Workflow.objects.create(name="WF-Del", order=1)
+        WorkflowTrigger.objects.create(workflow=wf, trigger_type="document_added")
+        resp = self.client.delete(f"/api/workflows/{wf.id}/")
+        self.assertEqual(resp.status_code, 204)
+        self.assertFalse(Workflow.objects.filter(id=wf.id).exists())
+
+    def test_gast_darf_nicht_schreiben(self):
+        self.client.force_authenticate(self.guest)
+        resp = self.client.post("/api/workflows/", {"name": "X", "order": 1}, format="json")
+        self.assertEqual(resp.status_code, 403)
+
+    def test_create_ohne_trigger_und_aktionen_moeglich(self):
+        """Minimaler Workflow (nur name/order) ist zulässig – Trigger folgt per Update."""
+        self.client.force_authenticate(self.user)
+        resp = self.client.post("/api/workflows/", {"name": "Leer", "order": 99}, format="json")
+        self.assertEqual(resp.status_code, 201, resp.content)
+        from .models import Workflow
+        self.assertTrue(Workflow.objects.filter(name="Leer").exists())
