@@ -16,9 +16,10 @@ bis zum erreichbaren `http://dms.stoegerer-home.at`. Optimiert für ein **Einzel
 | `postgres` | Deployment + PVC (`postgres-data`, 5 Gi) + Service | Datenbank |
 | `redis` | Deployment + Service | Celery-Broker |
 | `backend` | Deployment (Init-Container: migrate + collectstatic) + Service `:8000` | Django/DRF |
-| `worker` | Deployment | Celery-Worker (OCR-Pipeline) |
+| `worker` | Deployment (+ NFS-Volume `/consume-nfs`) | Celery-Worker (OCR-Pipeline + Consume-Scanner) |
 | `frontend` | Deployment + Service `:80` | React-SPA (nginx) |
 | `dms-data` | PVC (20 Gi) | Revisionssichere Ablage `/data` (originals + archive) |
+| `consume-nfs` | NFS-Volume (extern, konfigurierbar) | Scanner-Eingang (direkt auf NAS) |
 | `dms` | Ingress (Traefik) | `/api`,`/admin`,`/static` → Backend, `/` → Frontend |
 
 ```
@@ -297,17 +298,114 @@ Der Tag-Wechsel in `kustomization.yaml` ändert die Pod-Spezifikation → das
 Rollout startet automatisch (kein manuelles `rollout restart` nötig).
 **Rollback:** `newTag` zurück auf die alte Version, `kubectl apply -k`.
 
-### Consume-Ordner (Scanner-Eingang)
+### Consume-Ordner (Scanner-Eingang) – NFS-Volume
 
-Der Worker kann einen Eingangsordner `/data/consume` aufnehmen. Dateien
-hineinlegen (z. B. per Sidecar, NFS-Mount oder `kubectl cp`) und den Task anstoßen:
+Der Worker nutzt ein **separates NFS-Volume** (`/consume-nfs`) für den Eingangsordner.
+Der Scanner (z. B. Netzwerkscanner, Multifunktionsgerät) kann direkt auf die
+NAS-Freigabe schreiben; der Worker verarbeitet die Dateien von dort automatisch
+per Celery Beat (alle 120s, konfigurierbar via `CONSUME_SCAN_INTERVAL`).
 
+#### Ersteinrichtung
+
+1. **NAS-Export anlegen** (z. B. Synology, TrueNAS):
+   ```
+   Pfad: /volume1/dms-consume
+   Berechtigungen: root-squash deaktivieren ODER feste UID/GID (z. B. 1000:1000)
+   Zugriff: Node-IP-Range (z. B. 192.168.1.0/24)
+   ```
+
+2. **Node vorbereiten** (auf allen Worker-Nodes):
+   ```bash
+   sudo apt-get install -y nfs-common      # Debian/Ubuntu
+   # bzw. yum install nfs-utils            # RHEL/CentOS
+   
+   # Test-Mount (Server-IP + Pfad anpassen)
+   sudo mount -t nfs 192.168.1.10:/volume1/dms-consume /mnt
+   ls /mnt && sudo umount /mnt             # sollte ohne Fehler durchlaufen
+   ```
+
+3. **Deployment konfigurieren** (`deploy/k8s/celery.yaml`):
+   
+   Die Datei enthält Platzhalter `NFS_SERVER_PLACEHOLDER` und `NFS_EXPORT_PATH_PLACEHOLDER`.
+   **Zwei Wege** zum Setzen:
+
+   **a) Manuell vor `kubectl apply` (einfach, für Einzel-Node):**
+   ```bash
+   # celery.yaml editieren und ersetzen:
+   server: NFS_SERVER_PLACEHOLDER    →  server: 192.168.1.10
+   path: NFS_EXPORT_PATH_PLACEHOLDER →  path: /volume1/dms-consume
+   ```
+
+   **b) Per kustomize-Overlay (empfohlen für Multi-Umgebung):**
+   
+   Erstelle `deploy/k8s/overlays/prod/kustomization.yaml`:
+   ```yaml
+   apiVersion: kustomize.config.k8s.io/v1beta1
+   kind: Kustomization
+   bases: ["../../"]
+   patches:
+     - target:
+         kind: Deployment
+         name: worker
+       patch: |-
+         - op: replace
+           path: /spec/template/spec/volumes/1/nfs/server
+           value: "192.168.1.10"
+         - op: replace
+           path: /spec/template/spec/volumes/1/nfs/path
+           value: "/volume1/dms-consume"
+   ```
+   Dann: `kubectl apply -k deploy/k8s/overlays/prod`
+
+4. **Rollout + Verifikation:**
+   ```bash
+   kubectl apply -k deploy/k8s
+   kubectl -n dms rollout status deploy/worker
+   
+   # Mount im Pod prüfen
+   kubectl -n dms exec deploy/worker -- df -h /consume-nfs
+   kubectl -n dms exec deploy/worker -- touch /consume-nfs/test && \
+     kubectl -n dms exec deploy/worker -- rm /consume-nfs/test
+   # → Schreibzugriff OK, Datei sollte auch auf dem NAS sichtbar sein
+   ```
+
+#### Scanner konfigurieren
+
+Typisches Scan-to-Folder-Setup (Beispiel Brother MFC):
+1. Scanner-Web-UI öffnen → **Scan to Network**
+2. Ziel: `\\NAS-IP\dms-consume` (Windows) oder `smb://NAS-IP/dms-consume` (Linux)
+3. Oder direkt NFS, falls das Gerät es unterstützt.
+
+Die Dateien landen dann im Consume-Ordner; der Worker erkennt sie nach
+`CONSUME_MIN_AGE` Sekunden (Default: 30s, damit der Upload abgeschlossen ist).
+
+#### Automatische Verarbeitung
+
+Der Beat-Schedule (siehe `configmap.yaml`) stößt `scan_consume_folder` alle 120s an.
+Jede Datei im `/consume-nfs`, die älter als `CONSUME_MIN_AGE` ist, wird:
+1. OCR-verarbeitet (wie ein Upload)
+2. Im DMS-Archiv abgelegt (`/data/archive/…`)
+3. Aus dem Consume-Ordner **gelöscht** (erfolgreich verarbeitet)
+
+Manuelle Triggerung (z. B. für Tests):
 ```bash
 kubectl -n dms exec deploy/worker -- \
   python -c "from documents.tasks import scan_consume_folder as s; print(s())"
 ```
 
-Ein automatischer Zeitplan (Celery Beat) folgt in einer späteren Ausbaustufe.
+#### Troubleshooting
+
+| Problem | Lösung |
+|---|---|
+| Pod `ContainerCreating` hängt, Event `MountVolume.SetUp failed for volume "consume-nfs"` | `nfs-common` fehlt auf dem Node → §2 |
+| `mount.nfs: access denied` | NAS-Export-Berechtigungen prüfen (Node-IP in Allow-List? root-squash?) |
+| Mount OK, aber `Permission denied` beim Schreiben | UID/GID im Pod stimmt nicht mit NAS-Berechtigungen überein → im Pod `id` aufrufen, NAS entsprechend konfigurieren oder `securityContext` im Deployment setzen |
+| Dateien werden nicht verarbeitet | Worker-Logs prüfen; `CONSUME_MIN_AGE` zu hoch? Datei-Timestamp korrekt? |
+| Alte Scans akkumulieren | Beat läuft nicht → `kubectl -n dms logs deploy/beat`, Schedule-Konfig prüfen |
+
+**Wichtig:** Das NFS-Volume wird **nur** vom Worker genutzt. Backend und Beat
+greifen **nicht** darauf zu (kein Mount in deren Deployments). Die `dms-data`-PVC
+(RWO, per `podAffinity` ko-lokalisiert) bleibt unverändert für Originale + Archiv.
 
 ### Skalierung
 
