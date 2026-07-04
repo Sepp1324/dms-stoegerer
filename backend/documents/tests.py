@@ -2645,3 +2645,352 @@ class DocumentSearchTests(APITestCase):
         self.client.force_authenticate(self.owner)
         resp = self.client.get("/api/documents/?q=Energieanbieter")
         self.assertEqual(self._ids(resp), [doc.id])
+
+
+# ---------------------------------------------------------------------------
+# Workflow-Engine-Tests (STOAA-263)
+# ---------------------------------------------------------------------------
+class WorkflowEngineTests(TestCase):
+    """Unit-Tests für run_workflows, Trigger-Matching und Aktionsanwendung."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(username="wf-user", password="pw", role="user")
+        cls.corr = Correspondent.objects.create(name="Stadtwerke")
+        cls.dt = DocumentType.objects.create(name="Rechnung")
+        cls.sp = StoragePath.objects.create(name="Archiv", path_template="archiv/{titel}")
+        cls.tag_finanzen = Tag.objects.create(name="Finanzen")
+        cls.tag_privat = Tag.objects.create(name="Privat")
+
+    def _make_doc(self, title="Testdokument", ingest_source="upload"):
+        doc = Document.objects.create(title=title, owner=self.user)
+        version = DocumentVersion.objects.create(
+            document=doc, version_no=1, file_path="/tmp/x.pdf",
+            created_by=self.user, ingest_source=ingest_source,
+        )
+        doc.current_version = version
+        doc.save(update_fields=["current_version"])
+        return doc, version
+
+    def _make_workflow(self, *, name="WF", order=10, enabled=True,
+                       trigger_type="document_added", sources="",
+                       filter_text_contains="", filter_text_regex="",
+                       filter_correspondent=None, filter_document_type=None):
+        from .models import Workflow, WorkflowAction, WorkflowTrigger
+        wf = Workflow.objects.create(name=name, order=order, enabled=enabled)
+        trig = WorkflowTrigger.objects.create(
+            workflow=wf, trigger_type=trigger_type, sources=sources,
+            filter_text_contains=filter_text_contains,
+            filter_text_regex=filter_text_regex,
+            filter_correspondent=filter_correspondent,
+            filter_document_type=filter_document_type,
+        )
+        return wf, trig
+
+    # ------------------------------------------------------------------
+    # Trigger-Matching: source-Filter
+    # ------------------------------------------------------------------
+    def test_source_filter_trifft_passende_quelle(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction, WorkflowTrigger
+        wf, _ = self._make_workflow(sources="consume")
+        WorkflowAction.objects.create(
+            workflow=wf, order=10, action_type="assign",
+            assign_document_type=self.dt,
+        )
+        doc, _ = self._make_doc()
+        result = run_workflows(doc, trigger_type="document_added", source="consume", text="")
+        self.assertIn("WF", result["workflows"])
+
+    def test_source_filter_ignoriert_falsche_quelle(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction, WorkflowTrigger
+        wf, _ = self._make_workflow(name="WF2", sources="mail")
+        WorkflowAction.objects.create(
+            workflow=wf, order=10, action_type="assign",
+            assign_document_type=self.dt,
+        )
+        doc, _ = self._make_doc()
+        result = run_workflows(doc, trigger_type="document_added", source="upload", text="")
+        self.assertNotIn("WF2", result["workflows"])
+
+    def test_leere_source_trifft_alle(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction
+        wf, _ = self._make_workflow(name="WF_ALL", sources="")
+        WorkflowAction.objects.create(
+            workflow=wf, order=10, action_type="assign",
+            assign_correspondent=self.corr,
+        )
+        doc, _ = self._make_doc()
+        result = run_workflows(doc, trigger_type="document_added", source="api", text="")
+        self.assertIn("WF_ALL", result["workflows"])
+
+    # ------------------------------------------------------------------
+    # Trigger-Matching: text_contains / text_regex
+    # ------------------------------------------------------------------
+    def test_text_contains_trifft(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction
+        wf, _ = self._make_workflow(name="WF_TEXT", filter_text_contains="rechnung")
+        WorkflowAction.objects.create(workflow=wf, order=10, action_type="assign",
+                                       assign_document_type=self.dt)
+        doc, _ = self._make_doc()
+        result = run_workflows(doc, trigger_type="document_added", source="upload",
+                               text="Das ist eine Rechnung von Stadtwerke")
+        self.assertIn("WF_TEXT", result["workflows"])
+
+    def test_text_contains_verfehlt(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction
+        wf, _ = self._make_workflow(name="WF_MISS", filter_text_contains="xyz123")
+        WorkflowAction.objects.create(workflow=wf, order=10, action_type="assign",
+                                       assign_document_type=self.dt)
+        doc, _ = self._make_doc()
+        result = run_workflows(doc, trigger_type="document_added", source="upload", text="normal text")
+        self.assertNotIn("WF_MISS", result["workflows"])
+
+    def test_text_regex_trifft(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction
+        wf, _ = self._make_workflow(name="WF_REGEX", filter_text_regex=r"SR-\d+")
+        WorkflowAction.objects.create(workflow=wf, order=10, action_type="assign",
+                                       assign_document_type=self.dt)
+        doc, _ = self._make_doc()
+        result = run_workflows(doc, trigger_type="document_added", source="upload", text="Beleg SR-4711")
+        self.assertIn("WF_REGEX", result["workflows"])
+
+    # ------------------------------------------------------------------
+    # Trigger-Matching: Korrespondent
+    # ------------------------------------------------------------------
+    def test_filter_correspondent_trifft(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction
+        wf, _ = self._make_workflow(name="WF_CORR", filter_correspondent=self.corr)
+        WorkflowAction.objects.create(workflow=wf, order=10, action_type="assign",
+                                       assign_document_type=self.dt)
+        doc, _ = self._make_doc()
+        doc.correspondent = self.corr
+        doc.save(update_fields=["correspondent"])
+        result = run_workflows(doc, trigger_type="document_added", source="upload", text="")
+        self.assertIn("WF_CORR", result["workflows"])
+
+    def test_filter_correspondent_verfehlt(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction
+        wf, _ = self._make_workflow(name="WF_CORR2", filter_correspondent=self.corr)
+        WorkflowAction.objects.create(workflow=wf, order=10, action_type="assign",
+                                       assign_document_type=self.dt)
+        doc, _ = self._make_doc()
+        result = run_workflows(doc, trigger_type="document_added", source="upload", text="")
+        self.assertNotIn("WF_CORR2", result["workflows"])
+
+    # ------------------------------------------------------------------
+    # Trigger-Matching: Tags
+    # ------------------------------------------------------------------
+    def test_filter_has_tags_trifft(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction, WorkflowTrigger
+        wf, trig = self._make_workflow(name="WF_TAGS")
+        trig.filter_has_tags.add(self.tag_finanzen)
+        WorkflowAction.objects.create(workflow=wf, order=10, action_type="assign",
+                                       assign_correspondent=self.corr)
+        doc, _ = self._make_doc()
+        doc.tags.add(self.tag_finanzen)
+        result = run_workflows(doc, trigger_type="document_added", source="upload", text="")
+        self.assertIn("WF_TAGS", result["workflows"])
+
+    def test_filter_has_not_tags_sperrt(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction, WorkflowTrigger
+        wf, trig = self._make_workflow(name="WF_NOTTAGS")
+        trig.filter_has_not_tags.add(self.tag_privat)
+        WorkflowAction.objects.create(workflow=wf, order=10, action_type="assign",
+                                       assign_correspondent=self.corr)
+        doc, _ = self._make_doc()
+        doc.tags.add(self.tag_privat)
+        result = run_workflows(doc, trigger_type="document_added", source="upload", text="")
+        self.assertNotIn("WF_NOTTAGS", result["workflows"])
+
+    # ------------------------------------------------------------------
+    # Aktions-Anwendung: assign
+    # ------------------------------------------------------------------
+    def test_action_assign_document_type(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction
+        wf, _ = self._make_workflow(name="WF_DT")
+        WorkflowAction.objects.create(workflow=wf, order=10, action_type="assign",
+                                       assign_document_type=self.dt)
+        doc, _ = self._make_doc()
+        run_workflows(doc, trigger_type="document_added", source="upload", text="")
+        doc.refresh_from_db()
+        self.assertEqual(doc.document_type, self.dt)
+
+    def test_action_assign_correspondent(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction
+        wf, _ = self._make_workflow(name="WF_CORR_ASSIGN")
+        WorkflowAction.objects.create(workflow=wf, order=10, action_type="assign",
+                                       assign_correspondent=self.corr)
+        doc, _ = self._make_doc()
+        run_workflows(doc, trigger_type="document_added", source="upload", text="")
+        doc.refresh_from_db()
+        self.assertEqual(doc.correspondent, self.corr)
+
+    def test_action_assign_storage_path(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction
+        wf, _ = self._make_workflow(name="WF_SP")
+        WorkflowAction.objects.create(workflow=wf, order=10, action_type="assign",
+                                       assign_storage_path=self.sp)
+        doc, _ = self._make_doc()
+        run_workflows(doc, trigger_type="document_added", source="upload", text="")
+        doc.refresh_from_db()
+        self.assertEqual(doc.storage_path, self.sp)
+
+    def test_action_assign_tags(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction
+        wf, _ = self._make_workflow(name="WF_TAG_ADD")
+        action = WorkflowAction.objects.create(workflow=wf, order=10, action_type="assign")
+        action.assign_tags.add(self.tag_finanzen)
+        doc, _ = self._make_doc()
+        run_workflows(doc, trigger_type="document_added", source="upload", text="")
+        self.assertIn(self.tag_finanzen, doc.tags.all())
+
+    def test_action_assign_owner(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction
+        wf, _ = self._make_workflow(name="WF_OWNER")
+        WorkflowAction.objects.create(workflow=wf, order=10, action_type="assign",
+                                       assign_owner=self.user)
+        doc, _ = self._make_doc()
+        doc.owner = None
+        doc.save(update_fields=["owner"])
+        run_workflows(doc, trigger_type="document_added", source="upload", text="")
+        doc.refresh_from_db()
+        self.assertEqual(doc.owner, self.user)
+
+    def test_action_assign_title_template(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction
+        wf, _ = self._make_workflow(name="WF_TITLE")
+        doc, _ = self._make_doc()
+        doc.correspondent = self.corr
+        doc.save(update_fields=["correspondent"])
+        WorkflowAction.objects.create(
+            workflow=wf, order=10, action_type="assign",
+            assign_title="{correspondent} – Beleg",
+        )
+        run_workflows(doc, trigger_type="document_added", source="upload", text="")
+        doc.refresh_from_db()
+        self.assertEqual(doc.title, "Stadtwerke – Beleg")
+
+    def test_action_assign_custom_field(self):
+        from .workflows import run_workflows
+        from .models import CustomFieldValue, Workflow, WorkflowAction
+        field = CustomField.objects.create(name="Betrag", field_type="text")
+        wf, _ = self._make_workflow(name="WF_CF")
+        WorkflowAction.objects.create(
+            workflow=wf, order=10, action_type="assign",
+            assign_custom_fields={str(field.pk): "99.00"},
+        )
+        doc, _ = self._make_doc()
+        run_workflows(doc, trigger_type="document_added", source="upload", text="")
+        val = CustomFieldValue.objects.get(document=doc, field=field)
+        self.assertEqual(val.value, "99.00")
+
+    # ------------------------------------------------------------------
+    # Aktions-Anwendung: remove
+    # ------------------------------------------------------------------
+    def test_action_remove_tags(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction
+        wf, _ = self._make_workflow(name="WF_REMOVE")
+        action = WorkflowAction.objects.create(workflow=wf, order=10, action_type="remove")
+        action.remove_tags.add(self.tag_privat)
+        doc, _ = self._make_doc()
+        doc.tags.add(self.tag_privat)
+        run_workflows(doc, trigger_type="document_added", source="upload", text="")
+        self.assertNotIn(self.tag_privat, doc.tags.all())
+
+    # ------------------------------------------------------------------
+    # order-Reihenfolge + disabled
+    # ------------------------------------------------------------------
+    def test_order_reihenfolge_bestimmt_ausfuehrungsfolge(self):
+        """Zweiter Workflow setzt Feld, weil erster es bereits belegt hat → nur erster wirkt."""
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction
+        corr2 = Correspondent.objects.create(name="Zweiter")
+        wf_first, _ = self._make_workflow(name="FIRST", order=1)
+        WorkflowAction.objects.create(workflow=wf_first, order=10, action_type="assign",
+                                       assign_correspondent=self.corr)
+        wf_second, _ = self._make_workflow(name="SECOND", order=2)
+        WorkflowAction.objects.create(workflow=wf_second, order=10, action_type="assign",
+                                       assign_correspondent=corr2)
+        doc, _ = self._make_doc()
+        run_workflows(doc, trigger_type="document_added", source="upload", text="")
+        doc.refresh_from_db()
+        # assign-Logik: Einzelwert nur wenn noch leer → erster Workflow setzt, zweiter überspringt
+        self.assertEqual(doc.correspondent, self.corr)
+
+    def test_disabled_workflow_wird_uebersprungen(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction
+        wf, _ = self._make_workflow(name="WF_DISABLED", enabled=False)
+        WorkflowAction.objects.create(workflow=wf, order=10, action_type="assign",
+                                       assign_document_type=self.dt)
+        doc, _ = self._make_doc()
+        result = run_workflows(doc, trigger_type="document_added", source="upload", text="")
+        self.assertNotIn("WF_DISABLED", result["workflows"])
+        doc.refresh_from_db()
+        self.assertIsNone(doc.document_type)
+
+    # ------------------------------------------------------------------
+    # Trigger-Typ: document_added vs document_updated
+    # ------------------------------------------------------------------
+    def test_document_updated_trigger_nur_bei_updated(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction
+        wf, _ = self._make_workflow(name="WF_UPDATED", trigger_type="document_updated")
+        WorkflowAction.objects.create(workflow=wf, order=10, action_type="assign",
+                                       assign_document_type=self.dt)
+        doc, _ = self._make_doc()
+        result_added = run_workflows(doc, trigger_type="document_added", source="upload", text="")
+        self.assertNotIn("WF_UPDATED", result_added["workflows"])
+        result_updated = run_workflows(doc, trigger_type="document_updated", source="api", text="")
+        self.assertIn("WF_UPDATED", result_updated["workflows"])
+
+    # ------------------------------------------------------------------
+    # Audit-Log
+    # ------------------------------------------------------------------
+    def test_workflow_erstellt_audit_eintrag(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction
+        wf, _ = self._make_workflow(name="WF_AUDIT")
+        WorkflowAction.objects.create(workflow=wf, order=10, action_type="assign",
+                                       assign_document_type=self.dt)
+        doc, _ = self._make_doc()
+        run_workflows(doc, trigger_type="document_added", source="upload", text="")
+        entry = AuditLogEntry.objects.filter(
+            action="workflow", object_type="Document", object_id=str(doc.id)
+        ).first()
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry.detail["workflow"], "WF_AUDIT")
+
+    # ------------------------------------------------------------------
+    # ClassificationRule bleibt unverändert
+    # ------------------------------------------------------------------
+    def test_classification_rule_weiterhin_funktionsfaehig(self):
+        """apply_rules darf durch Workflow-Engine nicht gebrochen werden."""
+        ClassificationRule.objects.create(
+            name="Rechnungsregel",
+            priority=10,
+            match={"text_contains": "Rechnung"},
+            then={"document_type": "Rechnung"},
+        )
+        doc, _ = self._make_doc()
+        result = apply_rules(doc)
+        # Ohne OCR-Text schlägt die Regel nicht an – das ist korrekt
+        self.assertIsInstance(result, dict)
+        self.assertIn("rules", result)

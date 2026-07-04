@@ -14,6 +14,9 @@ from .models import (
     ProcessedMail,
     StoragePath,
     Tag,
+    Workflow,
+    WorkflowAction,
+    WorkflowTrigger,
 )
 
 
@@ -159,6 +162,25 @@ class ProcessedMailAdmin(admin.ModelAdmin):
         "imported_count",
         "processed_at",
     )
+
+
+class WorkflowTriggerInline(admin.StackedInline):
+    model = WorkflowTrigger
+    extra = 0
+    filter_horizontal = ("filter_has_tags", "filter_has_not_tags")
+
+
+class WorkflowActionInline(admin.TabularInline):
+    model = WorkflowAction
+    extra = 0
+    filter_horizontal = ("assign_tags", "remove_tags")
+
+
+@admin.register(Workflow)
+class WorkflowAdmin(admin.ModelAdmin):
+    list_display = ("name", "order", "enabled")
+    list_editable = ("order", "enabled")
+    inlines = [WorkflowTriggerInline, WorkflowActionInline]
 
 
 admin.site.site_header = "DMS-Verwaltung"
