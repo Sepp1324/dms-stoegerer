@@ -4,6 +4,8 @@ Belegt, dass ein Nutzer ausschließlich eigene Dokumente sieht und jeder
 Cross-User-Zugriff (Liste, Detail, Download, Update, Delete, Audit) mit
 404 abgewiesen wird – auf Objekt-Ebene, nicht nur in der UI.
 """
+import os
+import tempfile
 from contextlib import contextmanager
 from datetime import timedelta
 
@@ -1356,3 +1358,125 @@ class DocumentShareLinkTests(APITestCase):
             expires_at=timezone.now() - timedelta(seconds=1),
         )
         self.assertFalse(link.is_valid)
+
+
+class ShareAccessRouteTests(APITestCase):
+    """Freigabe-Abrufrouten /api/share/<token>/preview|download (STOAA-191).
+
+    Belegt: Login-Pflicht (IsAuthenticated), 410 Gone bei
+    unbekannt/widerrufen/abgelaufen (keine Existenz-Enumeration), Durchbrechen
+    der Owner-Isolation ausschließlich für das eine verknüpfte Dokument sowie
+    Auditierung je Zugriff.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.owner = User.objects.create_user(
+            username="sh_owner", password="pw", role="user"
+        )
+        cls.viewer = User.objects.create_user(
+            username="sh_viewer", password="pw", role="user"
+        )
+        cls.doc = Document.objects.create(title="Freigegeben", owner=cls.owner)
+
+    def setUp(self):
+        # Reale Datei auf Platte, damit FileResponse tatsächlich Bytes liefert.
+        tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+        tmp.write(b"%PDF-1.4 share test")
+        tmp.close()
+        self._tmp_path = tmp.name
+        self.addCleanup(
+            lambda: os.path.exists(self._tmp_path) and os.remove(self._tmp_path)
+        )
+        self.version = DocumentVersion.objects.create(
+            document=self.doc,
+            version_no=1,
+            file_path=self._tmp_path,
+            sha256="b" * 64,
+        )
+        self.doc.current_version = self.version
+        self.doc.save(update_fields=["current_version"])
+
+    def _link(self, *, token, expired=False, revoked=False):
+        expires = timezone.now() + (
+            timedelta(days=-1) if expired else timedelta(days=7)
+        )
+        return DocumentShareLink.objects.create(
+            document=self.doc,
+            token_hash=DocumentShareLink.hash_token(token),
+            expires_at=expires,
+            revoked_at=timezone.now() if revoked else None,
+            created_by=self.owner,
+        )
+
+    # --- Login-Pflicht ----------------------------------------------------
+    def test_download_verlangt_login(self):
+        self._link(token="t1")
+        resp = self.client.get("/api/share/t1/download")
+        self.assertIn(resp.status_code, (401, 403))
+
+    def test_preview_verlangt_login(self):
+        self._link(token="t1b")
+        resp = self.client.get("/api/share/t1b/preview")
+        self.assertIn(resp.status_code, (401, 403))
+
+    # --- Erfolgspfad (Owner-Isolation gezielt durchbrochen) ---------------
+    def test_fremder_angemeldeter_darf_ueber_link_herunterladen(self):
+        self._link(token="t2")
+        self.client.force_authenticate(self.viewer)
+        resp = self.client.get("/api/share/t2/download")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(
+            b"".join(resp.streaming_content), b"%PDF-1.4 share test"
+        )
+
+    def test_preview_liefert_inline(self):
+        self._link(token="t3")
+        self.client.force_authenticate(self.viewer)
+        resp = self.client.get("/api/share/t3/preview")
+        self.assertEqual(resp.status_code, 200)
+
+    # --- 410 Gone (keine Enumeration) -------------------------------------
+    def test_unbekanntes_token_ist_410(self):
+        self.client.force_authenticate(self.viewer)
+        resp = self.client.get("/api/share/gibtsnicht/download")
+        self.assertEqual(resp.status_code, 410)
+
+    def test_widerrufener_link_ist_410(self):
+        self._link(token="t4", revoked=True)
+        self.client.force_authenticate(self.viewer)
+        resp = self.client.get("/api/share/t4/download")
+        self.assertEqual(resp.status_code, 410)
+
+    def test_abgelaufener_link_ist_410(self):
+        self._link(token="t5", expired=True)
+        self.client.force_authenticate(self.viewer)
+        resp = self.client.get("/api/share/t5/download")
+        self.assertEqual(resp.status_code, 410)
+
+    # --- Audit ------------------------------------------------------------
+    def test_zugriff_wird_auditiert(self):
+        self._link(token="t6")
+        self.client.force_authenticate(self.viewer)
+        before = AuditLogEntry.objects.filter(action="share_download").count()
+        self.client.get("/api/share/t6/download")
+        entries = AuditLogEntry.objects.filter(action="share_download")
+        self.assertEqual(entries.count(), before + 1)
+        entry = entries.latest("timestamp")
+        self.assertEqual(entry.object_id, str(self.doc.id))
+        self.assertEqual(entry.actor, self.viewer)
+
+    def test_kein_audit_bei_ungueltigem_token(self):
+        self.client.force_authenticate(self.viewer)
+        before = AuditLogEntry.objects.count()
+        self.client.get("/api/share/gibtsnicht/preview")
+        self.assertEqual(AuditLogEntry.objects.count(), before)
+
+    # --- Isolation bleibt sonst intakt ------------------------------------
+    def test_link_durchbricht_isolation_nur_fuer_das_eine_dokument(self):
+        other = Document.objects.create(title="Anderes", owner=self.owner)
+        self._link(token="t7")
+        self.client.force_authenticate(self.viewer)
+        # Der Link liefert NUR self.doc; ein Direktzugriff auf `other` bleibt 404.
+        resp_other = self.client.get(f"/api/documents/{other.id}/")
+        self.assertEqual(resp_other.status_code, 404)

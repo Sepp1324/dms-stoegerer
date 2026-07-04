@@ -16,5 +16,9 @@ router.register("document-share-links", views.DocumentShareLinkViewSet)
 urlpatterns = [
     # Explizit vor dem Router, sonst würde "upload" als Dokument-PK gelesen.
     path("documents/upload/", views.DocumentUploadView.as_view(), name="document-upload"),
+    # Freigabe-Abrufrouten (STOAA-191). Bewusst OHNE Trailing-Slash (exakt wie im
+    # Ticket), damit kein APPEND_SLASH-Redirect den Authorization-Header verwirft.
+    path("share/<str:token>/preview", views.SharePreviewView.as_view(), name="share-preview"),
+    path("share/<str:token>/download", views.ShareDownloadView.as_view(), name="share-download"),
     *router.urls,
 ]
