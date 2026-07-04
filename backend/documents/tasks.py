@@ -5,6 +5,7 @@ from pathlib import Path
 
 from celery import shared_task
 from django.conf import settings
+from django.contrib.auth import get_user_model
 
 from . import pipeline, storage
 from .models import DocumentVersion
@@ -74,22 +75,88 @@ def scan_consume_folder() -> dict:
     Robustheit: Ein Fehler bei einer einzelnen Datei bricht den Scan der
     übrigen nicht ab und verschluckt die Datei nicht – sie wandert nach
     ``consume/_failed/`` und wird protokolliert.
+
+    Pro-User-Attribution (``settings.CONSUME_PER_USER``): Ist das Flag aktiv,
+    liegen die Scans in pro-User-Unterordnern (``CONSUME_DIR/<username>/``). Der
+    Ordnername wird auf einen Django-User aufgelöst; alle darin reifen Dateien
+    werden diesem als ``owner`` zugeordnet (``_processed/``/``_failed/`` liegen
+    pro User-Ordner). Ordner ohne passenden User werden komplett übersprungen
+    und protokolliert – niemals owner-los aufgenommen. Default (Flag off) ist
+    das unveränderte Flat-Verhalten.
     """
     consume = storage.CONSUME_DIR
     if not consume.exists():
         return {"found": 0, "ingested": [], "skipped": 0, "failed": 0}
 
-    processed_dir = consume / "_processed"
-    failed_dir = consume / "_failed"
-    processed_dir.mkdir(parents=True, exist_ok=True)
-
     min_age = float(getattr(settings, "CONSUME_MIN_AGE", 15))
     now = time.time()
+
+    if getattr(settings, "CONSUME_PER_USER", False):
+        return _scan_per_user(consume, min_age, now)
+
+    # Flat-Modus (Default): Dateien liegen direkt im Consume-Ordner, ohne Owner.
+    result = _ingest_consume_dir(consume, None, min_age, now)
+    return {"found": len(result["ingested"]), **result}
+
+
+def _scan_per_user(consume: Path, min_age: float, now: float) -> dict:
+    """Pro-User-Modus: iteriert die Top-Level-Unterordner von ``consume``.
+
+    Ordnername = Username. Nur Ordner mit passendem Django-User werden
+    verarbeitet (case-insensitiv); alle Dateien darin erhalten diesen als
+    ``owner``. Ordner mit führendem ``_``/``.`` (z. B. ``_processed`` auf
+    Consume-Ebene) und unbekannte Benutzer werden übersprungen.
+    """
+    user_model = get_user_model()
 
     ingested = []
     skipped = 0
     failed = 0
     for entry in sorted(consume.iterdir()):
+        if not entry.is_dir() or entry.name.startswith(("_", ".")):
+            continue
+
+        user = user_model.objects.filter(username__iexact=entry.name).first()
+        if user is None:
+            # Keine stille Fehl-Attribution: unbekannter Ordner wird komplett
+            # übersprungen (nicht als owner=None aufgenommen) und protokolliert.
+            logger.warning(
+                "scan_consume_folder: Unbekannter Benutzer-Ordner %r übersprungen "
+                "– kein passender Django-User, keine owner-lose Aufnahme.",
+                entry.name,
+            )
+            continue
+
+        result = _ingest_consume_dir(entry, user, min_age, now)
+        ingested.extend(result["ingested"])
+        skipped += result["skipped"]
+        failed += result["failed"]
+
+    return {
+        "found": len(ingested),
+        "ingested": ingested,
+        "skipped": skipped,
+        "failed": failed,
+    }
+
+
+def _ingest_consume_dir(base: Path, owner, min_age: float, now: float) -> dict:
+    """Nimmt alle reifen Dateien direkt in ``base`` auf (ohne Rekursion).
+
+    ``_processed/`` und ``_failed/`` liegen relativ zu ``base``. Wird sowohl im
+    Flat-Modus (``base=CONSUME_DIR``, ``owner=None``) als auch pro User-Ordner
+    verwendet (``owner`` = aufgelöster Django-User). Gibt die aufgenommenen
+    Dokumente sowie Zähler zurück. Robustheit unverändert: Reife-Check pro
+    Datei, ``_processed/``-Idempotenz, pro-Datei ``try/except`` → ``_failed/``.
+    """
+    processed_dir = base / "_processed"
+    failed_dir = base / "_failed"
+    processed_dir.mkdir(parents=True, exist_ok=True)
+
+    ingested = []
+    skipped = 0
+    failed = 0
+    for entry in sorted(base.iterdir()):
         if entry.is_dir() or entry.name.startswith("."):
             continue
 
@@ -113,7 +180,7 @@ def scan_consume_folder() -> dict:
             target.write_bytes(entry.read_bytes())
 
             document, version = pipeline.create_document_from_file(
-                str(target), title=title, size=target.stat().st_size
+                str(target), title=title, size=target.stat().st_size, owner=owner
             )
             process_document_version.delay(version.id)
             entry.rename(processed_dir / entry.name)
@@ -134,12 +201,7 @@ def scan_consume_folder() -> dict:
                     entry,
                 )
 
-    return {
-        "found": len(ingested),
-        "ingested": ingested,
-        "skipped": skipped,
-        "failed": failed,
-    }
+    return {"ingested": ingested, "skipped": skipped, "failed": failed}
 
 
 @shared_task

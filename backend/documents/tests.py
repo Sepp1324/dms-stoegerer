@@ -1217,6 +1217,179 @@ class ConsumeFolderScanTests(TestCase):
         delay.assert_called_once()
 
 
+class ConsumePerUserScanTests(TestCase):
+    """STOAA-261: Pro-User-Attribution des Consume-Ingest.
+
+    Bei ``CONSUME_PER_USER=True`` liegen Scans in pro-User-Unterordnern
+    (``CONSUME_DIR/<username>/``); Dateien werden dem passenden Django-User als
+    ``Document.owner`` zugeordnet. Deckt ab: (a) Zuordnung, (b) unbekannter
+    Ordner wird übersprungen + geloggt, (c) Reife-Check, (d) Fehlerpfad →
+    ``_failed/`` im User-Ordner, (e) Flag off → Flat-Regression (owner=None,
+    Unterordner ignoriert). ``process_document_version.delay`` wird gemockt.
+    """
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.consume = root / "consume"
+        self.originals = root / "originals"
+        self.consume.mkdir(parents=True, exist_ok=True)
+        self.originals.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(self._tmp.cleanup)
+
+        self.sebastian = get_user_model().objects.create_user(
+            username="sebastian", password="x"
+        )
+
+    def _write(self, subdir, name, *, age_seconds):
+        """Legt eine Datei in ``consume/<subdir>/`` an und setzt ihr Alter (mtime)."""
+        import os
+        import time
+
+        folder = self.consume / subdir
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / name
+        path.write_bytes(b"%PDF-1.4 dummy")
+        mtime = time.time() - age_seconds
+        os.utime(path, (mtime, mtime))
+        return path
+
+    def _run_scan(self):
+        from unittest import mock
+
+        from . import storage, tasks
+
+        with mock.patch.object(storage, "CONSUME_DIR", self.consume), mock.patch.object(
+            storage, "ORIGINALS_DIR", self.originals
+        ), mock.patch.object(tasks.process_document_version, "delay") as delay:
+            result = tasks.scan_consume_folder()
+        return result, delay
+
+    def test_datei_im_user_ordner_wird_dem_user_zugeordnet(self):
+        """(a) /scans/sebastian/reif.pdf -> Document.owner == sebastian."""
+        with self.settings(CONSUME_PER_USER=True, CONSUME_MIN_AGE=15):
+            self._write("sebastian", "reif.pdf", age_seconds=3600)
+            result, delay = self._run_scan()
+
+        self.assertEqual(result["found"], 1)
+        self.assertEqual(result["failed"], 0)
+        self.assertEqual(Document.objects.count(), 1)
+        doc = Document.objects.get()
+        self.assertEqual(doc.owner, self.sebastian)
+        # _processed/ liegt IM User-Ordner, nicht auf Consume-Ebene.
+        self.assertTrue((self.consume / "sebastian" / "_processed" / "reif.pdf").exists())
+        self.assertFalse((self.consume / "_processed" / "reif.pdf").exists())
+        delay.assert_called_once()
+
+    def test_ordnername_case_insensitive(self):
+        """Ordner ``Sebastian`` löst denselben User (username__iexact) auf."""
+        with self.settings(CONSUME_PER_USER=True, CONSUME_MIN_AGE=15):
+            self._write("Sebastian", "reif.pdf", age_seconds=3600)
+            result, _ = self._run_scan()
+
+        self.assertEqual(result["found"], 1)
+        self.assertEqual(Document.objects.get().owner, self.sebastian)
+
+    def test_unbekannter_ordner_wird_uebersprungen_und_geloggt(self):
+        """(b) Ordner ohne passenden User -> nicht aufgenommen + WARN-Log."""
+        self._write("unbekannt", "reif.pdf", age_seconds=3600)
+
+        with self.settings(CONSUME_PER_USER=True, CONSUME_MIN_AGE=15):
+            with self.assertLogs("documents.tasks", level="WARNING") as cm:
+                result, delay = self._run_scan()
+
+        self.assertEqual(result["found"], 0)
+        self.assertEqual(result["failed"], 0)
+        self.assertEqual(Document.objects.count(), 0)
+        # Datei bleibt liegen (keine stille owner=None-Aufnahme).
+        self.assertTrue((self.consume / "unbekannt" / "reif.pdf").exists())
+        self.assertFalse((self.consume / "unbekannt" / "_processed" / "reif.pdf").exists())
+        delay.assert_not_called()
+        self.assertTrue(any("unbekannt" in line for line in cm.output))
+
+    def test_zu_junge_datei_im_user_ordner_wird_uebersprungen(self):
+        """(c) Datei jünger als CONSUME_MIN_AGE -> übersprungen, nicht verschoben."""
+        with self.settings(CONSUME_PER_USER=True, CONSUME_MIN_AGE=15):
+            self._write("sebastian", "frisch.pdf", age_seconds=0)
+            result, delay = self._run_scan()
+
+        self.assertEqual(result["found"], 0)
+        self.assertEqual(result["skipped"], 1)
+        self.assertTrue((self.consume / "sebastian" / "frisch.pdf").exists())
+        delay.assert_not_called()
+        self.assertEqual(Document.objects.count(), 0)
+
+    def test_fehlerhafte_datei_landet_in_failed_im_user_ordner(self):
+        """(d) Fehlerpfad -> _failed/ im User-Ordner, Scan läuft weiter."""
+        from unittest import mock
+
+        from . import pipeline, storage, tasks
+
+        self._write("sebastian", "bad.pdf", age_seconds=3600)
+        self._write("sebastian", "good.pdf", age_seconds=3600)
+
+        real = pipeline.create_document_from_file
+
+        def flaky(path, *, title, **kwargs):
+            if title == "bad":
+                raise RuntimeError("boom")
+            return real(path, title=title, **kwargs)
+
+        with self.settings(CONSUME_PER_USER=True, CONSUME_MIN_AGE=15):
+            with mock.patch.object(
+                storage, "CONSUME_DIR", self.consume
+            ), mock.patch.object(
+                storage, "ORIGINALS_DIR", self.originals
+            ), mock.patch.object(
+                tasks.process_document_version, "delay"
+            ) as delay, mock.patch.object(
+                tasks.pipeline, "create_document_from_file", side_effect=flaky
+            ):
+                result = tasks.scan_consume_folder()
+
+        self.assertEqual(result["found"], 1)
+        self.assertEqual(result["failed"], 1)
+        # Fehlerhafte Datei nach _failed/ IM User-Ordner.
+        self.assertTrue((self.consume / "sebastian" / "_failed" / "bad.pdf").exists())
+        self.assertTrue((self.consume / "sebastian" / "_processed" / "good.pdf").exists())
+        # Gute Datei ist sebastian zugeordnet.
+        doc = Document.objects.get()
+        self.assertEqual(doc.title, "good")
+        self.assertEqual(doc.owner, self.sebastian)
+        delay.assert_called_once()
+
+    def test_flag_off_flat_regression_ignoriert_unterordner(self):
+        """(e) Flag off -> Flat-Modus: Datei direkt im Consume-Ordner, owner=None;
+        Unterordner werden ignoriert (kein Pro-User-Verhalten)."""
+        import os
+        import time
+
+        # Datei direkt im Consume-Ordner (Flat-Eingang).
+        flat = self.consume / "flat.pdf"
+        flat.write_bytes(b"%PDF-1.4 dummy")
+        mtime = time.time() - 3600
+        os.utime(flat, (mtime, mtime))
+        # Zusätzlich eine Datei in einem User-Unterordner, die im Flat-Modus
+        # ignoriert werden muss.
+        self._write("sebastian", "ignored.pdf", age_seconds=3600)
+
+        with self.settings(CONSUME_PER_USER=False, CONSUME_MIN_AGE=15):
+            result, delay = self._run_scan()
+
+        self.assertEqual(result["found"], 1)
+        self.assertEqual(Document.objects.count(), 1)
+        doc = Document.objects.get()
+        self.assertEqual(doc.title, "flat")
+        self.assertIsNone(doc.owner)
+        # Flat-Idempotenz auf Consume-Ebene; Unterordner unangetastet.
+        self.assertTrue((self.consume / "_processed" / "flat.pdf").exists())
+        self.assertTrue((self.consume / "sebastian" / "ignored.pdf").exists())
+        delay.assert_called_once()
+
+
 class DocumentShareLinkTests(APITestCase):
     """Verwaltungs-API der Freigabelinks (STOAA-190).
 
@@ -2445,3 +2618,175 @@ class ProcessingStatusAPITests(APITestCase):
             resp = self.client.post(self._retry_url(self.docs["failed"]))
         self.assertEqual(resp.status_code, 404)
         delayed.assert_not_called()
+
+
+class DocumentSearchTests(APITestCase):
+    """Gewichtete PostgreSQL-Volltextsuche im DocumentViewSet (STOAA-256).
+
+    Deckt AK1–AK6 ab: OCR-Treffer, Titel/Korrespondent, Ranking (Titel vor OCR),
+    Owner-Isolation inkl. Admin, Kurz-/Leer-Query-Fallback sowie
+    Dokumenttyp/Tags/Mail-Betreff/-Absender je als alleiniges Trefferfeld.
+    Benötigt PostgreSQL (SearchVector ``config='german'``) – läuft in CI.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.owner = User.objects.create_user(
+            username="such-owner", password="pw", role="user"
+        )
+        cls.other = User.objects.create_user(
+            username="such-other", password="pw", role="user"
+        )
+        cls.admin = User.objects.create_user(
+            username="such-admin", password="pw", role="admin"
+        )
+
+    @staticmethod
+    def _doc(
+        owner,
+        title="",
+        ocr_text="",
+        correspondent=None,
+        document_type=None,
+        tags=None,
+        mail_subject="",
+        mail_sender="",
+    ):
+        """Legt ein Dokument mit Version (für OCR-Text) und Relationen an."""
+        doc = Document.objects.create(
+            owner=owner,
+            title=title,
+            correspondent=(
+                Correspondent.objects.get_or_create(name=correspondent)[0]
+                if correspondent
+                else None
+            ),
+            document_type=(
+                DocumentType.objects.get_or_create(name=document_type)[0]
+                if document_type
+                else None
+            ),
+            mail_subject=mail_subject,
+            mail_sender=mail_sender,
+        )
+        version = DocumentVersion.objects.create(
+            document=doc,
+            version_no=1,
+            file_path=f"/data/originals/{doc.id}.pdf",
+            sha256=f"{doc.id:064d}",
+            ocr_text=ocr_text,
+        )
+        doc.current_version = version
+        doc.save(update_fields=["current_version"])
+        for name in tags or []:
+            doc.tags.add(Tag.objects.get_or_create(name=name)[0])
+        return doc
+
+    def _ids(self, resp):
+        return [r["id"] for r in resp.data["results"]]
+
+    # --- AK1: Treffer allein über den OCR-Text --------------------------
+    def test_ak1_ocr_only(self):
+        doc = self._doc(
+            self.owner,
+            title="Belegscan",
+            ocr_text="Sehr geehrte Frau Cornelia Muster, ...",
+        )
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get("/api/documents/?q=Cornelia")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._ids(resp), [doc.id])
+
+    # --- AK2: Treffer über Titel bzw. Korrespondentenname ---------------
+    def test_ak2_title_match(self):
+        doc = self._doc(self.owner, title="Grundsteuerbescheid 2024")
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get("/api/documents/?q=Grundsteuerbescheid")
+        self.assertEqual(self._ids(resp), [doc.id])
+
+    def test_ak2_correspondent_match(self):
+        doc = self._doc(self.owner, title="Rechnung", correspondent="Wienstrom")
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get("/api/documents/?q=Wienstrom")
+        self.assertEqual(self._ids(resp), [doc.id])
+
+    # --- AK3: Ranking – Titeltreffer vor reinem OCR-Treffer -------------
+    def test_ak3_title_ranks_before_ocr(self):
+        # ocr_doc zuerst angelegt → hätte bei Gleichstand via -added_at den
+        # Vortritt; korrektes Ranking muss title_doc dennoch vorne einordnen.
+        ocr_doc = self._doc(
+            self.owner, title="Anhang", ocr_text="Zwischenbericht Quartalsbericht Q3"
+        )
+        title_doc = self._doc(self.owner, title="Quartalsbericht Q3 2024")
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get("/api/documents/?q=Quartalsbericht")
+        ids = self._ids(resp)
+        self.assertEqual(set(ids), {title_doc.id, ocr_doc.id})
+        self.assertLess(
+            ids.index(title_doc.id),
+            ids.index(ocr_doc.id),
+            "Titeltreffer (Gewicht A) muss vor OCR-Treffer (Gewicht D) ranken.",
+        )
+
+    # --- AK4: Owner-Isolation inkl. Admin-Ausnahme ----------------------
+    def test_ak4_owner_isolation(self):
+        doc = self._doc(self.owner, title="Privatvertrag Sonderbegriff")
+        # Fremder Nutzer sieht den Treffer nicht.
+        self.client.force_authenticate(self.other)
+        resp = self.client.get("/api/documents/?q=Sonderbegriff")
+        self.assertEqual(self._ids(resp), [])
+        # Admin sieht alles.
+        self.client.force_authenticate(self.admin)
+        resp = self.client.get("/api/documents/?q=Sonderbegriff")
+        self.assertEqual(self._ids(resp), [doc.id])
+
+    # --- AK5: Fallback für leere / kurze Query --------------------------
+    def test_ak5_empty_query_returns_full_list(self):
+        d1 = self._doc(self.owner, title="Alpha")
+        d2 = self._doc(self.owner, title="Beta")
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get("/api/documents/?q=")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(set(self._ids(resp)), {d1.id, d2.id})
+
+    def test_ak5_short_query_icontains(self):
+        hit = self._doc(self.owner, title="XZ-Sonderfall")
+        self._doc(self.owner, title="Unbeteiligt")
+        self.client.force_authenticate(self.owner)
+        # 2-Zeichen-Query → icontains-Fallback (FTS-Lexeme greifen hier nicht).
+        resp = self.client.get("/api/documents/?q=XZ")
+        self.assertEqual(self._ids(resp), [hit.id])
+
+    # --- AK6: weitere Felder je als alleiniges Trefferfeld --------------
+    def test_ak6_document_type_match(self):
+        doc = self._doc(self.owner, title="Scan", document_type="Versicherungspolizze")
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get("/api/documents/?q=Versicherungspolizze")
+        self.assertEqual(self._ids(resp), [doc.id])
+
+    def test_ak6_tag_match(self):
+        doc = self._doc(self.owner, title="Scan", tags=["Nebenkostenabrechnung"])
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get("/api/documents/?q=Nebenkostenabrechnung")
+        self.assertEqual(self._ids(resp), [doc.id])
+
+    def test_ak6_mail_subject_match(self):
+        doc = self._doc(self.owner, title="Scan", mail_subject="Zählerstand Erdgas")
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get("/api/documents/?q=Zählerstand")
+        self.assertEqual(self._ids(resp), [doc.id])
+
+    def test_ak6_mail_sender_match(self):
+        # mail.py speichert den From-Header realistisch als "Anzeigename <adresse>"
+        # (mail.py:201). PostgreSQL-FTS tokenisiert eine reine E-Mail-Adresse als
+        # EIN atomares Token, d. h. Teilstrings der Domain sind nicht als eigene
+        # Lexeme suchbar. Realistische, FTS-taugliche Suche geht über den
+        # Anzeigenamen des Absenders (siehe Known-Limitation-Kommentar in views.py).
+        doc = self._doc(
+            self.owner,
+            title="Scan",
+            mail_sender="Energieanbieter Buchhaltung <buchhaltung@energieanbieter.example>",
+        )
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get("/api/documents/?q=Energieanbieter")
+        self.assertEqual(self._ids(resp), [doc.id])

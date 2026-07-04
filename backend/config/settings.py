@@ -129,6 +129,19 @@ CONSUME_FOLDER_PATH = os.getenv("CONSUME_FOLDER_PATH", "")
 # mindestens so viele Sekunden vergangen sind. Verhindert Teil-Reads langsam
 # über NFS geschriebener Scans; zu junge Dateien holt der nächste Scan.
 CONSUME_MIN_AGE = float(os.getenv("CONSUME_MIN_AGE", "15"))
+# Pro-User-Attribution des Consume-Ingest. Ist das Flag aktiv, iteriert
+# ``scan_consume_folder`` die Top-Level-Unterordner von ``CONSUME_DIR``: der
+# Ordnername ist der Username, alle darin reifen Dateien werden dem passenden
+# Django-User als ``Document.owner`` zugeordnet (``_processed/``/``_failed/``
+# liegen pro User-Ordner). Unbekannte Ordner werden übersprungen (keine
+# owner-lose Aufnahme). Default ``false`` -> unverändertes Flat-Verhalten; das
+# Overlay setzt das Flag im ConfigMap-Patch auf ``true`` (nicht in der Base).
+CONSUME_PER_USER = os.getenv("CONSUME_PER_USER", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 MEDIA_URL = "media/"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
