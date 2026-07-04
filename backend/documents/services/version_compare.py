@@ -1,261 +1,235 @@
-"""Versionsvergleich-Service (STOAA-288).
+"""Versionsvergleich Stufe 1 – reiner Vergleichs-Service (STOAA-289).
 
-Alle Vergleichslogik liegt hier – keine Logik in Models, ViewSets oder Serializern.
+Die *gesamte* Vergleichslogik lebt hier; Models/ViewSets/Serializer bleiben
+frei davon. Der Service ist isoliert testbar: :func:`compare_versions` nimmt zwei
+:class:`~documents.models.DocumentVersion`-Instanzen plus das zugehörige
+:class:`~documents.models.Document` entgegen – **nie** das Request-Objekt.
+
+Stufe 1 arbeitet ausschließlich auf bereits versionierten ``DocumentVersion``-
+Feldern (``ocr_text``, ``sha256``, ``size``, ``mime_type``, ``page_count``).
+Es gibt daher **keine Migration**. ``metadata``/``tags``/``custom_fields`` sind
+in Stufe 1 nicht versioniert und werden bewusst leer/``false`` zurückgegeben
+(siehe Machbarkeits-Befund in STOAA-288); der ``metadata_versioning_supported``-
+Flag signalisiert das dem Frontend, ohne die Antwort-Shape zu ändern.
+
+Die Rückgabe ist so strukturiert, dass ein späterer visueller Seiten-Diff
+(Stufe 2) rein *additiv* andockt – bestehende Felder bleiben stabil.
 """
 from __future__ import annotations
 
 import difflib
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any, Dict, List
 
-from documents.models import Document, DocumentVersion
+if TYPE_CHECKING:  # pragma: no cover - nur für Typannotationen
+    from documents.models import Document, DocumentVersion
+
+PDF_MIME = "application/pdf"
 
 
-# ---------------------------------------------------------------------------
-# Result-Datenklassen
-# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class CompareSummary:
+    """Kompakte Änderungs-Flags über alle Vergleichsdimensionen.
 
-@dataclass
-class FileDiff:
+    ``text_changed``/``binary_changed``/``pages_changed`` werden real berechnet.
+    ``metadata_changed``/``tags_changed``/``custom_fields_changed`` sind in
+    Stufe 1 fix ``False`` (diese Sektionen sind noch nicht versioniert).
+    """
+
+    text_changed: bool
+    binary_changed: bool
+    pages_changed: bool
+    metadata_changed: bool = False
+    tags_changed: bool = False
+    custom_fields_changed: bool = False
+
+
+@dataclass(frozen=True)
+class FileComparison:
+    """Datei-Ebene: Hash-, Größen-, MIME- und (bei PDF) Seiten-Vergleich.
+
+    ``changed`` entspricht ``summary.binary_changed`` (287-Feldname beibehalten);
+    die ``size``/``mime``/``page``-Felder sind additiv. ``both_pdf``/``pages_changed``
+    tragen die PDF-Stufe (nur Architektur – keine Bildverarbeitung in Stufe 1).
+    """
+
     old_sha256: str
     new_sha256: str
     old_size: int
     new_size: int
-    old_mime: str
-    new_mime: str
-    changed: bool
-    # PDF-Stufe-2-Vorbereitung
+    old_mime_type: str
+    new_mime_type: str
     old_page_count: int | None
     new_page_count: int | None
-    pages_changed: bool
+    changed: bool
+    both_pdf: bool
 
 
-@dataclass
-class TagDiff:
-    added: list[str]
-    removed: list[str]
+@dataclass(frozen=True)
+class VersionComparison:
+    """Vollständiges Vergleichsergebnis für zwei Versionen eines Dokuments."""
 
-
-@dataclass
-class FieldChange:
-    old: Any
-    new: Any
-
-
-@dataclass
-class CompareSummary:
-    text_changed: bool
-    metadata_changed: bool
-    tags_changed: bool
-    custom_fields_changed: bool
-    binary_changed: bool
-    pages_changed: bool
-    tag_changes: int
-    field_changes: int
-
-
-@dataclass
-class VersionCompareResult:
     document: int
     from_version: int
     to_version: int
     summary: CompareSummary
     text_diff: str
-    metadata: dict[str, FieldChange]
-    tags: TagDiff
-    custom_fields: dict[str, FieldChange]
-    files: FileDiff
+    text_diff_html: str
+    files: FileComparison
+    metadata_versioning_supported: bool = False
+    # Stufe-1: vorhanden-aber-leer; Shape bleibt über Stufe 2 stabil.
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    tags: Dict[str, List[Any]] = field(
+        default_factory=lambda: {"added": [], "removed": []}
+    )
+    custom_fields: Dict[str, Any] = field(default_factory=dict)
 
-
-# ---------------------------------------------------------------------------
-# Service
-# ---------------------------------------------------------------------------
-
-class VersionCompareService:
-    """Vergleicht zwei DocumentVersions desselben Dokuments."""
-
-    # Metadaten-Felder die verglichen werden (Attributname → Label)
-    METADATA_FIELDS: dict[str, str] = {
-        "document__title": "title",
-        "document__document_type__name": "document_type",
-        "document__correspondent__name": "correspondent",
-        "document__storage_path__name": "storage_path",
-        "document__owner__username": "owner",
-        "document__retention_until": "retention_until",
-        "document__status": "status",
-    }
-
-    def compare(
-        self,
-        document: Document,
-        from_no: int,
-        to_no: int,
-    ) -> VersionCompareResult:
-        """Lädt beide Versionen und berechnet den vollständigen Diff."""
-        v_from = self._load_version(document, from_no)
-        v_to = self._load_version(document, to_no)
-
-        text_diff = self._text_diff(v_from.ocr_text, v_to.ocr_text)
-        metadata_diff = self._metadata_diff(v_from, v_to)
-        tags_diff = self._tags_diff(v_from, v_to)
-        custom_diff = self._custom_fields_diff(v_from, v_to)
-        file_diff = self._file_diff(v_from, v_to)
-
-        summary = CompareSummary(
-            text_changed=bool(text_diff),
-            metadata_changed=bool(metadata_diff),
-            tags_changed=bool(tags_diff.added or tags_diff.removed),
-            custom_fields_changed=bool(custom_diff),
-            binary_changed=file_diff.changed,
-            pages_changed=file_diff.pages_changed,
-            tag_changes=len(tags_diff.added) + len(tags_diff.removed),
-            field_changes=len(custom_diff),
-        )
-
-        return VersionCompareResult(
-            document=document.pk,
-            from_version=from_no,
-            to_version=to_no,
-            summary=summary,
-            text_diff=text_diff,
-            metadata=metadata_diff,
-            tags=tags_diff,
-            custom_fields=custom_diff,
-            files=file_diff,
-        )
-
-    # ------------------------------------------------------------------
-    # Private helpers
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _load_version(document: Document, version_no: int) -> DocumentVersion:
-        """Lädt eine Version mit allen nötigen Relations in einer Query."""
-        return (
-            DocumentVersion.objects.select_related(
-                "document",
-                "document__document_type",
-                "document__correspondent",
-                "document__storage_path",
-                "document__owner",
-            )
-            .prefetch_related(
-                "document__tags",
-                "document__custom_field_values__field",
-            )
-            .get(document=document, version_no=version_no)
-        )
-
-    @staticmethod
-    def _text_diff(old_text: str, new_text: str) -> str:
-        """unified_diff der OCR-Texte; leer wenn gleich."""
-        if old_text == new_text:
-            return ""
-        old_lines = old_text.splitlines(keepends=True)
-        new_lines = new_text.splitlines(keepends=True)
-        diff = difflib.unified_diff(
-            old_lines,
-            new_lines,
-            fromfile="Vorherige Version",
-            tofile="Neue Version",
-        )
-        return "".join(diff)
-
-    @staticmethod
-    def _metadata_diff(
-        v_from: DocumentVersion, v_to: DocumentVersion
-    ) -> dict[str, FieldChange]:
-        """Vergleicht Metadaten; gibt nur geänderte Felder zurück."""
-        doc_from = v_from.document
-        doc_to = v_to.document
-
-        def _val(doc: Document, attr: str) -> Any:
-            parts = attr.split("__")
-            obj: Any = doc
-            for part in parts[1:]:  # skip leading "document"
-                if obj is None:
-                    return None
-                obj = getattr(obj, part, None)
-            return obj
-
-        result: dict[str, FieldChange] = {}
-        label_map = {
-            "title": "title",
-            "document_type__name": "document_type",
-            "correspondent__name": "correspondent",
-            "storage_path__name": "storage_path",
-            "owner__username": "owner",
-            "retention_until": "retention_until",
-            "status": "status",
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialisiert in die stabile API-Shape (exakt an STOAA-287 orientiert)."""
+        return {
+            "document": self.document,
+            "from_version": self.from_version,
+            "to_version": self.to_version,
+            "summary": {
+                "text_changed": self.summary.text_changed,
+                "binary_changed": self.summary.binary_changed,
+                "pages_changed": self.summary.pages_changed,
+                "metadata_changed": self.summary.metadata_changed,
+                "tags_changed": self.summary.tags_changed,
+                "custom_fields_changed": self.summary.custom_fields_changed,
+            },
+            "text_diff": self.text_diff,
+            "text_diff_html": self.text_diff_html,
+            "metadata": self.metadata,
+            "tags": self.tags,
+            "custom_fields": self.custom_fields,
+            "files": {
+                "old_sha256": self.files.old_sha256,
+                "new_sha256": self.files.new_sha256,
+                "old_size": self.files.old_size,
+                "new_size": self.files.new_size,
+                "old_mime_type": self.files.old_mime_type,
+                "new_mime_type": self.files.new_mime_type,
+                "old_page_count": self.files.old_page_count,
+                "new_page_count": self.files.new_page_count,
+                "changed": self.files.changed,
+                "both_pdf": self.files.both_pdf,
+            },
+            "metadata_versioning_supported": self.metadata_versioning_supported,
         }
-        for attr, label in label_map.items():
-            old_val = _val(doc_from, f"document__{attr}")
-            new_val = _val(doc_to, f"document__{attr}")
-            if old_val != new_val:
-                result[label] = FieldChange(
-                    old=str(old_val) if old_val is not None else None,
-                    new=str(new_val) if new_val is not None else None,
-                )
-        return result
 
-    @staticmethod
-    def _tags_diff(v_from: DocumentVersion, v_to: DocumentVersion) -> TagDiff:
-        """Ergibt hinzugefügte / entfernte Tags (alphabetisch sortiert)."""
-        tags_from = {t.name for t in v_from.document.tags.all()}
-        tags_to = {t.name for t in v_to.document.tags.all()}
-        return TagDiff(
-            added=sorted(tags_to - tags_from),
-            removed=sorted(tags_from - tags_to),
-        )
 
-    @staticmethod
-    def _custom_fields_diff(
-        v_from: DocumentVersion, v_to: DocumentVersion
-    ) -> dict[str, FieldChange]:
-        """Vergleicht CustomFieldValues; nur Änderungen."""
+def _split_lines(text: str) -> List[str]:
+    """Zerlegt OCR-Text zeilenweise für difflib.
 
-        def _as_dict(doc: Document) -> dict[str, str]:
-            return {
-                cfv.field.name: cfv.value
-                for cfv in doc.custom_field_values.all()
-            }
+    ``keepends=False`` + explizite ``lineterm``-Steuerung in den difflib-Aufrufen
+    hält den Plaintext-Diff sauber. Leerer Text ergibt eine leere Zeilenliste –
+    difflib kommt damit klar (kein Crash), der Diff zeigt dann reine Zufügungen
+    bzw. Löschungen.
+    """
+    return (text or "").splitlines()
 
-        old_map = _as_dict(v_from.document)
-        new_map = _as_dict(v_to.document)
 
-        all_keys = set(old_map) | set(new_map)
-        result: dict[str, FieldChange] = {}
-        for key in sorted(all_keys):
-            old_val = old_map.get(key)
-            new_val = new_map.get(key)
-            if old_val != new_val:
-                result[key] = FieldChange(old=old_val, new=new_val)
-        return result
+def _build_text_diff(from_text: str, to_text: str) -> str:
+    """Unified-Diff als Plaintext-String (für die API / Copy-Paste)."""
+    diff_lines = difflib.unified_diff(
+        _split_lines(from_text),
+        _split_lines(to_text),
+        fromfile="from",
+        tofile="to",
+        lineterm="",
+    )
+    return "\n".join(diff_lines)
 
-    @staticmethod
-    def _file_diff(v_from: DocumentVersion, v_to: DocumentVersion) -> FileDiff:
-        """Vergleicht SHA256, Größe, MIME und Seitenanzahl."""
-        sha_changed = v_from.sha256 != v_to.sha256
-        size_changed = v_from.size != v_to.size
-        mime_changed = v_from.mime_type != v_to.mime_type
 
-        old_pages = v_from.page_count
-        new_pages = v_to.page_count
-        pages_changed = (
-            old_pages is not None
-            and new_pages is not None
-            and old_pages != new_pages
-        )
+def _build_text_diff_html(from_text: str, to_text: str) -> str:
+    """Side-by-Side-HTML-Tabelle (fürs Frontend)."""
+    return difflib.HtmlDiff().make_table(
+        _split_lines(from_text),
+        _split_lines(to_text),
+        fromdesc="from",
+        todesc="to",
+        context=True,
+        numlines=3,
+    )
 
-        return FileDiff(
-            old_sha256=v_from.sha256,
-            new_sha256=v_to.sha256,
-            old_size=v_from.size,
-            new_size=v_to.size,
-            old_mime=v_from.mime_type,
-            new_mime=v_to.mime_type,
-            changed=sha_changed or size_changed or mime_changed,
-            old_page_count=old_pages,
-            new_page_count=new_pages,
-            pages_changed=pages_changed,
-        )
+
+def _compare_files(
+    from_version: "DocumentVersion", to_version: "DocumentVersion"
+) -> FileComparison:
+    """Datei-Vergleich inkl. PDF-Stufe (Architektur-only)."""
+    binary_changed = from_version.sha256 != to_version.sha256
+    both_pdf = (
+        from_version.mime_type == PDF_MIME and to_version.mime_type == PDF_MIME
+    )
+    return FileComparison(
+        old_sha256=from_version.sha256,
+        new_sha256=to_version.sha256,
+        old_size=from_version.size,
+        new_size=to_version.size,
+        old_mime_type=from_version.mime_type,
+        new_mime_type=to_version.mime_type,
+        old_page_count=from_version.page_count,
+        new_page_count=to_version.page_count,
+        changed=binary_changed,
+        both_pdf=both_pdf,
+    )
+
+
+def _pages_changed(files: FileComparison) -> bool:
+    """Seitenzahl-Änderung – nur relevant, wenn beide Seiten PDF sind.
+
+    Bei nicht-PDF bleibt ``pages_changed`` fix ``False`` (keine sinnvolle
+    Seiten-Semantik). ``page_count`` kann ``None`` sein (noch nicht ermittelt) –
+    ``!=`` behandelt ``None`` sauber als eigenen Wert.
+    """
+    if not files.both_pdf:
+        return False
+    return files.old_page_count != files.new_page_count
+
+
+def compare_versions(
+    document: "Document",
+    from_version: "DocumentVersion",
+    to_version: "DocumentVersion",
+) -> VersionComparison:
+    """Vergleicht zwei Versionen eines Dokuments (Stufe 1: OCR/Datei/PDF).
+
+    Args:
+        document: Das gemeinsame Dokument beider Versionen (liefert die ID).
+        from_version: Die *alte* Version (``version_no``).
+        to_version: Die *neue* Version (``version_no``).
+
+    Returns:
+        Ein :class:`VersionComparison` mit real berechneten Text-/Datei-/PDF-
+        Flags. ``metadata``/``tags``/``custom_fields`` sind leer und
+        ``metadata_versioning_supported`` ist ``False`` (Stufe 1).
+
+    Der Service ist seiteneffektfrei und berührt keine Request-/Permission-
+    Ebene – Sichtbarkeit/Owner werden vom aufrufenden ViewSet erzwungen.
+
+    # TODO Stufe 2: visueller Seiten-Diff (PDF-Seiten rendern und bildlich
+    # vergleichen). Dockt additiv an ``FileComparison``/``VersionComparison`` an,
+    # ohne die bestehende Shape zu verändern.
+    """
+    from_text = from_version.ocr_text or ""
+    to_text = to_version.ocr_text or ""
+    text_changed = from_text != to_text
+
+    files = _compare_files(from_version, to_version)
+
+    summary = CompareSummary(
+        text_changed=text_changed,
+        binary_changed=files.changed,
+        pages_changed=_pages_changed(files),
+    )
+
+    return VersionComparison(
+        document=document.id,
+        from_version=from_version.version_no,
+        to_version=to_version.version_no,
+        summary=summary,
+        text_diff=_build_text_diff(from_text, to_text),
+        text_diff_html=_build_text_diff_html(from_text, to_text),
+        files=files,
+    )
