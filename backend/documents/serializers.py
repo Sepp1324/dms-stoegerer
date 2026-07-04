@@ -118,6 +118,10 @@ class DocumentVersionSerializer(serializers.ModelSerializer):
             "sha256",
             "prev_hash",
             "processing_state",
+            "processing_error",
+            "processing_failed_step",
+            "processing_failed_at",
+            "processing_attempts",
             "mime_type",
             "size",
             "page_count",
@@ -127,6 +131,12 @@ class DocumentVersionSerializer(serializers.ModelSerializer):
             "created_by_name",
             "has_archive",
             "created_at",
+        )
+        read_only_fields = (
+            "processing_error",
+            "processing_failed_step",
+            "processing_failed_at",
+            "processing_attempts",
         )
 
     def get_created_by_name(self, obj) -> str | None:

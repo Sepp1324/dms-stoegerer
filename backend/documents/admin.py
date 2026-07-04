@@ -59,6 +59,12 @@ class DocumentVersionAdmin(admin.ModelAdmin):
     )
     list_filter = ("processing_state", "is_immutable", "mime_type")
     search_fields = ("document__title", "sha256")
+    readonly_fields = (
+        "processing_error",
+        "processing_failed_step",
+        "processing_failed_at",
+        "processing_attempts",
+    )
 
 
 @admin.register(ClassificationRule)
