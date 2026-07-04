@@ -1682,6 +1682,84 @@ class MailAccountApiTests(APITestCase):
         self.assertTrue(resp.data["ok"])
         self.assertEqual(captured["pw"], "stored-pw")
 
+    def test_test_connection_by_id_persists_success_status(self):
+        """Erfolgreicher Test eines gespeicherten Kontos aktualisiert
+        ``last_checked_at`` und löscht ``last_error`` (STOAA-172-Spec)."""
+        from unittest import mock
+
+        self.client.force_authenticate(self.admin)
+        acc = MailAccount.objects.create(
+            name="A", host="h", username="u", last_error="alter Fehler"
+        )
+        with mock.patch("documents.mail.connect", return_value=mock.Mock()):
+            resp = self.client.post(
+                "/api/mail-accounts/test-connection/", {"id": acc.id}, format="json"
+            )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertTrue(resp.data["ok"])
+        acc.refresh_from_db()
+        self.assertIsNotNone(acc.last_checked_at)
+        self.assertEqual(acc.last_error, "")
+        # In der API-Response sichtbar (read-only Statusfelder)
+        detail = self.client.get(f"/api/mail-accounts/{acc.id}/")
+        self.assertIsNotNone(detail.data["last_checked_at"])
+        self.assertEqual(detail.data["last_error"], "")
+        self.assertTrue(
+            AuditLogEntry.objects.filter(
+                action="mailaccount_test_connection", object_id=str(acc.id)
+            ).exists()
+        )
+
+    def test_test_connection_by_id_persists_error(self):
+        """Fehlgeschlagener Test schreibt ``last_error`` und setzt ``last_checked_at``."""
+        from unittest import mock
+
+        self.client.force_authenticate(self.admin)
+        acc = MailAccount.objects.create(name="A", host="h", username="u")
+        with mock.patch(
+            "documents.mail.connect", side_effect=OSError("connect refused")
+        ):
+            resp = self.client.post(
+                "/api/mail-accounts/test-connection/", {"id": acc.id}, format="json"
+            )
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.data["ok"])
+        acc.refresh_from_db()
+        self.assertIsNotNone(acc.last_checked_at)
+        self.assertIn("connect refused", acc.last_error)
+
+    def test_test_connection_detail_route_persists(self):
+        """Spec-Route ``/{pk}/test-connection/`` testet + persistiert das Konto."""
+        from unittest import mock
+
+        self.client.force_authenticate(self.admin)
+        acc = MailAccount.objects.create(name="A", host="h", username="u")
+        with mock.patch("documents.mail.connect", return_value=mock.Mock()):
+            resp = self.client.post(
+                f"/api/mail-accounts/{acc.id}/test-connection/", {}, format="json"
+            )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertTrue(resp.data["ok"])
+        acc.refresh_from_db()
+        self.assertIsNotNone(acc.last_checked_at)
+        self.assertEqual(acc.last_error, "")
+
+    def test_test_connection_transient_does_not_persist(self):
+        """Test mit rohen Zugangsdaten (Anlege-Formular) bleibt zustandslos:
+        legt kein Konto an und berührt keinen Datensatz."""
+        from unittest import mock
+
+        self.client.force_authenticate(self.admin)
+        with mock.patch("documents.mail.connect", return_value=mock.Mock()):
+            resp = self.client.post(
+                "/api/mail-accounts/test-connection/",
+                {"host": "imap.example.org", "username": "u", "password": "p"},
+                format="json",
+            )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertTrue(resp.data["ok"])
+        self.assertEqual(MailAccount.objects.count(), 0)
+
     def test_non_admin_cannot_test_connection(self):
         self.client.force_authenticate(self.user)
         resp = self.client.post(
