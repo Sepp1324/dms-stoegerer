@@ -235,6 +235,48 @@ export interface ClassificationRule {
     tags?: string[];
   };
 }
+
+// --- Workflow-Engine (STOAA-263) ---
+export type WorkflowTriggerType = "document_added" | "document_updated";
+export type WorkflowActionType = "assign" | "remove";
+
+export interface WorkflowTrigger {
+  id?: number;
+  trigger_type: WorkflowTriggerType;
+  sources: string; // Komma-getrennt: upload,consume,mail,api
+  filter_path: string;
+  filter_correspondent: number | null;
+  filter_document_type: number | null;
+  filter_has_tags: number[];
+  filter_has_not_tags: number[];
+  filter_text_contains: string;
+  filter_text_regex: string;
+}
+
+export interface WorkflowAction {
+  id?: number;
+  order: number;
+  action_type: WorkflowActionType;
+  assign_title: string;
+  assign_correspondent: number | null;
+  assign_document_type: number | null;
+  assign_storage_path: number | null;
+  assign_tags: number[];
+  assign_owner: number | null;
+  assign_custom_fields: Record<string, unknown>;
+  remove_tags: number[];
+}
+
+export interface Workflow {
+  id: number;
+  name: string;
+  order: number;
+  enabled: boolean;
+  trigger: WorkflowTrigger | null;
+  actions: WorkflowAction[];
+}
+
+export type WorkflowPayload = Omit<Workflow, "id">;
 export interface AuditEntry {
   id: number;
   timestamp: string;
@@ -731,6 +773,30 @@ export function createRule(
 }
 export async function deleteRule(id: number): Promise<void> {
   const res = await apiFetch(`/classification-rules/${id}/`, { method: "DELETE" });
+  if (!res.ok && res.status !== 204) throw new Error(`Löschen fehlgeschlagen: HTTP ${res.status}`);
+}
+
+// --- Workflows (STOAA-263) ---
+export async function getWorkflows(): Promise<Workflow[]> {
+  return listAll<Workflow>("/workflows/");
+}
+export function createWorkflow(payload: WorkflowPayload): Promise<Workflow> {
+  return postJson<Workflow>("/workflows/", payload);
+}
+export async function updateWorkflow(
+  id: number,
+  payload: WorkflowPayload,
+): Promise<Workflow> {
+  const res = await apiFetch(`/workflows/${id}/`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(`Speichern fehlgeschlagen: HTTP ${res.status}`);
+  return res.json();
+}
+export async function deleteWorkflow(id: number): Promise<void> {
+  const res = await apiFetch(`/workflows/${id}/`, { method: "DELETE" });
   if (!res.ok && res.status !== 204) throw new Error(`Löschen fehlgeschlagen: HTTP ${res.status}`);
 }
 
