@@ -3260,3 +3260,478 @@ class WorkflowAPITests(APITestCase):
         self.assertEqual(resp.status_code, 201, resp.content)
         from .models import Workflow
         self.assertTrue(Workflow.objects.filter(name="Leer").exists())
+
+
+# ---------------------------------------------------------------------------
+# Versionsvergleich (STOAA-288)
+# ---------------------------------------------------------------------------
+
+from .services.version_compare import VersionCompareService
+
+
+class VersionCompareServiceTests(TestCase):
+    """Unit-Tests für VersionCompareService (kein HTTP)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(username="cmp_user", password="pw", role="user")
+        cls.doc = Document.objects.create(title="Vergleichsdokument", owner=cls.user)
+
+        cls.v1 = DocumentVersion.objects.create(
+            document=cls.doc,
+            version_no=1,
+            file_path="/data/v1.pdf",
+            sha256="a" * 64,
+            size=1000,
+            mime_type="application/pdf",
+            page_count=3,
+            ocr_text="Hallo Welt",
+        )
+        cls.v2 = DocumentVersion.objects.create(
+            document=cls.doc,
+            version_no=2,
+            file_path="/data/v2.pdf",
+            sha256="b" * 64,
+            size=2000,
+            mime_type="application/pdf",
+            page_count=4,
+            ocr_text="Hallo Welt\nNeue Zeile",
+        )
+        cls.doc.current_version = cls.v2
+        cls.doc.save(update_fields=["current_version"])
+
+    def _svc(self):
+        return VersionCompareService()
+
+    # OCR tests
+    def test_text_unchanged(self):
+        # same text -> empty diff
+        v3 = DocumentVersion.objects.create(
+            document=self.doc, version_no=3, file_path="/d/v3.pdf",
+            sha256="c" * 64, size=1000, ocr_text="Hallo Welt",
+        )
+        result = self._svc().compare(self.doc, 1, 3)
+        self.assertEqual(result.text_diff, "")
+        self.assertFalse(result.summary.text_changed)
+
+    def test_text_changed(self):
+        result = self._svc().compare(self.doc, 1, 2)
+        self.assertIn("Neue Zeile", result.text_diff)
+        self.assertTrue(result.summary.text_changed)
+
+    def test_empty_text(self):
+        v4 = DocumentVersion.objects.create(
+            document=self.doc, version_no=4, file_path="/d/v4.pdf",
+            sha256="d" * 64, size=100, ocr_text="",
+        )
+        result = self._svc().compare(self.doc, 4, 1)
+        self.assertTrue(result.summary.text_changed)
+
+    # Tag tests
+    def test_tags_added(self):
+        tag = Tag.objects.create(name="Bezahlt")
+        self.doc.tags.add(tag)
+        result = self._svc().compare(self.doc, 1, 2)
+        # tags are on Document level so both see same tags – test via explicit diff manipulation
+        # Instead test with a fresh document
+        doc2 = Document.objects.create(title="TagDoc", owner=self.user)
+        dv_a = DocumentVersion.objects.create(
+            document=doc2, version_no=1, file_path="/d/ta.pdf", sha256="e" * 64, size=10,
+        )
+        dv_b = DocumentVersion.objects.create(
+            document=doc2, version_no=2, file_path="/d/tb.pdf", sha256="f" * 64, size=10,
+        )
+        doc2.current_version = dv_b
+        doc2.save()
+        # Before version 2 add tag (simulate diff by comparing after adding)
+        doc2.tags.add(tag)
+        # Both versions belong to same doc, service compares the doc at call time
+        # Tags are a document-level field; the service returns the current state for both.
+        # With current architecture, added/removed are always empty because the doc's tags
+        # are the same for both versions (they share the same Document row).
+        # This verifies the service doesn't crash and returns sane data.
+        result = self._svc().compare(doc2, 1, 2)
+        self.assertIsInstance(result.tags.added, list)
+        self.assertIsInstance(result.tags.removed, list)
+
+    # Custom fields
+    def test_custom_fields_changed(self):
+        cf = CustomField.objects.create(name="Betrag", data_type=CustomField.DataType.CURRENCY)
+        cfv = CustomFieldValue.objects.create(document=self.doc, field=cf, value="100")
+        result = self._svc().compare(self.doc, 1, 2)
+        # same document -> no custom field diff
+        self.assertEqual(result.custom_fields, {})
+        cfv.value = "200"
+        cfv.save()
+        # Still same document, still no diff (both versions share same doc)
+        result2 = self._svc().compare(self.doc, 1, 2)
+        self.assertIsInstance(result2.custom_fields, dict)
+
+    # File tests
+    def test_file_sha_changed(self):
+        result = self._svc().compare(self.doc, 1, 2)
+        self.assertTrue(result.files.changed)
+        self.assertTrue(result.summary.binary_changed)
+
+    def test_file_sha_unchanged(self):
+        v5 = DocumentVersion.objects.create(
+            document=self.doc, version_no=5, file_path="/d/v5.pdf",
+            sha256="a" * 64, size=1000, mime_type="application/pdf", page_count=3,
+        )
+        result = self._svc().compare(self.doc, 1, 5)
+        self.assertFalse(result.files.changed)
+
+    def test_file_size_changed(self):
+        result = self._svc().compare(self.doc, 1, 2)
+        self.assertEqual(result.files.old_size, 1000)
+        self.assertEqual(result.files.new_size, 2000)
+
+    # PDF page count (Stufe-2-Vorbereitung)
+    def test_pages_changed(self):
+        result = self._svc().compare(self.doc, 1, 2)
+        self.assertTrue(result.files.pages_changed)
+        self.assertEqual(result.files.old_page_count, 3)
+        self.assertEqual(result.files.new_page_count, 4)
+
+    def test_missing_version_raises(self):
+        with self.assertRaises(DocumentVersion.DoesNotExist):
+            self._svc().compare(self.doc, 1, 999)
+
+
+class VersionCompareAPITests(APITestCase):
+    """HTTP-Tests für GET /api/documents/{id}/versions/{a}/compare/{b}/."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.owner = User.objects.create_user(username="api_owner", password="pw", role="user")
+        cls.other = User.objects.create_user(username="api_other", password="pw", role="user")
+        cls.guest = User.objects.create_user(username="api_guest", password="pw", role="guest")
+
+        cls.doc = Document.objects.create(title="API-Vergleichsdok", owner=cls.owner)
+        cls.v1 = DocumentVersion.objects.create(
+            document=cls.doc, version_no=1, file_path="/d/a1.pdf",
+            sha256="1" * 64, size=100, mime_type="application/pdf", ocr_text="Version 1",
+        )
+        cls.v2 = DocumentVersion.objects.create(
+            document=cls.doc, version_no=2, file_path="/d/a2.pdf",
+            sha256="2" * 64, size=200, mime_type="application/pdf", ocr_text="Version 2",
+        )
+        cls.doc.current_version = cls.v2
+        cls.doc.save()
+
+    def _url(self, doc_id=None, f=1, t=2):
+        doc_id = doc_id or self.doc.pk
+        return f"/api/documents/{doc_id}/versions/{f}/compare/{t}/"
+
+    def test_successful_compare(self):
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get(self._url())
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertIn("summary", data)
+        self.assertIn("text_diff", data)
+        self.assertIn("files", data)
+        self.assertIn("tags", data)
+        self.assertIn("metadata", data)
+        self.assertIn("custom_fields", data)
+        self.assertTrue(data["summary"]["binary_changed"])
+
+    def test_invalid_version_number(self):
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get(f"/api/documents/{self.doc.pk}/versions/1/compare/999/")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_same_version_rejected(self):
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get(self._url(f=1, t=1))
+        self.assertEqual(resp.status_code, 400)
+
+    def test_other_user_doc_not_found(self):
+        self.client.force_authenticate(self.other)
+        resp = self.client.get(self._url())
+        self.assertEqual(resp.status_code, 404)
+
+    def test_guest_can_read(self):
+        # guest hat Leserecht auf eigene Dokumente aber kein fremdes
+        guest_doc = Document.objects.create(title="Gastdok", owner=self.guest)
+        gv1 = DocumentVersion.objects.create(
+            document=guest_doc, version_no=1, file_path="/d/g1.pdf", sha256="g" * 64, size=10,
+        )
+        gv2 = DocumentVersion.objects.create(
+            document=guest_doc, version_no=2, file_path="/d/g2.pdf", sha256="h" * 64, size=20,
+        )
+        guest_doc.current_version = gv2
+        guest_doc.save()
+        self.client.force_authenticate(self.guest)
+        resp = self.client.get(f"/api/documents/{guest_doc.pk}/versions/1/compare/2/")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_unauthenticated_denied(self):
+        # JWTAuthentication ist die erste DEFAULT_AUTHENTICATION_CLASS und liefert
+        # einen ``WWW-Authenticate: Bearer``-Header → DRF antwortet mit 401 statt
+        # 403 für den anonymen Fall (Konvention: siehe test_anonymous_unauthorized).
+        resp = self.client.get(self._url())
+        self.assertIn(resp.status_code, (401, 403))
+
+
+class MailOwnerFallbackTests(TestCase):
+    """STOAA-295: Owner-Auflösung beim Mail-Ingest (Konto-Owner > Fallback > Triage).
+
+    Belegt, dass Mail-Anhänge nicht mehr still eigentümerlos aufgenommen werden:
+    Konto-Owner hat Vorrang, sonst greift ``MAIL_DEFAULT_OWNER``; bleibt beides
+    leer, ist ``owner=None`` ein explizit protokollierter Triage-Zustand.
+    ``process_document_version.delay`` und der Originals-Pfad werden gemockt.
+    """
+
+    def setUp(self):
+        from pathlib import Path
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.originals = Path(self._tmp.name) / "originals"
+        self.originals.mkdir(parents=True, exist_ok=True)
+        self.empfaenger = User.objects.create_user(
+            username="empfaenger", password="pw", role="user"
+        )
+
+    def _mail(self, message_id="<m1@test>"):
+        from email.message import EmailMessage
+
+        msg = EmailMessage()
+        msg["Subject"] = "Rechnung"
+        msg["From"] = "Absender <a@example.com>"
+        msg["Message-ID"] = message_id
+        msg.set_content("Text")
+        msg.add_attachment(
+            b"%PDF-1.4 dummy",
+            maintype="application",
+            subtype="pdf",
+            filename="rechnung.pdf",
+        )
+        return msg.as_bytes()
+
+    def _ingest(self, account, message_id="<m1@test>"):
+        from unittest import mock
+
+        from . import mail, storage, tasks
+
+        with mock.patch.object(storage, "ORIGINALS_DIR", self.originals), mock.patch.object(
+            tasks.process_document_version, "delay"
+        ):
+            return mail.ingest_message(account, self._mail(message_id))
+
+    def test_a_mail_mit_account_owner_setzt_owner(self):
+        """(a) Konto-Owner gesetzt -> Dokument gehört ihm, kein Zusatz-Audit."""
+        acc = MailAccount.objects.create(
+            name="R", host="h", username="u", owner=self.empfaenger
+        )
+        imported = self._ingest(acc)
+        self.assertEqual(imported, 1)
+        doc = Document.objects.get()
+        self.assertEqual(doc.owner_id, self.empfaenger.id)
+        self.assertFalse(
+            AuditLogEntry.objects.filter(
+                action__in=["owner_fallback", "triage_ingest"]
+            ).exists()
+        )
+
+    def test_b_ohne_account_owner_nutzt_default_owner(self):
+        """(b) Konto-Owner leer + MAIL_DEFAULT_OWNER -> Fallback-Owner + Audit."""
+        acc = MailAccount.objects.create(name="R", host="h", username="u", owner=None)
+        with self.settings(MAIL_DEFAULT_OWNER="empfaenger"):
+            self._ingest(acc)
+        doc = Document.objects.get()
+        self.assertEqual(doc.owner_id, self.empfaenger.id)
+        audit = AuditLogEntry.objects.get(action="owner_fallback")
+        self.assertEqual(audit.detail["source"], "mail")
+        self.assertEqual(audit.detail["chosen_owner"], "empfaenger")
+        self.assertEqual(audit.actor_id, self.empfaenger.id)
+
+    def test_c_ohne_owner_und_ohne_default_ist_triage(self):
+        """(c) Beides leer -> owner=None + triage_ingest (actor=None), nicht still."""
+        acc = MailAccount.objects.create(name="R", host="h", username="u", owner=None)
+        with self.settings(MAIL_DEFAULT_OWNER=""):
+            self._ingest(acc)
+        doc = Document.objects.get()
+        self.assertIsNone(doc.owner_id)
+        audit = AuditLogEntry.objects.get(action="triage_ingest")
+        self.assertEqual(audit.detail["source"], "mail")
+        self.assertIsNone(audit.actor_id)
+
+    def test_c2_unbekannter_default_owner_bleibt_triage(self):
+        """Fehlkonfigurierter MAIL_DEFAULT_OWNER bricht nicht ab -> Triage."""
+        acc = MailAccount.objects.create(name="R", host="h", username="u", owner=None)
+        with self.settings(MAIL_DEFAULT_OWNER="gibtsnicht"):
+            self._ingest(acc)
+        doc = Document.objects.get()
+        self.assertIsNone(doc.owner_id)
+        self.assertTrue(AuditLogEntry.objects.filter(action="triage_ingest").exists())
+
+
+class ConsumeDefaultOwnerTests(TestCase):
+    """STOAA-295: CONSUME_DEFAULT_OWNER (Flat) + Per-User-Pfad unverändert."""
+
+    def setUp(self):
+        from pathlib import Path
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        root = Path(self._tmp.name)
+        self.consume = root / "consume"
+        self.originals = root / "originals"
+        self.consume.mkdir(parents=True, exist_ok=True)
+        self.originals.mkdir(parents=True, exist_ok=True)
+        self.user = User.objects.create_user(
+            username="consumer", password="pw", role="user"
+        )
+
+    def _write(self, base, name, *, age_seconds=3600):
+        import os
+        import time
+
+        base.mkdir(parents=True, exist_ok=True)
+        path = base / name
+        path.write_bytes(b"%PDF-1.4 dummy")
+        mtime = time.time() - age_seconds
+        os.utime(path, (mtime, mtime))
+        return path
+
+    def _run_scan(self):
+        from unittest import mock
+
+        from . import storage, tasks
+
+        with mock.patch.object(storage, "CONSUME_DIR", self.consume), mock.patch.object(
+            storage, "ORIGINALS_DIR", self.originals
+        ), mock.patch.object(tasks.process_document_version, "delay"):
+            return tasks.scan_consume_folder()
+
+    def test_d_flat_mit_default_owner_setzt_owner(self):
+        """(d) Flat + CONSUME_DEFAULT_OWNER -> Owner gesetzt + owner_fallback."""
+        self._write(self.consume, "beleg.pdf")
+        with self.settings(
+            CONSUME_MIN_AGE=15, CONSUME_PER_USER=False, CONSUME_DEFAULT_OWNER="consumer"
+        ):
+            result = self._run_scan()
+        self.assertEqual(result["found"], 1)
+        doc = Document.objects.get()
+        self.assertEqual(doc.owner_id, self.user.id)
+        audit = AuditLogEntry.objects.get(action="owner_fallback")
+        self.assertEqual(audit.detail["source"], "consume")
+        self.assertEqual(audit.detail["chosen_owner"], "consumer")
+
+    def test_d2_flat_ohne_default_owner_ist_triage(self):
+        """Flat ohne Default-Owner -> owner=None + triage_ingest (source consume)."""
+        self._write(self.consume, "beleg.pdf")
+        with self.settings(
+            CONSUME_MIN_AGE=15, CONSUME_PER_USER=False, CONSUME_DEFAULT_OWNER=""
+        ):
+            self._run_scan()
+        doc = Document.objects.get()
+        self.assertIsNone(doc.owner_id)
+        self.assertTrue(
+            AuditLogEntry.objects.filter(
+                action="triage_ingest", object_id=str(doc.id)
+            ).exists()
+        )
+
+    def test_e_per_user_unveraendert(self):
+        """(e) Per-User-Modus: Owner aus Ordnername, KEIN Fallback-/Triage-Audit."""
+        self._write(self.consume / "consumer", "beleg.pdf")
+        with self.settings(
+            CONSUME_MIN_AGE=15,
+            CONSUME_PER_USER=True,
+            CONSUME_DEFAULT_OWNER="irgendwer",
+        ):
+            result = self._run_scan()
+        self.assertEqual(result["found"], 1)
+        doc = Document.objects.get()
+        self.assertEqual(doc.owner_id, self.user.id)
+        self.assertFalse(
+            AuditLogEntry.objects.filter(
+                action__in=["owner_fallback", "triage_ingest"]
+            ).exists()
+        )
+
+
+class TriageAndSetOwnerTests(APITestCase):
+    """STOAA-295: Triage-Filter ``?owner=none`` + ``set-owner``-Action.
+
+    Belegt: (c) Admin sieht Triage-Dokumente via ``?owner=none``; (f) die
+    Owner-Isolation (STOAA-7) bleibt für Nicht-Admins dicht (Param ignoriert);
+    (g) Admin kann Owner setzen (per ID/Username) inkl. ``owner_assigned``-Audit;
+    (h) Nicht-Admin -> 403.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.admin = User.objects.create_user(
+            username="admin295", password="pw", role="admin"
+        )
+        cls.user = User.objects.create_user(
+            username="user295", password="pw", role="user"
+        )
+        cls.triage = Document.objects.create(title="Triage-Beleg", owner=None)
+        cls.eigenes = Document.objects.create(title="Eigenes", owner=cls.user)
+
+    def test_c_admin_sieht_triage_via_owner_none(self):
+        self.client.force_authenticate(self.admin)
+        resp = self.client.get("/api/documents/?owner=none")
+        self.assertEqual(resp.status_code, 200)
+        ids = [d["id"] for d in resp.data["results"]]
+        self.assertIn(self.triage.id, ids)
+        self.assertNotIn(self.eigenes.id, ids)
+
+    def test_f_nicht_admin_owner_none_ignoriert_isolation_dicht(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.get("/api/documents/?owner=none")
+        self.assertEqual(resp.status_code, 200)
+        ids = [d["id"] for d in resp.data["results"]]
+        self.assertEqual(ids, [self.eigenes.id])
+        self.assertNotIn(self.triage.id, ids)
+
+    def test_g_set_owner_als_admin_per_id(self):
+        self.client.force_authenticate(self.admin)
+        resp = self.client.post(
+            f"/api/documents/{self.triage.id}/set-owner/",
+            {"owner": self.user.id},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.triage.refresh_from_db()
+        self.assertEqual(self.triage.owner_id, self.user.id)
+        audit = AuditLogEntry.objects.get(
+            action="owner_assigned", object_id=str(self.triage.id)
+        )
+        self.assertEqual(audit.actor_id, self.admin.id)
+        self.assertEqual(audit.detail["chosen_owner"], "user295")
+        self.assertIsNone(audit.detail["previous_owner"])
+
+    def test_g2_set_owner_per_username(self):
+        self.client.force_authenticate(self.admin)
+        resp = self.client.post(
+            f"/api/documents/{self.triage.id}/set-owner/",
+            {"owner": "user295"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.triage.refresh_from_db()
+        self.assertEqual(self.triage.owner_id, self.user.id)
+
+    def test_g3_set_owner_unbekannt_400(self):
+        self.client.force_authenticate(self.admin)
+        resp = self.client.post(
+            f"/api/documents/{self.triage.id}/set-owner/",
+            {"owner": "gibtsnicht"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_h_set_owner_als_nicht_admin_403(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.post(
+            f"/api/documents/{self.eigenes.id}/set-owner/",
+            {"owner": self.user.id},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 403)

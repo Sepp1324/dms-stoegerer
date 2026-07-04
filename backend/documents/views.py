@@ -7,6 +7,7 @@ from datetime import timezone as dt_timezone
 from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
+from django.contrib.auth import get_user_model
 from django.db import connection
 from django.db.models import Case, DecimalField, Q, Value, When
 from django.db.models.functions import Cast
@@ -50,6 +51,7 @@ class IsDmsAdmin(BasePermission):
         return bool(getattr(request.user, "is_dms_admin", False))
 
 from . import classification, pipeline, storage
+from .services.version_compare import VersionCompareService
 from .models import (
     AuditLogEntry,
     ClassificationRule,
@@ -343,6 +345,14 @@ class DocumentViewSet(viewsets.ModelViewSet):
             qs = qs.filter(owner=user)
 
         params = self.request.query_params
+
+        # Triage-Ansicht (STOAA-295): Admins können mit ``?owner=none`` gezielt
+        # die eigentümerlosen (Triage-)Dokumente auflisten und anschließend per
+        # ``set-owner`` zuweisen. Für Nicht-Admins ist der Param wirkungslos –
+        # ihr Queryset ist bereits auf ``owner=user`` isoliert (STOAA-7), ein
+        # Leak in fremde/eigentümerlose Dokumente ist damit ausgeschlossen.
+        if getattr(user, "is_dms_admin", False) and params.get("owner") == "none":
+            qs = qs.filter(owner__isnull=True)
 
         q = params.get("q", "").strip()
         # ASN-Suche (STOAA-284/285): Eine Eingabe, die ausschließlich eine ASN ist
@@ -995,6 +1005,105 @@ class DocumentViewSet(viewsets.ModelViewSet):
         return Response(
             DocumentVersionSerializer(version).data,
             status=status.HTTP_202_ACCEPTED,
+        )
+
+    @action(
+        detail=True,
+        methods=["get"],
+        url_path=r"versions/(?P<from_version>\d+)/compare/(?P<to_version>\d+)",
+    )
+    def compare_versions(self, request, pk=None, from_version=None, to_version=None):
+        """Vergleicht zwei Versionen eines Dokuments (STOAA-288).
+
+        GET /api/documents/{id}/versions/{from}/compare/{to}/
+
+        Berechtigung: Leserecht auf das Dokument (Owner-Isolation via get_object).
+        Keine Schreibberechtigung nötig.
+        """
+        document = self.get_object()
+
+        try:
+            from_no = int(from_version)
+            to_no = int(to_version)
+        except (TypeError, ValueError):
+            return Response(
+                {"detail": "Ungültige Versionsnummer."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if from_no == to_no:
+            return Response(
+                {"detail": "from_version und to_version müssen unterschiedlich sein."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        service = VersionCompareService()
+        try:
+            result = service.compare(document, from_no, to_no)
+        except DocumentVersion.DoesNotExist:
+            return Response(
+                {"detail": "Eine oder beide Versionen existieren nicht."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        from .serializers import VersionCompareResultSerializer
+        return Response(VersionCompareResultSerializer(result).data)
+
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path="set-owner",
+        permission_classes=[IsDmsAdmin],
+    )
+    def set_owner(self, request, pk=None):
+        """Eigentümer eines Dokuments (Admin-Triage) setzen (STOAA-295).
+
+        Nur für ``is_dms_admin`` (sonst 403 über ``IsDmsAdmin``). Body::
+
+            {"owner": <userId|username>}
+
+        Hebt die serverseitige Read-Only-Regel auf ``owner`` (STOAA-7)
+        ausschließlich hier und nur für Admins auf – der Wert wird direkt am
+        Modell gesetzt, nicht über den Serializer. Da das Admin-Queryset nicht
+        owner-gefiltert ist, sind auch Triage-Dokumente (``owner=None``)
+        zuweisbar. Protokolliert ``owner_assigned`` mit vorigem/neuem Owner.
+        """
+        document = self.get_object()
+
+        raw = request.data.get("owner")
+        User = get_user_model()
+        target = None
+        if isinstance(raw, bool):
+            target = None
+        elif isinstance(raw, int) or (isinstance(raw, str) and raw.strip().isdigit()):
+            target = User.objects.filter(pk=int(raw)).first()
+        elif isinstance(raw, str) and raw.strip():
+            target = User.objects.filter(username__iexact=raw.strip()).first()
+
+        if target is None:
+            return Response(
+                {"detail": "Unbekannter oder fehlender Benutzer (owner)."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        previous = document.owner
+        document.owner = target
+        document.save(update_fields=["owner"])
+
+        AuditLogEntry.objects.create(
+            actor=request.user,
+            action="owner_assigned",
+            object_type="Document",
+            object_id=str(document.id),
+            detail={
+                "actor": request.user.get_username(),
+                "chosen_owner": target.get_username(),
+                "previous_owner": previous.get_username() if previous else None,
+            },
+        )
+        return Response(
+            DocumentSerializer(document, context={"request": request}).data,
+            status=status.HTTP_200_OK,
         )
 
     # Bis zu so vielen Dokumenten wird synchron im Request klassifiziert;

@@ -12,13 +12,16 @@ import {
   getMe,
   getStoragePaths,
   getTags,
+  getUsers,
   logout,
+  setDocumentOwner,
   type CustomField,
   type DocumentItem,
   type Me,
   type NamedRef,
   type ProcessingStateFilter,
   type TagRef,
+  type User,
 } from "../api";
 import { toCanonicalValue } from "../customFields";
 import { ProcessingBadge } from "./ProcessingStatus";
@@ -54,6 +57,10 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   const [processingState, setProcessingState] = useState<ProcessingStateFilter | "">("");
   // Sortierung; "" = Backend-Standard (FTS-Relevanz bei Suche, sonst Datum neu→alt).
   const [ordering, setOrdering] = useState("");
+  // Triage-Ansicht (STOAA-296): zeigt owner-lose Dokumente (?owner=none). Nur für
+  // Admins sichtbar/aktivierbar; lädt die Nutzerliste erst bei Bedarf.
+  const [triage, setTriage] = useState(false);
+  const [users, setUsers] = useState<User[]>([]);
 
   const [correspondents, setCorrespondents] = useState<NamedRef[]>([]);
   const [documentTypes, setDocumentTypes] = useState<NamedRef[]>([]);
@@ -117,6 +124,18 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
       });
     loadCustomFields();
   }, []);
+
+  // Nutzerliste für das „Owner setzen"-Dropdown der Triage-Ansicht. Der Endpunkt
+  // ist admin-only (403 für Normalnutzer), daher erst laden, wenn feststeht, dass
+  // der aktuelle Nutzer Admin ist. Muster wie MailAccountsAdmin (STOAA-215/233).
+  useEffect(() => {
+    if (!me?.is_dms_admin) return;
+    getUsers()
+      .then(setUsers)
+      .catch(() => {
+        /* Nutzerliste optional – Fehler hier nicht blockierend */
+      });
+  }, [me?.is_dms_admin]);
 
   // Stammdaten inline anlegen: erzeugen, in die lokale Liste einsortieren, Item zurückgeben.
   const byName = (a: NamedRef, b: NamedRef) => a.name.localeCompare(b.name);
@@ -195,6 +214,9 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
       tag,
       storage_path: storagePath,
       processing_state: processingState,
+      // Triage nur für Admins anfordern; das Backend ignoriert den Param für
+      // Normalnutzer ohnehin, aber so bleibt die FE-Absicht eindeutig.
+      owner: triage && me?.is_dms_admin ? "none" : "",
       ordering,
       page,
       customFilters,
@@ -213,7 +235,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     };
     // customFilterKey serialisiert customFilters für einen stabilen Dep-Vergleich.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [debouncedQ, correspondent, documentType, tag, storagePath, processingState, ordering, page, reloadKey, customFilterKey]);
+  }, [debouncedQ, correspondent, documentType, tag, storagePath, processingState, triage, me?.is_dms_admin, ordering, page, reloadKey, customFilterKey]);
 
   // Sichtbarkeit von „Zurücksetzen" & Empty-State-Text: alle roh getippten Filter.
   const hasCurrencyInput = useMemo(
@@ -256,6 +278,12 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   }
   function onOrderingChange(v: string) {
     setOrdering(v);
+    setPage(1);
+  }
+  // Triage-Ansicht umschalten (nur Admins). Zurück auf Seite 1, damit nach dem
+  // Moduswechsel keine leere hohe Seitenzahl gezeigt wird.
+  function onToggleTriage() {
+    setTriage((t) => !t);
     setPage(1);
   }
   // Eine Von-/Bis-Grenze eines CURRENCY-Feldes setzen (setzt auf Seite 1 zurück).
@@ -409,6 +437,18 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
                   Topleiste beschränkt sich auf Sortierung + Zurücksetzen. */}
               <section className="filters card">
                 <div className="filter-row">
+                  {/* Triage-Umschalter nur für Admins: zeigt owner-lose Dokumente
+                      (STOAA-296). Für Normalnutzer nicht sichtbar/aktivierbar. */}
+                  {me?.is_dms_admin && (
+                    <button
+                      type="button"
+                      className={`triage-toggle${triage ? " triage-toggle--active" : ""}`}
+                      onClick={onToggleTriage}
+                      aria-pressed={triage}
+                    >
+                      {triage ? "Alle Dokumente" : "Nicht zugeordnet (Triage)"}
+                    </button>
+                  )}
                   <label className="filter">
                     <span>Sortierung</span>
                     <select value={ordering} onChange={(e) => onOrderingChange(e.target.value)}>
@@ -444,17 +484,21 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
                 ) : docs.length === 0 ? (
                   <StateBlock
                     title={
-                      hasFilters
-                        ? "Keine Treffer für die aktuellen Filter"
-                        : "Noch keine Dokumente"
+                      triage
+                        ? "Keine Dokumente ohne Eigentümer"
+                        : hasFilters
+                          ? "Keine Treffer für die aktuellen Filter"
+                          : "Noch keine Dokumente"
                     }
                     detail={
-                      hasFilters
-                        ? "Passe die Suche oder Filter an."
-                        : "Lade ein Dokument hoch, um zu beginnen."
+                      triage
+                        ? "Aktuell ist alles zugeordnet – hier landen owner-lose Mail-/Consume-Importe."
+                        : hasFilters
+                          ? "Passe die Suche oder Filter an."
+                          : "Lade ein Dokument hoch, um zu beginnen."
                     }
                     action={
-                      hasFilters ? (
+                      !triage && hasFilters ? (
                         <button className="link" onClick={resetFilters}>
                           Filter zurücksetzen
                         </button>
@@ -467,13 +511,23 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
                       {count} {count === 1 ? "Dokument" : "Dokumente"}
                     </p>
                     <div className="doc-grid">
-                      {docs.map((d) => (
-                        <DocumentCard
-                          key={d.id}
-                          doc={d}
-                          onOpen={() => setSelectedId(d.id)}
-                        />
-                      ))}
+                      {docs.map((d) =>
+                        triage ? (
+                          <TriageCard
+                            key={d.id}
+                            doc={d}
+                            users={users}
+                            onOpen={() => setSelectedId(d.id)}
+                            onAssigned={() => setReloadKey((k) => k + 1)}
+                          />
+                        ) : (
+                          <DocumentCard
+                            key={d.id}
+                            doc={d}
+                            onOpen={() => setSelectedId(d.id)}
+                          />
+                        ),
+                      )}
                     </div>
                     <Pagination
                       page={page}
@@ -1045,6 +1099,81 @@ function DocumentCard({ doc, onOpen }: { doc: DocumentItem; onOpen: () => void }
         </p>
       </div>
     </button>
+  );
+}
+
+// Triage-Karte (STOAA-296): owner-loses Dokument mit „Owner setzen"-Aktion.
+// Anders als DocumentCard ist die Karte ein <div> (verschachtelte Buttons wären
+// ungültig): der Titel öffnet das Detail, darunter weist ein Dropdown + Button
+// über POST set-owner (admin-only) einen Eigentümer zu. Nach Erfolg lädt die
+// Liste neu (onAssigned) – das zugewiesene Dokument fällt aus ?owner=none heraus.
+function TriageCard({
+  doc,
+  users,
+  onOpen,
+  onAssigned,
+}: {
+  doc: DocumentItem;
+  users: User[];
+  onOpen: () => void;
+  onAssigned: () => void;
+}) {
+  const [userId, setUserId] = useState<number | "">("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function assign() {
+    if (userId === "") return;
+    setSaving(true);
+    setError(null);
+    try {
+      await setDocumentOwner(doc.id, userId);
+      onAssigned(); // Liste refreshen – Karte verschwindet aus der Triage-Liste
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setSaving(false); // bei Erfolg bleibt saving aktiv bis zum Neuladen
+    }
+  }
+
+  return (
+    <div className="doc-card doc-card--triage">
+      <button className="triage-card__open" onClick={onOpen} title={doc.title}>
+        <h3 className="doc-card__title">{doc.title}</h3>
+        <p className="doc-card__meta">
+          {doc.correspondent_name ?? "Unbekannt"}
+          {doc.document_type_name ? ` · ${doc.document_type_name}` : ""}
+        </p>
+        <p className="doc-card__footer">
+          <span className="doc-card__date">
+            {new Date(doc.added_at).toLocaleDateString("de-DE")}
+          </span>
+          <ProcessingBadge state={doc.processing_state} />
+        </p>
+      </button>
+      <div className="triage-card__assign">
+        <label className="filter">
+          <span>Owner setzen</span>
+          <select
+            value={userId === "" ? "" : String(userId)}
+            onChange={(e) =>
+              setUserId(e.target.value ? Number(e.target.value) : "")
+            }
+            disabled={saving || users.length === 0}
+          >
+            <option value="">Nutzer wählen …</option>
+            {users.map((u) => (
+              <option key={u.id} value={String(u.id)}>
+                {u.username}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button onClick={assign} disabled={userId === "" || saving}>
+          {saving ? "Zuweisen …" : "Zuweisen"}
+        </button>
+        {error && <p className="status status--error">{error}</p>}
+      </div>
+    </div>
   );
 }
 

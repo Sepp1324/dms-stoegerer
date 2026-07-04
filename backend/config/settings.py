@@ -142,6 +142,14 @@ CONSUME_PER_USER = os.getenv("CONSUME_PER_USER", "false").strip().lower() in (
     "yes",
     "on",
 )
+# Standard-Eigentümer für Ingest ohne direkten Owner (STOAA-295). Jeweils ein
+# Username; leer = bewusste Admin-Triage (owner=None). ``MAIL_DEFAULT_OWNER``
+# greift, wenn ein MailAccount keinen ``owner`` gesetzt hat; ``CONSUME_DEFAULT_
+# OWNER`` greift im Flat-Consume-Modus (der Per-User-Modus setzt den Owner
+# ohnehin selbst). Unbekannter Username -> Warn-Log + owner=None (Triage). Neue
+# Env-Vars: Backend-Image/Deployment-Env aktualisieren – KEINE Migration.
+MAIL_DEFAULT_OWNER = os.getenv("MAIL_DEFAULT_OWNER", "")
+CONSUME_DEFAULT_OWNER = os.getenv("CONSUME_DEFAULT_OWNER", "")
 MEDIA_URL = "media/"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
