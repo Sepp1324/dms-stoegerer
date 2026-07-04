@@ -50,6 +50,7 @@ class IsDmsAdmin(BasePermission):
         return bool(getattr(request.user, "is_dms_admin", False))
 
 from . import classification, pipeline, storage
+from .services import version_compare
 from .models import (
     AuditLogEntry,
     ClassificationRule,
@@ -944,6 +945,49 @@ class DocumentViewSet(viewsets.ModelViewSet):
             DocumentVersionSerializer(version).data,
             status=status.HTTP_202_ACCEPTED,
         )
+
+    def _resolve_version_no(self, document, version_no):
+        """Löst eine ``version_no`` gegen die DB auf (kein Nutzerpfad).
+
+        Wie das bestehende ``_resolve_version``-Muster: die Nummer wird gegen
+        ``document.versions`` validiert, es gibt keine Nutzer-Dateipfade → keine
+        Traversal. Fehlende/ungültige Version → ``Http404``.
+        """
+        version = document.versions.filter(version_no=version_no).first()
+        if version is None:
+            raise Http404(f"Version {version_no} nicht vorhanden.")
+        return version
+
+    @action(
+        detail=True,
+        methods=["get"],
+        url_path=(
+            "versions/(?P<from_version>[0-9]+)/compare/(?P<to_version>[0-9]+)"
+        ),
+    )
+    def compare_versions(
+        self, request, pk=None, from_version=None, to_version=None
+    ):
+        """Vergleicht zwei Versionen (Stufe 1: OCR-/Datei-/PDF-Diff, STOAA-289).
+
+        Pfad::
+
+            GET /api/documents/{id}/versions/{from_version}/compare/{to_version}/
+
+        ``from_version``/``to_version`` sind ``version_no``-Werte (``from`` = alt,
+        ``to`` = neu); beliebige Reihenfolge ist erlaubt. ``self.get_object()``
+        erzwingt Sichtbarkeit/Owner über das gefilterte Queryset – fremde/nicht
+        sichtbare Dokumente ergeben 404, keine neuen Rechte. Fehlende/ungültige
+        Version → 404. Die gesamte Vergleichslogik liegt im Service
+        ``services.version_compare`` – hier nur Auflösung + Delegation.
+        """
+        document = self.get_object()
+        # ``from_version``/``to_version`` sind durch die url_path-Regex bereits
+        # rein numerisch; int() ist damit crash-frei.
+        old = self._resolve_version_no(document, int(from_version))
+        new = self._resolve_version_no(document, int(to_version))
+        result = version_compare.compare_versions(document, old, new)
+        return Response(result.to_dict())
 
     # Bis zu so vielen Dokumenten wird synchron im Request klassifiziert;
     # größere Batches wandern in einen Celery-Task (Timeout-/Lastschutz).

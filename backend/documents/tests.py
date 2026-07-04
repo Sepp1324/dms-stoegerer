@@ -3260,3 +3260,199 @@ class WorkflowAPITests(APITestCase):
         self.assertEqual(resp.status_code, 201, resp.content)
         from .models import Workflow
         self.assertTrue(Workflow.objects.filter(name="Leer").exists())
+
+
+class VersionCompareServiceTests(TestCase):
+    """Unit-Tests für den isolierten Vergleichs-Service (STOAA-289).
+
+    Der Service nimmt zwei ``DocumentVersion`` + das ``Document`` – kein Request,
+    keine Permission-Ebene. Getestet werden OCR-Text-Diff, Datei-Vergleich und
+    die PDF-Stufe (nur Architektur, keine Bildverarbeitung).
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(username="vc_owner", password="pw", role="user")
+        cls.doc = Document.objects.create(title="Vergleichsdokument", owner=cls.user)
+
+    def _version(self, version_no, **kwargs):
+        defaults = dict(
+            document=self.doc,
+            version_no=version_no,
+            file_path=f"/data/originals/v{version_no}.pdf",
+            sha256=str(version_no) * 64,
+            mime_type="application/pdf",
+            size=1000 + version_no,
+            page_count=1,
+            ocr_text="",
+        )
+        defaults.update(kwargs)
+        return DocumentVersion.objects.create(**defaults)
+
+    def _compare(self, old, new):
+        from .services import version_compare
+
+        return version_compare.compare_versions(self.doc, old, new)
+
+    # --- OCR-Text -------------------------------------------------------
+    def test_gleicher_text_kein_change(self):
+        old = self._version(1, ocr_text="Hallo Welt", sha256="a" * 64)
+        new = self._version(2, ocr_text="Hallo Welt", sha256="a" * 64)
+        result = self._compare(old, new)
+        self.assertFalse(result.summary.text_changed)
+
+    def test_geaenderter_text_change_mit_diff_zeilen(self):
+        old = self._version(1, ocr_text="alt")
+        new = self._version(2, ocr_text="neu")
+        result = self._compare(old, new)
+        self.assertTrue(result.summary.text_changed)
+        self.assertIn("-alt", result.text_diff)
+        self.assertIn("+neu", result.text_diff)
+        self.assertIn("<table", result.text_diff_html)
+
+    def test_leerer_text_kein_crash(self):
+        old = self._version(1, ocr_text="")
+        new = self._version(2, ocr_text="jetzt Inhalt")
+        result = self._compare(old, new)
+        self.assertTrue(result.summary.text_changed)
+        # Beidseitig leer → kein Change, kein Crash.
+        empty_old = self._version(3, ocr_text="")
+        empty_new = self._version(4, ocr_text="")
+        result2 = self._compare(empty_old, empty_new)
+        self.assertFalse(result2.summary.text_changed)
+        self.assertEqual(result2.text_diff, "")
+
+    # --- Datei ----------------------------------------------------------
+    def test_gleicher_sha_kein_binary_change(self):
+        old = self._version(1, sha256="c" * 64)
+        new = self._version(2, sha256="c" * 64)
+        result = self._compare(old, new)
+        self.assertFalse(result.summary.binary_changed)
+        self.assertFalse(result.files.changed)
+
+    def test_anderer_sha_binary_change(self):
+        old = self._version(1, sha256="a" * 64)
+        new = self._version(2, sha256="b" * 64)
+        result = self._compare(old, new)
+        self.assertTrue(result.summary.binary_changed)
+        self.assertTrue(result.files.changed)
+        self.assertEqual(result.files.old_sha256, "a" * 64)
+        self.assertEqual(result.files.new_sha256, "b" * 64)
+
+    def test_groesse_und_mime_gespiegelt(self):
+        old = self._version(1, size=1234, mime_type="application/pdf")
+        new = self._version(2, size=2345, mime_type="image/png")
+        result = self._compare(old, new)
+        self.assertEqual(result.files.old_size, 1234)
+        self.assertEqual(result.files.new_size, 2345)
+        self.assertEqual(result.files.old_mime_type, "application/pdf")
+        self.assertEqual(result.files.new_mime_type, "image/png")
+
+    # --- PDF-Stufe ------------------------------------------------------
+    def test_beide_pdf_gleiche_seitenzahl(self):
+        old = self._version(1, mime_type="application/pdf", page_count=3)
+        new = self._version(2, mime_type="application/pdf", page_count=3)
+        result = self._compare(old, new)
+        self.assertTrue(result.files.both_pdf)
+        self.assertFalse(result.summary.pages_changed)
+
+    def test_beide_pdf_andere_seitenzahl(self):
+        old = self._version(1, mime_type="application/pdf", page_count=3)
+        new = self._version(2, mime_type="application/pdf", page_count=4)
+        result = self._compare(old, new)
+        self.assertTrue(result.files.both_pdf)
+        self.assertTrue(result.summary.pages_changed)
+
+    def test_nicht_pdf_kein_pages_changed(self):
+        old = self._version(1, mime_type="image/png", page_count=1)
+        new = self._version(2, mime_type="image/jpeg", page_count=9)
+        result = self._compare(old, new)
+        self.assertFalse(result.files.both_pdf)
+        self.assertFalse(result.summary.pages_changed)
+
+    # --- Summary Stufe-1-Fixwerte ---------------------------------------
+    def test_metadata_flags_fix_false(self):
+        old = self._version(1)
+        new = self._version(2, sha256="z" * 64)
+        result = self._compare(old, new).to_dict()
+        self.assertFalse(result["summary"]["metadata_changed"])
+        self.assertFalse(result["summary"]["tags_changed"])
+        self.assertFalse(result["summary"]["custom_fields_changed"])
+        self.assertFalse(result["metadata_versioning_supported"])
+        self.assertEqual(result["metadata"], {})
+        self.assertEqual(result["tags"], {"added": [], "removed": []})
+        self.assertEqual(result["custom_fields"], {})
+
+
+class VersionCompareApiTests(APITestCase):
+    """API-Tests für ``GET .../versions/{from}/compare/{to}/`` (STOAA-289)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.owner = User.objects.create_user(username="vc_api_owner", password="pw", role="user")
+        cls.other = User.objects.create_user(username="vc_api_other", password="pw", role="user")
+        cls.doc = Document.objects.create(title="API-Vergleich", owner=cls.owner)
+        cls.v2 = DocumentVersion.objects.create(
+            document=cls.doc, version_no=2, file_path="/d/v2.pdf",
+            sha256="a" * 64, mime_type="application/pdf", size=1000,
+            page_count=3, ocr_text="alt",
+        )
+        cls.v5 = DocumentVersion.objects.create(
+            document=cls.doc, version_no=5, file_path="/d/v5.pdf",
+            sha256="b" * 64, mime_type="application/pdf", size=2000,
+            page_count=4, ocr_text="neu",
+        )
+        cls.doc.current_version = cls.v5
+        cls.doc.save(update_fields=["current_version"])
+
+    def _url(self, doc_id, frm, to):
+        return f"/api/documents/{doc_id}/versions/{frm}/compare/{to}/"
+
+    def test_erfolgreicher_vergleich_shape(self):
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get(self._url(self.doc.id, 2, 5))
+        self.assertEqual(resp.status_code, 200, resp.content)
+        data = resp.json()
+        self.assertEqual(data["document"], self.doc.id)
+        self.assertEqual(data["from_version"], 2)
+        self.assertEqual(data["to_version"], 5)
+        self.assertTrue(data["summary"]["text_changed"])
+        self.assertTrue(data["summary"]["binary_changed"])
+        self.assertTrue(data["summary"]["pages_changed"])
+        self.assertEqual(data["files"]["changed"], data["summary"]["binary_changed"])
+        self.assertTrue(data["files"]["both_pdf"])
+        self.assertEqual(data["files"]["old_page_count"], 3)
+        self.assertEqual(data["files"]["new_page_count"], 4)
+        self.assertFalse(data["metadata_versioning_supported"])
+        # Stufe-1-Sektionen vorhanden aber leer.
+        self.assertEqual(data["metadata"], {})
+        self.assertEqual(data["tags"], {"added": [], "removed": []})
+        self.assertEqual(data["custom_fields"], {})
+
+    def test_beliebige_reihenfolge(self):
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get(self._url(self.doc.id, 5, 2))
+        self.assertEqual(resp.status_code, 200, resp.content)
+        data = resp.json()
+        self.assertEqual(data["from_version"], 5)
+        self.assertEqual(data["to_version"], 2)
+
+    def test_fehlende_version_404(self):
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get(self._url(self.doc.id, 2, 99))
+        self.assertEqual(resp.status_code, 404)
+
+    def test_ungueltige_versionsnummer_404(self):
+        # Nicht-numerisch matcht die url_path-Regex nicht → kein Route-Match → 404.
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get(f"/api/documents/{self.doc.id}/versions/abc/compare/2/")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_fremdes_dokument_404(self):
+        self.client.force_authenticate(self.other)
+        resp = self.client.get(self._url(self.doc.id, 2, 5))
+        self.assertEqual(resp.status_code, 404)
+
+    def test_unauthenticated_abgewiesen(self):
+        resp = self.client.get(self._url(self.doc.id, 2, 5))
+        self.assertIn(resp.status_code, (401, 403))
