@@ -1,11 +1,14 @@
 import os
+import re
 from datetime import date as date_cls
 from datetime import datetime, time
 from datetime import timezone as dt_timezone
+from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
 from django.db import connection
-from django.db.models import Q
+from django.db.models import Case, DecimalField, Q, Value, When
+from django.db.models.functions import Cast
 from django.http import FileResponse, Http404
 from django.utils import timezone
 from rest_framework import status, viewsets
@@ -37,6 +40,8 @@ from .models import (
     AuditLogEntry,
     ClassificationRule,
     Correspondent,
+    CustomField,
+    CustomFieldValue,
     Document,
     DocumentType,
     StoragePath,
@@ -46,12 +51,56 @@ from .serializers import (
     AuditLogEntrySerializer,
     ClassificationRuleSerializer,
     CorrespondentSerializer,
+    CustomFieldSerializer,
     DocumentSerializer,
     DocumentTypeSerializer,
     StoragePathSerializer,
     TagSerializer,
 )
 from .tasks import process_document_version
+
+# Erkennt Bereichsfilter auf Zusatzfeldern: ``custom_field_<id>_gte`` / ``_lte``.
+_CUSTOM_FIELD_PARAM_RE = re.compile(r"^custom_field_(\d+)_(gte|lte)$")
+# Werte, die sich verlustfrei zu DECIMAL casten lassen (Vorzeichen + Dezimalpunkt).
+# Andere ``CustomFieldValue.value`` (Text/Datum/„k. A.") werden per CASE zu NULL
+# und fallen aus dem Vergleich – kein Postgres-500 beim Cast.
+_NUMERIC_VALUE_RE = r"^-?[0-9]+(\.[0-9]+)?$"
+_DECIMAL_OUTPUT = DecimalField(max_digits=30, decimal_places=10)
+
+
+def _apply_custom_field_filters(qs, params):
+    """Wendet dynamische ``custom_field_<id>_gte/_lte``-Bereichsfilter an.
+
+    Der TextField ``CustomFieldValue.value`` wird für den Vergleich nach DECIMAL
+    gecastet – aber nur für rein numerische Werte (regex-geschütztes ``CASE``),
+    damit nicht-numerische Werte keinen Cast-Fehler (500) auslösen. Ungültige
+    Grenzwerte im Query-Param werden ignoriert (kein 500). Mehrere Grenzen auf
+    dasselbe Feld (gte + lte) verknüpfen additiv (AND) über getrennte Subqueries.
+    """
+    for key in params:
+        match = _CUSTOM_FIELD_PARAM_RE.match(key)
+        if not match:
+            continue
+        field_id, op = int(match.group(1)), match.group(2)
+        try:
+            bound = Decimal(params.get(key))
+        except (InvalidOperation, TypeError, ValueError):
+            continue  # ungültige Grenze → Filter ignorieren, nie 500
+
+        numeric = Case(
+            When(value__regex=_NUMERIC_VALUE_RE, then=Cast("value", _DECIMAL_OUTPUT)),
+            default=Value(None),
+            output_field=_DECIMAL_OUTPUT,
+        )
+        lookup = "num__gte" if op == "gte" else "num__lte"
+        matching = (
+            CustomFieldValue.objects.filter(field_id=field_id)
+            .annotate(num=numeric)
+            .filter(**{lookup: bound})
+            .values("document_id")
+        )
+        qs = qs.filter(id__in=matching)
+    return qs
 
 
 def _clean(value, max_len=255) -> str:
@@ -203,7 +252,9 @@ class DocumentViewSet(viewsets.ModelViewSet):
             .select_related(
                 "correspondent", "document_type", "storage_path", "current_version"
             )
-            .prefetch_related("tags", "versions")
+            .prefetch_related(
+                "tags", "versions", "custom_field_values__field"
+            )
         )
         # --- Owner-Isolation (STOAA-7) -------------------------------------
         # Jeder Nutzer sieht/verwaltet ausschließlich eigene Dokumente. Da
@@ -246,6 +297,9 @@ class DocumentViewSet(viewsets.ModelViewSet):
         tags = params.getlist("tag")
         if tags:
             qs = qs.filter(tags__id__in=tags)
+
+        # Zusatzfeld-Bereichsfilter (Spec §7.3): custom_field_<id>_gte/_lte
+        qs = _apply_custom_field_filters(qs, params)
 
         return qs.distinct()
 
@@ -763,3 +817,30 @@ class ClassificationRuleViewSet(viewsets.ModelViewSet):
     queryset = ClassificationRule.objects.all()
     serializer_class = ClassificationRuleSerializer
     permission_classes = [ReadOnlyOrCanWrite]
+
+
+class CustomFieldViewSet(viewsets.ModelViewSet):
+    """CRUD für Zusatzfeld-Definitionen (Spec §7.2).
+
+    Löschen ist nur erlaubt, solange kein Dokument einen Wert für das Feld hat –
+    sonst 409 mit klarer Meldung (verhindert stille Datenverluste). ``data_type``
+    ist beim Update im Serializer eingefroren (Typwechsel wäre breaking).
+    """
+
+    queryset = CustomField.objects.all()
+    serializer_class = CustomFieldSerializer
+    permission_classes = [ReadOnlyOrCanWrite]
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        if CustomFieldValue.objects.filter(field=instance).exists():
+            return Response(
+                {
+                    "detail": (
+                        "Zusatzfeld wird von mindestens einem Dokument verwendet "
+                        "und kann nicht gelöscht werden. Entferne zuerst die Werte."
+                    )
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        return super().destroy(request, *args, **kwargs)

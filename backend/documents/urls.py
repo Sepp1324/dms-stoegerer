@@ -10,6 +10,7 @@ router.register("correspondents", views.CorrespondentViewSet)
 router.register("document-types", views.DocumentTypeViewSet)
 router.register("storage-paths", views.StoragePathViewSet)
 router.register("classification-rules", views.ClassificationRuleViewSet)
+router.register("custom-fields", views.CustomFieldViewSet)
 
 urlpatterns = [
     # Explizit vor dem Router, sonst würde "upload" als Dokument-PK gelesen.

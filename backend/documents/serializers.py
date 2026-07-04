@@ -4,6 +4,8 @@ from .models import (
     AuditLogEntry,
     ClassificationRule,
     Correspondent,
+    CustomField,
+    CustomFieldValue,
     Document,
     DocumentType,
     DocumentVersion,
@@ -44,6 +46,41 @@ class ClassificationRuleSerializer(serializers.ModelSerializer):
     class Meta:
         model = ClassificationRule
         fields = ("id", "name", "priority", "enabled", "match", "then")
+
+
+class CustomFieldSerializer(serializers.ModelSerializer):
+    """Definition eines Zusatzfeldes.
+
+    ``data_type`` ist beim Update read-only: ein nachträglicher Typwechsel wäre
+    breaking (bestehende ``CustomFieldValue``-Texte würden zum neuen Typ nicht
+    mehr passen, Filter/FE-Formatierung brächen). Beim Anlegen ist er schreibbar.
+    """
+
+    class Meta:
+        model = CustomField
+        fields = ("id", "name", "data_type")
+
+    def get_fields(self):
+        fields = super().get_fields()
+        if self.instance is not None:  # Update (PATCH/PUT) → Typ einfrieren
+            fields["data_type"].read_only = True
+        return fields
+
+
+class CustomFieldValueSerializer(serializers.ModelSerializer):
+    """Ein Zusatzfeld-Wert an einem Dokument.
+
+    ``field`` ist als PK schreibbar (Upsert-Kontrakt); ``field_name`` und
+    ``data_type`` sind read-only Zusatzangaben, damit das FE den Wert im
+    Document-GET ohne Zweit-Request typkorrekt formatieren kann.
+    """
+
+    field_name = serializers.CharField(source="field.name", read_only=True)
+    data_type = serializers.CharField(source="field.data_type", read_only=True)
+
+    class Meta:
+        model = CustomFieldValue
+        fields = ("field", "value", "field_name", "data_type")
 
 
 class DocumentVersionSerializer(serializers.ModelSerializer):
@@ -130,6 +167,10 @@ class DocumentSerializer(serializers.ModelSerializer):
     storage_path_name = serializers.CharField(
         source="storage_path.name", read_only=True, default=None
     )
+    # Zusatzfeld-Werte: GET = nested Liste; PATCH = Upsert per (document, field)
+    # in ``update()``/``create()`` (unique_together). ``required=False``, damit
+    # ein PATCH ohne diesen Schlüssel die bestehenden Werte unangetastet lässt.
+    custom_field_values = CustomFieldValueSerializer(many=True, required=False)
 
     class Meta:
         model = Document
@@ -153,6 +194,7 @@ class DocumentSerializer(serializers.ModelSerializer):
             "ai_suggested_at",
             "classification",
             "status",
+            "custom_field_values",
             "versions",
         )
         read_only_fields = (
@@ -164,3 +206,31 @@ class DocumentSerializer(serializers.ModelSerializer):
             "classification",
             "status",  # Statuswechsel NUR über submit/approve/reject – nie per PATCH (STOAA-63)
         )
+
+    def _upsert_custom_field_values(self, document, values):
+        """Upsert der Zusatzfeld-Werte per unique_together (document, field).
+
+        Es werden ausschließlich die übergebenen Werte angelegt/aktualisiert;
+        nicht genannte bestehende Werte bleiben erhalten (Upsert, kein Replace).
+        """
+        for item in values:
+            CustomFieldValue.objects.update_or_create(
+                document=document,
+                field=item["field"],
+                defaults={"value": item.get("value", "")},
+            )
+
+    def create(self, validated_data):
+        cfv = validated_data.pop("custom_field_values", None)
+        document = super().create(validated_data)
+        if cfv:
+            self._upsert_custom_field_values(document, cfv)
+        return document
+
+    def update(self, instance, validated_data):
+        # ``None`` = Schlüssel nicht im PATCH → Werte unverändert lassen.
+        cfv = validated_data.pop("custom_field_values", None)
+        document = super().update(instance, validated_data)
+        if cfv is not None:
+            self._upsert_custom_field_values(document, cfv)
+        return document
