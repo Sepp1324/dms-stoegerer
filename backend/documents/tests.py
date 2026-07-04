@@ -2473,3 +2473,175 @@ class DocumentProcessingFailureRetryTests(TestCase):
         out2 = StringIO()
         call_command("retry_processing", "--failed", stdout=out2)
         self.assertIn("0 neu verarbeitet", out2.getvalue())
+
+
+class DocumentSearchTests(APITestCase):
+    """Gewichtete PostgreSQL-Volltextsuche im DocumentViewSet (STOAA-256).
+
+    Deckt AK1–AK6 ab: OCR-Treffer, Titel/Korrespondent, Ranking (Titel vor OCR),
+    Owner-Isolation inkl. Admin, Kurz-/Leer-Query-Fallback sowie
+    Dokumenttyp/Tags/Mail-Betreff/-Absender je als alleiniges Trefferfeld.
+    Benötigt PostgreSQL (SearchVector ``config='german'``) – läuft in CI.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.owner = User.objects.create_user(
+            username="such-owner", password="pw", role="user"
+        )
+        cls.other = User.objects.create_user(
+            username="such-other", password="pw", role="user"
+        )
+        cls.admin = User.objects.create_user(
+            username="such-admin", password="pw", role="admin"
+        )
+
+    @staticmethod
+    def _doc(
+        owner,
+        title="",
+        ocr_text="",
+        correspondent=None,
+        document_type=None,
+        tags=None,
+        mail_subject="",
+        mail_sender="",
+    ):
+        """Legt ein Dokument mit Version (für OCR-Text) und Relationen an."""
+        doc = Document.objects.create(
+            owner=owner,
+            title=title,
+            correspondent=(
+                Correspondent.objects.get_or_create(name=correspondent)[0]
+                if correspondent
+                else None
+            ),
+            document_type=(
+                DocumentType.objects.get_or_create(name=document_type)[0]
+                if document_type
+                else None
+            ),
+            mail_subject=mail_subject,
+            mail_sender=mail_sender,
+        )
+        version = DocumentVersion.objects.create(
+            document=doc,
+            version_no=1,
+            file_path=f"/data/originals/{doc.id}.pdf",
+            sha256=f"{doc.id:064d}",
+            ocr_text=ocr_text,
+        )
+        doc.current_version = version
+        doc.save(update_fields=["current_version"])
+        for name in tags or []:
+            doc.tags.add(Tag.objects.get_or_create(name=name)[0])
+        return doc
+
+    def _ids(self, resp):
+        return [r["id"] for r in resp.data["results"]]
+
+    # --- AK1: Treffer allein über den OCR-Text --------------------------
+    def test_ak1_ocr_only(self):
+        doc = self._doc(
+            self.owner,
+            title="Belegscan",
+            ocr_text="Sehr geehrte Frau Cornelia Muster, ...",
+        )
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get("/api/documents/?q=Cornelia")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._ids(resp), [doc.id])
+
+    # --- AK2: Treffer über Titel bzw. Korrespondentenname ---------------
+    def test_ak2_title_match(self):
+        doc = self._doc(self.owner, title="Grundsteuerbescheid 2024")
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get("/api/documents/?q=Grundsteuerbescheid")
+        self.assertEqual(self._ids(resp), [doc.id])
+
+    def test_ak2_correspondent_match(self):
+        doc = self._doc(self.owner, title="Rechnung", correspondent="Wienstrom")
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get("/api/documents/?q=Wienstrom")
+        self.assertEqual(self._ids(resp), [doc.id])
+
+    # --- AK3: Ranking – Titeltreffer vor reinem OCR-Treffer -------------
+    def test_ak3_title_ranks_before_ocr(self):
+        # ocr_doc zuerst angelegt → hätte bei Gleichstand via -added_at den
+        # Vortritt; korrektes Ranking muss title_doc dennoch vorne einordnen.
+        ocr_doc = self._doc(
+            self.owner, title="Anhang", ocr_text="Zwischenbericht Quartalsbericht Q3"
+        )
+        title_doc = self._doc(self.owner, title="Quartalsbericht Q3 2024")
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get("/api/documents/?q=Quartalsbericht")
+        ids = self._ids(resp)
+        self.assertEqual(set(ids), {title_doc.id, ocr_doc.id})
+        self.assertLess(
+            ids.index(title_doc.id),
+            ids.index(ocr_doc.id),
+            "Titeltreffer (Gewicht A) muss vor OCR-Treffer (Gewicht D) ranken.",
+        )
+
+    # --- AK4: Owner-Isolation inkl. Admin-Ausnahme ----------------------
+    def test_ak4_owner_isolation(self):
+        doc = self._doc(self.owner, title="Privatvertrag Sonderbegriff")
+        # Fremder Nutzer sieht den Treffer nicht.
+        self.client.force_authenticate(self.other)
+        resp = self.client.get("/api/documents/?q=Sonderbegriff")
+        self.assertEqual(self._ids(resp), [])
+        # Admin sieht alles.
+        self.client.force_authenticate(self.admin)
+        resp = self.client.get("/api/documents/?q=Sonderbegriff")
+        self.assertEqual(self._ids(resp), [doc.id])
+
+    # --- AK5: Fallback für leere / kurze Query --------------------------
+    def test_ak5_empty_query_returns_full_list(self):
+        d1 = self._doc(self.owner, title="Alpha")
+        d2 = self._doc(self.owner, title="Beta")
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get("/api/documents/?q=")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(set(self._ids(resp)), {d1.id, d2.id})
+
+    def test_ak5_short_query_icontains(self):
+        hit = self._doc(self.owner, title="XZ-Sonderfall")
+        self._doc(self.owner, title="Unbeteiligt")
+        self.client.force_authenticate(self.owner)
+        # 2-Zeichen-Query → icontains-Fallback (FTS-Lexeme greifen hier nicht).
+        resp = self.client.get("/api/documents/?q=XZ")
+        self.assertEqual(self._ids(resp), [hit.id])
+
+    # --- AK6: weitere Felder je als alleiniges Trefferfeld --------------
+    def test_ak6_document_type_match(self):
+        doc = self._doc(self.owner, title="Scan", document_type="Versicherungspolizze")
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get("/api/documents/?q=Versicherungspolizze")
+        self.assertEqual(self._ids(resp), [doc.id])
+
+    def test_ak6_tag_match(self):
+        doc = self._doc(self.owner, title="Scan", tags=["Nebenkostenabrechnung"])
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get("/api/documents/?q=Nebenkostenabrechnung")
+        self.assertEqual(self._ids(resp), [doc.id])
+
+    def test_ak6_mail_subject_match(self):
+        doc = self._doc(self.owner, title="Scan", mail_subject="Zählerstand Erdgas")
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get("/api/documents/?q=Zählerstand")
+        self.assertEqual(self._ids(resp), [doc.id])
+
+    def test_ak6_mail_sender_match(self):
+        # mail.py speichert den From-Header realistisch als "Anzeigename <adresse>"
+        # (mail.py:201). PostgreSQL-FTS tokenisiert eine reine E-Mail-Adresse als
+        # EIN atomares Token, d. h. Teilstrings der Domain sind nicht als eigene
+        # Lexeme suchbar. Realistische, FTS-taugliche Suche geht über den
+        # Anzeigenamen des Absenders (siehe Known-Limitation-Kommentar in views.py).
+        doc = self._doc(
+            self.owner,
+            title="Scan",
+            mail_sender="Energieanbieter Buchhaltung <buchhaltung@energieanbieter.example>",
+        )
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get("/api/documents/?q=Energieanbieter")
+        self.assertEqual(self._ids(resp), [doc.id])
