@@ -236,6 +236,14 @@ class Document(models.Model):
         default=ApprovalStatus.ENTWURF,
     )
 
+    # Archive Serial Number (STOAA-284/285): dauerhafte, unveränderliche Identität
+    # des logischen Dokuments – gehört zum Document, nie zu einer Version, bleibt
+    # über alle Versionen identisch, wird nie geändert oder wiederverwendet. Die
+    # eigentliche (transaktionssichere, lückenlose) Vergabe-Logik lebt im Service
+    # ``documents.services.asn``; ``save()`` ruft ihn nur als Invarianten-Absicherung
+    # auf, damit JEDER Erstellungspfad garantiert genau eine ASN erhält.
+    asn = models.PositiveBigIntegerField(unique=True, editable=False, db_index=True)
+
     class Meta:
         verbose_name = "Dokument"
         verbose_name_plural = "Dokumente"
@@ -243,6 +251,21 @@ class Document(models.Model):
 
     def __str__(self) -> str:
         return self.title
+
+    def save(self, *args, **kwargs):
+        """Sichert die ASN-Invariante ab: jedes neue Dokument erhält genau eine ASN.
+
+        Die Vergabe (transaktionssicher, per ``select_for_update``) delegiert
+        vollständig an den Service ``documents.services.asn`` – hier steht bewusst
+        keine Businesslogik, nur der Aufruf, der die Invariante an der niedrigsten
+        Ebene erzwingt (unabhängig vom Erstellungspfad: Upload, Mail, Consume,
+        direktes POST). Eine einmal vergebene ASN wird nie überschrieben.
+        """
+        if self._state.adding and not self.asn:
+            from documents.services.asn import assign_asn
+
+            assign_asn(self)
+        super().save(*args, **kwargs)
 
 
 class DocumentVersion(models.Model):
@@ -740,6 +763,68 @@ class DocumentShareLink(models.Model):
     def is_valid(self) -> bool:
         """Nutzbar = weder widerrufen noch abgelaufen."""
         return self.revoked_at is None and not self.is_expired
+
+
+# ---------------------------------------------------------------------------
+# ASN (Archive Serial Number, STOAA-284/285)
+# ---------------------------------------------------------------------------
+class ASNCounter(models.Model):
+    """Singleton-Zähler für die lückenlose, transaktionssichere ASN-Vergabe.
+
+    Genau eine Zeile (``pk=1``). Die Vergabe sperrt sie per ``select_for_update``
+    und erhöht ``last_value`` – dadurch serialisieren sich parallele Vergaben und
+    es entstehen weder Doppelvergaben noch Race Conditions. Bewusst **nicht** über
+    ``Document.objects.count()+1`` oder die Datenbank-ID (siehe Service).
+    """
+
+    last_value = models.PositiveBigIntegerField(
+        default=0,
+        help_text="Zuletzt vergebene ASN. Die nächste Vergabe liefert last_value + 1.",
+    )
+
+    class Meta:
+        verbose_name = "ASN-Zähler"
+        verbose_name_plural = "ASN-Zähler"
+
+    def __str__(self) -> str:
+        return f"ASN-Zähler (last_value={self.last_value})"
+
+
+class ASNScan(models.Model):
+    """Import-Historie einer ASN-Erkennung (Erweiterung gegenüber paperless).
+
+    Dokumentiert nachvollziehbar, wann und wodurch eine ASN erkannt wurde und
+    welche Version dadurch entstanden ist (z. B. beim erneuten Scan eines
+    Papierdokuments mit ASN-Etikett).
+    """
+
+    document = models.ForeignKey(
+        Document, on_delete=models.CASCADE, related_name="asn_scans"
+    )
+    version = models.ForeignKey(
+        DocumentVersion,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="asn_scans",
+    )
+    scanned_at = models.DateTimeField(auto_now_add=True)
+    matched_by = models.CharField(
+        max_length=64,
+        help_text="z. B. OCR, QR, Barcode",
+    )
+    confidence = models.FloatField(
+        default=1.0,
+        help_text="OCR-Erkennungswahrscheinlichkeit",
+    )
+
+    class Meta:
+        verbose_name = "ASN-Scan"
+        verbose_name_plural = "ASN-Scans"
+        ordering = ["-scanned_at"]
+
+    def __str__(self) -> str:
+        return f"ASN-Scan Dok#{self.document_id} via {self.matched_by} @ {self.scanned_at:%Y-%m-%d %H:%M}"
 
 
 # ---------------------------------------------------------------------------
