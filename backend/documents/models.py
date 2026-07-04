@@ -403,10 +403,13 @@ class MailAccount(models.Model):
         blank=True,
         help_text="Name der Umgebungsvariable (k8s-Secret) mit dem Passwort – empfohlen.",
     )
-    password = models.CharField(
-        max_length=255,
+    password = models.TextField(
         blank=True,
-        help_text="Alternativ direkt hinterlegtes App-Passwort (nur ohne Secret-Env).",
+        help_text=(
+            "Alternativ direkt hinterlegtes App-Passwort (nur ohne Secret-Env). "
+            "Wird beim Speichern verschlüsselt (Fernet, siehe crypto.py) – niemals "
+            "im Klartext in der DB und niemals über die API ausgegeben."
+        ),
     )
     enabled = models.BooleanField(default=True)
     last_checked_at = models.DateTimeField(null=True, blank=True)
@@ -420,13 +423,27 @@ class MailAccount(models.Model):
     def __str__(self) -> str:
         return f"{self.name} <{self.username}@{self.host}>"
 
+    def save(self, *args, **kwargs):
+        """Passwort at-rest verschlüsseln (idempotent).
+
+        Bereits verschlüsselte Werte (z. B. ein unverändert aus der DB geladenes
+        Objekt) werden nicht doppelt verschlüsselt – ``is_encrypted`` erkennt sie.
+        """
+        from .crypto import encrypt_secret, is_encrypted
+
+        if self.password and not is_encrypted(self.password):
+            self.password = encrypt_secret(self.password)
+        super().save(*args, **kwargs)
+
     def resolve_password(self) -> str:
-        """Passwort auflösen: Secret-Env hat Vorrang vor dem DB-Feld."""
+        """Passwort auflösen: Secret-Env hat Vorrang vor dem entschlüsselten DB-Feld."""
         import os
+
+        from .crypto import decrypt_secret
 
         if self.password_env:
             return os.environ.get(self.password_env, "")
-        return self.password
+        return decrypt_secret(self.password)
 
 
 class ProcessedMail(models.Model):

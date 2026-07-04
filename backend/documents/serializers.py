@@ -10,6 +10,7 @@ from .models import (
     DocumentShareLink,
     DocumentType,
     DocumentVersion,
+    MailAccount,
     StoragePath,
     Tag,
 )
@@ -256,3 +257,55 @@ class DocumentSerializer(serializers.ModelSerializer):
         if cfv is not None:
             self._upsert_custom_field_values(document, cfv)
         return document
+
+
+class MailAccountSerializer(serializers.ModelSerializer):
+    """CRUD-Serializer für IMAP-Postfächer (STOAA-212).
+
+    Sicherheit:
+    - ``password`` ist **write-only**: Es wird nie in einer Response ausgegeben
+      (weder Klartext noch Chiffretext). Die Verschlüsselung at-rest übernimmt
+      ``MailAccount.save()`` (Fernet, siehe ``crypto.py``).
+    - ``has_password`` zeigt der UI, ob ein Passwort hinterlegt ist, ohne es
+      preiszugeben.
+    - ``last_checked_at`` / ``last_error`` sind Status und nur lesbar.
+    """
+
+    password = serializers.CharField(
+        write_only=True,
+        required=False,
+        allow_blank=True,
+        style={"input_type": "password"},
+        help_text="Nur schreiben. Leerer String bei PATCH = unverändert lassen.",
+    )
+    has_password = serializers.SerializerMethodField()
+
+    class Meta:
+        model = MailAccount
+        fields = (
+            "id",
+            "name",
+            "owner",
+            "host",
+            "port",
+            "use_ssl",
+            "username",
+            "folder",
+            "password",
+            "password_env",
+            "has_password",
+            "enabled",
+            "last_checked_at",
+            "last_error",
+        )
+        read_only_fields = ("id", "last_checked_at", "last_error")
+
+    def get_has_password(self, obj) -> bool:
+        return bool(obj.password or obj.password_env)
+
+    def update(self, instance, validated_data):
+        # Leeres Passwort bei PATCH bedeutet „nicht ändern" – sonst würde ein
+        # UI-Formular ohne erneute Passworteingabe das gespeicherte löschen.
+        if validated_data.get("password", None) == "":
+            validated_data.pop("password")
+        return super().update(instance, validated_data)
