@@ -9,6 +9,7 @@ from django.contrib.auth import get_user_model
 
 from . import pipeline, storage
 from .models import DocumentVersion
+from .owner import log_ingest_owner_audit, resolve_default_owner
 
 logger = logging.getLogger(__name__)
 
@@ -94,8 +95,15 @@ def scan_consume_folder() -> dict:
     if getattr(settings, "CONSUME_PER_USER", False):
         return _scan_per_user(consume, min_age, now)
 
-    # Flat-Modus (Default): Dateien liegen direkt im Consume-Ordner, ohne Owner.
-    result = _ingest_consume_dir(consume, None, min_age, now)
+    # Flat-Modus (Default): Dateien liegen direkt im Consume-Ordner. Ohne
+    # pro-User-Ordner greift optional ``CONSUME_DEFAULT_OWNER`` (STOAA-295),
+    # damit eingespeiste Dokumente nicht eigentümerlos (und für Nicht-Admins
+    # unsichtbar) bleiben. Ist er leer/unbekannt, bleibt owner=None ein
+    # bewusster, admin-sichtbarer Triage-Zustand.
+    default_owner = resolve_default_owner(getattr(settings, "CONSUME_DEFAULT_OWNER", ""))
+    result = _ingest_consume_dir(
+        consume, default_owner, min_age, now, fallback_used=default_owner is not None
+    )
     return {"found": len(result["ingested"]), **result}
 
 
@@ -140,14 +148,23 @@ def _scan_per_user(consume: Path, min_age: float, now: float) -> dict:
     }
 
 
-def _ingest_consume_dir(base: Path, owner, min_age: float, now: float) -> dict:
+def _ingest_consume_dir(
+    base: Path, owner, min_age: float, now: float, *, fallback_used: bool = False
+) -> dict:
     """Nimmt alle reifen Dateien direkt in ``base`` auf (ohne Rekursion).
 
     ``_processed/`` und ``_failed/`` liegen relativ zu ``base``. Wird sowohl im
-    Flat-Modus (``base=CONSUME_DIR``, ``owner=None``) als auch pro User-Ordner
-    verwendet (``owner`` = aufgelöster Django-User). Gibt die aufgenommenen
-    Dokumente sowie Zähler zurück. Robustheit unverändert: Reife-Check pro
-    Datei, ``_processed/``-Idempotenz, pro-Datei ``try/except`` → ``_failed/``.
+    Flat-Modus (``base=CONSUME_DIR``, ``owner`` = ``CONSUME_DEFAULT_OWNER`` oder
+    None) als auch pro User-Ordner verwendet (``owner`` = aufgelöster
+    Django-User). Gibt die aufgenommenen Dokumente sowie Zähler zurück.
+    Robustheit unverändert: Reife-Check pro Datei, ``_processed/``-Idempotenz,
+    pro-Datei ``try/except`` → ``_failed/``.
+
+    ``fallback_used`` markiert, dass ``owner`` aus ``CONSUME_DEFAULT_OWNER``
+    stammt (Flat-Fallback) – dann wird pro Dokument ``owner_fallback``
+    protokolliert; bei ``owner=None`` ``triage_ingest``. Der Per-User-Pfad ruft
+    ohne ``fallback_used`` auf und hat stets einen echten Owner → kein
+    Zusatz-Audit (Verhalten unverändert, STOAA-269).
     """
     processed_dir = base / "_processed"
     failed_dir = base / "_failed"
@@ -182,6 +199,16 @@ def _ingest_consume_dir(base: Path, owner, min_age: float, now: float) -> dict:
             document, version = pipeline.create_document_from_file(
                 str(target), title=title, size=target.stat().st_size, owner=owner,
                 ingest_source="consume",
+            )
+            # Owner-Herkunft explizit machen (STOAA-295): Flat-Fallback ->
+            # ``owner_fallback``, ohne Owner -> ``triage_ingest``. Per-User-Pfad
+            # (echter Owner, kein Fallback) erzeugt hier keinen Zusatz-Eintrag.
+            log_ingest_owner_audit(
+                document,
+                owner=owner,
+                fallback_used=fallback_used,
+                source="consume",
+                reason="consume_flat_ohne_owner",
             )
             process_document_version.delay(version.id)
             entry.rename(processed_dir / entry.name)

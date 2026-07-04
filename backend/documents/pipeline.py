@@ -432,6 +432,20 @@ def _run_from(version: DocumentVersion, start_index: int) -> dict:
                     "chars": step_result["chars"],
                 },
             )
+            # ASN-Integration (STOAA-284/285): Nach dem OCR den Text auf eine ASN
+            # prüfen. Erkennt der Service die ASN eines *bestehenden* Dokuments
+            # (erneuter Scan eines Papierdokuments), hängt er diese Version als
+            # neue Version an das bestehende Dokument und entfernt das Duplikat.
+            # Best effort – ein Fehler hier darf die restliche Pipeline nicht
+            # abbrechen (Stil ``scan_consume_folder``).
+            from documents.services import asn as asn_service
+
+            try:
+                asn_service.match_and_reconcile(version, actor=version.created_by)
+            except Exception:  # noqa: BLE001 – Zuordnung ist optional/best effort
+                logger.exception(
+                    "ASN-Reconcile für Version %s fehlgeschlagen", version.id
+                )
 
     return {
         "version_id": version.id,

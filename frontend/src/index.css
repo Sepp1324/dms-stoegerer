@@ -679,6 +679,51 @@ select:focus-visible {
   color: var(--muted);
 }
 
+/* --- Triage-Ansicht (STOAA-296): owner-lose Dokumente + „Owner setzen" --- */
+.triage-toggle {
+  align-self: end;
+}
+.triage-toggle--active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+/* Triage-Karte: kein Vorschaubild, dafür Zuweisungs-Bereich unten. */
+.doc-card--triage {
+  cursor: default;
+}
+.doc-card--triage:hover {
+  border-color: var(--border);
+  transform: none;
+}
+.triage-card__open {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  text-align: left;
+  padding: 0.85rem 0.85rem 0.6rem;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  cursor: pointer;
+}
+.triage-card__open:hover:not(:disabled) {
+  background: rgba(148, 163, 184, 0.08);
+}
+.triage-card__open .doc-card__footer {
+  margin-top: 0.35rem;
+}
+.triage-card__assign {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.6rem 0.85rem 0.85rem;
+  border-top: 1px solid var(--border);
+}
+.triage-card__assign button {
+  align-self: start;
+}
+
 /* --- Detailansicht --- */
 .detail {
   display: grid;
@@ -823,6 +868,193 @@ select:focus-visible {
 .version-add input[type="file"] {
   font-size: 0.8rem;
   color: var(--muted);
+}
+
+/* --- Versionsvergleich (STOAA-290) --- */
+.compare-picker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.6rem;
+  margin-top: 0.4rem;
+}
+.compare-picker__field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+.compare-picker__field select {
+  min-width: 6rem;
+}
+.compare-result {
+  margin-top: 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+.compare-caption {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.compare-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.compare-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 0.1rem 0.6rem;
+  font-size: 0.72rem;
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+.compare-badge--same {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+.compare-badge--changed {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-tint);
+}
+.compare-hint {
+  margin: 0;
+  font-size: 0.75rem;
+}
+.compare-section {
+  border-top: 1px solid var(--border);
+  padding-top: 0.7rem;
+}
+.compare-section h4 {
+  margin: 0 0 0.5rem;
+  font-size: 0.85rem;
+}
+.compare-file-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+.compare-file-table th,
+.compare-file-table td {
+  text-align: left;
+  padding: 0.25rem 0.5rem 0.25rem 0;
+  vertical-align: top;
+}
+.compare-file-table thead th {
+  color: var(--muted);
+  font-weight: 500;
+  font-size: 0.72rem;
+}
+.compare-file-table tbody th {
+  color: var(--muted);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.compare-downloads {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.8rem;
+  margin-top: 0.6rem;
+}
+.compare-diff {
+  margin: 0;
+  max-height: 24rem;
+  overflow: auto;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.5rem 0.6rem;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+.compare-diff--text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.compare-diff__line {
+  display: block;
+}
+.compare-diff__line--add {
+  color: var(--ok);
+  background: rgba(34, 197, 94, 0.1);
+}
+.compare-diff__line--del {
+  color: var(--error);
+  background: rgba(239, 68, 68, 0.1);
+}
+.compare-diff__line--meta {
+  color: var(--muted);
+}
+/* Vom Backend erzeugte HtmlDiff-Tabelle ans dunkle Theme anpassen (Stufe 2). */
+.compare-diff--html table {
+  border-collapse: collapse;
+  width: 100%;
+}
+.compare-diff--html td,
+.compare-diff--html th {
+  border: 1px solid var(--border);
+  padding: 0.1rem 0.4rem;
+}
+.compare-diff--html .diff_add {
+  background: rgba(34, 197, 94, 0.18);
+}
+.compare-diff--html .diff_sub {
+  background: rgba(239, 68, 68, 0.18);
+}
+.compare-diff--html .diff_chg {
+  background: rgba(245, 158, 11, 0.18);
+}
+.compare-changes {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.compare-change {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+}
+.compare-change__label {
+  color: var(--muted);
+  min-width: 8rem;
+}
+.compare-change__old {
+  color: var(--error);
+}
+.compare-change__new {
+  color: var(--ok);
+}
+.compare-change__arrow {
+  color: var(--muted);
+}
+.compare-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+.compare-tag {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 0.1rem 0.55rem;
+  font-size: 0.72rem;
+  border: 1px solid var(--border);
+}
+.compare-tag--added {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+.compare-tag--removed {
+  color: var(--error);
+  border-color: var(--error);
 }
 .tag {
   display: inline-block;
@@ -1746,4 +1978,20 @@ button.share-links__revoke:hover:not(:disabled) {
   flex: 1;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.82rem;
+}
+
+/* Archivnummer (ASN) im Dokumentdetail (STOAA-286): ASN-Label monospace neben
+   dem QR-Download-Button. */
+.asn {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.asn__value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.02em;
+}
+.asn button.link {
+  padding: 0.2rem 0.4rem;
 }

@@ -181,6 +181,11 @@ export interface DocumentDetail extends DocumentItem {
   ai_suggested_at: string | null;
   classification: Classification;
   versions: DocumentVersion[];
+  // Archivnummer (STOAA-284/285). ``asn`` ist die rohe fortlaufende Zahl,
+  // ``asn_label`` die kanonische Anzeigeform ``ASN000123``. Beide read-only,
+  // serverseitig vergeben; ``null`` bei Altdaten ohne vergebene ASN.
+  asn: number | null;
+  asn_label: string | null;
   // Zusatzfelder-Werte dieses Dokuments (STOAA-108/112). Nur gesetzte Werte sind
   // enthalten; die vollständige Feldliste kommt aus getCustomFields().
   custom_field_values: CustomFieldValue[];
@@ -399,6 +404,11 @@ export interface DocumentQuery {
   storage_path?: number | "";
   // Verarbeitungsstatus-Filter (STOAA-248): grober UI-Bucket, leer = kein Filter.
   processing_state?: ProcessingStateFilter | "";
+  // Triage-Ansicht (STOAA-296): nur ``"none"`` ist wirksam und lädt die
+  // owner-losen Dokumente. Ausschließlich für Admins ausgewertet – für
+  // Nicht-Admins ignoriert das Backend den Param (Queryset ist ohnehin auf den
+  // eigenen Owner isoliert, STOAA-295). Leer = kein Triage-Filter.
+  owner?: "none" | "";
   page?: number;
   // Sortierung, z. B. "-added_at" (Datum neu→alt), "added_at" (alt→neu),
   // "title" (A–Z). Leer = Backend-Standard (FTS-Relevanz bei ``q``, sonst
@@ -488,6 +498,15 @@ export async function getDocumentIntegrity(id: number): Promise<DocumentIntegrit
   return res.json();
 }
 
+// Lädt den QR-Code des Dokuments als PNG-Blob (STOAA-284/286). Der Code enthält
+// ausschließlich die ASN (``ASN000123``). Per fetch+Blob wegen JWT – ein direkter
+// <img src="…/qr/"> würde den Bearer-Token nicht mitschicken.
+export async function getDocumentQr(id: number): Promise<Blob> {
+  const res = await apiFetch(`/documents/${id}/qr/`);
+  if (!res.ok) throw new Error(`QR-Code nicht verfügbar (HTTP ${res.status})`);
+  return res.blob();
+}
+
 // Lädt die Originaldatei einer Version als Blob (mit Auth-Header) zum Download.
 export async function getDocumentVersionFile(
   id: number,
@@ -496,6 +515,84 @@ export async function getDocumentVersionFile(
   const res = await apiFetch(`/documents/${id}/download/?version=${versionNo}`);
   if (!res.ok) throw new Error(`Download fehlgeschlagen (HTTP ${res.status})`);
   return res.blob();
+}
+
+// --- Versionsvergleich Stufe 1 (STOAA-288/289/290) ---
+// Contract entspricht ``VersionCompareResultSerializer`` (Backend STOAA-289 auf
+// origin/main). Metadaten-/Tag-/Feld-Diff wird in Stufe 1 aus dem aktuellen
+// Dokument berechnet (beide Versionen zeigen auf dasselbe ``Document``) und ist
+// daher vorerst faktisch immer leer; die Felder bleiben Teil des Contracts,
+// damit Stufe 2 (echte Metadaten-Versionierung) rein additiv andockt.
+export interface CompareFieldChange {
+  old: string | null;
+  new: string | null;
+}
+
+export interface CompareSummary {
+  text_changed: boolean;
+  metadata_changed: boolean;
+  tags_changed: boolean;
+  custom_fields_changed: boolean;
+  binary_changed: boolean;
+  pages_changed: boolean;
+  tag_changes: number;
+  field_changes: number;
+}
+
+export interface CompareFileDiff {
+  old_sha256: string;
+  new_sha256: string;
+  old_size: number;
+  new_size: number;
+  old_mime: string;
+  new_mime: string;
+  changed: boolean;
+  old_page_count: number | null;
+  new_page_count: number | null;
+  pages_changed: boolean;
+  // Stufe-2-Vorbereitung (PDF-Seitendiff); vom Stufe-1-Backend nicht geliefert.
+  both_pdf?: boolean;
+}
+
+export interface VersionCompare {
+  document: number;
+  from_version: number;
+  to_version: number;
+  summary: CompareSummary;
+  text_diff: string;
+  // HtmlDiff-Tabelle; erst ab Stufe 2 gefüllt. Wenn vorhanden, wird sie dem
+  // Plaintext-Diff vorgezogen.
+  text_diff_html?: string;
+  metadata: Record<string, CompareFieldChange>;
+  tags: { added: string[]; removed: string[] };
+  custom_fields: Record<string, CompareFieldChange>;
+  files: CompareFileDiff;
+  // Ob Metadaten/Tags/Felder pro Version verglichen werden können (Stufe 2).
+  // Das Stufe-1-Backend liefert das Feld nicht → im Frontend als false behandeln.
+  metadata_versioning_supported?: boolean;
+}
+
+// Vergleicht zwei Versionen desselben Dokuments (STOAA-288).
+// GET /documents/{id}/versions/{from}/compare/{to}/
+export async function compareVersions(
+  id: number,
+  fromVersion: number,
+  toVersion: number,
+): Promise<VersionCompare> {
+  const res = await apiFetch(
+    `/documents/${id}/versions/${fromVersion}/compare/${toVersion}/`,
+  );
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const data = await res.json();
+      detail = data.detail || detail;
+    } catch {
+      /* keine JSON-Fehlermeldung */
+    }
+    throw new Error(detail);
+  }
+  return res.json();
 }
 
 // Hängt eine neue Datei als nächste Version an ein bestehendes Dokument.
@@ -812,6 +909,32 @@ export async function getMailAccounts(): Promise<MailAccount[]> {
 // Aktive Nutzer für Zuordnungs-Dropdowns (admin-only im Backend). Bare Liste.
 export async function getUsers(): Promise<User[]> {
   return listAll<User>("/users/");
+}
+
+// Owner eines (Triage-)Dokuments setzen (STOAA-295/296). Nur für Admins –
+// das Backend erzwingt ``IsDmsAdmin`` (403 für Normalnutzer). Body ``{owner}``
+// erwartet die Nutzer-ID; die Antwort ist das aktualisierte Dokument. Nach
+// Erfolg fällt das Dokument aus der ``?owner=none``-Liste heraus.
+export async function setDocumentOwner(
+  id: number,
+  owner: number,
+): Promise<DocumentDetail> {
+  const res = await apiFetch(`/documents/${id}/set-owner/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ owner }),
+  });
+  if (!res.ok) {
+    let detail = `Zuweisen fehlgeschlagen: HTTP ${res.status}`;
+    try {
+      const data = await res.json();
+      if (data && typeof data.detail === "string") detail = data.detail;
+    } catch {
+      /* keine JSON-Fehlermeldung – Fallback bleibt */
+    }
+    throw new Error(detail);
+  }
+  return res.json();
 }
 export function createMailAccount(
   payload: MailAccountPayload,

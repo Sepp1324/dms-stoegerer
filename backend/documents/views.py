@@ -7,10 +7,11 @@ from datetime import timezone as dt_timezone
 from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
+from django.contrib.auth import get_user_model
 from django.db import connection
 from django.db.models import Case, DecimalField, Q, Value, When
 from django.db.models.functions import Cast
-from django.http import FileResponse, Http404
+from django.http import FileResponse, Http404, HttpResponse
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
@@ -80,6 +81,7 @@ from .serializers import (
     TagSerializer,
     WorkflowSerializer,
 )
+from .services import asn as asn_service
 from .tasks import (
     bulk_classify_documents,
     process_document_version,
@@ -88,6 +90,10 @@ from .tasks import (
 
 # Erkennt Bereichsfilter auf Zusatzfeldern: ``custom_field_<id>_gte`` / ``_lte``.
 _CUSTOM_FIELD_PARAM_RE = re.compile(r"^custom_field_(\d+)_(gte|lte)$")
+# Eine Sucheingabe, die *ausschließlich* eine ASN ist: ``ASN12345`` oder die reine
+# Nummer ``12345`` (führende Nullen erlaubt). Beide Formen sind für die Suche
+# äquivalent und liefern exakt das zugehörige Dokument (STOAA-284/285).
+_ASN_QUERY_RE = re.compile(r"(?i)^\s*(?:asn)?\s*[0-9]+\s*$")
 # Werte, die sich verlustfrei zu DECIMAL casten lassen (Vorzeichen + Dezimalpunkt).
 # Andere ``CustomFieldValue.value`` (Text/Datum/„k. A.") werden per CASE zu NULL
 # und fallen aus dem Vergleich – kein Postgres-500 beim Cast.
@@ -340,7 +346,29 @@ class DocumentViewSet(viewsets.ModelViewSet):
 
         params = self.request.query_params
 
+        # Triage-Ansicht (STOAA-295): Admins können mit ``?owner=none`` gezielt
+        # die eigentümerlosen (Triage-)Dokumente auflisten und anschließend per
+        # ``set-owner`` zuweisen. Für Nicht-Admins ist der Param wirkungslos –
+        # ihr Queryset ist bereits auf ``owner=user`` isoliert (STOAA-7), ein
+        # Leak in fremde/eigentümerlose Dokumente ist damit ausgeschlossen.
+        if getattr(user, "is_dms_admin", False) and params.get("owner") == "none":
+            qs = qs.filter(owner__isnull=True)
+
         q = params.get("q", "").strip()
+        # ASN-Suche (STOAA-284/285): Eine Eingabe, die ausschließlich eine ASN ist
+        # (``ASN12345`` oder die reine Nummer ``12345``), liefert exakt das
+        # zugehörige Dokument – beide Formen sind äquivalent. Owner-Scope bleibt
+        # gewahrt (qs ist bereits gefiltert). Gemischte Anfragen laufen weiter
+        # über die Volltextsuche.
+        if q and _ASN_QUERY_RE.match(q):
+            asn_value = asn_service.coerce_asn(q)
+            if asn_value is not None:
+                asn_qs = qs.filter(asn=asn_value)
+                # Nur wenn tatsächlich ein (eigenes) Dokument mit dieser ASN
+                # existiert, wird exakt danach aufgelöst. Sonst fällt die reine
+                # Zahl auf die normale Volltextsuche zurück (z. B. Jahreszahlen).
+                if asn_qs.exists():
+                    return asn_qs.distinct()
         if 0 < len(q) < 3:
             # Kurze Query: FTS-Lexeme greifen bei 1–2 Zeichen schlecht →
             # icontains-ODER über dieselben Felder. Kein ``rank`` → es gilt das
@@ -496,6 +524,39 @@ class DocumentViewSet(viewsets.ModelViewSet):
         """
         document = self.get_object()
         return Response(pipeline.verify_document_integrity(document))
+
+    @action(detail=False, methods=["get"], url_path=r"by-asn/(?P<asn>[^/]+)")
+    def by_asn(self, request, asn=None):
+        """Liefert das Dokument zu einer ASN (``GET /api/documents/by-asn/{asn}``).
+
+        Akzeptiert sowohl ``ASN000123`` als auch die reine Nummer ``123``. Owner-
+        Scoping über ``get_queryset()`` – ein fremdes/unbekanntes Dokument ergibt
+        404 (kein Leak). Nur-Lesen. Die ASN-Auflösung liegt vollständig im Service
+        (keine ASN-Logik im ViewSet).
+        """
+        asn_value = asn_service.coerce_asn(asn)
+        if asn_value is None:
+            raise Http404("Ungültige ASN.")
+        document = self.get_queryset().filter(asn=asn_value).first()
+        if document is None:
+            raise Http404("Kein Dokument mit dieser ASN gefunden.")
+        return Response(self.get_serializer(document).data)
+
+    @action(detail=True, methods=["get"])
+    def qr(self, request, pk=None):
+        """Liefert den QR-Code des Dokuments als PNG (``GET /api/documents/{id}/qr``).
+
+        Der Code enthält ausschließlich die ASN (``ASN000123``) – keine URL, kein
+        JSON. Die Erzeugung liegt vollständig im Service ``asn.render_qr``. Nur-
+        Lesen; Owner-Scoping über ``get_object()``.
+        """
+        document = self.get_object()
+        png = asn_service.render_qr(document)
+        response = HttpResponse(png, content_type="image/png")
+        response["Content-Disposition"] = (
+            f'inline; filename="{asn_service.format_asn(document.asn)}.png"'
+        )
+        return response
 
     @action(
         detail=True,

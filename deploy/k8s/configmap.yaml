@@ -23,6 +23,13 @@ data:
   # NFS-Reife-Check: Datei erst aufnehmen, wenn sie mind. so viele Sekunden
   # alt ist (verhindert Teil-Reads langsam über NFS geschriebener Scans).
   CONSUME_MIN_AGE: "15"
+  # Standard-Eigentümer für Ingest ohne direkten Owner (STOAA-295, Username).
+  # Leer = bewusste Admin-Triage (owner=None, via GET /api/documents/?owner=none
+  # sichtbar, per POST .../set-owner/ zuweisbar). MAIL_DEFAULT_OWNER greift, wenn
+  # ein MailAccount keinen owner hat; CONSUME_DEFAULT_OWNER im Flat-Consume-Modus
+  # (Per-User-Modus setzt den Owner selbst). Keine Migration.
+  MAIL_DEFAULT_OWNER: ""
+  CONSUME_DEFAULT_OWNER: ""
   AI_PROVIDER: "anthropic"
   AI_MODEL: "claude-opus-4-8"
   OLLAMA_BASE_URL: "http://ollama:11434"
