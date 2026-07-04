@@ -1480,3 +1480,208 @@ class ShareAccessRouteTests(APITestCase):
         # Der Link liefert NUR self.doc; ein Direktzugriff auf `other` bleibt 404.
         resp_other = self.client.get(f"/api/documents/{other.id}/")
         self.assertEqual(resp_other.status_code, 404)
+
+
+class MailCryptoTests(TestCase):
+    """Verschlüsselung der DB-Geheimnisse (STOAA-212)."""
+
+    def test_roundtrip(self):
+        from .crypto import decrypt_secret, encrypt_secret, is_encrypted
+
+        token = encrypt_secret("geheim123")
+        self.assertNotEqual(token, "geheim123")  # nicht im Klartext
+        self.assertTrue(is_encrypted(token))
+        self.assertEqual(decrypt_secret(token), "geheim123")
+
+    def test_empty(self):
+        from .crypto import decrypt_secret, encrypt_secret, is_encrypted
+
+        self.assertEqual(encrypt_secret(""), "")
+        self.assertEqual(decrypt_secret(""), "")
+        self.assertFalse(is_encrypted(""))
+
+    def test_legacy_plaintext_passthrough(self):
+        # Alt-Datenbestand (Klartext vor STOAA-212) bleibt lesbar.
+        from .crypto import decrypt_secret, is_encrypted
+
+        self.assertFalse(is_encrypted("altes-klartext-pw"))
+        self.assertEqual(decrypt_secret("altes-klartext-pw"), "altes-klartext-pw")
+
+    def test_model_encrypts_on_save(self):
+        acc = MailAccount.objects.create(
+            name="Rechnungen", host="imap.example.org", username="u", password="s3cret"
+        )
+        acc.refresh_from_db()
+        self.assertNotIn("s3cret", acc.password)  # DB-Feld ist Chiffretext
+        self.assertEqual(acc.resolve_password(), "s3cret")  # entschlüsselt korrekt
+
+    def test_save_is_idempotent(self):
+        acc = MailAccount.objects.create(
+            name="A", host="h", username="u", password="pw"
+        )
+        first = MailAccount.objects.get(pk=acc.pk).password
+        acc.name = "B"
+        acc.save()  # zweites Save darf nicht doppelt verschlüsseln
+        acc.refresh_from_db()
+        self.assertEqual(acc.password, first)
+        self.assertEqual(acc.resolve_password(), "pw")
+
+
+class MailAccountApiTests(APITestCase):
+    """CRUD + test-connection der Mailkonto-Verwaltung (STOAA-212)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.admin = User.objects.create_user(
+            username="mailadmin", password="pw", role="admin"
+        )
+        cls.user = User.objects.create_user(
+            username="normal", password="pw", role="user"
+        )
+
+    # --- Rechte -----------------------------------------------------------
+    def test_non_admin_forbidden(self):
+        self.client.force_authenticate(self.user)
+        self.assertEqual(self.client.get("/api/mail-accounts/").status_code, 403)
+
+    def test_anonymous_unauthorized(self):
+        self.assertIn(self.client.get("/api/mail-accounts/").status_code, (401, 403))
+
+    def test_admin_can_list(self):
+        self.client.force_authenticate(self.admin)
+        self.assertEqual(self.client.get("/api/mail-accounts/").status_code, 200)
+
+    # --- CRUD -------------------------------------------------------------
+    def test_create_hides_password_and_encrypts(self):
+        self.client.force_authenticate(self.admin)
+        resp = self.client.post(
+            "/api/mail-accounts/",
+            {
+                "name": "Rechnungen",
+                "host": "imap.example.org",
+                "username": "rechnung@example.org",
+                "password": "supergeheim",
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        # Passwort niemals in der Response
+        self.assertNotIn("password", resp.data)
+        self.assertNotIn("supergeheim", str(resp.data))
+        self.assertTrue(resp.data["has_password"])
+        acc = MailAccount.objects.get(pk=resp.data["id"])
+        self.assertNotIn("supergeheim", acc.password)  # verschlüsselt in DB
+        self.assertEqual(acc.resolve_password(), "supergeheim")
+        # Audit-Eintrag
+        self.assertTrue(
+            AuditLogEntry.objects.filter(
+                action="mailaccount_create", object_id=str(acc.id)
+            ).exists()
+        )
+
+    def test_patch_empty_password_keeps_existing(self):
+        self.client.force_authenticate(self.admin)
+        acc = MailAccount.objects.create(
+            name="A", host="h", username="u", password="orig-pw"
+        )
+        resp = self.client.patch(
+            f"/api/mail-accounts/{acc.id}/",
+            {"name": "A-neu", "password": ""},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        acc.refresh_from_db()
+        self.assertEqual(acc.name, "A-neu")
+        self.assertEqual(acc.resolve_password(), "orig-pw")  # unverändert
+
+    def test_patch_new_password_replaces(self):
+        self.client.force_authenticate(self.admin)
+        acc = MailAccount.objects.create(
+            name="A", host="h", username="u", password="orig-pw"
+        )
+        resp = self.client.patch(
+            f"/api/mail-accounts/{acc.id}/",
+            {"password": "neues-pw"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        acc.refresh_from_db()
+        self.assertEqual(acc.resolve_password(), "neues-pw")
+
+    def test_delete_audited(self):
+        self.client.force_authenticate(self.admin)
+        acc = MailAccount.objects.create(name="A", host="h", username="u")
+        resp = self.client.delete(f"/api/mail-accounts/{acc.id}/")
+        self.assertEqual(resp.status_code, 204)
+        self.assertFalse(MailAccount.objects.filter(pk=acc.id).exists())
+        self.assertTrue(
+            AuditLogEntry.objects.filter(
+                action="mailaccount_delete", object_id=str(acc.id)
+            ).exists()
+        )
+
+    # --- Verbindungstest --------------------------------------------------
+    def test_test_connection_missing_fields(self):
+        self.client.force_authenticate(self.admin)
+        resp = self.client.post(
+            "/api/mail-accounts/test-connection/", {}, format="json"
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_test_connection_success(self):
+        from unittest import mock
+
+        self.client.force_authenticate(self.admin)
+        with mock.patch("documents.mail.connect") as m:
+            m.return_value = mock.Mock()
+            resp = self.client.post(
+                "/api/mail-accounts/test-connection/",
+                {"host": "imap.example.org", "username": "u", "password": "p"},
+                format="json",
+            )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertTrue(resp.data["ok"])
+
+    def test_test_connection_failure(self):
+        from unittest import mock
+
+        self.client.force_authenticate(self.admin)
+        with mock.patch("documents.mail.connect", side_effect=OSError("connect refused")):
+            resp = self.client.post(
+                "/api/mail-accounts/test-connection/",
+                {"host": "imap.example.org", "username": "u", "password": "p"},
+                format="json",
+            )
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.data["ok"])
+        self.assertIn("connect refused", resp.data["message"])
+
+    def test_test_connection_by_id_uses_stored_password(self):
+        from unittest import mock
+
+        self.client.force_authenticate(self.admin)
+        acc = MailAccount.objects.create(
+            name="A", host="h", username="u", password="stored-pw"
+        )
+        captured = {}
+
+        def fake_connect(account):
+            captured["pw"] = account.resolve_password()
+            return mock.Mock()
+
+        with mock.patch("documents.mail.connect", side_effect=fake_connect):
+            resp = self.client.post(
+                "/api/mail-accounts/test-connection/", {"id": acc.id}, format="json"
+            )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertTrue(resp.data["ok"])
+        self.assertEqual(captured["pw"], "stored-pw")
+
+    def test_non_admin_cannot_test_connection(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.post(
+            "/api/mail-accounts/test-connection/",
+            {"host": "h", "username": "u"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 403)

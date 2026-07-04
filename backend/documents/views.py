@@ -36,6 +36,19 @@ class ReadOnlyOrCanWrite(BasePermission):
             return True
         return bool(getattr(request.user, "can_write", False))
 
+
+class IsDmsAdmin(BasePermission):
+    """Nur DMS-Administratoren (``is_dms_admin``) – für Systemkonfiguration.
+
+    Verwendet für die Mailkonto-Verwaltung (STOAA-212): IMAP-Zugangsdaten sind
+    sensibel, deshalb ist der gesamte ViewSet (auch Lesen) Admins vorbehalten.
+    """
+
+    def has_permission(self, request, view):
+        if not (request.user and request.user.is_authenticated):
+            return False
+        return bool(getattr(request.user, "is_dms_admin", False))
+
 from . import pipeline, storage
 from .models import (
     AuditLogEntry,
@@ -46,6 +59,7 @@ from .models import (
     Document,
     DocumentShareLink,
     DocumentType,
+    MailAccount,
     StoragePath,
     Tag,
 )
@@ -57,6 +71,7 @@ from .serializers import (
     DocumentSerializer,
     DocumentShareLinkSerializer,
     DocumentTypeSerializer,
+    MailAccountSerializer,
     StoragePathSerializer,
     TagSerializer,
 )
@@ -1086,3 +1101,91 @@ class ShareDownloadView(_ShareAccessView):
         if version is None:
             raise Http404("Keine Version vorhanden.")
         return _serve_version_download(link.document, version)
+
+
+class MailAccountViewSet(viewsets.ModelViewSet):
+    """Verwaltung der IMAP-Postfächer (STOAA-212).
+
+    Nur DMS-Admins (``IsDmsAdmin``): IMAP-Zugangsdaten sind sensibel. Das
+    Passwort wird write-only entgegengenommen, at-rest verschlüsselt (Model-
+    ``save()``) und nie ausgegeben. Zusätzlich ein Verbindungstest-Endpoint,
+    der Zugangsdaten prüft, ohne sie zu speichern.
+    """
+
+    queryset = MailAccount.objects.all()
+    serializer_class = MailAccountSerializer
+    permission_classes = [IsDmsAdmin]
+
+    def _audit(self, action, account_id, detail=None):
+        AuditLogEntry.objects.create(
+            actor=self.request.user,
+            action=action,
+            object_type="MailAccount",
+            object_id=str(account_id),
+            detail=detail or {},
+        )
+
+    def perform_create(self, serializer):
+        account = serializer.save()
+        self._audit("mailaccount_create", account.id, {"name": account.name})
+
+    def perform_update(self, serializer):
+        account = serializer.save()
+        self._audit("mailaccount_update", account.id, {"name": account.name})
+
+    def perform_destroy(self, instance):
+        account_id, name = instance.id, instance.name
+        instance.delete()
+        self._audit("mailaccount_delete", account_id, {"name": name})
+
+    @action(detail=False, methods=["post"], url_path="test-connection")
+    def test_connection(self, request):
+        """IMAP-Verbindung mit übergebenen (oder gespeicherten) Zugangsdaten testen.
+
+        Body: entweder ``{"id": <pk>}`` (testet ein gespeichertes Konto) **oder**
+        vollständige Zugangsdaten ``{host, port, use_ssl, username, password}``
+        (bzw. ``password_env``). Es wird nichts gespeichert.
+
+        Antwort: ``{"ok": bool, "message": str}`` (HTTP 200 – ein fehlgeschlagener
+        Test ist kein Client-Fehler, sondern ein erwartetes Ergebnis).
+        """
+        from .mail import connect
+
+        data = request.data
+        account_id = data.get("id")
+        if account_id is not None:
+            account = self.get_queryset().filter(pk=account_id).first()
+            if account is None:
+                return Response(
+                    {"detail": "Konto nicht gefunden."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+        else:
+            host = (data.get("host") or "").strip()
+            username = (data.get("username") or "").strip()
+            if not host or not username:
+                return Response(
+                    {"detail": "host und username sind erforderlich."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            # Transientes (nicht gespeichertes) Konto nur für den Verbindungstest.
+            account = MailAccount(
+                name="__test__",
+                host=host,
+                port=int(data.get("port") or 993),
+                use_ssl=bool(data.get("use_ssl", True)),
+                username=username,
+                folder=data.get("folder") or "INBOX",
+                password=data.get("password") or "",
+                password_env=data.get("password_env") or "",
+            )
+
+        try:
+            conn = connect(account)
+            try:
+                conn.logout()
+            except Exception:  # noqa: BLE001 – Logout-Fehler nach Erfolg ignorieren
+                pass
+            return Response({"ok": True, "message": "Verbindung erfolgreich."})
+        except Exception as exc:  # noqa: BLE001 – jede IMAP-/Netzwerkstörung melden
+            return Response({"ok": False, "message": str(exc) or exc.__class__.__name__})
