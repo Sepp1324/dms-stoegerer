@@ -8,24 +8,20 @@ from django.conf import settings
 
 from . import pipeline, storage
 from .models import DocumentVersion
-from documents.pipeline import process_version
 
 logger = logging.getLogger(__name__)
 
 
 @shared_task
 def process_document_version(version_id: int) -> dict:
-    """Verarbeitet eine neu angelegte Version: Hash-Kette + OCR + Ablage + Audit.
+    """Verarbeitet eine neu angelegte Version bis ``READY``.
 
-    Stößt anschließend die KI-Metadatenvorschläge an (asynchron, unverbindlich).
+    Die fachliche State Machine läuft synchron in ``pipeline.process_version``;
+    anschließend werden KI-Metadatenvorschläge asynchron und unverbindlich
+    angestoßen.
     """
     version = DocumentVersion.objects.select_related("document").get(pk=version_id)
     result = pipeline.process_version(version)
-
-    # Regelbasierte Klassifizierung (deterministisch, direkt anwendend) vor der KI.
-    from . import classification
-
-    classification.apply_rules(version.document)
 
     # KI-Vorschläge nach dem OCR (eigener Task, damit OCR nicht daran hängt).
     from ai.tasks import suggest_document_metadata

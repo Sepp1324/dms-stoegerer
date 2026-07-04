@@ -1813,3 +1813,123 @@ class BulkClassifyEndpointTests(APITestCase):
                 action="bulk_classify", actor=self.user
             ).exists()
         )
+
+
+class DocumentProcessingStateMachineTests(TestCase):
+    """Regressionstests für die fachliche Dokumentverarbeitungs-State-Machine."""
+
+    def _version(self, file_path: str = "/tmp/dms-test.pdf"):
+        user = User.objects.create_user(username="state-user", password="pw", role="user")
+        document = Document.objects.create(title="State Machine Test", owner=user)
+        version = DocumentVersion.objects.create(
+            document=document,
+            version_no=1,
+            file_path=file_path,
+            created_by=user,
+        )
+        document.current_version = version
+        document.save(update_fields=["current_version"])
+        return user, document, version
+
+    def test_neue_version_startet_als_uploaded(self):
+        _, _, version = self._version()
+
+        self.assertEqual(
+            version.processing_state,
+            DocumentVersion.ProcessingState.UPLOADED,
+        )
+
+    def test_transitionen_muessen_strikt_vorwaerts_laufen(self):
+        from django.core.exceptions import ValidationError
+
+        user, _, version = self._version()
+
+        with self.assertRaises(ValidationError):
+            version.transition_to(
+                DocumentVersion.ProcessingState.OCR_RUNNING,
+                actor=user,
+            )
+
+        version.transition_to(DocumentVersion.ProcessingState.HASHED, actor=user)
+        version.transition_to(DocumentVersion.ProcessingState.OCR_RUNNING, actor=user)
+
+        with self.assertRaises(ValidationError):
+            version.transition_to(DocumentVersion.ProcessingState.READY, actor=user)
+
+    def test_process_document_version_durchlaeuft_alle_states(self):
+        from pathlib import Path
+        from unittest import mock
+
+        from documents.services.ocr.types import OCRResult, OCRStatusEnum
+        from .tasks import process_document_version
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "cornelia.pdf"
+            source.write_bytes(b"%PDF-1.4\n% test\n")
+            user, document, version = self._version(str(source))
+
+            ClassificationRule.objects.create(
+                name="Cornelia",
+                match={"text_contains": ["Cornelia"]},
+                then={"correspondent": "Cornelia", "document_type": "Privat"},
+            )
+
+            def fake_thumbnail(version, *, max_width=700):
+                thumbnail = str(Path(tmp) / "thumb.jpg")
+                DocumentVersion.objects.filter(pk=version.pk).update(
+                    thumbnail_path=thumbnail
+                )
+                version.thumbnail_path = thumbnail
+                return thumbnail
+
+            with mock.patch(
+                "documents.pipeline.run_ocr",
+                return_value=OCRResult(
+                    text="Dokument von Cornelia",
+                    pages=1,
+                    status=OCRStatusEnum.SUCCESS,
+                    duration_ms=12,
+                    engine="test-ocr",
+                ),
+            ), mock.patch(
+                "documents.pipeline.generate_thumbnail",
+                side_effect=fake_thumbnail,
+            ), mock.patch(
+                "ai.tasks.suggest_document_metadata.delay"
+            ) as suggest_delay:
+                result = process_document_version(version.id)
+
+        version.refresh_from_db()
+        document.refresh_from_db()
+
+        self.assertEqual(result["processing_state"], DocumentVersion.ProcessingState.READY)
+        self.assertEqual(version.processing_state, DocumentVersion.ProcessingState.READY)
+        self.assertTrue(version.is_immutable)
+        self.assertEqual(version.ocr_text, "Dokument von Cornelia")
+        self.assertEqual(version.ocr_status, OCRStatusEnum.SUCCESS.value)
+        self.assertEqual(document.correspondent.name, "Cornelia")
+        self.assertEqual(document.document_type.name, "Privat")
+        suggest_delay.assert_called_once_with(document.id)
+
+        state_changes = list(
+            AuditLogEntry.objects.filter(
+                action="processing_state",
+                object_type="DocumentVersion",
+                object_id=str(version.id),
+            )
+            .order_by("id")
+            .values_list("detail", flat=True)
+        )
+        self.assertEqual(
+            [entry["to"] for entry in state_changes],
+            [
+                DocumentVersion.ProcessingState.HASHED,
+                DocumentVersion.ProcessingState.OCR_RUNNING,
+                DocumentVersion.ProcessingState.OCR_DONE,
+                DocumentVersion.ProcessingState.CLASSIFICATION_RUNNING,
+                DocumentVersion.ProcessingState.CLASSIFIED,
+                DocumentVersion.ProcessingState.THUMBNAIL_DONE,
+                DocumentVersion.ProcessingState.SEALED,
+                DocumentVersion.ProcessingState.READY,
+            ],
+        )

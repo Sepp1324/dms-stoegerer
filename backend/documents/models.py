@@ -248,6 +248,36 @@ class Document(models.Model):
 class DocumentVersion(models.Model):
     """Eine konkrete Fassung eines Dokuments – der Träger von Datei & Hash-Kette."""
 
+    class ProcessingState(models.TextChoices):
+        """Fachliche State Machine der asynchronen Dokumentverarbeitung.
+
+        ``ocr_status`` bleibt das technische Detail-Monitoring des OCR-Schritts.
+        ``processing_state`` beschreibt dagegen den gesamten DMS-Fluss, den UI,
+        Audit und Betrieb gemeinsam verstehen sollen.
+        """
+
+        UPLOADED = "uploaded", "Uploaded"
+        HASHED = "hashed", "Hashed"
+        OCR_RUNNING = "ocr_running", "OCR running"
+        OCR_DONE = "ocr_done", "OCR done"
+        CLASSIFICATION_RUNNING = "classification_running", "Classification running"
+        CLASSIFIED = "classified", "Classified"
+        THUMBNAIL_DONE = "thumbnail_done", "Thumbnail done"
+        SEALED = "sealed", "Sealed"
+        READY = "ready", "Ready"
+
+    PROCESSING_TRANSITIONS = {
+        ProcessingState.UPLOADED: {ProcessingState.HASHED},
+        ProcessingState.HASHED: {ProcessingState.OCR_RUNNING},
+        ProcessingState.OCR_RUNNING: {ProcessingState.OCR_DONE},
+        ProcessingState.OCR_DONE: {ProcessingState.CLASSIFICATION_RUNNING},
+        ProcessingState.CLASSIFICATION_RUNNING: {ProcessingState.CLASSIFIED},
+        ProcessingState.CLASSIFIED: {ProcessingState.THUMBNAIL_DONE},
+        ProcessingState.THUMBNAIL_DONE: {ProcessingState.SEALED},
+        ProcessingState.SEALED: {ProcessingState.READY},
+        ProcessingState.READY: set(),
+    }
+
     document = models.ForeignKey(
         Document, on_delete=models.CASCADE, related_name="versions"
     )
@@ -266,6 +296,13 @@ class DocumentVersion(models.Model):
         max_length=64,
         blank=True,
         help_text="sha256 der Vorgängerversion – bildet die Hash-Kette",
+    )
+    processing_state = models.CharField(
+        max_length=32,
+        choices=ProcessingState.choices,
+        default=ProcessingState.UPLOADED,
+        db_index=True,
+        help_text="State Machine der Dokumentverarbeitung (uploaded → ready)",
     )
 
     ocr_status = models.CharField(
@@ -317,6 +354,32 @@ class DocumentVersion(models.Model):
 
     def __str__(self) -> str:
         return f"{self.document.title} · v{self.version_no}"
+
+    def transition_to(self, new_state: str, *, actor=None, detail: dict | None = None) -> None:
+        """Wechselt streng kontrolliert in den nächsten Verarbeitungszustand.
+
+        Der Wechsel läuft bewusst über ``QuerySet.update``: Nach ``SEALED`` ist
+        die Version WORM-geschützt und ``save()`` darf nicht mehr funktionieren.
+        Die State Machine selbst bleibt trotzdem berechtigt, den letzten Schritt
+        ``SEALED → READY`` auditierbar zu setzen.
+        """
+        old_state = self.processing_state
+        allowed = self.PROCESSING_TRANSITIONS.get(old_state, set())
+        if new_state not in allowed:
+            raise ValidationError(
+                f"Ungültiger Verarbeitungsübergang: {old_state} → {new_state}"
+            )
+
+        DocumentVersion.objects.filter(pk=self.pk).update(processing_state=new_state)
+        self.processing_state = new_state
+
+        AuditLogEntry.objects.create(
+            actor=actor,
+            action="processing_state",
+            object_type="DocumentVersion",
+            object_id=str(self.id),
+            detail={"from": old_state, "to": new_state, **(detail or {})},
+        )
 
     def save(self, *args, **kwargs):
         if self.pk:
