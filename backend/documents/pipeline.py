@@ -17,6 +17,10 @@ from pathlib import Path
 
 from . import storage
 from .models import AuditLogEntry, Document, DocumentVersion
+<<<<<<< HEAD
+=======
+from documents.services.ocr.engine import run_ocr
+>>>>>>> a7e415a (Reworked OCR)
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +170,7 @@ def verify_document_integrity(document: Document) -> dict:
     return {"chain_ok": chain_ok, "versions": results}
 
 
+<<<<<<< HEAD
 def run_ocr(
     input_path: str | Path, output_path: Path
 ) -> tuple[str, int | None, bool]:
@@ -200,6 +205,32 @@ def run_ocr(
     text = extract_text(source)
     pages = _page_count(source)
     return text, pages, archive_created
+=======
+from documents.services.ocr.engine import run_ocr
+
+
+def process_version(version, file_path: str):
+    """
+    Stufe-2 Pipeline Entry Point
+    """
+
+    # 1. Status setzen
+    version.ocr_status = "running"
+    version.save(update_fields=["ocr_status"])
+
+    # 2. OCR ausführen
+    result = run_ocr(file_path)
+
+    # 3. Ergebnis speichern
+    version.ocr_text = result.text
+    version.page_count = result.pages
+    version.ocr_status = result.status.value
+    version.ocr_error = result.error or ""
+    version.ocr_engine = result.engine
+    version.ocr_duration_ms = result.duration_ms
+
+    version.save()
+>>>>>>> a7e415a (Reworked OCR)
 
 
 def extract_text(pdf_path: str | Path) -> str:

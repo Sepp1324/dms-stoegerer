@@ -8,6 +8,10 @@ from django.conf import settings
 
 from . import pipeline, storage
 from .models import DocumentVersion
+<<<<<<< HEAD
+=======
+from documents.pipeline import process_version
+>>>>>>> a7e415a (Reworked OCR)
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +191,27 @@ def bulk_classify_documents(document_ids, actor_id=None) -> dict:
         )
     return result
 
+<<<<<<< HEAD
+=======
+@shared_task(bind=True, max_retries=3)
+def run_document_pipeline(self, version_id: int, file_path: str):
+    """
+    WHY:
+    - retry support
+    - async OCR
+    """
+
+    try:
+        from documents.models import DocumentVersion
+
+        version = DocumentVersion.objects.get(id=version_id)
+
+        process_version(version, file_path)
+
+    except Exception as e:
+        raise self.retry(exc=e, countdown=10)
+
+>>>>>>> a7e415a (Reworked OCR)
 
 def _unique(path: Path) -> Path:
     counter = 1
