@@ -46,7 +46,7 @@ if [ "$ready" -ne 1 ]; then
 fi
 echo "::endgroup::"
 
-echo "::group::Migrations-Check + Testsuite im Backend-Image"
+echo "::group::System-Check + Migrations-Check + Testsuite im Backend-Image"
 # POSTGRES_HOST zeigt auf den DB-Container im selben Docker-Netz.
 # DJANGO_SECRET_KEY/DEBUG explizit gesetzt, damit der Lauf nicht vom
 # Default-Verhalten abhängt. Der User "dms" ist im Postgres-Image Superuser
@@ -59,5 +59,5 @@ docker run --rm --network "$NET" \
   -e DJANGO_SECRET_KEY=ci-test-not-a-real-secret \
   -e DJANGO_DEBUG=0 \
   "$IMAGE" \
-  sh -c "python manage.py makemigrations --check --dry-run && python manage.py test --noinput -v2"
+  sh -c "python manage.py check && python manage.py makemigrations --check --dry-run && python manage.py test --noinput -v2"
 echo "::endgroup::"

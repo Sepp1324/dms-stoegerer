@@ -33,19 +33,24 @@ Runner-Skript: [`backend/ci/run-tests.sh`](../backend/ci/run-tests.sh)
 Pull Request  ─▶  ci.yml (Runner "dms")
                     1. docker build backend  (flüchtiger CI-Tag)
                     2. Wegwerf-Postgres starten
-                    3. python manage.py makemigrations --check --dry-run
-                    4. python manage.py test
+                    3. python manage.py check           (System-Check)
+                    4. python manage.py makemigrations --check --dry-run
+                    5. python manage.py test
+    Frontend-Job (frontend-build):
+                    1. docker build frontend → npm run build (tsc -b && vite build)
 ```
 
-- **PR-Gate:** `ci.yml` läuft auf `pull_request`. Ein roter Test blockt – via
-  **Branch-Protection** (Pflicht-Check `backend-tests` auf `main`) – den Merge
-  und damit den Deploy.
+- **PR-Gate:** `ci.yml` läuft auf `pull_request` (Backend **und** Frontend). Ein
+  roter Job blockt – via **Branch-Protection** (Pflicht-Checks `backend-tests`
+  **und** `frontend-build` auf `main`) – den Merge und damit den Deploy.
+  **Ein PR ist erst mergebar, wenn beide CI-Jobs grün sind.**
 - **Deploy-Gate:** `deploy.yml` führt dasselbe Skript vor dem `docker push`
   aus. So blockt ein roter Test auch bei direktem Push nach `main` den Rollout.
 
 > Branch-Protection einrichten (einmalig, GitHub → Settings → Branches):
-> Regel für `main`, „Require status checks to pass“ → Check **`backend-tests`**
-> auswählen. Erst danach blockt ein roter Test den Merge zuverlässig.
+> Regel für `main`, „Require status checks to pass“ → Checks **`backend-tests`**
+> und **`frontend-build`** auswählen. Erst danach blockt ein roter Lauf den Merge
+> zuverlässig.
 
 ---
 
