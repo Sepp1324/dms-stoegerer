@@ -13,6 +13,7 @@ cryptography==44.0.0
 # OCR-Pipeline
 ocrmypdf==16.10.0
 img2pdf==0.6.0
+PyMuPDF==1.24.9
 # pikepdf explizit auf 8.x pinnen: ocrmypdf 16.10 ruft noch Pdf.check() auf,
 # das in pikepdf 9.x entfernt wurde (sonst AttributeError → OCR schlägt fehl).
 pikepdf==8.15.1
