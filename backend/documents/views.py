@@ -235,7 +235,8 @@ class DocumentUploadView(APIView):
         file_path, size, mime = storage.save_upload(uploaded)
 
         document, version = pipeline.create_document_from_file(
-            file_path, title=title, owner=request.user, mime=mime, size=size
+            file_path, title=title, owner=request.user, mime=mime, size=size,
+            source=DocumentVersion.Source.UPLOAD,
         )
         # OCR/Hash-Kette asynchron im Celery-Worker.
         process_document_version.delay(version.id)
@@ -523,7 +524,8 @@ class DocumentViewSet(viewsets.ModelViewSet):
 
         file_path, size, mime = storage.save_upload(uploaded)
         version = pipeline.create_version_for_document(
-            document, file_path, created_by=request.user, mime=mime, size=size
+            document, file_path, created_by=request.user, mime=mime, size=size,
+            source=DocumentVersion.Source.UPLOAD,
         )
         # OCR/Hash-Kette asynchron im Celery-Worker.
         process_document_version.delay(version.id)
