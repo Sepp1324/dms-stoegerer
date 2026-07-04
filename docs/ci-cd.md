@@ -26,26 +26,32 @@ Django-Testsuite in der CI – im gebauten Backend-Image gegen eine wegwerfbare
 **Postgres 16** (SQLite scheidet aus, weil das Backend `django.contrib.postgres`
 für die Volltextsuche nutzt).
 
-Workflow: [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)
+Workflow: [`.github/workflows/pr-checks.yml`](../.github/workflows/pr-checks.yml)
 Runner-Skript: [`backend/ci/run-tests.sh`](../backend/ci/run-tests.sh)
 
 ```
-Pull Request  ─▶  ci.yml (Runner "dms")
-                    1. docker build backend  (flüchtiger CI-Tag)
-                    2. Wegwerf-Postgres starten
-                    3. python manage.py makemigrations --check --dry-run
-                    4. python manage.py test
+Pull Request → main  ─▶  pr-checks.yml (Runner "dms")
+   backend-tests:    1. docker build backend  (flüchtiger CI-Tag)
+                     2. Wegwerf-Postgres 16 starten
+                     3. python manage.py check
+                     4. python manage.py makemigrations --check --dry-run
+                     5. python manage.py test
+   frontend-build:   docker build frontend  (npm install + tsc -b && vite build)
+   pr-checks:        aggregierendes Gate (needs: backend-tests, frontend-build)
 ```
 
-- **PR-Gate:** `ci.yml` läuft auf `pull_request`. Ein roter Test blockt – via
-  **Branch-Protection** (Pflicht-Check `backend-tests` auf `main`) – den Merge
-  und damit den Deploy.
-- **Deploy-Gate:** `deploy.yml` führt dasselbe Skript vor dem `docker push`
-  aus. So blockt ein roter Test auch bei direktem Push nach `main` den Rollout.
+- **PR-Gate:** `pr-checks.yml` läuft auf `pull_request → main`. Ein roter Job
+  macht den PR – via **Branch-Protection** – nicht mergebar. **Kein Deploy** in
+  diesem Workflow.
+- **Deploy-Gate:** `deploy.yml` (Push nach `main`, unverändert) führt Check +
+  `run-tests.sh` vor dem `docker push` erneut aus. So blockt ein roter Test auch
+  bei direktem Push nach `main` den Rollout (zweites Sicherheitsnetz).
 
-> Branch-Protection einrichten (einmalig, GitHub → Settings → Branches):
-> Regel für `main`, „Require status checks to pass“ → Check **`backend-tests`**
-> auswählen. Erst danach blockt ein roter Test den Merge zuverlässig.
+> **Branch-Protection einrichten (einmalig, macht der Owner):**
+> GitHub → **Settings → Branches** → Regel für `main` → „Require status checks
+> to pass before merging“ → Status-Check **`pr-checks`** auswählen. Erst danach
+> ist ein PR mit rotem Gate nicht mehr mergebar. (`pr-checks` wird nur grün,
+> wenn `backend-tests` **und** `frontend-build` grün sind.)
 
 ---
 
