@@ -86,14 +86,30 @@ def scan_consume_folder() -> dict:
     das unveränderte Flat-Verhalten.
     """
     consume = storage.CONSUME_DIR
-    if not consume.exists():
-        return {"found": 0, "ingested": [], "skipped": 0, "failed": 0}
+    # Fehlt der Consume-Ordner, tat der Task früher still nichts ({'found': 0})
+    # und Ingest lief betrieblich unbemerkt ins Leere (STOAA-321). Stattdessen
+    # legen wir das Verzeichnis idempotent an und weisen – nur bei tatsächlicher
+    # Neuanlage – EINMAL per WARN darauf hin.
+    existed = consume.exists()
+    consume.mkdir(parents=True, exist_ok=True)
+    if not existed:
+        logger.warning("scan_consume_folder: CONSUME_DIR angelegt: %s", consume)
 
     min_age = float(getattr(settings, "CONSUME_MIN_AGE", 15))
     now = time.time()
 
     if getattr(settings, "CONSUME_PER_USER", False):
+        # Pro-User-Modus: nur die Basis wird vorab angelegt (die eigentlichen
+        # Scan-Ordner sind pro-User-Unterordner, deren Namen hier unbekannt
+        # sind). ``_processed/``/``_failed/`` entstehen dort je User-Ordner.
         return _scan_per_user(consume, min_age, now)
+
+    # Flat-Modus: ``_processed/``/``_failed/`` direkt unter ``consume`` vorab
+    # idempotent anlegen (AK STOAA-321). ``_ingest_consume_dir`` legt sie sonst
+    # ohnehin lazy an – hier nur explizit, damit die Ordnerstruktur nach dem
+    # ersten Scan vollständig steht.
+    (consume / "_processed").mkdir(parents=True, exist_ok=True)
+    (consume / "_failed").mkdir(parents=True, exist_ok=True)
 
     # Flat-Modus (Default): Dateien liegen direkt im Consume-Ordner. Ohne
     # pro-User-Ordner greift optional ``CONSUME_DEFAULT_OWNER`` (STOAA-295),
