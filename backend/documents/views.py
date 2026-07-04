@@ -1238,7 +1238,16 @@ class MailAccountViewSet(viewsets.ModelViewSet):
 
         Antwort: ``{"ok": bool, "message": str}`` (HTTP 200 – ein fehlgeschlagener
         Test ist kein Client-Fehler, sondern ein erwartetes Ergebnis).
+
+        Wird ein **gespeichertes** Konto getestet (``{"id": <pk>}``), so wird das
+        Ergebnis persistiert: ``last_checked_at`` (immer) und ``last_error``
+        (leer bei Erfolg, sonst die Meldung). So bleibt der Status auch nach
+        Reload/Seitenwechsel sichtbar (STOAA-236, konform zur STOAA-172-Spec) und
+        deckt sich mit dem, was der Ingestion-Job schreibt. Für transiente,
+        nicht gespeicherte Zugangsdaten gibt es nichts zu persistieren.
         """
+        from django.utils import timezone
+
         from .mail import connect
 
         data = request.data
@@ -1270,12 +1279,35 @@ class MailAccountViewSet(viewsets.ModelViewSet):
                 password_env=data.get("password_env") or "",
             )
 
+        def _persist(error_message):
+            """Prüfergebnis am gespeicherten Konto festhalten (nur bei ``id``)."""
+            if account_id is None:
+                return None
+            account.last_checked_at = timezone.now()
+            account.last_error = error_message
+            account.save(update_fields=["last_checked_at", "last_error"])
+            self._audit(
+                "mailaccount_test_connection",
+                account.id,
+                {"ok": not error_message},
+            )
+            return account.last_checked_at
+
         try:
             conn = connect(account)
             try:
                 conn.logout()
             except Exception:  # noqa: BLE001 – Logout-Fehler nach Erfolg ignorieren
                 pass
-            return Response({"ok": True, "message": "Verbindung erfolgreich."})
+            checked_at = _persist("")
+            payload = {"ok": True, "message": "Verbindung erfolgreich."}
+            if checked_at is not None:
+                payload["last_checked_at"] = checked_at
+            return Response(payload)
         except Exception as exc:  # noqa: BLE001 – jede IMAP-/Netzwerkstörung melden
-            return Response({"ok": False, "message": str(exc) or exc.__class__.__name__})
+            message = str(exc) or exc.__class__.__name__
+            checked_at = _persist(message)
+            payload = {"ok": False, "message": message}
+            if checked_at is not None:
+                payload["last_checked_at"] = checked_at
+            return Response(payload)

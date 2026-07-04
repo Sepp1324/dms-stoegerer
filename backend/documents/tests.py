@@ -1691,6 +1691,61 @@ class MailAccountApiTests(APITestCase):
         )
         self.assertEqual(resp.status_code, 403)
 
+    def test_test_connection_by_id_persists_success(self):
+        """STOAA-236: Test eines gespeicherten Kontos persistiert den Status."""
+        from unittest import mock
+
+        self.client.force_authenticate(self.admin)
+        acc = MailAccount.objects.create(
+            name="A", host="h", username="u", password="p",
+            last_error="alter Fehler",
+        )
+        with mock.patch("documents.mail.connect", return_value=mock.Mock()):
+            resp = self.client.post(
+                "/api/mail-accounts/test-connection/", {"id": acc.id}, format="json"
+            )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertTrue(resp.data["ok"])
+        self.assertIn("last_checked_at", resp.data)
+        acc.refresh_from_db()
+        self.assertIsNotNone(acc.last_checked_at)
+        self.assertEqual(acc.last_error, "")
+
+    def test_test_connection_by_id_persists_failure(self):
+        """STOAA-236: Fehlgeschlagener Test setzt last_error am Konto."""
+        from unittest import mock
+
+        self.client.force_authenticate(self.admin)
+        acc = MailAccount.objects.create(name="A", host="h", username="u", password="p")
+        with mock.patch(
+            "documents.mail.connect", side_effect=OSError("connect refused")
+        ):
+            resp = self.client.post(
+                "/api/mail-accounts/test-connection/", {"id": acc.id}, format="json"
+            )
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.data["ok"])
+        acc.refresh_from_db()
+        self.assertIsNotNone(acc.last_checked_at)
+        self.assertIn("connect refused", acc.last_error)
+
+    def test_test_connection_transient_does_not_persist(self):
+        """Transiente Zugangsdaten (ohne id) legen kein Konto an und persistieren nichts."""
+        from unittest import mock
+
+        self.client.force_authenticate(self.admin)
+        before = MailAccount.objects.count()
+        with mock.patch("documents.mail.connect", return_value=mock.Mock()):
+            resp = self.client.post(
+                "/api/mail-accounts/test-connection/",
+                {"host": "imap.example.org", "username": "u", "password": "p"},
+                format="json",
+            )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertTrue(resp.data["ok"])
+        self.assertNotIn("last_checked_at", resp.data)
+        self.assertEqual(MailAccount.objects.count(), before)
+
 
 class BulkClassifyEndpointTests(APITestCase):
     """Bulk-Klassifizierung POST /api/documents/bulk-classify/ (STOAA-208).
