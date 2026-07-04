@@ -139,6 +139,37 @@ export interface DocumentDetail extends DocumentItem {
   ai_suggested_at: string | null;
   classification: Classification;
   versions: DocumentVersion[];
+  // Zusatzfelder-Werte dieses Dokuments (STOAA-108/112). Nur gesetzte Werte sind
+  // enthalten; die vollständige Feldliste kommt aus getCustomFields().
+  custom_field_values: CustomFieldValue[];
+}
+
+// --- Zusatzfelder (Custom Fields, STOAA-108/113) ---
+// Kanonisches Storage-Format (Backend-Kontrakt STOAA-112): NUMBER/CURRENCY mit
+// Punkt-Dezimal ("1234.56"), DATE ISO ("YYYY-MM-DD"), BOOLEAN "true"/"false",
+// TEXT roh. Das Frontend konvertiert für Anzeige/Eingabe ins deutsche Format.
+export type CustomFieldDataType =
+  | "text"
+  | "number"
+  | "date"
+  | "currency"
+  | "boolean";
+
+// Definition eines Zusatzfeldes (global, admin-gepflegt).
+export interface CustomField {
+  id: number;
+  name: string;
+  data_type: CustomFieldDataType;
+}
+
+// Wert eines Zusatzfeldes an einem Dokument (nested im DocumentDetail).
+// ``field`` ist die CustomField-PK; ``field_name``/``data_type`` liefert das
+// Backend read-only mit, damit das Frontend ohne Extra-Lookup formatieren kann.
+export interface CustomFieldValue {
+  field: number;
+  field_name: string;
+  data_type: CustomFieldDataType;
+  value: string;
 }
 export interface Classification {
   rules?: string[];
@@ -211,6 +242,11 @@ export interface DocumentQuery {
   // "title" (A–Z). Leer = Backend-Standard (FTS-Relevanz bei ``q``, sonst
   // ``-added_at``). Wird von getDocuments nur gesetzt, wenn nicht leer.
   ordering?: string;
+  // Zusatzfeld-Filter (STOAA-108/113): Query-Param-Name → Wert, z. B.
+  // { "custom_field_3_gte": "100.00", "custom_field_3_lte": "500.00" }.
+  // Werte sind bereits kanonisch (Punkt-Dezimal); leere Einträge werden
+  // ausgelassen. Backend ignoriert unbekannte/ungültige Grenzen (kein 500).
+  customFilters?: Record<string, string>;
 }
 
 export async function getDocuments(
@@ -218,6 +254,12 @@ export async function getDocuments(
 ): Promise<Paginated<DocumentItem>> {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(query)) {
+    if (key === "customFilters") continue; // gesondert behandelt (dynamische Keys)
+    if (value !== undefined && value !== "" && value !== null) {
+      params.set(key, String(value));
+    }
+  }
+  for (const [key, value] of Object.entries(query.customFilters ?? {})) {
     if (value !== undefined && value !== "" && value !== null) {
       params.set(key, String(value));
     }
@@ -310,6 +352,10 @@ export interface DocumentPatch {
   document_type?: number | null;
   storage_path?: number | null;
   tag_ids?: number[];
+  // Zusatzfeld-Werte als Upsert-Liste (STOAA-112): jeder Eintrag mit
+  // CustomField-PK und kanonischem Wert. Leerer Wert = Feld am Dokument löschen.
+  // Fehlt der Key ganz, bleiben vorhandene Werte unangetastet.
+  custom_field_values?: { field: number; value: string }[];
 }
 
 export async function updateDocument(
@@ -482,6 +528,55 @@ export async function getTags(): Promise<TagRef[]> {
 }
 export async function getStoragePaths(): Promise<NamedRef[]> {
   return listAll<NamedRef>("/storage-paths/");
+}
+
+// --- Zusatzfelder (Custom Fields) ---
+// CRUD unter /api/custom-fields/ (STOAA-112). DELETE liefert 409, wenn noch
+// Werte am Feld hängen (kein Datenverlust); die UI fängt das ab.
+export async function getCustomFields(): Promise<CustomField[]> {
+  return listAll<CustomField>("/custom-fields/");
+}
+export function createCustomField(
+  name: string,
+  data_type: CustomFieldDataType,
+): Promise<CustomField> {
+  return postJson<CustomField>("/custom-fields/", { name, data_type });
+}
+// Nur der Name ist änderbar – data_type ist serverseitig read-only (Typwechsel
+// wäre breaking, siehe Spec §3.1).
+export async function updateCustomField(
+  id: number,
+  name: string,
+): Promise<CustomField> {
+  const res = await apiFetch(`/custom-fields/${id}/`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const data = await res.json();
+      detail = data.detail || JSON.stringify(data);
+    } catch {
+      /* keine JSON-Fehlermeldung */
+    }
+    throw new Error(detail);
+  }
+  return res.json();
+}
+export async function deleteCustomField(id: number): Promise<void> {
+  const res = await apiFetch(`/custom-fields/${id}/`, { method: "DELETE" });
+  if (res.ok || res.status === 204) return;
+  let detail = `HTTP ${res.status}`;
+  try {
+    const data = await res.json();
+    detail = data.detail || JSON.stringify(data);
+  } catch {
+    /* keine JSON-Fehlermeldung */
+  }
+  // 409 = Feld ist noch in Dokumenten verwendet (Backend-Schutz).
+  throw new Error(detail);
 }
 
 // --- Klassifizierungsregeln ---
