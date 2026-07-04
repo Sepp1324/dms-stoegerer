@@ -1,10 +1,15 @@
 """Celery-Tasks der Verarbeitungs-Pipeline (asynchron, außerhalb des Requests)."""
+import logging
+import time
 from pathlib import Path
 
 from celery import shared_task
+from django.conf import settings
 
 from . import pipeline, storage
 from .models import DocumentVersion
+
+logger = logging.getLogger(__name__)
 
 
 @shared_task
@@ -30,37 +35,86 @@ def process_document_version(version_id: int) -> dict:
 
 @shared_task
 def scan_consume_folder() -> dict:
-    """Nimmt alle Dateien aus dem Consume-Ordner auf und stößt die Pipeline an.
+    """Nimmt alle reifen Dateien aus dem Consume-Ordner auf und stößt die Pipeline an.
 
     Verarbeitete Dateien werden nach ``consume/_processed/`` verschoben, damit
     sie nicht doppelt aufgenommen werden. (Beat-Zeitplan folgt später.)
+
+    NFS-/NAS-Reife: Eine Datei wird erst verarbeitet, wenn seit ihrer letzten
+    Änderung mindestens ``settings.CONSUME_MIN_AGE`` Sekunden vergangen sind.
+    Das verhindert Teil-Reads von Dateien, die noch langsam über NFS
+    geschrieben werden. Zu junge Dateien werden schlicht übersprungen (kein
+    Fehler, kein Verschieben) – der nächste Scan holt sie.
+
+    Robustheit: Ein Fehler bei einer einzelnen Datei bricht den Scan der
+    übrigen nicht ab und verschluckt die Datei nicht – sie wandert nach
+    ``consume/_failed/`` und wird protokolliert.
     """
     consume = storage.CONSUME_DIR
     if not consume.exists():
-        return {"found": 0, "ingested": []}
+        return {"found": 0, "ingested": [], "skipped": 0, "failed": 0}
 
     processed_dir = consume / "_processed"
+    failed_dir = consume / "_failed"
     processed_dir.mkdir(parents=True, exist_ok=True)
 
+    min_age = float(getattr(settings, "CONSUME_MIN_AGE", 15))
+    now = time.time()
+
     ingested = []
+    skipped = 0
+    failed = 0
     for entry in sorted(consume.iterdir()):
         if entry.is_dir() or entry.name.startswith("."):
             continue
-        title = entry.stem
-        # In den originals-Bereich kopieren, Original aus dem Eingang entfernen.
-        storage.ORIGINALS_DIR.mkdir(parents=True, exist_ok=True)
-        target = storage.ORIGINALS_DIR / entry.name
-        target = _unique(target)
-        target.write_bytes(entry.read_bytes())
 
-        document, version = pipeline.create_document_from_file(
-            str(target), title=title, size=target.stat().st_size
-        )
-        process_document_version.delay(version.id)
-        entry.rename(processed_dir / entry.name)
-        ingested.append({"document_id": document.id, "title": title})
+        # Reife-Check: zu junge (noch nicht fertig geschriebene) Dateien
+        # überspringen. ``stat`` kann fehlschlagen, wenn die Datei zwischen
+        # ``iterdir`` und hier verschwindet – dann ebenfalls überspringen.
+        try:
+            age = now - entry.stat().st_mtime
+        except OSError:
+            skipped += 1
+            continue
+        if age < min_age:
+            skipped += 1
+            continue
 
-    return {"found": len(ingested), "ingested": ingested}
+        try:
+            title = entry.stem
+            # In den originals-Bereich kopieren, Original aus dem Eingang entfernen.
+            storage.ORIGINALS_DIR.mkdir(parents=True, exist_ok=True)
+            target = _unique(storage.ORIGINALS_DIR / entry.name)
+            target.write_bytes(entry.read_bytes())
+
+            document, version = pipeline.create_document_from_file(
+                str(target), title=title, size=target.stat().st_size
+            )
+            process_document_version.delay(version.id)
+            entry.rename(processed_dir / entry.name)
+            ingested.append({"document_id": document.id, "title": title})
+        except Exception:
+            # Eine fehlerhafte Datei darf weder den Scan abbrechen noch
+            # verschluckt werden: nach ``_failed/`` verschieben + loggen.
+            failed += 1
+            logger.exception(
+                "scan_consume_folder: Verarbeitung fehlgeschlagen für %s", entry
+            )
+            try:
+                failed_dir.mkdir(parents=True, exist_ok=True)
+                entry.rename(_unique(failed_dir / entry.name))
+            except OSError:
+                logger.exception(
+                    "scan_consume_folder: Verschieben nach _failed/ fehlgeschlagen für %s",
+                    entry,
+                )
+
+    return {
+        "found": len(ingested),
+        "ingested": ingested,
+        "skipped": skipped,
+        "failed": failed,
+    }
 
 
 @shared_task

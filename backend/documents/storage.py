@@ -20,7 +20,13 @@ from django.utils.text import slugify
 DATA_DIR = Path(settings.DMS_DATA_DIR)
 ORIGINALS_DIR = DATA_DIR / "originals"
 ARCHIVE_DIR = DATA_DIR / "archive"
-CONSUME_DIR = DATA_DIR / "consume"
+# Eingangsordner: per Env (CONSUME_FOLDER_PATH) auf einen NFS-/NAS-Mount
+# umlenkbar; Fallback ist das bisherige DMS_DATA_DIR/consume.
+CONSUME_DIR = (
+    Path(settings.CONSUME_FOLDER_PATH)
+    if getattr(settings, "CONSUME_FOLDER_PATH", "")
+    else DATA_DIR / "consume"
+)
 
 DEFAULT_TEMPLATE = "archive/{jahr}/{korrespondent}/{titel}"
 

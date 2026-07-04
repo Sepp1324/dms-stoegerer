@@ -119,6 +119,16 @@ STORAGES = {
 # Wurzel der revisionssicheren Datei-Ablage (Originale + Archiv-PDFs)
 DMS_DATA_DIR = Path(os.getenv("DMS_DATA_DIR", BASE_DIR.parent / "data"))
 MEDIA_ROOT = DMS_DATA_DIR
+
+# Consume-Ordner (Eingang, z. B. vom Scanner/NAS beschickt). Der Pfad ist per
+# Env übersteuerbar, damit er auf einen NFS-/NAS-Mount zeigen kann; Default
+# unverändert DMS_DATA_DIR/consume (siehe storage.CONSUME_DIR). ``_processed/``
+# und ``_failed/`` liegen relativ dazu.
+CONSUME_FOLDER_PATH = os.getenv("CONSUME_FOLDER_PATH", "")
+# NFS-Reife-Check: eine Datei erst aufnehmen, wenn seit ihrer letzten Änderung
+# mindestens so viele Sekunden vergangen sind. Verhindert Teil-Reads langsam
+# über NFS geschriebener Scans; zu junge Dateien holt der nächste Scan.
+CONSUME_MIN_AGE = float(os.getenv("CONSUME_MIN_AGE", "15"))
 MEDIA_URL = "media/"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"

@@ -13,6 +13,12 @@ data:
   POSTGRES_PORT: "5432"
   REDIS_URL: "redis://redis:6379/0"
   DMS_DATA_DIR: "/data"
+  # Consume-Ordner (Eingang). Default unverändert = DMS_DATA_DIR/consume.
+  # Auf einen NFS-/NAS-Mount umlenkbar (Volume-Mount macht das DevOps-Ticket).
+  CONSUME_FOLDER_PATH: "/data/consume"
+  # NFS-Reife-Check: Datei erst aufnehmen, wenn sie mind. so viele Sekunden
+  # alt ist (verhindert Teil-Reads langsam über NFS geschriebener Scans).
+  CONSUME_MIN_AGE: "15"
   # Beat-Intervalle in Sekunden (periodische Aufgaben).
   MAIL_FETCH_INTERVAL: "300"
   CONSUME_SCAN_INTERVAL: "120"
