@@ -8,7 +8,7 @@ from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
 from django.db import connection
-from django.db.models import Case, DecimalField, Q, Value, When
+from django.db.models import Case, DecimalField, OuterRef, Q, Subquery, Value, When
 from django.db.models.functions import Cast
 from django.http import FileResponse, Http404
 from django.utils import timezone
@@ -84,6 +84,80 @@ _CUSTOM_FIELD_PARAM_RE = re.compile(r"^custom_field_(\d+)_(gte|lte)$")
 # und fallen aus dem Vergleich – kein Postgres-500 beim Cast.
 _NUMERIC_VALUE_RE = r"^-?[0-9]+(\.[0-9]+)?$"
 _DECIMAL_OUTPUT = DecimalField(max_digits=30, decimal_places=10)
+
+
+# --- Volltextsuche (STOAA-251) ------------------------------------------------
+# Gewichtete PostgreSQL-FTS über alle relevanten Suchfelder. Gewichte (A>B>C>D):
+#   A – title, correspondent.name          (Kopf-/Absenderdaten → höchster Rang)
+#   B – mail_subject, mail_sender,
+#       document_type.name, tags.name        (Metadaten)
+#   D – current_version.ocr_text            (Fließtext → niedrigster Rang)
+# Damit steht ein Titel-/Korrespondenten-Treffer im SearchRank vor einem reinen
+# OCR-Fließtext-Treffer (Akzeptanzkriterium 3). ``config="german"`` liefert
+# deutschsprachiges Stemming (z. B. „Rechnungen“ ↔ „Rechnung“).
+_FTS_CONFIG = "german"
+# Queries unterhalb dieser Länge sind für die tsvector-Zerlegung zu unspezifisch
+# (einzelne Buchstaben ergeben kaum sinnvolle Lexeme) → substring-Fallback.
+_FTS_MIN_LEN = 3
+
+
+def _apply_fulltext_search(qs, q):
+    """Filtert ``qs`` nach Volltext ``q`` und sortiert nach Relevanz.
+
+    Ab ``_FTS_MIN_LEN`` Zeichen läuft die gewichtete PostgreSQL-FTS
+    (SearchVector/SearchRank); kürzere Queries nutzen einen ``icontains``-ODER-
+    Fallback über dieselben Felder, damit auch 1–2-Zeichen-Eingaben Treffer
+    liefern. Die Owner-Isolation kommt aus dem übergebenen ``qs`` und bleibt
+    unangetastet.
+
+    Die Tag-Namen (n:m) werden über ein StringAgg-Subquery zu *einem* Textwert
+    verdichtet, bevor sie in den SearchVector eingehen. Ein direkter
+    ``tags__name``-Join würde das Dokument je Tag vervielfachen und – trotz
+    ``distinct()`` – bei unterschiedlichen Rängen doppelte Zeilen erzeugen.
+    """
+    from django.contrib.postgres.aggregates import StringAgg
+    from django.contrib.postgres.search import (
+        SearchQuery,
+        SearchRank,
+        SearchVector,
+    )
+
+    if len(q) < _FTS_MIN_LEN:
+        return qs.filter(
+            Q(title__icontains=q)
+            | Q(mail_subject__icontains=q)
+            | Q(mail_sender__icontains=q)
+            | Q(correspondent__name__icontains=q)
+            | Q(document_type__name__icontains=q)
+            | Q(tags__name__icontains=q)
+            | Q(current_version__ocr_text__icontains=q)
+        ).distinct()
+
+    # Korrelierte Aggregat-Subquery: pro Dokument alle Tag-Namen zu einem
+    # Textwert verdichten (GROUP BY über die m:n-Durchgangstabelle via
+    # ``values("documents")``). ``[:1]`` erzwingt genau eine Zeile je Outer-Row.
+    tag_names = Subquery(
+        Tag.objects.filter(documents=OuterRef("pk"))
+        .values("documents")
+        .annotate(_names=StringAgg("name", delimiter=" "))
+        .values("_names")[:1]
+    )
+    vector = (
+        SearchVector("title", weight="A", config=_FTS_CONFIG)
+        + SearchVector("correspondent__name", weight="A", config=_FTS_CONFIG)
+        + SearchVector("mail_subject", weight="B", config=_FTS_CONFIG)
+        + SearchVector("mail_sender", weight="B", config=_FTS_CONFIG)
+        + SearchVector("document_type__name", weight="B", config=_FTS_CONFIG)
+        + SearchVector("_tag_names", weight="B", config=_FTS_CONFIG)
+        + SearchVector("current_version__ocr_text", weight="D", config=_FTS_CONFIG)
+    )
+    query = SearchQuery(q, config=_FTS_CONFIG)
+    return (
+        qs.annotate(_tag_names=tag_names)
+        .annotate(rank=SearchRank(vector, query))
+        .filter(rank__gt=0)
+        .order_by("-rank", "-added_at")
+    )
 
 
 def _apply_custom_field_filters(qs, params):
@@ -281,7 +355,11 @@ class DocumentViewSet(viewsets.ModelViewSet):
     """Dokumente auflisten/abrufen inkl. Volltextsuche und Filtern.
 
     Query-Parameter der Liste:
-      * ``q``             – Volltextsuche über Titel + OCR-Text (PostgreSQL FTS)
+      * ``q``             – Gewichtete Volltextsuche (PostgreSQL FTS) über Titel,
+                            Korrespondent, Dokumenttyp, Tags, Mail-Betreff/-Absender
+                            und OCR-Text; Ranking via SearchRank (Titel/Korrespondent
+                            vor OCR-Fließtext). Kurze Queries (<3 Zeichen) nutzen einen
+                            ``icontains``-Fallback, leere Query = ungefilterte Liste.
       * ``correspondent`` – Filter auf Korrespondenten-ID
       * ``document_type`` – Filter auf Dokumenttyp-ID
       * ``storage_path``  – Filter auf Speicherpfad-ID
@@ -327,21 +405,9 @@ class DocumentViewSet(viewsets.ModelViewSet):
 
         q = params.get("q", "").strip()
         if q:
-            from django.contrib.postgres.search import (
-                SearchQuery,
-                SearchRank,
-                SearchVector,
-            )
-
-            vector = SearchVector("title", weight="A", config="german") + SearchVector(
-                "current_version__ocr_text", weight="B", config="german"
-            )
-            query = SearchQuery(q, config="german")
-            qs = (
-                qs.annotate(rank=SearchRank(vector, query))
-                .filter(rank__gt=0)
-                .order_by("-rank", "-added_at")
-            )
+            # Gewichtete FTS über alle Suchfelder (+ Kurzquery-Fallback).
+            # Leere Query → kein Filter (Standard-Liste bleibt = Fallback aus AK 5).
+            qs = _apply_fulltext_search(qs, q)
 
         if params.get("correspondent"):
             qs = qs.filter(correspondent_id=params["correspondent"])

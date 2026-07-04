@@ -2300,3 +2300,157 @@ class DocumentProcessingFailureRetryTests(TestCase):
         out2 = StringIO()
         call_command("retry_processing", "--failed", stdout=out2)
         self.assertIn("0 neu verarbeitet", out2.getvalue())
+
+
+class WeightedFullTextSearchTests(APITestCase):
+    """Gewichtete PostgreSQL-FTS über alle Suchfelder (STOAA-251).
+
+    Belegt die Akzeptanzkriterien aus STOAA-245: Treffer über OCR-Text, Titel und
+    Korrespondent; SearchRank-Reihenfolge (Titel/Korrespondent vor OCR-Fließtext);
+    strikte Owner-Isolation der Suche; Fallback bei kurzer/leerer Query.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.alice = User.objects.create_user(
+            username="alice", password="pw", role="user"
+        )
+        cls.bob = User.objects.create_user(
+            username="bob", password="pw", role="user"
+        )
+
+    def _doc(self, owner, title, *, ocr="", correspondent=None,
+             document_type=None, tags=(), mail_subject="", mail_sender=""):
+        """Legt ein Dokument samt aktueller Version (mit OCR-Text) an."""
+        corr = None
+        if correspondent:
+            corr, _ = Correspondent.objects.get_or_create(name=correspondent)
+        dtype = None
+        if document_type:
+            dtype, _ = DocumentType.objects.get_or_create(name=document_type)
+        doc = Document.objects.create(
+            title=title,
+            owner=owner,
+            correspondent=corr,
+            document_type=dtype,
+            mail_subject=mail_subject,
+            mail_sender=mail_sender,
+        )
+        version = DocumentVersion.objects.create(
+            document=doc,
+            version_no=1,
+            file_path=f"/data/originals/{owner.username}-{doc.id}.pdf",
+            sha256="a" * 64,
+            ocr_text=ocr,
+        )
+        doc.current_version = version
+        doc.save(update_fields=["current_version"])
+        for name in tags:
+            tag, _ = Tag.objects.get_or_create(name=name)
+            doc.tags.add(tag)
+        return doc
+
+    def _search(self, user, q):
+        self.client.force_authenticate(user)
+        resp = self.client.get("/api/documents/", {"q": q})
+        self.assertEqual(resp.status_code, 200, resp.data)
+        return resp.data["results"]
+
+    def _ids(self, rows):
+        return [r["id"] for r in rows]
+
+    # --- AK 1: Treffer NUR über OCR-Text -----------------------------------
+    def test_match_via_ocr_text_only(self):
+        doc = self._doc(self.alice, title="Steuerbescheid 2024",
+                        ocr="Sehr geehrte Frau Cornelia, anbei Ihr Bescheid.")
+        rows = self._search(self.alice, "Cornelia")
+        self.assertEqual(self._ids(rows), [doc.id])
+
+    # --- AK 2: Treffer über Titel bzw. Korrespondent -----------------------
+    def test_match_via_title(self):
+        doc = self._doc(self.alice, title="Mietvertrag Wohnung", ocr="nichts")
+        rows = self._search(self.alice, "Mietvertrag")
+        self.assertIn(doc.id, self._ids(rows))
+
+    def test_match_via_correspondent(self):
+        doc = self._doc(self.alice, title="Rechnung", ocr="nichts",
+                        correspondent="Stadtwerke München")
+        rows = self._search(self.alice, "Stadtwerke")
+        self.assertIn(doc.id, self._ids(rows))
+
+    def test_match_via_document_type_and_tags_and_mail(self):
+        by_type = self._doc(self.alice, title="Beleg A", ocr="x",
+                            document_type="Versicherungspolice")
+        by_tag = self._doc(self.alice, title="Beleg B", ocr="x",
+                           tags=["Kfz-Finanzierung"])
+        by_mail = self._doc(self.alice, title="Beleg C", ocr="x",
+                            mail_subject="Quartalsabrechnung Q3")
+        self.assertIn(by_type.id, self._ids(self._search(self.alice, "Versicherungspolice")))
+        self.assertIn(by_tag.id, self._ids(self._search(self.alice, "Kfz-Finanzierung")))
+        self.assertIn(by_mail.id, self._ids(self._search(self.alice, "Quartalsabrechnung")))
+
+    # --- AK 3: Ranking – Titel/Korrespondent vor OCR-Fließtext --------------
+    def test_ranking_title_before_ocr(self):
+        # Beide Dokumente enthalten „Photovoltaik“ – einmal im Titel (Gewicht A),
+        # einmal nur im OCR-Fließtext (Gewicht D). Der Titel-Treffer muss vorne stehen.
+        ocr_hit = self._doc(self.alice, title="Anlage Süd",
+                            ocr="Abrechnung der Photovoltaik Einspeisung 2024.")
+        title_hit = self._doc(self.alice, title="Photovoltaik Vertrag", ocr="egal")
+        rows = self._search(self.alice, "Photovoltaik")
+        ids = self._ids(rows)
+        self.assertEqual(set(ids), {title_hit.id, ocr_hit.id})
+        self.assertLess(ids.index(title_hit.id), ids.index(ocr_hit.id))
+        # Rank wird optional exponiert und ist beim Titel-Treffer höher.
+        rank_by_id = {r["id"]: r["rank"] for r in rows}
+        self.assertGreater(rank_by_id[title_hit.id], rank_by_id[ocr_hit.id])
+
+    def test_ranking_correspondent_before_ocr(self):
+        ocr_hit = self._doc(self.alice, title="Notiz",
+                            ocr="Zahlung an Hausverwaltung Meyer erfolgt.")
+        corr_hit = self._doc(self.alice, title="Beleg", ocr="egal",
+                            correspondent="Hausverwaltung Meyer")
+        rows = self._search(self.alice, "Hausverwaltung")
+        ids = self._ids(rows)
+        self.assertLess(ids.index(corr_hit.id), ids.index(ocr_hit.id))
+
+    # --- AK 4: Owner-Isolation der Suche -----------------------------------
+    def test_search_is_owner_scoped(self):
+        self._doc(self.bob, title="Bobs Cornelia Brief",
+                  ocr="Cornelia schreibt an Bob.")
+        mine = self._doc(self.alice, title="Alice Cornelia Brief",
+                         ocr="Cornelia schreibt an Alice.")
+        rows = self._search(self.alice, "Cornelia")
+        self.assertEqual(self._ids(rows), [mine.id])
+
+    def test_no_results_does_not_leak(self):
+        self._doc(self.bob, title="Streng geheim", ocr="Vertrauliche Bob-Daten")
+        rows = self._search(self.alice, "geheim")
+        self.assertEqual(rows, [])
+
+    # --- AK 5: Fallback bei kurzer/leerer Query -----------------------------
+    def test_short_query_uses_icontains_fallback(self):
+        # 2-Zeichen-Query: unter der FTS-Mindestlänge → icontains-Fallback greift.
+        doc = self._doc(self.alice, title="AB-Testbericht", ocr="x")
+        rows = self._search(self.alice, "AB")
+        self.assertIn(doc.id, self._ids(rows))
+
+    def test_empty_query_returns_full_list(self):
+        d1 = self._doc(self.alice, title="Eins", ocr="x")
+        d2 = self._doc(self.alice, title="Zwei", ocr="y")
+        self.client.force_authenticate(self.alice)
+        resp = self.client.get("/api/documents/", {"q": ""})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(set(self._ids(resp.data["results"])), {d1.id, d2.id})
+
+    # --- Robustheit: Tags dürfen Treffer nicht vervielfachen ---------------
+    def test_multiple_tags_no_duplicate_rows(self):
+        doc = self._doc(self.alice, title="Vertrag Mehrfachtag",
+                        ocr="x", tags=["Wichtig", "Finanzen", "2024"])
+        rows = self._search(self.alice, "Mehrfachtag")
+        self.assertEqual(self._ids(rows).count(doc.id), 1)
+
+    def test_null_correspondent_still_matches_title(self):
+        # correspondent=None darf den gewichteten Vektor nicht auf NULL kippen.
+        doc = self._doc(self.alice, title="Grundsteuerbescheid", ocr="")
+        rows = self._search(self.alice, "Grundsteuerbescheid")
+        self.assertEqual(self._ids(rows), [doc.id])

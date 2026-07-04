@@ -225,6 +225,9 @@ class DocumentSerializer(serializers.ModelSerializer):
     # in ``update()``/``create()`` (unique_together). ``required=False``, damit
     # ein PATCH ohne diesen Schlüssel die bestehenden Werte unangetastet lässt.
     custom_field_values = CustomFieldValueSerializer(many=True, required=False)
+    # Optionaler FTS-Relevanzwert (STOAA-251): nur bei Volltextsuche annotiert,
+    # sonst ``None``. Additiv – bricht den bestehenden Listen-Kontrakt nicht.
+    rank = serializers.SerializerMethodField()
 
     class Meta:
         model = Document
@@ -251,6 +254,7 @@ class DocumentSerializer(serializers.ModelSerializer):
             "status",
             "custom_field_values",
             "versions",
+            "rank",
         )
         read_only_fields = (
             "added_at",
@@ -261,6 +265,15 @@ class DocumentSerializer(serializers.ModelSerializer):
             "classification",
             "status",  # Statuswechsel NUR über submit/approve/reject – nie per PATCH (STOAA-63)
         )
+
+    def get_rank(self, obj):
+        """FTS-Relevanz aus der ``rank``-Annotation (nur bei Volltextsuche gesetzt).
+
+        Ohne Suche existiert die Annotation nicht → ``None`` (Feld bleibt im JSON,
+        aber leer). Rundung hält die Payload kompakt.
+        """
+        rank = getattr(obj, "rank", None)
+        return round(rank, 6) if rank is not None else None
 
     def _upsert_custom_field_values(self, document, values):
         """Upsert der Zusatzfeld-Werte per unique_together (document, field).
