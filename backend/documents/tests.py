@@ -3312,11 +3312,15 @@ class VersionCompareServiceTests(TestCase):
         )
         result = self._svc().compare(self.doc, 1, 3)
         self.assertEqual(result.text_diff, "")
+        self.assertEqual(result.text_diff_html, "")
         self.assertFalse(result.summary.text_changed)
+        self.assertFalse(result.metadata_versioning_supported)
 
     def test_text_changed(self):
         result = self._svc().compare(self.doc, 1, 2)
         self.assertIn("Neue Zeile", result.text_diff)
+        # HTML-Side-by-Side-Tabelle vorhanden (difflib.HtmlDiff).
+        self.assertIn("<table", result.text_diff_html)
         self.assertTrue(result.summary.text_changed)
 
     def test_empty_text(self):
@@ -3435,6 +3439,13 @@ class VersionCompareAPITests(APITestCase):
         self.assertIn("metadata", data)
         self.assertIn("custom_fields", data)
         self.assertTrue(data["summary"]["binary_changed"])
+        # Stufe-1-Shape-Stabilität (STOAA-288 item 6): HTML-Diff + Versionierungs-Flag.
+        self.assertIn("text_diff_html", data)
+        self.assertIn("metadata_versioning_supported", data)
+        self.assertFalse(data["metadata_versioning_supported"])
+        # Metadaten/Tags/Custom-Fields sind in Stufe 1 nicht pro Version versioniert.
+        self.assertEqual(data["metadata"], {})
+        self.assertEqual(data["custom_fields"], {})
 
     def test_invalid_version_number(self):
         self.client.force_authenticate(self.owner)

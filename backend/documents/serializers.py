@@ -496,8 +496,12 @@ class VersionCompareResultSerializer(_s.Serializer):
     from_version = _s.IntegerField()
     to_version = _s.IntegerField()
     summary = CompareSummarySerializer()
-    text_diff = _s.CharField()
+    text_diff = _s.CharField(allow_blank=True)
+    text_diff_html = _s.CharField(allow_blank=True)
     metadata = _s.DictField(child=FieldChangeSerializer())
     tags = TagDiffSerializer()
     custom_fields = _s.DictField(child=FieldChangeSerializer())
     files = FileDiffSerializer()
+    # Stufe-1-Signal: Metadaten/Tags/Custom-Fields sind noch nicht pro Version
+    # versioniert → obige drei Sektionen bleiben leer, Shape bleibt Stufe-2-stabil.
+    metadata_versioning_supported = _s.BooleanField()

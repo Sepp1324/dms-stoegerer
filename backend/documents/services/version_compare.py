@@ -61,10 +61,16 @@ class VersionCompareResult:
     to_version: int
     summary: CompareSummary
     text_diff: str
+    text_diff_html: str
     metadata: dict[str, FieldChange]
     tags: TagDiff
     custom_fields: dict[str, FieldChange]
     files: FileDiff
+    # Stufe 1: Metadaten/Tags/Custom-Fields sind (noch) NICHT pro Version
+    # versioniert (siehe STOAA-288-Machbarkeitsbefund). Diese Sektionen bleiben
+    # in Stufe 1 leer; das Flag signalisiert dem Frontend die Ursache und hält
+    # die Antwort-Shape stabil, damit Stufe 2 rein additiv andockt.
+    metadata_versioning_supported: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +102,9 @@ class VersionCompareService:
         v_to = self._load_version(document, to_no)
 
         text_diff = self._text_diff(v_from.ocr_text, v_to.ocr_text)
+        text_diff_html = self._text_diff_html(
+            v_from.ocr_text, v_to.ocr_text, from_no, to_no
+        )
         metadata_diff = self._metadata_diff(v_from, v_to)
         tags_diff = self._tags_diff(v_from, v_to)
         custom_diff = self._custom_fields_diff(v_from, v_to)
@@ -118,6 +127,7 @@ class VersionCompareService:
             to_version=to_no,
             summary=summary,
             text_diff=text_diff,
+            text_diff_html=text_diff_html,
             metadata=metadata_diff,
             tags=tags_diff,
             custom_fields=custom_diff,
@@ -160,6 +170,27 @@ class VersionCompareService:
             tofile="Neue Version",
         )
         return "".join(diff)
+
+    @staticmethod
+    def _text_diff_html(
+        old_text: str, new_text: str, from_no: int, to_no: int
+    ) -> str:
+        """Side-by-Side-HTML-Tabelle der OCR-Texte (difflib.HtmlDiff).
+
+        Leer, wenn beide Texte identisch sind – das Frontend zeigt dann keinen
+        Diff-Block. Die Tabelle ist direkt einbettbar (nur ``<table class="diff">``,
+        ohne umschließendes Dokument); das Styling übernimmt das Frontend-Theme.
+        """
+        if old_text == new_text:
+            return ""
+        return difflib.HtmlDiff().make_table(
+            old_text.splitlines(),
+            new_text.splitlines(),
+            fromdesc=f"Version {from_no}",
+            todesc=f"Version {to_no}",
+            context=True,
+            numlines=3,
+        )
 
     @staticmethod
     def _metadata_diff(
