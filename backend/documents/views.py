@@ -281,7 +281,13 @@ class DocumentViewSet(viewsets.ModelViewSet):
     """Dokumente auflisten/abrufen inkl. Volltextsuche und Filtern.
 
     Query-Parameter der Liste:
-      * ``q``             – Volltextsuche über Titel + OCR-Text (PostgreSQL FTS)
+      * ``q``             – Gewichtete Volltextsuche (PostgreSQL FTS) über Titel,
+                            Korrespondent, Dokumenttyp, Schlagworte, Mail-Betreff/
+                            -Absender und OCR-Text. Gewichte: A=Titel+Korrespondent,
+                            B=Dokumenttyp/Tags/Mail-Felder, D=OCR-Text (niedrigste
+                            Priorität) → Treffer im Titel ranken vor OCR-Fließtext.
+                            Kurze Queries (1–2 Zeichen) fallen auf ``icontains`` über
+                            dieselben Felder zurück (FTS-Lexeme greifen dort schlecht).
       * ``correspondent`` – Filter auf Korrespondenten-ID
       * ``document_type`` – Filter auf Dokumenttyp-ID
       * ``storage_path``  – Filter auf Speicherpfad-ID
@@ -326,15 +332,40 @@ class DocumentViewSet(viewsets.ModelViewSet):
         params = self.request.query_params
 
         q = params.get("q", "").strip()
-        if q:
+        if 0 < len(q) < 3:
+            # Kurze Query: FTS-Lexeme greifen bei 1–2 Zeichen schlecht →
+            # icontains-ODER über dieselben Felder. Kein ``rank`` → es gilt das
+            # Standard-Ordering (Meta.ordering bzw. ``?ordering=``).
+            qs = qs.filter(
+                Q(title__icontains=q)
+                | Q(correspondent__name__icontains=q)
+                | Q(document_type__name__icontains=q)
+                | Q(tags__name__icontains=q)
+                | Q(mail_subject__icontains=q)
+                | Q(mail_sender__icontains=q)
+                | Q(current_version__ocr_text__icontains=q)
+            )
+        elif q:
             from django.contrib.postgres.search import (
                 SearchQuery,
                 SearchRank,
                 SearchVector,
             )
 
-            vector = SearchVector("title", weight="A", config="german") + SearchVector(
-                "current_version__ocr_text", weight="B", config="german"
+            # Gewichteter Vektor (STOAA-256): Titel/Korrespondent (A) ranken vor
+            # Dokumenttyp/Tags/Mail-Feldern (B), OCR-Fließtext (D) am schwächsten.
+            # Query-Zeit-Vektor (keine materialisierte Spalte/GIN) – bewusst, da
+            # der Vektor Join-Tabellen spannt; performant für Familien-Korpus.
+            vector = (
+                SearchVector("title", weight="A", config="german")
+                + SearchVector("correspondent__name", weight="A", config="german")
+                + SearchVector("document_type__name", weight="B", config="german")
+                + SearchVector("tags__name", weight="B", config="german")
+                + SearchVector("mail_subject", weight="B", config="german")
+                + SearchVector("mail_sender", weight="B", config="german")
+                + SearchVector(
+                    "current_version__ocr_text", weight="D", config="german"
+                )
             )
             query = SearchQuery(q, config="german")
             qs = (
