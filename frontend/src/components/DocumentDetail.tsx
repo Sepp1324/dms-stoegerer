@@ -10,6 +10,7 @@ import {
   getDocumentAudit,
   getDocumentIntegrity,
   getDocumentPreview,
+  getDocumentQr,
   getDocumentVersionFile,
   getShareLinks,
   rejectDocument,
@@ -187,6 +188,24 @@ export default function DocumentDetail({
       setRetryError(e instanceof Error ? e.message : String(e));
     } finally {
       setRetryBusy(false);
+    }
+  }
+
+  // Lädt den ASN-QR-Code als PNG herunter (STOAA-286). Dateiname = ASN-Label,
+  // damit das gedruckte Label eindeutig dem Dokument zuzuordnen ist.
+  async function downloadQr() {
+    try {
+      const blob = await getDocumentQr(id);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${doc?.asn_label ?? "asn"}.png`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setAddError(e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -531,6 +550,23 @@ export default function DocumentDetail({
                   </p>
                 ) : null}
                 <dl>
+                  <dt>Archivnummer</dt>
+                  <dd className="asn">
+                    {doc.asn_label ? (
+                      <>
+                        <span className="asn__value">{doc.asn_label}</span>
+                        <button
+                          type="button"
+                          className="link"
+                          onClick={downloadQr}
+                        >
+                          QR-Code herunterladen
+                        </button>
+                      </>
+                    ) : (
+                      "—"
+                    )}
+                  </dd>
                   <dt>Korrespondent</dt>
                   <dd>{doc.correspondent_name ?? "—"}</dd>
                   <dt>Typ</dt>

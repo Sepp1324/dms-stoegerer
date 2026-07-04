@@ -181,6 +181,11 @@ export interface DocumentDetail extends DocumentItem {
   ai_suggested_at: string | null;
   classification: Classification;
   versions: DocumentVersion[];
+  // Archivnummer (STOAA-284/285). ``asn`` ist die rohe fortlaufende Zahl,
+  // ``asn_label`` die kanonische Anzeigeform ``ASN000123``. Beide read-only,
+  // serverseitig vergeben; ``null`` bei Altdaten ohne vergebene ASN.
+  asn: number | null;
+  asn_label: string | null;
   // Zusatzfelder-Werte dieses Dokuments (STOAA-108/112). Nur gesetzte Werte sind
   // enthalten; die vollständige Feldliste kommt aus getCustomFields().
   custom_field_values: CustomFieldValue[];
@@ -491,6 +496,15 @@ export async function getDocumentIntegrity(id: number): Promise<DocumentIntegrit
   const res = await apiFetch(`/documents/${id}/integrity/`);
   if (!res.ok) throw new Error(`Integritätsprüfung fehlgeschlagen (HTTP ${res.status})`);
   return res.json();
+}
+
+// Lädt den QR-Code des Dokuments als PNG-Blob (STOAA-284/286). Der Code enthält
+// ausschließlich die ASN (``ASN000123``). Per fetch+Blob wegen JWT – ein direkter
+// <img src="…/qr/"> würde den Bearer-Token nicht mitschicken.
+export async function getDocumentQr(id: number): Promise<Blob> {
+  const res = await apiFetch(`/documents/${id}/qr/`);
+  if (!res.ok) throw new Error(`QR-Code nicht verfügbar (HTTP ${res.status})`);
+  return res.blob();
 }
 
 // Lädt die Originaldatei einer Version als Blob (mit Auth-Header) zum Download.
