@@ -76,25 +76,6 @@ class ClassificationRuleAdmin(admin.ModelAdmin):
     list_editable = ("priority", "enabled")
 
 
-class WorkflowTriggerInline(admin.StackedInline):
-    model = WorkflowTrigger
-    extra = 0
-    filter_horizontal = ("filter_has_tags", "filter_has_not_tags")
-
-
-class WorkflowActionInline(admin.StackedInline):
-    model = WorkflowAction
-    extra = 0
-    filter_horizontal = ("tags",)
-
-
-@admin.register(Workflow)
-class WorkflowAdmin(admin.ModelAdmin):
-    list_display = ("name", "order", "enabled")
-    list_editable = ("order", "enabled")
-    inlines = (WorkflowTriggerInline, WorkflowActionInline)
-
-
 @admin.register(AuditLogEntry)
 class AuditLogEntryAdmin(admin.ModelAdmin):
     list_display = ("timestamp", "actor", "action", "object_type", "object_id")
