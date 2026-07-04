@@ -150,7 +150,7 @@ def ingest_message(account, raw_bytes: bytes) -> int | None:
     Message-ID) bereits verarbeitet wurde.
     """
     from . import pipeline, storage
-    from .models import ProcessedMail
+    from .models import DocumentVersion, ProcessedMail
     from .tasks import process_document_version
 
     msg = email_mod.message_from_bytes(raw_bytes)
@@ -187,6 +187,7 @@ def ingest_message(account, raw_bytes: bytes) -> int | None:
             owner=account.owner,
             mime=ctype,
             size=len(payload),
+            source=DocumentVersion.Source.MAIL,
         )
         # Hash sofort setzen, damit weitere identische Anhänge im selben Lauf
         # zuverlässig dedupliziert werden (die OCR-Pipeline berechnet ihn später

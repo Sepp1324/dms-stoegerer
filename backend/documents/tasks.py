@@ -152,7 +152,8 @@ def _ingest_consume_dir(base: Path, owner, min_age: float, now: float) -> dict:
             target.write_bytes(entry.read_bytes())
 
             document, version = pipeline.create_document_from_file(
-                str(target), title=title, size=target.stat().st_size, owner=owner
+                str(target), title=title, size=target.stat().st_size, owner=owner,
+                source=DocumentVersion.Source.CONSUME,
             )
             process_document_version.delay(version.id)
             entry.rename(processed_dir / entry.name)

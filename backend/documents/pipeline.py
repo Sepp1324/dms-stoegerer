@@ -17,7 +17,7 @@ import os
 from pathlib import Path
 
 from . import storage
-from .models import AuditLogEntry, Document, DocumentVersion
+from .models import AuditLogEntry, Document, DocumentVersion, WorkflowTrigger
 from documents.services.ocr.engine import run_ocr
 
 logger = logging.getLogger(__name__)
@@ -50,10 +50,13 @@ def create_document_from_file(
     owner=None,
     mime: str = "",
     size: int | None = None,
+    source: str = DocumentVersion.Source.API,
 ) -> tuple[Document, DocumentVersion]:
     """Legt Dokument + erste Version an und protokolliert die Aufnahme.
 
     Führt (noch) keine OCR aus – das übernimmt die Pipeline anschließend.
+    ``source`` markiert die Herkunft (upload/consume/mail/api) für die
+    Workflow-Trigger; Default ``api`` (programmatischer/unbekannter Ingest).
     """
     path = Path(file_path)
     document = Document.objects.create(title=title, owner=owner)
@@ -64,6 +67,7 @@ def create_document_from_file(
         mime_type=mime,
         size=size if size is not None else path.stat().st_size,
         created_by=owner,
+        source=source,
     )
     document.current_version = version
     document.save(update_fields=["current_version"])
@@ -85,6 +89,7 @@ def create_version_for_document(
     created_by=None,
     mime: str = "",
     size: int | None = None,
+    source: str = DocumentVersion.Source.API,
 ) -> DocumentVersion:
     """Hängt eine neue Version an ein bestehendes Dokument (fortlaufende Nr.).
 
@@ -105,6 +110,7 @@ def create_version_for_document(
         mime_type=mime,
         size=size if size is not None else path.stat().st_size,
         created_by=created_by,
+        source=source,
     )
     document.current_version = version
     document.save(update_fields=["current_version"])
@@ -318,7 +324,7 @@ def ocr_version(version: DocumentVersion) -> dict:
 
 def classify_version(version: DocumentVersion) -> dict:
     """Regelbasierte Klassifizierung ausführen und State ``CLASSIFIED`` setzen."""
-    from . import classification
+    from . import classification, workflows
 
     version.refresh_from_db(fields=["processing_state"])
     version.transition_to(
@@ -327,6 +333,14 @@ def classify_version(version: DocumentVersion) -> dict:
     )
     result = classification.apply_rules(version.document)
     version.document.refresh_from_db(fields=["classification"])
+    # Workflow-Engine (STOAA-263) NACH den Klassifizierungsregeln – so matchen
+    # Trigger auch auf regel-gesetzte Metadaten/Tags. Quelle aus der Version
+    # (upload/consume/mail/api). document_updated bleibt PR2.
+    workflows.run_workflows(
+        version.document,
+        trigger_type=WorkflowTrigger.TriggerType.DOCUMENT_ADDED,
+        source=version.source,
+    )
     version.transition_to(
         DocumentVersion.ProcessingState.CLASSIFIED,
         actor=version.created_by,

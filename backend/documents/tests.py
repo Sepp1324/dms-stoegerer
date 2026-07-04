@@ -29,7 +29,11 @@ from .models import (
     MailAccount,
     StoragePath,
     Tag,
+    Workflow,
+    WorkflowAction,
+    WorkflowTrigger,
 )
+from .workflows import run_workflows
 
 User = get_user_model()
 
@@ -2645,3 +2649,292 @@ class DocumentSearchTests(APITestCase):
         self.client.force_authenticate(self.owner)
         resp = self.client.get("/api/documents/?q=Energieanbieter")
         self.assertEqual(self._ids(resp), [doc.id])
+
+
+class WorkflowEngineTests(TestCase):
+    """Workflow-Engine (STOAA-263/265): Trigger-Matching, Aktionen, Reihenfolge.
+
+    Deckt die Akzeptanzkriterien ab: source-/FK-/Tag-/Text-/Pfad-Trigger,
+    assign/remove-Aktionen (Einzelwerte nur wenn leer, Tags akkumulierend,
+    Zusatzfeld, Titel-Template), order-Reihenfolge, disabled übersprungen,
+    Audit-Eintrag und Koexistenz mit der ClassificationRule-Engine.
+    """
+
+    def _doc(self, *, title="Doc", ocr_text="", source="upload",
+             file_path="/data/originals/a.pdf", **kw):
+        doc = Document.objects.create(title=title, **kw)
+        version = DocumentVersion.objects.create(
+            document=doc,
+            version_no=1,
+            file_path=file_path,
+            sha256="a" * 64,
+            ocr_text=ocr_text,
+            source=source,
+        )
+        doc.current_version = version
+        doc.save(update_fields=["current_version"])
+        return doc
+
+    def _workflow(self, name="WF", *, order=100, enabled=True):
+        return Workflow.objects.create(name=name, order=order, enabled=enabled)
+
+    def _trigger(self, wf, *, trigger_type="document_added", **kw):
+        # M2M-Felder getrennt setzen (nach dem Anlegen).
+        has_tags = kw.pop("filter_has_tags", None)
+        has_not_tags = kw.pop("filter_has_not_tags", None)
+        trigger = WorkflowTrigger.objects.create(
+            workflow=wf, trigger_type=trigger_type, **kw
+        )
+        if has_tags:
+            trigger.filter_has_tags.set(has_tags)
+        if has_not_tags:
+            trigger.filter_has_not_tags.set(has_not_tags)
+        return trigger
+
+    def _action(self, wf, *, action_type="assign", tags=None, order=100, **kw):
+        action = WorkflowAction.objects.create(
+            workflow=wf, action_type=action_type, order=order, **kw
+        )
+        if tags:
+            action.tags.set(tags)
+        return action
+
+    # --- Trigger-Matching -------------------------------------------------
+    def test_source_schnittmenge_matcht_und_verfehlt(self):
+        wf = self._workflow()
+        self._trigger(wf, source=["upload", "mail"])
+        self._action(wf, document_type=DocumentType.objects.create(name="Rechnung"))
+
+        doc = self._doc(source="upload")
+        run_workflows(doc, trigger_type="document_added", source="upload")
+        doc.refresh_from_db()
+        self.assertEqual(doc.document_type.name, "Rechnung")
+
+        # Andere Quelle -> kein Treffer.
+        other = self._doc(source="consume")
+        run_workflows(other, trigger_type="document_added", source="consume")
+        other.refresh_from_db()
+        self.assertIsNone(other.document_type)
+
+    def test_leere_source_matcht_jede_quelle(self):
+        wf = self._workflow()
+        self._trigger(wf, source=[])
+        self._action(wf, tags=[Tag.objects.create(name="Alle")])
+
+        doc = self._doc(source="api")
+        run_workflows(doc, trigger_type="document_added", source="api")
+        self.assertTrue(doc.tags.filter(name="Alle").exists())
+
+    def test_correspondent_filter(self):
+        corr = Correspondent.objects.create(name="Stadtwerke")
+        wf = self._workflow()
+        self._trigger(wf, filter_correspondent=corr)
+        self._action(wf, tags=[Tag.objects.create(name="Treffer")])
+
+        match = self._doc(correspondent=corr)
+        run_workflows(match, trigger_type="document_added", source="upload")
+        self.assertTrue(match.tags.filter(name="Treffer").exists())
+
+        miss = self._doc()
+        run_workflows(miss, trigger_type="document_added", source="upload")
+        self.assertFalse(miss.tags.exists())
+
+    def test_has_tags_und_has_not_tags(self):
+        wanted = Tag.objects.create(name="Wichtig")
+        blocked = Tag.objects.create(name="Archiv")
+        wf = self._workflow()
+        self._trigger(wf, filter_has_tags=[wanted], filter_has_not_tags=[blocked])
+        self._action(wf, tags=[Tag.objects.create(name="OK")])
+
+        doc = self._doc()
+        doc.tags.add(wanted)
+        run_workflows(doc, trigger_type="document_added", source="upload")
+        self.assertTrue(doc.tags.filter(name="OK").exists())
+
+        # has_not_tag vorhanden -> blockiert.
+        doc2 = self._doc()
+        doc2.tags.add(wanted, blocked)
+        run_workflows(doc2, trigger_type="document_added", source="upload")
+        self.assertFalse(doc2.tags.filter(name="OK").exists())
+
+    def test_text_contains_und_regex(self):
+        wf = self._workflow()
+        self._trigger(wf, text_contains=["rechnung"], text_regex=r"nr\.?\s*\d+")
+        self._action(wf, tags=[Tag.objects.create(name="Finanz")])
+
+        hit = self._doc(ocr_text="Ihre Rechnung Nr. 4711 vom Mai")
+        run_workflows(hit, trigger_type="document_added", source="upload")
+        self.assertTrue(hit.tags.filter(name="Finanz").exists())
+
+        # Wort fehlt -> kein Treffer.
+        miss = self._doc(ocr_text="Nur ein Brief Nr. 12")
+        run_workflows(miss, trigger_type="document_added", source="upload")
+        self.assertFalse(miss.tags.exists())
+
+    def test_filter_path_glob(self):
+        wf = self._workflow()
+        self._trigger(wf, filter_path="*.pdf")
+        self._action(wf, tags=[Tag.objects.create(name="PDF")])
+
+        hit = self._doc(file_path="/data/originals/scan.pdf")
+        run_workflows(hit, trigger_type="document_added", source="upload")
+        self.assertTrue(hit.tags.filter(name="PDF").exists())
+
+        miss = self._doc(file_path="/data/originals/foto.png")
+        run_workflows(miss, trigger_type="document_added", source="upload")
+        self.assertFalse(miss.tags.exists())
+
+    def test_trigger_type_wird_unterschieden(self):
+        wf = self._workflow()
+        self._trigger(wf, trigger_type="document_updated")
+        self._action(wf, tags=[Tag.objects.create(name="Update")])
+
+        doc = self._doc()
+        # document_added feuert den document_updated-Trigger NICHT.
+        run_workflows(doc, trigger_type="document_added", source="upload")
+        self.assertFalse(doc.tags.exists())
+
+    # --- Aktions-Anwendung ------------------------------------------------
+    def test_assign_setzt_einzelwerte_nur_wenn_leer(self):
+        corr = Correspondent.objects.create(name="Neu")
+        dt = DocumentType.objects.create(name="Vertrag")
+        sp = StoragePath.objects.create(name="Ablage")
+        wf = self._workflow()
+        self._trigger(wf, source=[])
+        self._action(wf, correspondent=corr, document_type=dt, storage_path=sp)
+
+        # Korrespondent bereits gesetzt -> bleibt unverändert; Rest wird gefüllt.
+        vorhanden = Correspondent.objects.create(name="Bestehend")
+        doc = self._doc(correspondent=vorhanden)
+        run_workflows(doc, trigger_type="document_added", source="upload")
+        doc.refresh_from_db()
+        self.assertEqual(doc.correspondent.name, "Bestehend")
+        self.assertEqual(doc.document_type.name, "Vertrag")
+        self.assertEqual(doc.storage_path.name, "Ablage")
+
+    def test_assign_owner_nur_wenn_leer(self):
+        user = User.objects.create_user(username="wfuser", password="x")
+        wf = self._workflow()
+        self._trigger(wf, source=[])
+        self._action(wf, owner=user)
+
+        doc = self._doc()
+        run_workflows(doc, trigger_type="document_added", source="upload")
+        doc.refresh_from_db()
+        self.assertEqual(doc.owner, user)
+
+    def test_tags_akkumulieren_und_remove(self):
+        keep = Tag.objects.create(name="Behalten")
+        drop = Tag.objects.create(name="Weg")
+        add = Tag.objects.create(name="Dazu")
+        wf = self._workflow()
+        self._trigger(wf, source=[])
+        self._action(wf, action_type="assign", tags=[add], order=1)
+        self._action(wf, action_type="remove", tags=[drop], order=2)
+
+        doc = self._doc()
+        doc.tags.add(keep, drop)
+        run_workflows(doc, trigger_type="document_added", source="upload")
+        names = set(doc.tags.values_list("name", flat=True))
+        self.assertEqual(names, {"Behalten", "Dazu"})
+
+    def test_custom_field_wird_gesetzt(self):
+        field = CustomField.objects.create(
+            name="Rechnungsbetrag", data_type=CustomField.DataType.CURRENCY
+        )
+        wf = self._workflow()
+        self._trigger(wf, source=[])
+        self._action(wf, custom_fields={"Rechnungsbetrag": "42.50"})
+
+        doc = self._doc()
+        run_workflows(doc, trigger_type="document_added", source="upload")
+        cfv = CustomFieldValue.objects.get(document=doc, field=field)
+        self.assertEqual(cfv.value, "42.50")
+
+    def test_titel_template_wird_gerendert(self):
+        corr = Correspondent.objects.create(name="Stadtwerke")
+        dt = DocumentType.objects.create(name="Rechnung")
+        wf = self._workflow()
+        self._trigger(wf, source=[])
+        self._action(
+            wf,
+            correspondent=corr,
+            document_type=dt,
+            title="{correspondent} – {doc_type}",
+        )
+
+        doc = self._doc(title="scan001")
+        run_workflows(doc, trigger_type="document_added", source="upload")
+        doc.refresh_from_db()
+        self.assertEqual(doc.title, "Stadtwerke – Rechnung")
+
+    # --- Reihenfolge / disabled / Audit ----------------------------------
+    def test_order_reihenfolge_erster_workflow_gewinnt(self):
+        dt_a = DocumentType.objects.create(name="Zuerst")
+        dt_b = DocumentType.objects.create(name="Danach")
+        wf_b = self._workflow("B", order=200)
+        self._trigger(wf_b, source=[])
+        self._action(wf_b, document_type=dt_b)
+        wf_a = self._workflow("A", order=100)
+        self._trigger(wf_a, source=[])
+        self._action(wf_a, document_type=dt_a)
+
+        doc = self._doc()
+        result = run_workflows(doc, trigger_type="document_added", source="upload")
+        doc.refresh_from_db()
+        # order 100 (A) läuft zuerst und belegt document_type; B überschreibt nicht.
+        self.assertEqual(doc.document_type.name, "Zuerst")
+        self.assertEqual(result["workflows"], ["A", "B"])
+
+    def test_disabled_wird_uebersprungen(self):
+        wf = self._workflow(enabled=False)
+        self._trigger(wf, source=[])
+        self._action(wf, tags=[Tag.objects.create(name="Nie")])
+
+        doc = self._doc()
+        result = run_workflows(doc, trigger_type="document_added", source="upload")
+        self.assertEqual(result["workflows"], [])
+        self.assertFalse(doc.tags.exists())
+
+    def test_audit_eintrag_pro_gefeuertem_workflow(self):
+        wf = self._workflow("Audit-WF")
+        self._trigger(wf, source=[])
+        self._action(wf, tags=[Tag.objects.create(name="X")])
+
+        doc = self._doc()
+        run_workflows(doc, trigger_type="document_added", source="upload")
+        entry = AuditLogEntry.objects.get(action="workflow", object_id=str(doc.id))
+        self.assertEqual(entry.detail["workflow"], "Audit-WF")
+        self.assertIn("tags", entry.detail["applied"])
+
+    def test_classification_rule_laeuft_unveraendert_neben_workflow(self):
+        # ClassificationRule (Bestand) UND Workflow greifen ineinander:
+        # die Regel setzt document_type, der Workflow ergänzt nur noch Tags.
+        ClassificationRule.objects.create(
+            name="Regel-Rechnung",
+            match={"text_contains": ["rechnung"]},
+            then={"document_type": "Rechnung"},
+        )
+        wf = self._workflow()
+        self._trigger(wf, text_contains=["rechnung"])
+        self._action(
+            wf,
+            document_type=DocumentType.objects.create(name="SollNichtGewinnen"),
+            tags=[Tag.objects.create(name="Finanzen")],
+        )
+
+        doc = self._doc(ocr_text="Ihre Rechnung liegt bei")
+        apply_rules(doc)
+        run_workflows(doc, trigger_type="document_added", source="upload")
+        doc.refresh_from_db()
+        # Regel hat document_type gesetzt -> Workflow überschreibt nicht.
+        self.assertEqual(doc.document_type.name, "Rechnung")
+        # Workflow-Tag ergänzt.
+        self.assertTrue(doc.tags.filter(name="Finanzen").exists())
+        # Beide Audit-Spuren vorhanden.
+        self.assertTrue(
+            AuditLogEntry.objects.filter(action="classify", object_id=str(doc.id)).exists()
+        )
+        self.assertTrue(
+            AuditLogEntry.objects.filter(action="workflow", object_id=str(doc.id)).exists()
+        )
