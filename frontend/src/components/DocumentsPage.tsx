@@ -24,6 +24,7 @@ import UploadZone from "./UploadZone";
 import DocumentDetail from "./DocumentDetail";
 import RulesPage from "./RulesPage";
 import CustomFieldsAdmin from "./CustomFieldsAdmin";
+import MailAccountsAdmin from "./MailAccountsAdmin";
 
 // Von-/Bis-Eingaben eines CURRENCY-Zusatzfeld-Filters (STOAA-113).
 type CurrencyRange = { gte: string; lte: string };
@@ -78,7 +79,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   // Aktuell geöffnetes Dokument (Detailansicht) oder null (Liste).
   const [selectedId, setSelectedId] = useState<number | null>(null);
   // Aktive Hauptansicht (persistente linke Navigation).
-  const [view, setView] = useState<"docs" | "rules" | "fields">("docs");
+  const [view, setView] = useState<"docs" | "rules" | "fields" | "mail">("docs");
   // Sidebar auf schmalen Screens ein-/ausklappbar.
   const [navOpen, setNavOpen] = useState(false);
 
@@ -302,7 +303,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     );
   }
 
-  const navigate = (v: "docs" | "rules" | "fields") => {
+  const navigate = (v: "docs" | "rules" | "fields" | "mail") => {
     setView(v);
     setNavOpen(false); // Overlay auf Mobil nach Auswahl schließen
   };
@@ -351,7 +352,9 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
               ? "Regeln"
               : view === "fields"
                 ? "Zusatzfelder"
-                : "Dokumente"}
+                : view === "mail"
+                  ? "Mailkonten"
+                  : "Dokumente"}
           </h1>
           {view === "docs" && (
             <input
@@ -371,6 +374,8 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
               canEdit={!!me?.can_write}
               onChanged={loadCustomFields}
             />
+          ) : view === "mail" ? (
+            <MailAccountsAdmin canEdit={!!me?.can_write} />
           ) : (
             <>
               {me?.can_write && (
@@ -505,8 +510,8 @@ function Sidebar({
   currencyFilters,
   onCurrencyChange,
 }: {
-  view: "docs" | "rules" | "fields";
-  onNavigate: (v: "docs" | "rules" | "fields") => void;
+  view: "docs" | "rules" | "fields" | "mail";
+  onNavigate: (v: "docs" | "rules" | "fields" | "mail") => void;
   username?: string;
   onLogout: () => void;
   isAdmin: boolean;
@@ -576,6 +581,14 @@ function Sidebar({
             onClick={() => onNavigate("fields")}
             label="Zusatzfelder"
             icon="M4 4h16v4H4zm0 6h16v4H4zm0 6h10v4H4z"
+          />
+        )}
+        {isAdmin && (
+          <NavItem
+            active={view === "mail"}
+            onClick={() => onNavigate("mail")}
+            label="Mailkonten"
+            icon="M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2m0 2v.5l8 5 8-5V6H4m0 2.8V18h16V8.8l-8 5z"
           />
         )}
 

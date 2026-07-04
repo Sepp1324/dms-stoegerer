@@ -246,6 +246,54 @@ export interface ShareLinkCreated extends ShareLink {
   token: string;
 }
 
+// --- Mailkonten (IMAP-Postfächer, STOAA-214/215) ---
+// Verwaltungs-Sicht eines Mailkontos. Das Backend liefert das Passwort NIE in
+// der Response (write_only); ``password_env``, ``last_checked_at`` und
+// ``last_error`` sind read-only (server-/testgepflegt). ``owner`` ist der
+// Standard-Empfänger (Nutzer-PK) importierter Dokumente, ``null`` =
+// Admin-Triage-Postfach.
+export interface MailAccount {
+  id: number;
+  name: string;
+  owner: number | null;
+  host: string;
+  port: number;
+  use_ssl: boolean;
+  username: string;
+  folder: string;
+  enabled: boolean;
+  password_env: string;
+  // Serverseitig: ``true``, wenn ein Passwort (Klartext-Feld oder ``password_env``)
+  // hinterlegt ist – ohne das Passwort preiszugeben. Steuert im Edit-Form den
+  // Platzhalter „(unverändert lassen)".
+  has_password: boolean;
+  last_checked_at: string | null;
+  last_error: string;
+}
+
+// Nutzlast zum Anlegen/Aktualisieren. ``password`` ist optional: beim Bearbeiten
+// bedeutet ein leeres Passwort „unverändert" (Backend löscht es dann nicht).
+export interface MailAccountPayload {
+  name: string;
+  owner: number | null;
+  host: string;
+  port: number;
+  use_ssl: boolean;
+  username: string;
+  folder: string;
+  enabled: boolean;
+  password?: string;
+}
+
+// Ergebnis des Verbindungstests (POST /mail-accounts/test-connection/). Das
+// Backend antwortet auch bei einem fehlgeschlagenen Login mit HTTP 200 – ein
+// misslungener Test ist ein erwartetes Ergebnis, kein Client-Fehler. ``ok``
+// zeigt Erfolg/Misserfolg, ``message`` ist stets eine anzeigbare Meldung.
+export interface MailTestResult {
+  ok: boolean;
+  message: string;
+}
+
 // --- Endpunkte ---
 export interface DocumentQuery {
   q?: string;
@@ -610,6 +658,79 @@ export function createRule(
 export async function deleteRule(id: number): Promise<void> {
   const res = await apiFetch(`/classification-rules/${id}/`, { method: "DELETE" });
   if (!res.ok && res.status !== 204) throw new Error(`Löschen fehlgeschlagen: HTTP ${res.status}`);
+}
+
+// --- Mailkonten (STOAA-214/215) ---
+// CRUD + Verbindungstest unter /api/mail-accounts/. Nur für DMS-Admins
+// (Backend-Permission ``IsDmsAdmin``); Nicht-Admins erhalten 403 (im FE wird der
+// Menüpunkt gar nicht erst gezeigt). Passwort geht nur rein (write_only), nie
+// zurück.
+export async function getMailAccounts(): Promise<MailAccount[]> {
+  return listAll<MailAccount>("/mail-accounts/");
+}
+export function createMailAccount(
+  payload: MailAccountPayload,
+): Promise<MailAccount> {
+  return postJson<MailAccount>("/mail-accounts/", payload);
+}
+// PATCH: nur die übergebenen Felder ändern. Leeres/ausgelassenes ``password``
+// lässt das gespeicherte Passwort unverändert (Backend-Verhalten).
+export async function updateMailAccount(
+  id: number,
+  payload: Partial<MailAccountPayload>,
+): Promise<MailAccount> {
+  const res = await apiFetch(`/mail-accounts/${id}/`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const data = await res.json();
+      detail = data.detail || JSON.stringify(data);
+    } catch {
+      /* keine JSON-Fehlermeldung */
+    }
+    throw new Error(detail);
+  }
+  return res.json();
+}
+export async function deleteMailAccount(id: number): Promise<void> {
+  const res = await apiFetch(`/mail-accounts/${id}/`, { method: "DELETE" });
+  if (res.ok || res.status === 204) return;
+  let detail = `HTTP ${res.status}`;
+  try {
+    const data = await res.json();
+    detail = data.detail || JSON.stringify(data);
+  } catch {
+    /* keine JSON-Fehlermeldung */
+  }
+  throw new Error(detail);
+}
+// Echter IMAP-Login-Test des gespeicherten Kontos. Der Endpoint liegt auf der
+// Collection (``test-connection``, nicht am Detail-Objekt); das gewünschte Konto
+// wird per ``{ id }`` im Body adressiert. Der Test ist zustandslos – er
+// speichert nichts (kein ``last_checked_at``-Update), sondern liefert nur das
+// Ergebnis-Banner zurück. Fehlschläge kommen mit HTTP 200 und ``ok: false``;
+// nur echte HTTP-Fehler (403/404/500) werfen.
+export async function testMailAccount(id: number): Promise<MailTestResult> {
+  const res = await apiFetch(`/mail-accounts/test-connection/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id }),
+  });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const data = await res.json();
+      detail = data.detail || JSON.stringify(data);
+    } catch {
+      /* keine JSON-Fehlermeldung */
+    }
+    throw new Error(detail);
+  }
+  return res.json();
 }
 
 // --- Freigabelinks (STOAA-192) ---
