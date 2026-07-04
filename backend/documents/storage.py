@@ -20,7 +20,9 @@ from django.utils.text import slugify
 DATA_DIR = Path(settings.DMS_DATA_DIR)
 ORIGINALS_DIR = DATA_DIR / "originals"
 ARCHIVE_DIR = DATA_DIR / "archive"
-CONSUME_DIR = DATA_DIR / "consume"
+# Consume-Pfad aus den Settings (per Env ``CONSUME_FOLDER_PATH`` übersteuerbar);
+# Default identisch zu ``DATA_DIR/consume`` → kein Verhaltenswechsel ohne Env.
+CONSUME_DIR = Path(getattr(settings, "CONSUME_DIR", DATA_DIR / "consume"))
 
 DEFAULT_TEMPLATE = "archive/{jahr}/{korrespondent}/{titel}"
 

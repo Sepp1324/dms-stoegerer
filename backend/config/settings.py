@@ -121,6 +121,15 @@ DMS_DATA_DIR = Path(os.getenv("DMS_DATA_DIR", BASE_DIR.parent / "data"))
 MEDIA_ROOT = DMS_DATA_DIR
 MEDIA_URL = "media/"
 
+# Consume-Eingang (Scanner-/NFS-Ordner). Pfad per Env übersteuerbar; Default
+# identisch zum bisherigen Verhalten (``DMS_DATA_DIR/consume``) → keine
+# Verhaltensänderung ohne gesetzte Env.
+CONSUME_DIR = Path(os.getenv("CONSUME_FOLDER_PATH", DMS_DATA_DIR / "consume"))
+# NFS-Reife-Check: Mindestalter (Sekunden) einer Datei, bevor sie verarbeitet
+# wird. Schützt über NFS vor Teil-Reads noch im Schreiben befindlicher Dateien.
+# ``0`` deaktiviert den Check (Alt-/Testverhalten).
+CONSUME_MIN_AGE = float(os.getenv("CONSUME_MIN_AGE", "15"))
+
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # --- DRF ---

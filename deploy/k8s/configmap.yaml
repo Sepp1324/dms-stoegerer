@@ -16,6 +16,13 @@ data:
   # Beat-Intervalle in Sekunden (periodische Aufgaben).
   MAIL_FETCH_INTERVAL: "300"
   CONSUME_SCAN_INTERVAL: "120"
+  # Consume-Ordner (STOAA-177). CONSUME_FOLDER_PATH übersteuert den Pfad;
+  # Default ist DMS_DATA_DIR/consume. Für NFS-Betrieb setzt DevOps hier den
+  # gemounteten NFS-Pfad (deshalb bewusst NICHT hart vorgegeben):
+  #   CONSUME_FOLDER_PATH: "/mnt/nfs/consume"
+  # NFS-Reife-Check: Mindestalter (Sekunden), bevor eine Datei verarbeitet wird
+  # (Schutz vor Teil-Reads noch im Schreiben befindlicher Dateien; 0 = aus).
+  CONSUME_MIN_AGE: "15"
   AI_PROVIDER: "anthropic"
   AI_MODEL: "claude-opus-4-8"
   OLLAMA_BASE_URL: "http://ollama:11434"

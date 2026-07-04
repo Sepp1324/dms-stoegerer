@@ -4,12 +4,15 @@ Belegt, dass ein Nutzer ausschließlich eigene Dokumente sieht und jeder
 Cross-User-Zugriff (Liste, Detail, Download, Update, Delete, Audit) mit
 404 abgewiesen wird – auf Objekt-Ebene, nicht nur in der UI.
 """
+import time
 from contextlib import contextmanager
+from pathlib import Path
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from rest_framework.test import APITestCase
 
+from . import pipeline
 from .classification import apply_rules, rule_matches
 from .models import (
     AuditLogEntry,
@@ -1088,3 +1091,140 @@ class CustomFieldFilterTests(APITestCase):
         self.assertEqual(
             self._titles(resp), {"D10", "D100", "D500", "Dtext"}
         )
+
+
+class ConsumeScanTests(TestCase):
+    """STOAA-177: NFS-Reife-Check, Quarantäne & konfigurierbarer Consume-Pfad.
+
+    Deckt den Kontrakt für DevOps (STOAA-167) und QA ab: (a) zu junge Dateien
+    werden übersprungen, (b) gereifte Dateien werden aufgenommen und nach
+    ``_processed`` verschoben, (c) ein Verarbeitungsfehler quarantänisiert nur
+    die betroffene Datei und stoppt den Scan nicht, (d) der konfigurierte
+    Consume-Pfad wird respektiert. ``process_document_version.delay`` wird
+    gemockt (kein Broker im Test), ``storage``-Pfade zeigen in ein tmp-Verzeichnis.
+    """
+
+    def setUp(self):
+        import os
+        import tempfile
+        from unittest import mock
+
+        from . import storage, tasks
+
+        self.tasks = tasks
+        self.os = os
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        root = Path(self._tmp.name)
+        self.consume = root / "consume"
+        self.originals = root / "originals"
+        self.consume.mkdir()
+        self.originals.mkdir()
+
+        # storage-Pfade sind Modul-Konstanten → für den Test umbiegen.
+        for attr, value in (("CONSUME_DIR", self.consume), ("ORIGINALS_DIR", self.originals)):
+            p = mock.patch.object(storage, attr, value)
+            p.start()
+            self.addCleanup(p.stop)
+
+        # Kein Celery-Broker im Test: das Fan-out nur registrieren.
+        delay = mock.patch.object(tasks.process_document_version, "delay")
+        self.delay = delay.start()
+        self.addCleanup(delay.stop)
+
+    def _write(self, name: str, data: bytes = b"inhalt", age: float = 0.0) -> Path:
+        """Legt eine Consume-Datei an; ``age`` = Sekunden in der Vergangenheit."""
+        path = self.consume / name
+        path.write_bytes(data)
+        if age:
+            past = time.time() - age
+            self.os.utime(path, (past, past))
+        return path
+
+    @override_settings(CONSUME_MIN_AGE=15)
+    def test_frische_datei_wird_uebersprungen(self):
+        # (a) mtime≈jetzt < Mindestalter → kein Import, Datei bleibt liegen.
+        self._write("frisch.pdf", age=0)
+        result = self.tasks.scan_consume_folder()
+        self.assertEqual(result["found"], 0)
+        self.assertTrue((self.consume / "frisch.pdf").exists())
+        self.assertEqual(Document.objects.count(), 0)
+        self.delay.assert_not_called()
+
+    @override_settings(CONSUME_MIN_AGE=15)
+    def test_leere_datei_wird_uebersprungen(self):
+        # Reife-Check greift auch bei 0-Byte-Datei (Teil-Read-Schutz).
+        self._write("leer.pdf", data=b"", age=3600)
+        result = self.tasks.scan_consume_folder()
+        self.assertEqual(result["found"], 0)
+        self.assertTrue((self.consume / "leer.pdf").exists())
+        self.assertEqual(Document.objects.count(), 0)
+
+    @override_settings(CONSUME_MIN_AGE=15)
+    def test_gealterte_datei_wird_ingestiert_und_verschoben(self):
+        # (b) mtime in der Vergangenheit → Import + Verschieben nach _processed.
+        self._write("alt.pdf", data=b"hallo welt", age=3600)
+        result = self.tasks.scan_consume_folder()
+        self.assertEqual(result["found"], 1)
+        self.assertEqual(Document.objects.count(), 1)
+        self.assertFalse((self.consume / "alt.pdf").exists())
+        self.assertTrue((self.consume / "_processed" / "alt.pdf").exists())
+        self.delay.assert_called_once()
+
+    @override_settings(CONSUME_MIN_AGE=15)
+    def test_verarbeitungsfehler_quarantaene_scan_laeuft_weiter(self):
+        # (c) Pipeline-Fehler bei der ersten Datei → _failed; zweite Datei
+        # wird normal verarbeitet; der Scan bricht nicht ab.
+        from unittest import mock
+
+        self._write("aaa_kaputt.pdf", data=b"boom", age=3600)
+        self._write("bbb_gut.pdf", data=b"heil", age=3600)
+
+        real_create = pipeline.create_document_from_file
+
+        def _create(file_path, *, title, size, **kw):
+            if title == "aaa_kaputt":
+                raise ValueError("Pipeline kaputt")
+            return real_create(file_path, title=title, size=size, **kw)
+
+        with mock.patch.object(pipeline, "create_document_from_file", side_effect=_create):
+            result = self.tasks.scan_consume_folder()
+
+        self.assertEqual(result["found"], 1)
+        self.assertTrue((self.consume / "_failed" / "aaa_kaputt.pdf").exists())
+        self.assertFalse((self.consume / "aaa_kaputt.pdf").exists())
+        self.assertTrue((self.consume / "_processed" / "bbb_gut.pdf").exists())
+        self.assertEqual(Document.objects.count(), 1)
+
+    @override_settings(CONSUME_MIN_AGE=0)
+    def test_dedup_identischer_bytes(self):
+        # Optionale Härtung: identische Bytes eines bereits verarbeiteten
+        # Dokuments werden nicht doppelt aufgenommen.
+        self._write("erst.pdf", data=b"gleiche bytes", age=0)
+        first = self.tasks.scan_consume_folder()
+        self.assertEqual(Document.objects.count(), 1)
+        version = DocumentVersion.objects.get()
+        version.sha256 = pipeline.sha256_of(version.file_path)
+        version.save(update_fields=["sha256"])
+
+        self._write("zweit.pdf", data=b"gleiche bytes", age=0)
+        second = self.tasks.scan_consume_folder()
+        self.assertTrue(second["ingested"][0].get("duplicate"))
+        self.assertEqual(Document.objects.count(), 1)
+
+    def test_konfigurierbarer_pfad_wird_respektiert(self):
+        # (d) Der Scan liest aus dem gesetzten storage.CONSUME_DIR (per Env
+        # CONSUME_FOLDER_PATH konfigurierbar), nicht aus einem festen Pfad.
+        from unittest import mock
+
+        custom = Path(self._tmp.name) / "nfs_inbox"
+        custom.mkdir()
+        with mock.patch.object(self.tasks.storage, "CONSUME_DIR", custom):
+            (custom / "scan.pdf").write_bytes(b"aus dem NFS-Inbox")
+            past = time.time() - 3600
+            self.os.utime(custom / "scan.pdf", (past, past))
+            with override_settings(CONSUME_MIN_AGE=15):
+                result = self.tasks.scan_consume_folder()
+        self.assertEqual(result["found"], 1)
+        self.assertTrue((custom / "_processed" / "scan.pdf").exists())
+        self.assertEqual(Document.objects.count(), 1)
