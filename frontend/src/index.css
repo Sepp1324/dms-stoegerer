@@ -1979,3 +1979,19 @@ button.share-links__revoke:hover:not(:disabled) {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.82rem;
 }
+
+/* Archivnummer (ASN) im Dokumentdetail (STOAA-286): ASN-Label monospace neben
+   dem QR-Download-Button. */
+.asn {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.asn__value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.02em;
+}
+.asn button.link {
+  padding: 0.2rem 0.4rem;
+}
