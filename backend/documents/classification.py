@@ -20,7 +20,10 @@ Regel-Schema (``ClassificationRule``):
 """
 from __future__ import annotations
 
+import logging
 import re
+
+logger = logging.getLogger(__name__)
 
 
 def _searchable_text(document) -> str:
@@ -134,3 +137,31 @@ def apply_rules(document) -> dict:
         )
 
     return {"rules": matched, "applied": applied}
+
+
+def classify_documents(documents) -> dict:
+    """Wendet ``apply_rules`` auf mehrere Dokumente an und aggregiert das Ergebnis.
+
+    Zählt Dokumente, an denen tatsächlich etwas geändert wurde (``applied`` nicht
+    leer) als ``updated``, ansonsten als ``unchanged``. Teilfehler an einzelnen
+    Dokumenten brechen die Massenaktion **nicht** ab – sie werden pro Dokument in
+    ``errors`` (``{"id", "error"}``) gesammelt, die übrigen laufen weiter.
+
+    Gemeinsame Kernlogik für den synchronen Endpoint und den Celery-Task
+    (``tasks.bulk_classify_documents``), damit beide Pfade identisch zählen.
+    """
+    updated = 0
+    unchanged = 0
+    errors: list[dict] = []
+    for document in documents:
+        try:
+            result = apply_rules(document)
+        except Exception as exc:  # pragma: no cover - defensiv, pro Dokument isoliert
+            logger.exception("Bulk-Klassifizierung fehlgeschlagen: doc=%s", document.id)
+            errors.append({"id": document.id, "error": str(exc)})
+            continue
+        if result.get("applied"):
+            updated += 1
+        else:
+            unchanged += 1
+    return {"updated": updated, "unchanged": unchanged, "errors": errors}

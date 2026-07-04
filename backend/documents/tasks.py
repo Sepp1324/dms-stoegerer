@@ -153,6 +153,41 @@ def fetch_mail_account(account_id: int) -> dict:
         return mail.fetch_account(account)
 
 
+@shared_task
+def bulk_classify_documents(document_ids, actor_id=None) -> dict:
+    """Wendet die Klassifizierungsregeln asynchron auf viele Dokumente an.
+
+    Für große Batches (>10 Dokumente) aus ``DocumentViewSet.bulk_classify``. Die
+    ``document_ids`` sind bereits owner-gescopet (der View filtert vor dem
+    Dispatch über ``get_queryset``), daher lädt der Task sie ohne weitere
+    Rechteprüfung. Zählt ``updated``/``unchanged`` und sammelt Teilfehler in
+    ``errors`` (gemeinsame Kernlogik ``classification.classify_documents``).
+    """
+    from . import classification
+    from .models import AuditLogEntry, Document
+
+    documents = list(Document.objects.filter(id__in=document_ids))
+    result = classification.classify_documents(documents)
+
+    if documents:
+        AuditLogEntry.objects.create(
+            actor_id=actor_id,
+            action="bulk_classify",
+            object_type="Document",
+            # object_id ist CharField(64) – bei großen Batches würde eine
+            # ID-Liste überlaufen; die vollständigen IDs stehen in ``detail``.
+            object_id=f"{len(documents)} Dokumente",
+            detail={
+                "mode": "async",
+                "ids": sorted(d.id for d in documents),
+                "updated": result["updated"],
+                "unchanged": result["unchanged"],
+                "errors": result["errors"],
+            },
+        )
+    return result
+
+
 def _unique(path: Path) -> Path:
     counter = 1
     candidate = path

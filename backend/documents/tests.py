@@ -1689,3 +1689,127 @@ class MailAccountApiTests(APITestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, 403)
+
+
+class BulkClassifyEndpointTests(APITestCase):
+    """Bulk-Klassifizierung POST /api/documents/bulk-classify/ (STOAA-208).
+
+    Belegt: synchrone Verarbeitung kleiner Batches mit updated/unchanged/errors,
+    Celery-Dispatch großer Batches, can_write-Gate, Owner-Isolation (fremde IDs
+    als Teilfehler, kein Leak) und Eingabevalidierung.
+    """
+
+    URL = "/api/documents/bulk-classify/"
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(username="u208", password="pw", role="user")
+        cls.other = User.objects.create_user(username="o208", password="pw", role="user")
+        cls.guest = User.objects.create_user(username="g208", password="pw", role="guest")
+        # Regel greift auf Dokumente, deren Titel „rechnung" enthält.
+        ClassificationRule.objects.create(
+            name="Text-Rechnung",
+            match={"text_contains": ["rechnung"]},
+            then={"document_type": "Rechnung"},
+        )
+
+    def _doc(self, title, owner=None):
+        return Document.objects.create(title=title, owner=owner or self.user)
+
+    def test_sync_klein_batch_updated_unchanged_zaehlung(self):
+        treffer = self._doc("Monatsrechnung Strom")  # Regel greift → updated
+        kein_treffer = self._doc("Urlaubsfoto")       # keine Regel → unchanged
+        self.client.force_authenticate(self.user)
+
+        resp = self.client.post(
+            self.URL, {"ids": [treffer.id, kein_treffer.id]}, format="json"
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["updated"], 1)
+        self.assertEqual(resp.data["unchanged"], 1)
+        self.assertEqual(resp.data["errors"], [])
+        treffer.refresh_from_db()
+        self.assertEqual(treffer.document_type.name, "Rechnung")
+        # Audit-Eintrag der Massenaktion.
+        self.assertTrue(
+            AuditLogEntry.objects.filter(action="bulk_classify").exists()
+        )
+
+    def test_grosser_batch_spawnt_celery_task(self):
+        from unittest import mock
+
+        docs = [self._doc(f"Rechnung {i}") for i in range(11)]  # > Limit (10)
+        self.client.force_authenticate(self.user)
+
+        class _Result:
+            id = "task-abc-123"
+
+        with mock.patch(
+            "documents.views.bulk_classify_documents.delay", return_value=_Result()
+        ) as delay:
+            resp = self.client.post(
+                self.URL, {"ids": [d.id for d in docs]}, format="json"
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data, {"task_id": "task-abc-123", "status": "processing"})
+        delay.assert_called_once()
+        args, kwargs = delay.call_args
+        self.assertEqual(sorted(args[0]), sorted(d.id for d in docs))
+        self.assertEqual(kwargs["actor_id"], self.user.id)
+
+    def test_rechte_check_403_fuer_gast(self):
+        doc = self._doc("Rechnung", owner=self.guest)
+        self.client.force_authenticate(self.guest)
+        resp = self.client.post(self.URL, {"ids": [doc.id]}, format="json")
+        self.assertEqual(resp.status_code, 403)
+
+    def test_fremde_ids_als_errors_kein_leak(self):
+        mine = self._doc("Meine Rechnung")
+        fremd = self._doc("Fremde Rechnung", owner=self.other)
+        self.client.force_authenticate(self.user)
+
+        resp = self.client.post(
+            self.URL, {"ids": [mine.id, fremd.id]}, format="json"
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        # Nur das eigene Dokument wurde verarbeitet.
+        self.assertEqual(resp.data["updated"] + resp.data["unchanged"], 1)
+        fehler_ids = [e["id"] for e in resp.data["errors"]]
+        self.assertIn(fremd.id, fehler_ids)
+        fremd.refresh_from_db()
+        self.assertIsNone(fremd.document_type)  # unangetastet
+
+    def test_leere_ids_400(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.post(self.URL, {"ids": []}, format="json")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_ungueltige_id_400(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.post(self.URL, {"ids": ["abc"]}, format="json")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_celery_task_klassifiziert_und_auditiert(self):
+        # Task-Funktion direkt aufrufen (kein Broker nötig).
+        from .tasks import bulk_classify_documents
+
+        treffer = self._doc("Stromrechnung Januar")
+        neutral = self._doc("Notiz")
+
+        result = bulk_classify_documents(
+            [treffer.id, neutral.id], actor_id=self.user.id
+        )
+
+        self.assertEqual(result["updated"], 1)
+        self.assertEqual(result["unchanged"], 1)
+        self.assertEqual(result["errors"], [])
+        treffer.refresh_from_db()
+        self.assertEqual(treffer.document_type.name, "Rechnung")
+        self.assertTrue(
+            AuditLogEntry.objects.filter(
+                action="bulk_classify", actor=self.user
+            ).exists()
+        )
