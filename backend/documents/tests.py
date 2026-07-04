@@ -1088,3 +1088,120 @@ class CustomFieldFilterTests(APITestCase):
         self.assertEqual(
             self._titles(resp), {"D10", "D100", "D500", "Dtext"}
         )
+
+
+class ConsumeFolderScanTests(TestCase):
+    """STOAA-174: NFS-tauglicher Consume-Ordner.
+
+    Deckt den Reife-Check (CONSUME_MIN_AGE), den Normalpfad (ingested +
+    ``_processed/``) sowie den Fehlerpfad (``_failed/`` + Scan läuft weiter) ab.
+    ``process_document_version.delay`` wird gemockt, damit die Tests ohne
+    Celery-Broker/OCR laufen.
+    """
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.consume = root / "consume"
+        self.originals = root / "originals"
+        self.consume.mkdir(parents=True, exist_ok=True)
+        self.originals.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(self._tmp.cleanup)
+
+    def _write(self, name, *, age_seconds):
+        """Legt eine Datei im Consume-Ordner an und setzt ihr Alter (mtime)."""
+        import os
+        import time
+
+        path = self.consume / name
+        path.write_bytes(b"%PDF-1.4 dummy")
+        mtime = time.time() - age_seconds
+        os.utime(path, (mtime, mtime))
+        return path
+
+    def _run_scan(self):
+        from unittest import mock
+
+        from . import storage, tasks
+
+        with mock.patch.object(storage, "CONSUME_DIR", self.consume), mock.patch.object(
+            storage, "ORIGINALS_DIR", self.originals
+        ), mock.patch.object(tasks.process_document_version, "delay") as delay:
+            result = tasks.scan_consume_folder()
+        return result, delay
+
+    def test_zu_junge_datei_wird_uebersprungen(self):
+        """(a) Datei jünger als CONSUME_MIN_AGE -> übersprungen, nicht verschoben."""
+        with self.settings(CONSUME_MIN_AGE=15):
+            self._write("frisch.pdf", age_seconds=0)
+            result, delay = self._run_scan()
+
+        self.assertEqual(result["found"], 0)
+        self.assertEqual(result["skipped"], 1)
+        self.assertEqual(result["failed"], 0)
+        # Datei bleibt liegen (kein _processed/_failed), nichts angestoßen.
+        self.assertTrue((self.consume / "frisch.pdf").exists())
+        self.assertFalse((self.consume / "_processed" / "frisch.pdf").exists())
+        delay.assert_not_called()
+        self.assertEqual(Document.objects.count(), 0)
+
+    def test_reife_datei_wird_aufgenommen(self):
+        """(b) Datei alt genug -> ingested + nach _processed/ verschoben."""
+        with self.settings(CONSUME_MIN_AGE=15):
+            self._write("reif.pdf", age_seconds=3600)
+            result, delay = self._run_scan()
+
+        self.assertEqual(result["found"], 1)
+        self.assertEqual(result["skipped"], 0)
+        self.assertEqual(result["failed"], 0)
+        # Original aus dem Eingang entfernt und nach _processed/ verschoben.
+        self.assertFalse((self.consume / "reif.pdf").exists())
+        self.assertTrue((self.consume / "_processed" / "reif.pdf").exists())
+        # Dokument angelegt, Pipeline (async) angestoßen.
+        self.assertEqual(Document.objects.count(), 1)
+        self.assertEqual(Document.objects.get().title, "reif")
+        delay.assert_called_once()
+
+    def test_fehlerhafte_datei_landet_in_failed_und_scan_laeuft_weiter(self):
+        """(c) Fehlerpfad -> _failed/ + die übrigen Dateien werden verarbeitet."""
+        from unittest import mock
+
+        from . import pipeline, storage, tasks
+
+        self._write("bad.pdf", age_seconds=3600)
+        self._write("good.pdf", age_seconds=3600)
+
+        real = pipeline.create_document_from_file
+
+        def flaky(path, *, title, **kwargs):
+            if title == "bad":
+                raise RuntimeError("boom")
+            return real(path, title=title, **kwargs)
+
+        with self.settings(CONSUME_MIN_AGE=15):
+            with mock.patch.object(
+                storage, "CONSUME_DIR", self.consume
+            ), mock.patch.object(
+                storage, "ORIGINALS_DIR", self.originals
+            ), mock.patch.object(
+                tasks.process_document_version, "delay"
+            ) as delay, mock.patch.object(
+                tasks.pipeline, "create_document_from_file", side_effect=flaky
+            ):
+                result = tasks.scan_consume_folder()
+
+        # Scan wurde nicht abgebrochen: gute Datei ingested, schlechte gezählt.
+        self.assertEqual(result["found"], 1)
+        self.assertEqual(result["failed"], 1)
+        self.assertEqual(result["skipped"], 0)
+        # Fehlerhafte Datei nach _failed/, nicht verschluckt und nicht in _processed/.
+        self.assertTrue((self.consume / "_failed" / "bad.pdf").exists())
+        self.assertFalse((self.consume / "_processed" / "bad.pdf").exists())
+        # Gute Datei regulär verarbeitet.
+        self.assertTrue((self.consume / "_processed" / "good.pdf").exists())
+        self.assertEqual(Document.objects.count(), 1)
+        self.assertEqual(Document.objects.get().title, "good")
+        delay.assert_called_once()
