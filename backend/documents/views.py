@@ -59,6 +59,7 @@ from .models import (
     Document,
     DocumentShareLink,
     DocumentType,
+    DocumentVersion,
     MailAccount,
     StoragePath,
     Tag,
@@ -71,11 +72,16 @@ from .serializers import (
     DocumentSerializer,
     DocumentShareLinkSerializer,
     DocumentTypeSerializer,
+    DocumentVersionSerializer,
     MailAccountSerializer,
     StoragePathSerializer,
     TagSerializer,
 )
-from .tasks import bulk_classify_documents, process_document_version
+from .tasks import (
+    bulk_classify_documents,
+    process_document_version,
+    retry_document_version,
+)
 
 # Erkennt Bereichsfilter auf Zusatzfeldern: ``custom_field_<id>_gte`` / ``_lte``.
 _CUSTOM_FIELD_PARAM_RE = re.compile(r"^custom_field_(\d+)_(gte|lte)$")
@@ -349,6 +355,36 @@ class DocumentViewSet(viewsets.ModelViewSet):
             qs = qs.filter(document_type_id=params["document_type"])
         if params.get("storage_path"):
             qs = qs.filter(storage_path_id=params["storage_path"])
+        # Verarbeitungsstatus-Filter (STOAA-248): grobe UI-Buckets auf den
+        # ``processing_state`` der aktuellen Version. Bewusst manuell (kein
+        # django-filter). ``processing`` fasst alle In-Flight-States zusammen;
+        # ``failed``/``retry_pending``/``ready`` sind eigene Buckets. Ein Wert,
+        # der kein Bucket ist, wird als exakter State interpretiert; ein
+        # unbekannter Wert wird ignoriert (kein 500, kein Filter).
+        processing_state = params.get("processing_state")
+        if processing_state:
+            PS = DocumentVersion.ProcessingState
+            buckets = {
+                "failed": [PS.FAILED],
+                "retry_pending": [PS.RETRY_PENDING],
+                "ready": [PS.READY],
+                "processing": [
+                    PS.UPLOADED,
+                    PS.HASHED,
+                    PS.OCR_RUNNING,
+                    PS.OCR_DONE,
+                    PS.CLASSIFICATION_RUNNING,
+                    PS.CLASSIFIED,
+                    PS.THUMBNAIL_DONE,
+                    PS.SEALED,
+                ],
+            }
+            states = buckets.get(processing_state)
+            if states is None and processing_state in {c for c, _ in PS.choices}:
+                # Kein Bucket, aber ein gültiger exakter State.
+                states = [processing_state]
+            if states is not None:
+                qs = qs.filter(current_version__processing_state__in=states)
         # ``tag`` mehrfach erlaubt (?tag=1&tag=2) → ODER via ``__in``;
         # ein einzelner Wert bleibt abwärtskompatibel (getlist → ["1"]).
         tags = params.getlist("tag")
@@ -821,6 +857,50 @@ class DocumentViewSet(viewsets.ModelViewSet):
             allowed_from=(Document.ApprovalStatus.ZUR_FREIGABE,),
             new_status=Document.ApprovalStatus.ABGELEHNT,
             action_name="reject",
+        )
+
+    @action(detail=True, methods=["post"], url_path="retry_processing")
+    def retry_processing(self, request, pk=None):
+        """Verarbeitung der aktuellen Version neu anstoßen (STOAA-248).
+
+        Bewusst dokument-scoped (nicht version-scoped): es gibt kein
+        DocumentVersionViewSet, Versionen sind nur nested; der UI-Bedarf ist
+        genau der Retry der *current_version*. Die Owner-Isolation kommt gratis
+        über ``get_object()`` (fremdes Dokument → 404).
+
+        Guard: nur erlaubt, wenn ``current_version.processing_state == failed``
+        (sonst 400). Gast-Rolle → 403. Die – potentiell lange –
+        Neuverarbeitung läuft asynchron (``retry_document_version.delay``); die
+        Antwort ist 202 mit der serialisierten aktuellen Version (noch im
+        Zustand FAILED, das Hochzählen auf RETRY_PENDING passiert im Task).
+        Polling ist nicht nötig – der ``processing_state``-Rollup aktualisiert
+        sich über die Liste.
+        """
+        if not request.user.can_write:
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        document = self.get_object()
+        version = document.current_version
+        PS = DocumentVersion.ProcessingState
+
+        if version is None or version.processing_state != PS.FAILED:
+            return Response(
+                {
+                    "detail": (
+                        "Retry ist nur für eine fehlgeschlagene Verarbeitung "
+                        "(processing_state=failed) möglich."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        retry_document_version.delay(version.id, actor_id=request.user.id)
+        return Response(
+            DocumentVersionSerializer(version).data,
+            status=status.HTTP_202_ACCEPTED,
         )
 
     # Bis zu so vielen Dokumenten wird synchron im Request klassifiziert;

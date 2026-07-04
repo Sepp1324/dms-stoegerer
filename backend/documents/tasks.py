@@ -31,6 +31,34 @@ def process_document_version(version_id: int) -> dict:
 
 
 @shared_task
+def retry_document_version(version_id: int, actor_id: int | None = None) -> dict:
+    """Verarbeitet eine FAILED-Version asynchron ab dem fehlgeschlagenen Schritt neu.
+
+    Spiegelt ``process_document_version`` für den Retry-Pfad (STOAA-248): der
+    dokument-scoped Retry-Endpoint stößt diesen Task per ``.delay()`` an, damit
+    die – potentiell lange – Neuverarbeitung nicht im Request hängt.
+    ``pipeline.retry_version`` zählt den Versuch hoch und läuft ab dem
+    fehlgeschlagenen Schritt weiter; anschließend werden – wie beim Erstlauf –
+    die KI-Metadatenvorschläge unverbindlich neu angestoßen.
+    """
+    version = DocumentVersion.objects.select_related("document").get(pk=version_id)
+
+    actor = None
+    if actor_id is not None:
+        from django.contrib.auth import get_user_model
+
+        actor = get_user_model().objects.filter(pk=actor_id).first()
+
+    result = pipeline.retry_version(version, actor=actor)
+
+    # KI-Vorschläge nach dem OCR neu anstoßen (eigener Task, s. process_document_version).
+    from ai.tasks import suggest_document_metadata
+
+    suggest_document_metadata.delay(version.document_id)
+    return result
+
+
+@shared_task
 def scan_consume_folder() -> dict:
     """Nimmt alle reifen Dateien aus dem Consume-Ordner auf und stößt die Pipeline an.
 
