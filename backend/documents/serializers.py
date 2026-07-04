@@ -501,3 +501,15 @@ class VersionCompareResultSerializer(_s.Serializer):
     tags = TagDiffSerializer()
     custom_fields = _s.DictField(child=FieldChangeSerializer())
     files = FileDiffSerializer()
+    # Stufe 1 vergleicht beide Versionen gegen dasselbe ``Document`` – ein
+    # echter Metadaten-/Tag-/Feld-Diff pro Version ist erst mit Stufe 2
+    # (Metadaten-Versionierung) möglich. Das Flag ist Teil des Contracts, damit
+    # das Frontend die entsprechenden Badges gezielt aus-/einblenden kann
+    # (STOAA-290). In Stufe 1 immer ``False``.
+    metadata_versioning_supported = _s.SerializerMethodField()
+
+    def get_metadata_versioning_supported(self, obj):
+        # ``VersionCompareResult`` (dataclass) trägt das Flag in Stufe 1 nicht;
+        # per Vertrag ist es hier immer False. Stufe 2 kann das Attribut am
+        # Ergebnis setzen, dann wird es hier durchgereicht.
+        return bool(getattr(obj, "metadata_versioning_supported", False))
