@@ -346,7 +346,7 @@ class DocumentVersion(models.Model):
         max_length=16,
         blank=True,
         default="upload",
-        help_text="upload | consume | mail | api",
+        help_text="upload | consume | mail | api | paperless_import",
     )
 
     ocr_status = models.CharField(

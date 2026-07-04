@@ -3799,3 +3799,132 @@ class VersionCompareSnapshotDiffTests(TestCase):
         result = self._compare(old, new)
         self.assertTrue(result["summary"]["text_changed"])
         self.assertIn("<table", result["text_diff_html"])
+
+
+class ImportPaperlessCommandTests(TestCase):
+    """STOAA-332: manage.py import_paperless (paperless-ngx-Export -> DMS).
+
+    ``pipeline.process_version`` wird gemockt, damit die Tests ohne OCR/Celery
+    laufen; die DB-Anlage, das Mapping und die SHA-256-Idempotenz werden real
+    geprüft. ``storage.ORIGINALS_DIR`` zeigt auf ein Temp-Verzeichnis.
+    """
+
+    def setUp(self):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        self.owner = User.objects.create_user(username="importeur", password="x")
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        root = Path(self._tmp.name)
+        self.source = root / "export"
+        self.source.mkdir(parents=True, exist_ok=True)
+        self.originals = root / "originals"
+        self.originals.mkdir(parents=True, exist_ok=True)
+
+        # Zwei Originaldateien mit unterschiedlichem Inhalt.
+        (self.source / "rechnung.pdf").write_bytes(b"%PDF-1.4 rechnung")
+        (self.source / "vertrag.pdf").write_bytes(b"%PDF-1.4 vertrag")
+
+        manifest = [
+            {"model": "documents.correspondent", "pk": 1, "fields": {"name": "Stadtwerke"}},
+            {"model": "documents.documenttype", "pk": 1, "fields": {"name": "Rechnung"}},
+            {"model": "documents.tag", "pk": 1, "fields": {"name": "Finanzen"}},
+            {"model": "documents.tag", "pk": 2, "fields": {"name": "Wichtig"}},
+            {
+                "model": "documents.document",
+                "pk": 10,
+                "__exported_file_name__": "rechnung.pdf",
+                "fields": {
+                    "title": "Stromrechnung 2024",
+                    "correspondent": 1,
+                    "document_type": 1,
+                    "tags": [1, 2],
+                    "created": "2024-03-15T00:00:00+00:00",
+                },
+            },
+            {
+                "model": "documents.document",
+                "pk": 11,
+                "__exported_file_name__": "vertrag.pdf",
+                "fields": {
+                    "title": "Mietvertrag",
+                    "correspondent": None,
+                    "document_type": None,
+                    "tags": [],
+                    "created": "2023-01-01",
+                },
+            },
+        ]
+        (self.source / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    def _run(self, **kwargs):
+        from unittest import mock
+
+        from django.core.management import call_command
+
+        from . import pipeline, storage
+
+        opts = {"source": str(self.source), "owner": "importeur"}
+        opts.update(kwargs)
+        with mock.patch.object(storage, "ORIGINALS_DIR", self.originals), mock.patch.object(
+            pipeline, "process_version"
+        ) as proc:
+            call_command("import_paperless", **opts)
+        return proc
+
+    def test_import_legt_dokumente_an(self):
+        proc = self._run()
+
+        self.assertEqual(Document.objects.count(), 2)
+        rechnung = Document.objects.get(title="Stromrechnung 2024")
+        self.assertEqual(rechnung.owner, self.owner)
+        self.assertEqual(rechnung.correspondent.name, "Stadtwerke")
+        self.assertEqual(rechnung.document_type.name, "Rechnung")
+        self.assertIsNotNone(rechnung.created_at)
+        self.assertEqual(rechnung.created_at.year, 2024)
+        # get_or_create-Stammdaten genau einmal angelegt.
+        self.assertEqual(Correspondent.objects.count(), 1)
+        self.assertEqual(DocumentType.objects.count(), 1)
+        # ingest_source auf der Version gesetzt, Pipeline angestoßen.
+        version = rechnung.current_version
+        self.assertEqual(version.ingest_source, "paperless_import")
+        self.assertTrue(version.sha256)
+        self.assertEqual(proc.call_count, 2)
+        # Ohne --with-tags keine Tags.
+        self.assertEqual(rechnung.tags.count(), 0)
+
+    def test_idempotenz_zweiter_lauf_null_neu(self):
+        self._run()
+        self.assertEqual(Document.objects.count(), 2)
+        # Zweiter Lauf ueber denselben Export: 0 neue Dokumente (SHA-256-Dedup).
+        proc = self._run()
+        self.assertEqual(Document.objects.count(), 2)
+        proc.assert_not_called()
+
+    def test_dry_run_schreibt_nichts(self):
+        proc = self._run(dry_run=True)
+        self.assertEqual(Document.objects.count(), 0)
+        self.assertEqual(Correspondent.objects.count(), 0)
+        self.assertEqual(DocumentType.objects.count(), 0)
+        proc.assert_not_called()
+        # Keine Datei in den storage-Bereich kopiert.
+        self.assertEqual(list(self.originals.iterdir()), [])
+
+    def test_with_tags_importiert_tags(self):
+        self._run(with_tags=True)
+        rechnung = Document.objects.get(title="Stromrechnung 2024")
+        self.assertEqual(
+            sorted(rechnung.tags.values_list("name", flat=True)), ["Finanzen", "Wichtig"]
+        )
+        self.assertEqual(Tag.objects.count(), 2)
+
+    def test_unbekannter_owner_ist_fehler(self):
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+
+        with self.assertRaises(CommandError):
+            call_command("import_paperless", source=str(self.source), owner="gibtsnicht")
+        self.assertEqual(Document.objects.count(), 0)
