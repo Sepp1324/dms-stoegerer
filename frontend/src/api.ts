@@ -263,6 +263,10 @@ export interface MailAccount {
   folder: string;
   enabled: boolean;
   password_env: string;
+  // Serverseitig: ``true``, wenn ein Passwort (Klartext-Feld oder ``password_env``)
+  // hinterlegt ist – ohne das Passwort preiszugeben. Steuert im Edit-Form den
+  // Platzhalter „(unverändert lassen)".
+  has_password: boolean;
   last_checked_at: string | null;
   last_error: string;
 }
@@ -281,11 +285,12 @@ export interface MailAccountPayload {
   password?: string;
 }
 
-// Ergebnis des Verbindungstests (POST .../test_connection/). ``error_code`` ist
-// bei Erfolg ``null``; ``message`` ist stets eine anzeigbare deutsche Meldung.
+// Ergebnis des Verbindungstests (POST /mail-accounts/test-connection/). Das
+// Backend antwortet auch bei einem fehlgeschlagenen Login mit HTTP 200 – ein
+// misslungener Test ist ein erwartetes Ergebnis, kein Client-Fehler. ``ok``
+// zeigt Erfolg/Misserfolg, ``message`` ist stets eine anzeigbare Meldung.
 export interface MailTestResult {
-  success: boolean;
-  error_code: string | null;
+  ok: boolean;
   message: string;
 }
 
@@ -703,13 +708,17 @@ export async function deleteMailAccount(id: number): Promise<void> {
   }
   throw new Error(detail);
 }
-// Echter IMAP-Login-Test des gespeicherten Kontos. Persistiert
-// ``last_checked_at``/``last_error`` serverseitig; die Karte sollte danach
-// refetchen. Liefert das Ergebnis-Banner-Objekt zurück.
+// Echter IMAP-Login-Test des gespeicherten Kontos. Der Endpoint liegt auf der
+// Collection (``test-connection``, nicht am Detail-Objekt); das gewünschte Konto
+// wird per ``{ id }`` im Body adressiert. Der Test ist zustandslos – er
+// speichert nichts (kein ``last_checked_at``-Update), sondern liefert nur das
+// Ergebnis-Banner zurück. Fehlschläge kommen mit HTTP 200 und ``ok: false``;
+// nur echte HTTP-Fehler (403/404/500) werfen.
 export async function testMailAccount(id: number): Promise<MailTestResult> {
-  const res = await apiFetch(`/mail-accounts/${id}/test_connection/`, {
+  const res = await apiFetch(`/mail-accounts/test-connection/`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id }),
   });
   if (!res.ok) {
     let detail = `HTTP ${res.status}`;

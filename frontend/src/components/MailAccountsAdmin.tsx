@@ -222,7 +222,9 @@ function AccountCard({
     try {
       const r = await testMailAccount(account.id);
       setTestResult(r);
-      onChanged(); // last_checked_at / last_error frisch nachladen
+      // Kein onChanged(): Der Verbindungstest ist serverseitig zustandslos und
+      // aktualisiert weder last_checked_at noch last_error – ein Refetch würde
+      // die Statuszeile nicht verändern. Das Banner zeigt das Live-Ergebnis.
     } catch (e) {
       setRowError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -238,6 +240,7 @@ function AccountCard({
           submitLabel="Änderungen speichern"
           initial={draftFromAccount(account)}
           isEdit
+          hasPassword={account.has_password}
           onCancel={() => setEditing(false)}
           onSubmit={async (payload) => {
             await updateMailAccount(account.id, payload);
@@ -340,7 +343,7 @@ function AccountCard({
 
       {testResult && (
         <p
-          className={`status ${testResult.success ? "status--ok" : "status--error"}`}
+          className={`status ${testResult.ok ? "status--ok" : "status--error"}`}
           role="status"
         >
           {testResult.message}
@@ -377,6 +380,7 @@ function MailAccountForm({
   submitLabel,
   initial,
   isEdit,
+  hasPassword = false,
   onCancel,
   onSubmit,
 }: {
@@ -384,6 +388,9 @@ function MailAccountForm({
   submitLabel: string;
   initial: Draft;
   isEdit: boolean;
+  // Nur relevant beim Bearbeiten: steuert, ob das leere Passwortfeld „unverändert
+  // lassen" (Passwort hinterlegt) oder „App-Passwort" (noch keins) anzeigt.
+  hasPassword?: boolean;
   onCancel: () => void;
   onSubmit: (payload: MailAccountPayload) => Promise<void>;
 }) {
@@ -457,7 +464,9 @@ function MailAccountForm({
             type="password"
             value={draft.password}
             onChange={(e) => set("password", e.target.value)}
-            placeholder={isEdit ? "(unverändert lassen)" : "App-Passwort"}
+            placeholder={
+              isEdit && hasPassword ? "(unverändert lassen)" : "App-Passwort"
+            }
             autoComplete="new-password"
           />
         </label>
