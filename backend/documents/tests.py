@@ -5,9 +5,11 @@ Cross-User-Zugriff (Liste, Detail, Download, Update, Delete, Audit) mit
 404 abgewiesen wird – auf Objekt-Ebene, nicht nur in der UI.
 """
 from contextlib import contextmanager
+from datetime import timedelta
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
+from django.utils import timezone
 from rest_framework.test import APITestCase
 
 from .classification import apply_rules, rule_matches
@@ -1219,12 +1221,6 @@ class DocumentShareLinkTests(APITestCase):
 
     @classmethod
     def setUpTestData(cls):
-        from datetime import timedelta
-
-        from django.utils import timezone
-
-        cls.timezone = timezone
-        cls.timedelta = timedelta
         cls.owner = User.objects.create_user(username="s_owner", password="pw", role="user")
         cls.other = User.objects.create_user(username="s_other", password="pw", role="user")
         cls.guest = User.objects.create_user(username="s_guest", password="pw", role="guest")
@@ -1233,7 +1229,7 @@ class DocumentShareLinkTests(APITestCase):
         cls.other_doc = Document.objects.create(title="Fremd", owner=cls.other)
 
     def _future(self, days=7):
-        return (self.timezone.now() + self.timedelta(days=days)).isoformat()
+        return (timezone.now() + timedelta(days=days)).isoformat()
 
     # --- Create -----------------------------------------------------------
     def test_create_liefert_token_einmalig_und_speichert_nur_hash(self):
@@ -1260,7 +1256,7 @@ class DocumentShareLinkTests(APITestCase):
 
     def test_create_mit_vergangenem_expires_at_ist_400(self):
         self.client.force_authenticate(self.owner)
-        past = (self.timezone.now() - self.timedelta(days=1)).isoformat()
+        past = (timezone.now() - timedelta(days=1)).isoformat()
         resp = self.client.post(
             self.BASE, {"document": self.doc.id, "expires_at": past}
         )
@@ -1287,7 +1283,7 @@ class DocumentShareLinkTests(APITestCase):
         link = DocumentShareLink.objects.create(
             document=self.doc,
             token_hash=DocumentShareLink.hash_token("t"),
-            expires_at=self.timezone.now() + self.timedelta(days=3),
+            expires_at=timezone.now() + timedelta(days=3),
             created_by=self.owner,
         )
         self.client.force_authenticate(self.owner)
@@ -1305,7 +1301,7 @@ class DocumentShareLinkTests(APITestCase):
         DocumentShareLink.objects.create(
             document=self.doc,
             token_hash=DocumentShareLink.hash_token("x"),
-            expires_at=self.timezone.now() + self.timedelta(days=3),
+            expires_at=timezone.now() + timedelta(days=3),
         )
         self.client.force_authenticate(self.other)
         resp = self.client.get(self.BASE)
@@ -1317,7 +1313,7 @@ class DocumentShareLinkTests(APITestCase):
         link = DocumentShareLink.objects.create(
             document=self.doc,
             token_hash=DocumentShareLink.hash_token("d"),
-            expires_at=self.timezone.now() + self.timedelta(days=3),
+            expires_at=timezone.now() + timedelta(days=3),
         )
         self.client.force_authenticate(self.owner)
         resp = self.client.delete(self.BASE + f"{link.id}/")
@@ -1330,11 +1326,11 @@ class DocumentShareLinkTests(APITestCase):
         link = DocumentShareLink.objects.create(
             document=self.doc,
             token_hash=DocumentShareLink.hash_token("p"),
-            expires_at=self.timezone.now() + self.timedelta(days=3),
+            expires_at=timezone.now() + timedelta(days=3),
         )
         self.client.force_authenticate(self.owner)
         resp = self.client.patch(
-            self.BASE + f"{link.id}/", {"revoked_at": self.timezone.now().isoformat()}
+            self.BASE + f"{link.id}/", {"revoked_at": timezone.now().isoformat()}
         )
         self.assertEqual(resp.status_code, 200)
         self.assertFalse(resp.data["is_valid"])
@@ -1345,7 +1341,7 @@ class DocumentShareLinkTests(APITestCase):
         link = DocumentShareLink.objects.create(
             document=self.doc,
             token_hash=DocumentShareLink.hash_token("f"),
-            expires_at=self.timezone.now() + self.timedelta(days=3),
+            expires_at=timezone.now() + timedelta(days=3),
         )
         self.client.force_authenticate(self.other)
         resp = self.client.delete(self.BASE + f"{link.id}/")
@@ -1357,6 +1353,6 @@ class DocumentShareLinkTests(APITestCase):
         link = DocumentShareLink.objects.create(
             document=self.doc,
             token_hash=DocumentShareLink.hash_token("e"),
-            expires_at=self.timezone.now() - self.timedelta(seconds=1),
+            expires_at=timezone.now() - timedelta(seconds=1),
         )
         self.assertFalse(link.is_valid)
