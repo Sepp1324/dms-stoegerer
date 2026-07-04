@@ -1,0 +1,26 @@
+# Strategic-Merge-Patch: separates NFS-Volume in den Worker-Pod mounten.
+# Merge-Key ist `name` → volumeMount + volume `consume-nfs` werden ergänzt,
+# `data` (dms-data, RWO) und die podAffinity bleiben unangetastet.
+#
+# Platzhalter vor der Aktivierung ersetzen (kein Secret/keine IP ins Git):
+#   server: <NAS-IP oder DNS-Name>
+#   path:   <NFS-Export-Pfad, z. B. /volume1/dms-consume>
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: dms
+spec:
+  template:
+    spec:
+      containers:
+        - name: worker
+          volumeMounts:
+            - name: consume-nfs
+              mountPath: /consume-nfs
+      volumes:
+        - name: consume-nfs
+          nfs:
+            server: NFS_SERVER_PLACEHOLDER
+            path: NFS_EXPORT_PATH_PLACEHOLDER
+            readOnly: false

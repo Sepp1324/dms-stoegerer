@@ -16,9 +16,10 @@ bis zum erreichbaren `http://dms.stoegerer-home.at`. Optimiert für ein **Einzel
 | `postgres` | Deployment + PVC (`postgres-data`, 5 Gi) + Service | Datenbank |
 | `redis` | Deployment + Service | Celery-Broker |
 | `backend` | Deployment (Init-Container: migrate + collectstatic) + Service `:8000` | Django/DRF |
-| `worker` | Deployment | Celery-Worker (OCR-Pipeline) |
+| `worker` | Deployment | Celery-Worker (OCR-Pipeline + Consume-Scanner) |
 | `frontend` | Deployment + Service `:80` | React-SPA (nginx) |
 | `dms-data` | PVC (20 Gi) | Revisionssichere Ablage `/data` (originals + archive) |
+| `consume-nfs` | NFS-Volume (**optionales Overlay**, extern konfigurierbar) | Scanner-Eingang direkt auf NAS |
 | `dms` | Ingress (Traefik) | `/api`,`/admin`,`/static` → Backend, `/` → Frontend |
 
 ```
@@ -299,15 +300,107 @@ Rollout startet automatisch (kein manuelles `rollout restart` nötig).
 
 ### Consume-Ordner (Scanner-Eingang)
 
-Der Worker kann einen Eingangsordner `/data/consume` aufnehmen. Dateien
-hineinlegen (z. B. per Sidecar, NFS-Mount oder `kubectl cp`) und den Task anstoßen:
+Der Worker scannt periodisch (Celery Beat, alle 120s, `CONSUME_SCAN_INTERVAL`)
+einen Eingangsordner und schickt reife Dateien durch die OCR-Pipeline.
 
+- **Basis (Default):** lokaler Pfad `CONSUME_FOLDER_PATH=/data/consume` im
+  `dms-data`-PVC. Dateien z. B. per `kubectl cp` oder Sidecar hineinlegen. So
+  deployt die CD ohne externe Abhängigkeit — **kein NFS-Server nötig**.
+- **NAS-Betrieb (optional):** ein **separates NFS-Volume** (`/consume-nfs`), auf
+  das ein Netzwerkscanner/MFC direkt schreibt. Aktivierung über das Overlay
+  `deploy/k8s/overlays/consume-nfs/` (siehe unten).
+
+> **Warum ein Overlay und nicht die Basis?** Das NFS-Volume trägt Platzhalter für
+> Server/Export (kein Secret/keine IP ins Git). Läge es in der Basis, würde die CD
+> (`deploy.yml` → `kubectl apply -k deploy/k8s` + `rollout status deploy/worker`)
+> versuchen, gegen `NFS_SERVER_PLACEHOLDER` zu mounten → der Worker-Pod hinge in
+> `ContainerCreating` und der Deploy liefe rot. Deshalb ist NFS bewusst opt-in.
+
+#### NAS-Betrieb aktivieren
+
+1. **NAS-Export anlegen** (z. B. Synology, TrueNAS):
+   ```
+   Pfad: /volume1/dms-consume
+   Berechtigungen: root-squash deaktivieren ODER feste UID/GID (z. B. 1000:1000)
+   Zugriff: Node-IP-Range (z. B. 192.168.1.0/24)
+   ```
+
+2. **Node vorbereiten** (auf allen Worker-Nodes):
+   ```bash
+   sudo apt-get install -y nfs-common      # Debian/Ubuntu
+   # bzw. yum install nfs-utils            # RHEL/CentOS
+
+   # Test-Mount (Server-IP + Pfad anpassen)
+   sudo mount -t nfs 192.168.1.10:/volume1/dms-consume /mnt
+   ls /mnt && sudo umount /mnt             # sollte ohne Fehler durchlaufen
+   ```
+
+3. **Platzhalter im Overlay setzen** — in
+   `deploy/k8s/overlays/consume-nfs/worker-nfs-patch.yaml`:
+   ```yaml
+   server: NFS_SERVER_PLACEHOLDER    →  server: 192.168.1.10
+   path: NFS_EXPORT_PATH_PLACEHOLDER →  path: /volume1/dms-consume
+   ```
+   Das Overlay ergänzt Volume + Mount am Worker und überschreibt
+   `CONSUME_FOLDER_PATH` auf `/consume-nfs` (`configmap-nfs-patch.yaml`).
+   Rendern zum Prüfen: `kubectl kustomize deploy/k8s/overlays/consume-nfs`.
+
+4. **Rollout + Verifikation:**
+   ```bash
+   kubectl apply -k deploy/k8s/overlays/consume-nfs
+   kubectl -n dms rollout status deploy/worker
+
+   # Mount im Pod prüfen
+   kubectl -n dms exec deploy/worker -- df -h /consume-nfs
+   kubectl -n dms exec deploy/worker -- touch /consume-nfs/test && \
+     kubectl -n dms exec deploy/worker -- rm /consume-nfs/test
+   # → Schreibzugriff OK, Datei sollte auch auf dem NAS sichtbar sein
+   ```
+
+5. **Dauerhaft in der CD** (damit der NFS-Mount Deploys übersteht): in
+   `.github/workflows/deploy.yml` den Render-Pfad von `deploy/k8s` auf
+   `deploy/k8s/overlays/consume-nfs` umstellen. Bis dahin deployt die CD die
+   NFS-freie Basis; ein manuell angewandtes Overlay würde beim nächsten
+   Basis-Deploy wieder überschrieben.
+
+#### Scanner konfigurieren
+
+Typisches Scan-to-Folder-Setup (Beispiel Brother MFC):
+1. Scanner-Web-UI öffnen → **Scan to Network**
+2. Ziel: `\\NAS-IP\dms-consume` (Windows) oder `smb://NAS-IP/dms-consume` (Linux)
+3. Oder direkt NFS, falls das Gerät es unterstützt.
+
+Die Dateien landen dann im Consume-Ordner; der Worker erkennt sie erst, wenn sie
+mindestens `CONSUME_MIN_AGE` Sekunden alt sind (Default: 15s, siehe `configmap.yaml`),
+damit langsam über NFS geschriebene Scans nicht als Teil-Read aufgenommen werden.
+
+#### Automatische Verarbeitung
+
+Der Beat-Schedule (siehe `configmap.yaml`) stößt `scan_consume_folder` alle 120s an.
+Jede Datei im Consume-Ordner, die älter als `CONSUME_MIN_AGE` ist, wird:
+1. OCR-verarbeitet (wie ein Upload)
+2. Im DMS-Archiv abgelegt (`/data/archive/…`)
+3. Nach `_processed/` verschoben (Idempotenz-Marker; Fehler → `_failed/`)
+
+Manuelle Triggerung (z. B. für Tests):
 ```bash
 kubectl -n dms exec deploy/worker -- \
   python -c "from documents.tasks import scan_consume_folder as s; print(s())"
 ```
 
-Ein automatischer Zeitplan (Celery Beat) folgt in einer späteren Ausbaustufe.
+#### Troubleshooting
+
+| Problem | Lösung |
+|---|---|
+| Pod `ContainerCreating` hängt, Event `MountVolume.SetUp failed for volume "consume-nfs"` | `nfs-common` fehlt auf dem Node → §2 |
+| `mount.nfs: access denied` | NAS-Export-Berechtigungen prüfen (Node-IP in Allow-List? root-squash?) |
+| Mount OK, aber `Permission denied` beim Schreiben | UID/GID im Pod stimmt nicht mit NAS-Berechtigungen überein → im Pod `id` aufrufen, NAS entsprechend konfigurieren oder `securityContext` im Deployment setzen |
+| Dateien werden nicht verarbeitet | Worker-Logs prüfen; `CONSUME_MIN_AGE` zu hoch? Datei-Timestamp korrekt? |
+| Alte Scans akkumulieren | Beat läuft nicht → `kubectl -n dms logs deploy/beat`, Schedule-Konfig prüfen |
+
+**Wichtig:** Das NFS-Volume wird **nur** vom Worker genutzt. Backend und Beat
+greifen **nicht** darauf zu (kein Mount in deren Deployments). Die `dms-data`-PVC
+(RWO, per `podAffinity` ko-lokalisiert) bleibt unverändert für Originale + Archiv.
 
 ### Skalierung
 

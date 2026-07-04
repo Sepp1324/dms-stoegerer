@@ -1,3 +1,11 @@
+# Worker-Deployment (Celery: OCR-Pipeline + Consume-Scanner).
+#
+# Consume-Ordner: Die Basis nutzt den lokalen Pfad DMS_DATA_DIR/consume
+# (= /data/consume, ConfigMap CONSUME_FOLDER_PATH). Für den NAS-Betrieb wird
+# ein separates NFS-Volume als Overlay zugeschaltet – NICHT hier in der Basis,
+# damit das CD-Deployment (deploy.yml → `kubectl apply -k deploy/k8s`) ohne
+# echten NFS-Server nicht am Worker-Rollout hängen bleibt.
+# Aktivierung: deploy/k8s/overlays/consume-nfs/ (siehe README).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
