@@ -176,11 +176,24 @@ class WorkflowActionInline(admin.TabularInline):
     filter_horizontal = ("assign_tags", "remove_tags")
 
 
-@admin.register(Workflow)
 class WorkflowAdmin(admin.ModelAdmin):
     list_display = ("name", "order", "enabled")
     list_editable = ("order", "enabled")
     inlines = [WorkflowTriggerInline, WorkflowActionInline]
+
+
+# Idempotente Registrierung: In manchen Build-Umgebungen (collectstatic während
+# des Docker-Builds) werden App-Module durch das Zusammenspiel von Djangos
+# App-Population und Celerys ``autodiscover_tasks`` nicht-deterministisch ein
+# zweites Mal importiert (sichtbar an den „Model … was already registered"-
+# RuntimeWarnings). Der harte ``@admin.register``-Dekorator würde dann mit
+# ``AlreadyRegistered`` abbrechen und collectstatic (und damit den Image-Build)
+# scheitern lassen. Das ``try/except`` macht die Registrierung robust, ohne die
+# fachliche Funktion (Admin-Verwaltung der Workflows) zu verändern.
+try:
+    admin.site.register(Workflow, WorkflowAdmin)
+except admin.sites.AlreadyRegistered:
+    pass
 
 
 admin.site.site_header = "DMS-Verwaltung"
