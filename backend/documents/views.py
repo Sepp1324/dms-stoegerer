@@ -223,6 +223,45 @@ class DocumentUploadView(APIView):
         )
 
 
+def _serve_version_preview(version):
+    """Liefert das Archiv-PDF (Original als Fallback) einer Version inline.
+
+    Der Pfad stammt ausschließlich aus der DB (nie aus Nutzereingaben) –
+    keine Traversal-Gefahr. Gemeinsam genutzt von ``DocumentViewSet.preview``
+    und den Freigabe-Abrufrouten (STOAA-191), damit beide Pfade identisch
+    liefern.
+    """
+    path = version.archive_path or version.file_path
+    if not path or not os.path.exists(path):
+        raise Http404("Datei nicht gefunden.")
+    content_type = (
+        "application/pdf"
+        if version.archive_path
+        else (version.mime_type or "application/octet-stream")
+    )
+    # as_attachment=False → inline anzeigen (PDF-Vorschau im Browser)
+    return FileResponse(open(path, "rb"), content_type=content_type)
+
+
+def _serve_version_download(document, version):
+    """Lädt die Originaldatei (``file_path``) einer Version als Attachment.
+
+    Bewusst das Original – über genau diese Bytes wird der ``sha256`` gebildet,
+    sie sind damit verifizierbar. Gemeinsam genutzt von
+    ``DocumentViewSet.download`` und den Freigabe-Abrufrouten (STOAA-191).
+    """
+    path = version.file_path
+    if not path or not os.path.exists(path):
+        raise Http404("Datei nicht gefunden.")
+    filename = f"{document.title}-v{version.version_no}{os.path.splitext(path)[1]}"
+    return FileResponse(
+        open(path, "rb"),
+        as_attachment=True,
+        filename=filename,
+        content_type=version.mime_type or "application/octet-stream",
+    )
+
+
 class DocumentViewSet(viewsets.ModelViewSet):
     """Dokumente auflisten/abrufen inkl. Volltextsuche und Filtern.
 
@@ -342,18 +381,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
         version = self._resolve_version(document)
         if version is None:
             raise Http404("Keine Version vorhanden.")
-
-        path = version.archive_path or version.file_path
-        if not path or not os.path.exists(path):
-            raise Http404("Datei nicht gefunden.")
-
-        content_type = (
-            "application/pdf"
-            if version.archive_path
-            else (version.mime_type or "application/octet-stream")
-        )
-        # as_attachment=False → inline anzeigen (PDF-Vorschau im Browser)
-        return FileResponse(open(path, "rb"), content_type=content_type)
+        return _serve_version_preview(version)
 
     @action(detail=True, methods=["get"])
     def download(self, request, pk=None):
@@ -367,18 +395,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
         version = self._resolve_version(document)
         if version is None:
             raise Http404("Keine Version vorhanden.")
-
-        path = version.file_path
-        if not path or not os.path.exists(path):
-            raise Http404("Datei nicht gefunden.")
-
-        filename = f"{document.title}-v{version.version_no}{os.path.splitext(path)[1]}"
-        return FileResponse(
-            open(path, "rb"),
-            as_attachment=True,
-            filename=filename,
-            content_type=version.mime_type or "application/octet-stream",
-        )
+        return _serve_version_download(document, version)
 
     @action(detail=True, methods=["get"])
     def integrity(self, request, pk=None):
@@ -978,3 +995,94 @@ class DocumentShareLinkViewSet(viewsets.ModelViewSet):
         # sichtbar bleibt (is_valid=False). Antwort 200 mit dem widerrufenen Link.
         link = self.get_object()
         return self._revoke(request, link)
+
+
+# ---------------------------------------------------------------------------
+# Freigabe-Abrufrouten (STOAA-191) – /api/share/<token>/preview|download
+# ---------------------------------------------------------------------------
+def _resolve_valid_share_link(token: str):
+    """Findet einen *gültigen* Freigabelink zu einem Klartext-Token.
+
+    Einheitliche Rückgabe ``None`` für **alle** Nicht-Erfolgsfälle
+    (unbekannt / widerrufen / abgelaufen), damit die API uniform mit
+    ``410 Gone`` antwortet und keine Existenz-Enumeration ermöglicht.
+    Verglichen wird ausschließlich der SHA-256-Hash – der Klartext wird
+    nie gespeichert (siehe ``DocumentShareLink``).
+    """
+    if not token:
+        return None
+    link = (
+        DocumentShareLink.objects.select_related(
+            "document", "document__current_version"
+        )
+        .filter(token_hash=DocumentShareLink.hash_token(token))
+        .first()
+    )
+    if link is None or not link.is_valid:
+        return None
+    return link
+
+
+class _ShareAccessView(APIView):
+    """Basis der Freigabe-Abrufrouten (Login-PFLICHT-Variante, STOAA-191).
+
+    Sicherheitsmodell:
+      * ``IsAuthenticated`` – ein Freigabelink ist **kein** anonymer Zugang;
+        der Abrufende muss angemeldet sein (bewusste Login-Pflicht).
+      * Der Link durchbricht die Owner-Isolation **ausschließlich** für das
+        eine verknüpfte Dokument – keine Liste, keine Nachbardokumente.
+      * ``410 Gone`` für unbekannte/widerrufene/abgelaufene Tokens (uniform,
+        keine Existenz-Enumeration).
+      * Jeder erfolgreiche Abruf wird auditiert (``AuditLogEntry``); die
+        GoBD-Hash-Kette der Versionen bleibt unangetastet (reiner Lesezugriff).
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    #: Von den Unterklassen gesetzte Audit-Aktion.
+    audit_action = ""
+
+    def _serve(self, request, link):  # pragma: no cover - abstrakt
+        raise NotImplementedError
+
+    def get(self, request, token):
+        link = _resolve_valid_share_link(token)
+        if link is None:
+            return Response(
+                {"detail": "Freigabelink ist ungültig, widerrufen oder abgelaufen."},
+                status=status.HTTP_410_GONE,
+            )
+        # _serve kann Http404 werfen (Datei fehlt) → dann KEIN Audit-Eintrag.
+        response = self._serve(request, link)
+        AuditLogEntry.objects.create(
+            actor=request.user if request.user.is_authenticated else None,
+            action=self.audit_action,
+            object_type="Document",
+            object_id=str(link.document_id),
+            detail={"share_link_id": link.id},
+        )
+        return response
+
+
+class SharePreviewView(_ShareAccessView):
+    """Inline-Vorschau des freigegebenen Dokuments (``/api/share/<token>/preview``)."""
+
+    audit_action = "share_preview"
+
+    def _serve(self, request, link):
+        version = link.document.current_version
+        if version is None:
+            raise Http404("Keine Version vorhanden.")
+        return _serve_version_preview(version)
+
+
+class ShareDownloadView(_ShareAccessView):
+    """Download des freigegebenen Dokuments (``/api/share/<token>/download``)."""
+
+    audit_action = "share_download"
+
+    def _serve(self, request, link):
+        version = link.document.current_version
+        if version is None:
+            raise Http404("Keine Version vorhanden.")
+        return _serve_version_download(link.document, version)
