@@ -625,7 +625,9 @@ class MailAccountAdminFormTests(TestCase):
         form = MailAccountAdminForm(data=self._data(password=""), instance=acc)
         self.assertTrue(form.is_valid(), form.errors)
         obj = form.save()
-        self.assertEqual(obj.password, "geheim")
+        # Passwort ist at-rest verschlüsselt (STOAA-212) – semantisch prüfen.
+        self.assertNotIn("geheim", obj.password)
+        self.assertEqual(obj.resolve_password(), "geheim")
 
     def test_neues_passwort_ersetzt(self):
         from .admin import MailAccountAdminForm
@@ -634,7 +636,9 @@ class MailAccountAdminFormTests(TestCase):
         form = MailAccountAdminForm(data=self._data(password="neu"), instance=acc)
         self.assertTrue(form.is_valid(), form.errors)
         obj = form.save()
-        self.assertEqual(obj.password, "neu")
+        # Passwort ist at-rest verschlüsselt (STOAA-212) – semantisch prüfen.
+        self.assertNotIn("neu", obj.password)
+        self.assertEqual(obj.resolve_password(), "neu")
 
     def test_gespeichertes_passwort_nicht_im_html(self):
         from .admin import MailAccountAdminForm
