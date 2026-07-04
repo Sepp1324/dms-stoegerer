@@ -399,6 +399,11 @@ export interface DocumentQuery {
   storage_path?: number | "";
   // Verarbeitungsstatus-Filter (STOAA-248): grober UI-Bucket, leer = kein Filter.
   processing_state?: ProcessingStateFilter | "";
+  // Triage-Ansicht (STOAA-296): nur ``"none"`` ist wirksam und lädt die
+  // owner-losen Dokumente. Ausschließlich für Admins ausgewertet – für
+  // Nicht-Admins ignoriert das Backend den Param (Queryset ist ohnehin auf den
+  // eigenen Owner isoliert, STOAA-295). Leer = kein Triage-Filter.
+  owner?: "none" | "";
   page?: number;
   // Sortierung, z. B. "-added_at" (Datum neu→alt), "added_at" (alt→neu),
   // "title" (A–Z). Leer = Backend-Standard (FTS-Relevanz bei ``q``, sonst
@@ -890,6 +895,32 @@ export async function getMailAccounts(): Promise<MailAccount[]> {
 // Aktive Nutzer für Zuordnungs-Dropdowns (admin-only im Backend). Bare Liste.
 export async function getUsers(): Promise<User[]> {
   return listAll<User>("/users/");
+}
+
+// Owner eines (Triage-)Dokuments setzen (STOAA-295/296). Nur für Admins –
+// das Backend erzwingt ``IsDmsAdmin`` (403 für Normalnutzer). Body ``{owner}``
+// erwartet die Nutzer-ID; die Antwort ist das aktualisierte Dokument. Nach
+// Erfolg fällt das Dokument aus der ``?owner=none``-Liste heraus.
+export async function setDocumentOwner(
+  id: number,
+  owner: number,
+): Promise<DocumentDetail> {
+  const res = await apiFetch(`/documents/${id}/set-owner/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ owner }),
+  });
+  if (!res.ok) {
+    let detail = `Zuweisen fehlgeschlagen: HTTP ${res.status}`;
+    try {
+      const data = await res.json();
+      if (data && typeof data.detail === "string") detail = data.detail;
+    } catch {
+      /* keine JSON-Fehlermeldung – Fallback bleibt */
+    }
+    throw new Error(detail);
+  }
+  return res.json();
 }
 export function createMailAccount(
   payload: MailAccountPayload,

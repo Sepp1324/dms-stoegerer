@@ -679,6 +679,51 @@ select:focus-visible {
   color: var(--muted);
 }
 
+/* --- Triage-Ansicht (STOAA-296): owner-lose Dokumente + „Owner setzen" --- */
+.triage-toggle {
+  align-self: end;
+}
+.triage-toggle--active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+/* Triage-Karte: kein Vorschaubild, dafür Zuweisungs-Bereich unten. */
+.doc-card--triage {
+  cursor: default;
+}
+.doc-card--triage:hover {
+  border-color: var(--border);
+  transform: none;
+}
+.triage-card__open {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  text-align: left;
+  padding: 0.85rem 0.85rem 0.6rem;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  cursor: pointer;
+}
+.triage-card__open:hover:not(:disabled) {
+  background: rgba(148, 163, 184, 0.08);
+}
+.triage-card__open .doc-card__footer {
+  margin-top: 0.35rem;
+}
+.triage-card__assign {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.6rem 0.85rem 0.85rem;
+  border-top: 1px solid var(--border);
+}
+.triage-card__assign button {
+  align-self: start;
+}
+
 /* --- Detailansicht --- */
 .detail {
   display: grid;
