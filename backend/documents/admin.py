@@ -87,6 +87,10 @@ class DocumentVersionAdmin(admin.ModelAdmin):
         "processing_failed_step",
         "processing_failed_at",
         "processing_attempts",
+        # Siegel-Felder (STOAA-315): nur maschinell beim Sealing/Backfill gesetzt,
+        # nie manuell (WORM). Read-only verhindert versehentliche Admin-Edits.
+        "metadata_snapshot",
+        "seal_hash",
     )
 
 

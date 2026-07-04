@@ -3456,3 +3456,316 @@ class VersionCompareApiTests(APITestCase):
     def test_unauthenticated_abgewiesen(self):
         resp = self.client.get(self._url(self.doc.id, 2, 5))
         self.assertIn(resp.status_code, (401, 403))
+
+
+# ---------------------------------------------------------------------------
+# STOAA-315 – Versionsvergleich Stufe 2: metadata_snapshot + Seal-Verkettung
+# ---------------------------------------------------------------------------
+class MetadataSnapshotServiceTests(TestCase):
+    """Kanonik von ``build_metadata_snapshot``/``compute_seal_hash`` (STOAA-315)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(username="ms_owner", password="pw", role="user")
+        cls.corr = Correspondent.objects.create(name="Stadtwerke")
+        cls.dtype = DocumentType.objects.create(name="Rechnung")
+        cls.spath = StoragePath.objects.create(name="Finanzen", path_template="{y}/{t}")
+        cls.tag_a = Tag.objects.create(name="Alpha")
+        cls.tag_b = Tag.objects.create(name="Beta")
+        cls.cf = CustomField.objects.create(name="Betrag", data_type="currency")
+
+    def _doc(self):
+        doc = Document.objects.create(
+            title="Snapshot-Dok",
+            owner=self.user,
+            correspondent=self.corr,
+            document_type=self.dtype,
+            storage_path=self.spath,
+            status=Document.ApprovalStatus.FREIGEGEBEN,
+        )
+        doc.tags.set([self.tag_b, self.tag_a])
+        CustomFieldValue.objects.create(document=doc, field=self.cf, value="42,00")
+        return doc
+
+    def test_snapshot_kanonische_form(self):
+        from documents.services.metadata_snapshot import build_metadata_snapshot
+
+        snap = build_metadata_snapshot(self._doc())
+        self.assertEqual(snap["title"], "Snapshot-Dok")
+        self.assertEqual(snap["correspondent"], "Stadtwerke")
+        self.assertEqual(snap["document_type"], "Rechnung")
+        self.assertEqual(snap["storage_path"], "Finanzen")
+        self.assertEqual(snap["owner"], "ms_owner")
+        self.assertEqual(snap["status"], "freigegeben")
+        # Tags sortiert (unabhängig von Set-Reihenfolge beim Zuweisen).
+        self.assertEqual(snap["tags"], ["Alpha", "Beta"])
+        self.assertEqual(snap["custom_fields"], {"Betrag": "42,00"})
+
+    def test_leeres_dokument_snapshot_none_werte(self):
+        from documents.services.metadata_snapshot import build_metadata_snapshot
+
+        doc = Document.objects.create(title="Nackt", owner=None)
+        snap = build_metadata_snapshot(doc)
+        self.assertIsNone(snap["correspondent"])
+        self.assertIsNone(snap["document_type"])
+        self.assertIsNone(snap["owner"])
+        self.assertEqual(snap["tags"], [])
+        self.assertEqual(snap["custom_fields"], {})
+
+    def test_seal_hash_deterministisch_und_snapshot_gebunden(self):
+        from documents.services.metadata_snapshot import (
+            build_metadata_snapshot,
+            compute_seal_hash,
+        )
+
+        snap = build_metadata_snapshot(self._doc())
+        h1 = compute_seal_hash("a" * 64, "", snap)
+        h2 = compute_seal_hash("a" * 64, "", dict(snap))  # gleiche Daten, neue Instanz
+        self.assertEqual(h1, h2)
+        # Metadaten-Änderung verändert den seal_hash …
+        tampered = dict(snap, title="Anders")
+        self.assertNotEqual(h1, compute_seal_hash("a" * 64, "", tampered))
+        # … und Datei-Hash / prev_hash fließen ebenfalls ein.
+        self.assertNotEqual(h1, compute_seal_hash("b" * 64, "", snap))
+        self.assertNotEqual(h1, compute_seal_hash("a" * 64, "x" * 64, snap))
+
+
+class MetadataSealPipelineTests(TestCase):
+    """Sealing schreibt Snapshot+seal_hash; verify erkennt Manipulation (STOAA-315)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.user = User.objects.create_user(username="seal-user", password="pw", role="user")
+        self.corr = Correspondent.objects.create(name="Amt")
+
+    def _sealed_version(self):
+        from pathlib import Path
+        from unittest import mock
+
+        source = Path(self._tmp.name) / f"doc-{DocumentVersion.objects.count()}.pdf"
+        source.write_bytes(b"%PDF-1.4\n% metadata-seal test\n")
+        document = Document.objects.create(
+            title="Seal-Dok", owner=self.user, correspondent=self.corr
+        )
+        version = DocumentVersion.objects.create(
+            document=document, version_no=1, file_path=str(source), created_by=self.user,
+        )
+        document.current_version = version
+        document.save(update_fields=["current_version"])
+
+        def fake_thumbnail(v, *, max_width=700):
+            thumb = str(Path(self._tmp.name) / f"thumb-{v.id}.jpg")
+            DocumentVersion.objects.filter(pk=v.pk).update(thumbnail_path=thumb)
+            v.thumbnail_path = thumb
+            return thumb
+
+        from documents.services.ocr.types import OCRResult, OCRStatusEnum
+
+        with mock.patch(
+            "documents.pipeline.run_ocr",
+            return_value=OCRResult(
+                text="Text", pages=1, status=OCRStatusEnum.SUCCESS,
+                duration_ms=1, engine="test-ocr",
+            ),
+        ), mock.patch(
+            "documents.pipeline.generate_thumbnail", side_effect=fake_thumbnail
+        ):
+            pipeline.process_version(version)
+
+        version.refresh_from_db()
+        return document, version
+
+    def test_seal_schreibt_snapshot_und_seal_hash(self):
+        from documents.services.metadata_snapshot import compute_seal_hash
+
+        _, version = self._sealed_version()
+        self.assertIsNotNone(version.metadata_snapshot)
+        self.assertEqual(version.metadata_snapshot["title"], "Seal-Dok")
+        self.assertEqual(version.metadata_snapshot["correspondent"], "Amt")
+        self.assertTrue(version.seal_hash)
+        # seal_hash reproduzierbar aus den persistierten Feldern.
+        self.assertEqual(
+            version.seal_hash,
+            compute_seal_hash(
+                version.sha256, version.prev_hash, version.metadata_snapshot
+            ),
+        )
+        # Snapshot wurde VOR SEALED geschrieben, Version bleibt WORM-versiegelt.
+        self.assertTrue(version.is_immutable)
+
+    def test_verify_seal_ok_true_bei_intaktem_siegel(self):
+        document, version = self._sealed_version()
+        report = pipeline.verify_document_integrity(document)
+        self.assertTrue(report["chain_ok"])
+        self.assertTrue(report["versions"][0]["seal_ok"])
+
+    def test_verify_erkennt_metadaten_manipulation(self):
+        document, version = self._sealed_version()
+        # Metadaten am persistierten Snapshot manipulieren (WORM per update umgehen).
+        tampered = dict(version.metadata_snapshot, title="GEFÄLSCHT")
+        DocumentVersion.objects.filter(pk=version.pk).update(metadata_snapshot=tampered)
+
+        report = pipeline.verify_document_integrity(document)
+        self.assertFalse(report["versions"][0]["seal_ok"])
+        self.assertFalse(report["chain_ok"])
+
+    def test_verify_altbestand_ohne_snapshot_ist_nicht_manipuliert(self):
+        # Version ohne Snapshot (Altbestand): seal_ok=None, kein Bruch von chain_ok.
+        doc = Document.objects.create(title="Alt", owner=self.user)
+        DocumentVersion.objects.create(
+            document=doc, version_no=1, file_path="", sha256="", prev_hash="",
+        )
+        report = pipeline.verify_document_integrity(doc)
+        self.assertIsNone(report["versions"][0]["seal_ok"])
+
+
+class MetadataCompareStufe2Tests(TestCase):
+    """Echter Metadaten-Diff, wenn beide Versionen Snapshots tragen (STOAA-315)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(username="cmp2_owner", password="pw", role="user")
+        cls.doc = Document.objects.create(title="Diff-Dok", owner=cls.user)
+
+    def _version(self, version_no, snapshot):
+        return DocumentVersion.objects.create(
+            document=self.doc,
+            version_no=version_no,
+            file_path=f"/d/v{version_no}.pdf",
+            sha256=str(version_no) * 64,
+            mime_type="application/pdf",
+            size=1000,
+            page_count=1,
+            ocr_text="",
+            metadata_snapshot=snapshot,
+        )
+
+    def _snap(self, **over):
+        base = {
+            "title": "T", "correspondent": "A", "document_type": "Rechnung",
+            "storage_path": None, "owner": "cmp2_owner", "status": "entwurf",
+            "retention_until": None, "tags": ["X"], "custom_fields": {"Betrag": "1"},
+        }
+        base.update(over)
+        return base
+
+    def _compare(self, old, new):
+        from documents.services import version_compare
+
+        return version_compare.compare_versions(self.doc, old, new).to_dict()
+
+    def test_diff_added_removed_changed(self):
+        old = self._version(1, self._snap())
+        new = self._version(
+            2,
+            self._snap(
+                title="T2",
+                correspondent="B",
+                tags=["Y", "Z"],
+                custom_fields={"Betrag": "2", "Datum": "2026-01-01"},
+            ),
+        )
+        result = self._compare(old, new)
+        self.assertTrue(result["metadata_versioning_supported"])
+        # Skalar-Metadaten: nur geänderte Felder mit old/new.
+        self.assertEqual(result["metadata"]["title"], {"old": "T", "new": "T2"})
+        self.assertEqual(result["metadata"]["correspondent"], {"old": "A", "new": "B"})
+        self.assertNotIn("owner", result["metadata"])  # unverändert
+        self.assertTrue(result["summary"]["metadata_changed"])
+        # Tags: X entfernt, Y+Z hinzu.
+        self.assertEqual(result["tags"], {"added": ["Y", "Z"], "removed": ["X"]})
+        self.assertTrue(result["summary"]["tags_changed"])
+        # Custom-Fields: Betrag geändert, Datum hinzu, nichts entfernt.
+        self.assertEqual(result["custom_fields"]["changed"], {"Betrag": {"old": "1", "new": "2"}})
+        self.assertEqual(result["custom_fields"]["added"], {"Datum": "2026-01-01"})
+        self.assertEqual(result["custom_fields"]["removed"], {})
+        self.assertTrue(result["summary"]["custom_fields_changed"])
+
+    def test_identische_snapshots_keine_changes(self):
+        old = self._version(1, self._snap())
+        new = self._version(2, self._snap())
+        result = self._compare(old, new)
+        self.assertTrue(result["metadata_versioning_supported"])
+        self.assertEqual(result["metadata"], {})
+        self.assertEqual(result["tags"], {"added": [], "removed": []})
+        self.assertEqual(
+            result["custom_fields"], {"added": {}, "removed": {}, "changed": {}}
+        )
+        self.assertFalse(result["summary"]["metadata_changed"])
+        self.assertFalse(result["summary"]["tags_changed"])
+        self.assertFalse(result["summary"]["custom_fields_changed"])
+
+    def test_ein_snapshot_fehlt_bleibt_stufe1_shape(self):
+        # Altbestand: nur eine Version hat einen Snapshot → „nicht verfügbar".
+        old = self._version(1, None)
+        new = self._version(2, self._snap(title="Neu"))
+        result = self._compare(old, new)
+        self.assertFalse(result["metadata_versioning_supported"])
+        self.assertEqual(result["metadata"], {})
+        self.assertEqual(result["tags"], {"added": [], "removed": []})
+        self.assertEqual(result["custom_fields"], {})
+        self.assertFalse(result["summary"]["metadata_changed"])
+
+
+class BackfillMetadataSnapshotsCommandTests(TestCase):
+    """current-only + Idempotenz des Backfill-Commands (STOAA-315)."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="bf_owner", password="pw", role="user")
+
+    def _doc_with_two_versions(self):
+        doc = Document.objects.create(title="Backfill-Dok", owner=self.user, correspondent=None)
+        v1 = DocumentVersion.objects.create(
+            document=doc, version_no=1, file_path="/d/v1.pdf", sha256="1" * 64,
+        )
+        v2 = DocumentVersion.objects.create(
+            document=doc, version_no=2, file_path="/d/v2.pdf", sha256="2" * 64,
+        )
+        doc.current_version = v2
+        doc.save(update_fields=["current_version"])
+        return doc, v1, v2
+
+    def test_backfill_nur_current_version(self):
+        from django.core.management import call_command
+
+        doc, v1, v2 = self._doc_with_two_versions()
+        call_command("backfill_metadata_snapshots")
+
+        v1.refresh_from_db()
+        v2.refresh_from_db()
+        # Nur die current_version (v2) bekommt einen Snapshot; v1 bleibt null.
+        self.assertIsNone(v1.metadata_snapshot)
+        self.assertIsNotNone(v2.metadata_snapshot)
+        self.assertEqual(v2.metadata_snapshot["title"], "Backfill-Dok")
+        self.assertTrue(v2.seal_hash)
+        self.assertTrue(
+            AuditLogEntry.objects.filter(
+                action="metadata_backfill",
+                object_type="DocumentVersion",
+                object_id=str(v2.id),
+            ).exists()
+        )
+
+    def test_backfill_idempotent(self):
+        from django.core.management import call_command
+
+        doc, v1, v2 = self._doc_with_two_versions()
+        call_command("backfill_metadata_snapshots")
+        v2.refresh_from_db()
+        first_hash = v2.seal_hash
+        audit_count_1 = AuditLogEntry.objects.filter(action="metadata_backfill").count()
+
+        # Zweiter Lauf: nichts ändert sich, kein neuer Audit-Eintrag.
+        call_command("backfill_metadata_snapshots")
+        v2.refresh_from_db()
+        audit_count_2 = AuditLogEntry.objects.filter(action="metadata_backfill").count()
+        self.assertEqual(v2.seal_hash, first_hash)
+        self.assertEqual(audit_count_1, audit_count_2)
+
+    def test_backfill_ueberspringt_dokument_ohne_current_version(self):
+        from django.core.management import call_command
+
+        Document.objects.create(title="Ohne current", owner=self.user)
+        # Darf nicht crashen.
+        call_command("backfill_metadata_snapshots")

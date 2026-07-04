@@ -128,15 +128,21 @@ def create_version_for_document(
 def verify_document_integrity(document: Document) -> dict:
     """Prüft die Hash-Kette eines Dokuments – Grundlage der prüfbaren Versionierung.
 
-    Zwei unabhängige Prüfungen je Version:
+    Drei unabhängige Prüfungen je Version:
       * **file_ok** – die Datei auf der Platte wird neu gehasht und mit dem
         gespeicherten ``sha256`` verglichen (Beweis der Unverändertheit).
       * **prev_ok** – der gespeicherte ``prev_hash`` entspricht dem ``sha256``
         der Vorgängerversion (Beweis der lückenlosen Verkettung).
+      * **seal_ok** – der ``seal_hash`` wird aus ``sha256``/``prev_hash``/
+        Metadaten-Snapshot neu berechnet und verglichen (Beweis der
+        Metadaten-Unverändertheit, STOAA-315). ``None`` wenn kein Snapshot
+        vorliegt (Altbestand) – dann geht die Prüfung nicht in ``chain_ok`` ein.
 
     Rückgabe: ``{"chain_ok": bool, "versions": [ {…}, … ]}`` – aufsteigend nach
     Versionsnummer. ``chain_ok`` ist nur wahr, wenn ALLE Prüfungen bestehen.
     """
+    from documents.services.metadata_snapshot import compute_seal_hash
+
     versions = list(document.versions.order_by("version_no"))
     results = []
     chain_ok = True
@@ -150,7 +156,20 @@ def verify_document_integrity(document: Document) -> dict:
         file_ok = bool(version.sha256) and file_present and computed == version.sha256
         prev_ok = (version.prev_hash or "") == (prev_sha or "")
 
-        if not (file_ok and prev_ok):
+        # Metadaten-Siegel (STOAA-315): nur prüfbar, wenn ein Snapshot existiert.
+        # Fehlender Snapshot ⇒ seal_ok = None (NICHT False), damit Altbestand
+        # vor dem Feature nicht als „manipuliert" gilt. Ist ein Snapshot da, wird
+        # der seal_hash neu berechnet und verglichen – Metadaten-Manipulation
+        # (oder Datei-Hash-/prev_hash-Manipulation) macht seal_ok=False.
+        if version.metadata_snapshot is not None:
+            expected_seal = compute_seal_hash(
+                version.sha256, version.prev_hash, version.metadata_snapshot
+            )
+            seal_ok = version.seal_hash == expected_seal
+        else:
+            seal_ok = None
+
+        if not (file_ok and prev_ok) or seal_ok is False:
             chain_ok = False
 
         results.append(
@@ -163,6 +182,7 @@ def verify_document_integrity(document: Document) -> dict:
                 "file_present": file_present,
                 "file_ok": file_ok,
                 "prev_ok": prev_ok,
+                "seal_ok": seal_ok,
             }
         )
         prev_sha = version.sha256
@@ -360,8 +380,19 @@ def generate_version_thumbnail(version: DocumentVersion) -> str | None:
 
 
 def seal_version(version: DocumentVersion) -> None:
-    """WORM-/Retention-Siegel setzen und danach State ``READY`` erreichen."""
+    """WORM-/Retention-Siegel setzen und danach State ``READY`` erreichen.
+
+    Reihenfolge (STOAA-315, verbindlich):
+      1. ``_write_metadata_seal`` – Metadaten-Snapshot + ``seal_hash`` **vor**
+         ``transition_to(SEALED)`` per ``save()`` schreiben. Zu diesem Zeitpunkt
+         ist ``is_immutable`` noch ``False`` (wird erst in ``_seal_version``
+         gesetzt), der WORM-``save``-Guard greift also noch nicht.
+      2. ``transition_to(SEALED)`` – Zustandswechsel (per QuerySet.update).
+      3. ``_seal_version`` – ``is_immutable=True`` + Retention/chmod (ab hier WORM).
+      4. ``transition_to(READY)``.
+    """
     version.refresh_from_db(fields=["processing_state"])
+    _write_metadata_seal(version)
     version.transition_to(
         DocumentVersion.ProcessingState.SEALED,
         actor=version.created_by,
@@ -371,6 +402,25 @@ def seal_version(version: DocumentVersion) -> None:
         DocumentVersion.ProcessingState.READY,
         actor=version.created_by,
     )
+
+
+def _write_metadata_seal(version: DocumentVersion) -> None:
+    """Friert den Metadaten-Snapshot ein und berechnet den ``seal_hash``.
+
+    Bewusst VOR ``transition_to(SEALED)`` aufgerufen: ``is_immutable`` ist hier
+    noch ``False``, also ist ``save()`` erlaubt. Der Snapshot bildet den
+    *aktuellen* ``Document``-Zustand ab; ``seal_hash`` bindet Datei-Hash,
+    ``prev_hash`` (transitive Kette) und den kanonischen Snapshot in EINE Größe.
+    """
+    from documents.services.metadata_snapshot import (
+        build_metadata_snapshot,
+        compute_seal_hash,
+    )
+
+    snapshot = build_metadata_snapshot(version.document)
+    version.metadata_snapshot = snapshot
+    version.seal_hash = compute_seal_hash(version.sha256, version.prev_hash, snapshot)
+    version.save(update_fields=["metadata_snapshot", "seal_hash"])
 
 
 # ---------------------------------------------------------------------------

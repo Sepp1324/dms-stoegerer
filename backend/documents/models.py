@@ -390,6 +390,23 @@ class DocumentVersion(models.Model):
         help_text="Löschen gesperrt bis zu diesem Datum",
     )
 
+    # Versionsvergleich Stufe 2 (STOAA-315): Point-in-time-Snapshot des
+    # Document-Metadatenzustands beim Sealing + eine Siegelgröße, die Datei-Hash
+    # UND Snapshot bindet. ``null`` = „nicht verfügbar" (Altbestand vor dem
+    # Feature) – identisch zur Stufe-1-UX. Geschrieben wird VOR SEALED per
+    # save() (Sealing) bzw. per QuerySet.update (Backfill), um den WORM-Guard
+    # nicht zu verletzen. Der Datei-Hash ``sha256`` bleibt davon unangetastet.
+    metadata_snapshot = models.JSONField(
+        null=True,
+        blank=True,
+        help_text="Kanonischer Metadaten-Snapshot beim Sealing (null = nicht verfügbar)",
+    )
+    seal_hash = models.CharField(
+        max_length=64,
+        blank=True,
+        help_text="sha256(sha256 | prev_hash | canonical_json(metadata_snapshot)) – Siegelkette",
+    )
+
     class Meta:
         verbose_name = "Dokumentversion"
         verbose_name_plural = "Dokumentversionen"
