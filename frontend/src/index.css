@@ -1382,6 +1382,74 @@ button.freigabe__reject:hover:not(:disabled) {
   color: #fca5a5;
 }
 
+/* --- Mailkonten (STOAA-215) --- */
+.mail-item {
+  display: block;
+}
+.mail-item__head {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+.mail-item__head .field-item__actions {
+  margin-left: auto;
+}
+.mail-badge {
+  margin-left: 0.5rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 0.1rem 0.4rem;
+  border-radius: 0.4rem;
+}
+.mail-badge--off {
+  color: var(--warn);
+  border: 1px solid var(--warn);
+}
+.mail-item__meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 0.25rem 1rem;
+  margin: 0.6rem 0 0;
+  font-size: 0.85rem;
+}
+.mail-item__meta dt {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  opacity: 0.75;
+}
+.mail-item__meta dd {
+  margin: 0 0 0.25rem;
+  color: var(--text);
+}
+.mail-status {
+  margin: 0.6rem 0 0;
+  font-size: 0.82rem;
+}
+.mail-form__checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.25rem;
+  margin-bottom: 0.75rem;
+}
+.mail-check {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.mail-check input {
+  width: auto;
+}
+.mail-form__actions {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+}
+
 /* --- Freigabelinks (Share-Links, STOAA-192) --- */
 .share-links {
   margin-top: 1.25rem;
