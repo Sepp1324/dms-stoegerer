@@ -1373,3 +1373,165 @@ button.freigabe__reject:hover:not(:disabled) {
 .field-item__delete:hover {
   color: #fca5a5;
 }
+
+/* --- Freigabelinks (Share-Links, STOAA-192) --- */
+.share-links {
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+.share-links__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+.share-links__head h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+.share-links__empty {
+  margin: 0;
+}
+.share-links__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.share-links__row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+.share-links__expiry {
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin-right: auto;
+}
+.share-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: var(--radius-pill);
+  padding: 0.15rem 0.7rem;
+  font-size: 0.78rem;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.share-badge--gueltig {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+.share-badge--abgelaufen {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+.share-badge--widerrufen {
+  color: var(--error);
+  border-color: var(--error);
+}
+button.share-links__revoke {
+  background: transparent;
+  color: var(--error);
+  border: 1px solid var(--error);
+  font-size: 0.82rem;
+  padding: 0.25rem 0.7rem;
+}
+button.share-links__revoke:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.12);
+}
+
+/* Modal-Overlay + Karte (erste Verwendung: „Link teilen"-Dialog). */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: rgba(15, 23, 42, 0.7);
+  backdrop-filter: blur(4px);
+}
+.modal-card {
+  width: min(440px, 100%);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 1.25rem 1.4rem 1.4rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.45);
+}
+.modal-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.modal-card__head h3 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+.modal-card__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+.share-dialog__hint {
+  margin: 0;
+  font-size: 0.82rem;
+}
+.share-dialog__choices {
+  border: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.share-dialog__legend {
+  width: 100%;
+  padding: 0;
+  margin-bottom: 0.2rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.share-choice {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  padding: 0.3rem 0.8rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.share-choice--on {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-tint);
+}
+.share-choice input {
+  accent-color: var(--accent);
+}
+.share-dialog__ok {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--ok);
+}
+.share-dialog__link {
+  display: flex;
+  gap: 0.5rem;
+}
+.share-dialog__link input {
+  flex: 1;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.82rem;
+}
