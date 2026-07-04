@@ -96,8 +96,9 @@ Beim Merge führt das zu einem P0, weil Django nicht weiß, welche Migration zue
 laufen soll.
 
 **Lösung:** Die CI prüft mit `makemigrations --check --dry-run` (siehe
-`.github/workflows/ci.yml`), ob ausstehende Migrationen fehlen. Ein roter CI-Build
-blockt den Merge. Zusätzlich verhindert folgender Workflow die meisten Konflikte:
+`.github/workflows/pr-checks.yml`), ob ausstehende Migrationen fehlen. Ein roter
+CI-Build blockt den Merge. Zusätzlich verhindert folgender Workflow die meisten
+Konflikte:
 
 ### Workflow für Migrations-PRs
 
@@ -125,9 +126,33 @@ git commit -m "fix: merge parallel migrations 0007"
 Django erzeugt eine `0008_merge_…`-Datei, die beide `0007_*` als Vorgänger
 referenziert. Das löst den Konflikt, ohne Daten zu verlieren.
 
-> **CI-Gate:** `.github/workflows/ci.yml` führt `makemigrations --check` aus –
-> ein fehlender Merge schlägt fehl und blockt den PR, BEVOR kaputter Code auf
-> `main` landet. Details: [docs/ci-cd.md](docs/ci-cd.md).
+> **CI-Gate:** `.github/workflows/pr-checks.yml` führt `makemigrations --check`
+> aus – ein fehlender Merge schlägt fehl und blockt den PR, BEVOR kaputter Code
+> auf `main` landet. Details: [docs/ci-cd.md](docs/ci-cd.md).
+
+---
+
+## PRs sind erst mergebar, wenn `pr-checks` grün ist
+
+Jeder Pull Request gegen `main` löst automatisch den Workflow
+[`.github/workflows/pr-checks.yml`](.github/workflows/pr-checks.yml) auf dem
+self-hosted Runner aus:
+
+- **backend-tests** – baut das Backend-Image und führt darin `manage.py check`,
+  `makemigrations --check --dry-run` und die Testsuite gegen eine wegwerfbare
+  Postgres 16 aus (Logik in [`backend/ci/run-tests.sh`](backend/ci/run-tests.sh)).
+- **frontend-build** – baut das Frontend-Image (`npm install` + `npm run build`,
+  also `tsc -b && vite build`); ein TS-Fehler lässt den Build rot werden.
+- **pr-checks** – aggregierendes Gate, wird nur grün, wenn beide obigen Jobs
+  grün sind.
+
+Dieser Workflow **deployt nicht** – der Deploy bleibt separat auf `push → main`
+([`deploy.yml`](.github/workflows/deploy.yml)).
+
+> **Owner-Setup (einmalig):** GitHub → **Settings → Branches** → Regel für
+> `main` → „Require status checks to pass before merging“ → Status-Check
+> **`pr-checks`** auswählen. Erst danach ist ein PR mit rotem Gate nicht mehr
+> mergebar. Siehe [docs/ci-cd.md](docs/ci-cd.md).
 
 ---
 

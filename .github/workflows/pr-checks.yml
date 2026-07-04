@@ -1,0 +1,71 @@
+name: pr-checks
+
+# Pflicht-Qualitäts-Gate für JEDEN Pull Request gegen main. Läuft VOR dem Merge
+# auf dem self-hosted Runner (Label "dms") und macht rote Änderungen nicht
+# mergebar – sobald der Owner "pr-checks" als Required Status Check setzt
+# (siehe README / docs/ci-cd.md).
+#
+# WICHTIG: Dieser Workflow deployt NICHT. Der Deploy läuft unverändert separat
+# beim Push nach main (siehe deploy.yml) und bringt dort sein eigenes Test-Gate
+# als zweites Sicherheitsnetz für direkte Pushes mit.
+#
+# Nur der self-hosted Runner "dms" hat Docker + Registry-Zugriff; deshalb bauen
+# wir die Images lokal und führen die Suiten darin aus. Siehe docs/ci-cd.md.
+
+on:
+  pull_request:
+    branches: [main]
+
+# Pro Branch/PR nur ein Lauf – ältere Läufe abbrechen, Ressourcen sparen.
+concurrency:
+  group: pr-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Backend-Gate: baut das Backend-Image und führt darin `manage.py check`,
+  # den Migrations-Check und die Testsuite gegen eine wegwerfbare Postgres 16
+  # aus. Die gesamte Logik liegt in backend/ci/run-tests.sh (auch von deploy.yml
+  # wiederverwendet – keine Duplizierung). DB-Creds kommen aus dem Skript-Env,
+  # nichts ist im Workflow hartkodiert.
+  backend-tests:
+    runs-on: [self-hosted, dms]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Backend-Image bauen (flüchtiger CI-Tag)
+        run: docker build -t "dms-backend-ci:${GITHUB_SHA}" ./backend
+
+      - name: Check + Migrations-Check + Testsuite
+        run: backend/ci/run-tests.sh "dms-backend-ci:${GITHUB_SHA}"
+
+      - name: CI-Image aufräumen
+        if: always()
+        run: docker rmi "dms-backend-ci:${GITHUB_SHA}" 2>/dev/null || true
+
+  # Frontend-Gate: baut das Frontend-Image, dessen Build-Stufe `npm install`
+  # (in frontend/) + `npm run build` (= tsc -b && vite build) ausführt. Ein
+  # TS-Fehler oder ein unaufgelöster Merge-Konflikt-Marker lässt den Build – und
+  # damit den PR – rot werden, BEVOR gemergt wird (siehe STOAA-85/86).
+  frontend-build:
+    runs-on: [self-hosted, dms]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Frontend-Image bauen (flüchtiger CI-Tag)
+        run: docker build -t "dms-frontend-ci:${GITHUB_SHA}" ./frontend
+
+      - name: CI-Image aufräumen
+        if: always()
+        run: docker rmi "dms-frontend-ci:${GITHUB_SHA}" 2>/dev/null || true
+
+  # Aggregierendes Gate: EIN stabiler Status-Check-Name ("pr-checks"), den der
+  # Owner als Required Status Check in der Branch-Protection setzt. Wird nur
+  # grün, wenn Backend- UND Frontend-Job grün sind.
+  pr-checks:
+    runs-on: [self-hosted, dms]
+    needs: [backend-tests, frontend-build]
+    steps:
+      - name: Gate erfüllt
+        run: echo "Backend- und Frontend-Checks grün – PR ist mergebar."
