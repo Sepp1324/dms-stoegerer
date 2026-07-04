@@ -62,6 +62,7 @@ from .models import (
     MailAccount,
     StoragePath,
     Tag,
+    Workflow,
 )
 from .serializers import (
     AuditLogEntrySerializer,
@@ -74,6 +75,7 @@ from .serializers import (
     MailAccountSerializer,
     StoragePathSerializer,
     TagSerializer,
+    WorkflowSerializer,
 )
 from .tasks import bulk_classify_documents, process_document_version
 
@@ -1009,6 +1011,26 @@ class CustomFieldViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_409_CONFLICT,
             )
         return super().destroy(request, *args, **kwargs)
+
+
+class WorkflowViewSet(viewsets.ModelViewSet):
+    """CRUD für Workflows (STOAA-263) inkl. verschachteltem Trigger + Aktionen.
+
+    Schreiben nur für ``can_write`` (nicht Gäste). Der Serializer nimmt
+    ``trigger`` (Objekt) und ``actions`` (Liste) verschachtelt entgegen und
+    ersetzt sie idempotent – passend zum geführten Frontend-Editor (PR3).
+    """
+
+    queryset = Workflow.objects.prefetch_related(
+        "trigger",
+        "trigger__filter_has_tags",
+        "trigger__filter_has_not_tags",
+        "actions",
+        "actions__assign_tags",
+        "actions__remove_tags",
+    ).all()
+    serializer_class = WorkflowSerializer
+    permission_classes = [ReadOnlyOrCanWrite]
 
 
 class DocumentShareLinkViewSet(viewsets.ModelViewSet):
