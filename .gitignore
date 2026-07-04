@@ -26,3 +26,4 @@ node_modules/
 
 # Secrets (k8s)
 deploy/k8s/secret.yaml
+deploy/k8s/backup-secret.yaml

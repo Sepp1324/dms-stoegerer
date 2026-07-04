@@ -429,24 +429,29 @@ Zwei Wege:
 
 ---
 
-## 13. Backup
+## 13. Backup & Restore
 
-Zwei Dinge sichern: **Datenbank** (Metadaten) und **`/data`** (Dateien).
+Gesichert werden **zwei** zusammengehörige Dinge: die **Datenbank** (Metadaten,
+Hash-Kette, Audit-Trail) und **`/data`** (`originals/`, `archive/`, `thumbnails/`).
+
+Das läuft automatisiert als k8s-**CronJob** `dms-backup` (`backup-cronjob.yaml`),
+täglich 02:30, mit Integritätsprüfung, Offsite-Ablage (rclone) und Retention.
+
+**Einmalige Einrichtung (Owner):** Offsite-Ziel + Zugangsdaten in ein gitignored
+Secret setzen:
 
 ```bash
-# 1. Datenbank-Dump
-kubectl -n dms exec deploy/postgres -- \
-  pg_dump -U dms dms | gzip > dms-db-$(date +%F).sql.gz
-
-# 2. Datei-Ablage (/data) aus dem Backend-Pod
-kubectl -n dms exec deploy/backend -- \
-  tar czf - -C /data . > dms-data-$(date +%F).tar.gz
+cd deploy/k8s
+cp backup-secret.example.yaml backup-secret.yaml   # rclone.conf füllen
+kubectl apply -f backup-secret.yaml
 ```
 
-> Da Metadaten (DB) und Dateien (`/data`) getrennt liegen, immer **beide zum
-> gleichen Zeitpunkt** sichern. Für Konsistenz idealerweise Uploads kurz pausieren
-> oder zu ruhiger Zeit sichern. Wiederherstellung: DB per `psql < dump` einspielen,
-> `/data` in die PVC zurückspielen.
+Manueller Ad-hoc-Lauf: `kubectl -n dms create job --from=cronjob/dms-backup test`.
+
+> **Vollständige Doku – Architektur, Restore-Schritte und Restore-Drill:**
+> siehe [`docs/backup.md`](../../docs/backup.md). Ein Backup gilt erst als echt,
+> wenn ein Restore einmal nachweislich durchgespielt wurde
+> (`deploy/k8s/restore-drill.sh`).
 
 ---
 
