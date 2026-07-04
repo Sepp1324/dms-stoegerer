@@ -230,6 +230,10 @@ class DocumentSerializer(serializers.ModelSerializer):
     storage_path_name = serializers.CharField(
         source="storage_path.name", read_only=True, default=None
     )
+    # Archivnummer (STOAA-284/285): read-only – die ASN ist unveränderlich und
+    # wird serverseitig vergeben. ``asn_label`` liefert die kanonische Anzeigeform
+    # ``ASN000123`` fürs Frontend (Detailansicht/QR-Download).
+    asn_label = serializers.SerializerMethodField()
     # Zusatzfeld-Werte: GET = nested Liste; PATCH = Upsert per (document, field)
     # in ``update()``/``create()`` (unique_together). ``required=False``, damit
     # ein PATCH ohne diesen Schlüssel die bestehenden Werte unangetastet lässt.
@@ -255,6 +259,8 @@ class DocumentSerializer(serializers.ModelSerializer):
             "page_count",
             "ocr_status",
             "processing_state",
+            "asn",
+            "asn_label",
             "ai_suggestions",
             "ai_suggested_at",
             "classification",
@@ -266,11 +272,20 @@ class DocumentSerializer(serializers.ModelSerializer):
             "added_at",
             "current_version",
             "owner",  # Eigentümer serverseitig gesetzt – nicht per Request änderbar (STOAA-7)
+            "asn",  # unveränderlich, serverseitig vergeben (STOAA-284/285)
             "ai_suggestions",
             "ai_suggested_at",
             "classification",
             "status",  # Statuswechsel NUR über submit/approve/reject – nie per PATCH (STOAA-63)
         )
+
+    def get_asn_label(self, obj) -> str | None:
+        """Kanonische Anzeigeform der ASN (``ASN000123``) oder ``None``."""
+        if not obj.asn:
+            return None
+        from .services.asn import format_asn
+
+        return format_asn(obj.asn)
 
     def _upsert_custom_field_values(self, document, values):
         """Upsert der Zusatzfeld-Werte per unique_together (document, field).

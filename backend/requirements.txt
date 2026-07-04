@@ -20,6 +20,8 @@ pikepdf==8.15.1
 # Miniaturbilder (erste Seite → JPEG)
 pdf2image==1.17.0
 Pillow==11.0.0
+# QR-Codes für die Archivnummer (ASN, STOAA-284/285); rendert als PNG via Pillow
+qrcode==7.4.2
 
 # AI-Anbindung (optional je nach Provider)
 anthropic==0.42.0

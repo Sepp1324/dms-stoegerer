@@ -2,6 +2,7 @@ from django import forms
 from django.contrib import admin
 
 from .models import (
+    ASNScan,
     AuditLogEntry,
     ClassificationRule,
     Correspondent,
@@ -40,13 +41,32 @@ class CustomFieldValueInline(admin.TabularInline):
     extra = 0
 
 
+class ASNScanInline(admin.TabularInline):
+    model = ASNScan
+    extra = 0
+    fields = ("scanned_at", "matched_by", "confidence", "version")
+    readonly_fields = ("scanned_at",)
+
+
 @admin.register(Document)
 class DocumentAdmin(admin.ModelAdmin):
-    list_display = ("title", "correspondent", "document_type", "added_at", "owner")
+    # ASN (STOAA-284/285): read-only anzeigen, filter-/suchbar und sortierbar.
+    list_display = ("asn", "title", "correspondent", "document_type", "added_at", "owner")
     list_filter = ("document_type", "correspondent", "tags")
-    search_fields = ("title",)
+    search_fields = ("title", "asn")
+    ordering = ("-added_at",)
+    readonly_fields = ("asn",)
     filter_horizontal = ("tags",)
-    inlines = (DocumentVersionInline, CustomFieldValueInline)
+    inlines = (DocumentVersionInline, CustomFieldValueInline, ASNScanInline)
+
+
+@admin.register(ASNScan)
+class ASNScanAdmin(admin.ModelAdmin):
+    list_display = ("document", "matched_by", "confidence", "version", "scanned_at")
+    list_filter = ("matched_by",)
+    search_fields = ("document__title", "document__asn")
+    ordering = ("-scanned_at",)
+    readonly_fields = ("document", "version", "matched_by", "confidence", "scanned_at")
 
 
 @admin.register(DocumentVersion)
