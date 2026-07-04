@@ -5,6 +5,7 @@ import {
   createStoragePath,
   createTag,
   getCorrespondents,
+  getCustomFields,
   getDocuments,
   getDocumentThumbnail,
   getDocumentTypes,
@@ -12,14 +13,20 @@ import {
   getStoragePaths,
   getTags,
   logout,
+  type CustomField,
   type DocumentItem,
   type Me,
   type NamedRef,
   type TagRef,
 } from "../api";
+import { toCanonicalValue } from "../customFields";
 import UploadZone from "./UploadZone";
 import DocumentDetail from "./DocumentDetail";
 import RulesPage from "./RulesPage";
+import CustomFieldsAdmin from "./CustomFieldsAdmin";
+
+// Von-/Bis-Eingaben eines CURRENCY-Zusatzfeld-Filters (STOAA-113).
+type CurrencyRange = { gte: string; lte: string };
 
 // Muss dem Backend entsprechen (DRF PageNumberPagination, config/settings.py:
 // REST_FRAMEWORK["PAGE_SIZE"] = 25). Nur für die Anzeige „Seite X von N" nötig;
@@ -46,6 +53,12 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   const [documentTypes, setDocumentTypes] = useState<NamedRef[]>([]);
   const [tags, setTags] = useState<TagRef[]>([]);
   const [storagePaths, setStoragePaths] = useState<NamedRef[]>([]);
+  // Zusatzfeld-Definitionen (STOAA-113) für Anzeige (DocumentDetail) + Filter.
+  const [customFields, setCustomFields] = useState<CustomField[]>([]);
+  // CURRENCY-Filter: pro Feld-ID Von-/Bis-Eingaben (roh, deutsches Format).
+  const [currencyFilters, setCurrencyFilters] = useState<
+    Record<number, CurrencyRange>
+  >({});
 
   const [docs, setDocs] = useState<DocumentItem[]>([]);
   const [count, setCount] = useState(0);
@@ -65,9 +78,18 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   // Aktuell geöffnetes Dokument (Detailansicht) oder null (Liste).
   const [selectedId, setSelectedId] = useState<number | null>(null);
   // Aktive Hauptansicht (persistente linke Navigation).
-  const [view, setView] = useState<"docs" | "rules">("docs");
+  const [view, setView] = useState<"docs" | "rules" | "fields">("docs");
   // Sidebar auf schmalen Screens ein-/ausklappbar.
   const [navOpen, setNavOpen] = useState(false);
+
+  // Zusatzfeld-Definitionen laden (auch nach Admin-Änderungen erneut aufrufbar).
+  function loadCustomFields() {
+    getCustomFields()
+      .then(setCustomFields)
+      .catch(() => {
+        /* Zusatzfelder optional – Fehler hier nicht blockierend */
+      });
+  }
 
   // Profil + Filter-Stammdaten einmalig laden.
   useEffect(() => {
@@ -87,6 +109,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
       .catch(() => {
         /* Stammdaten sind optional – Fehler hier nicht blockierend */
       });
+    loadCustomFields();
   }, []);
 
   // Stammdaten inline anlegen: erzeugen, in die lokale Liste einsortieren, Item zurückgeben.
@@ -119,6 +142,42 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     return () => clearTimeout(id);
   }, [q]);
 
+  // CURRENCY-Filtereingaben ebenfalls entprellen (Zahlen sind kurz → 400 ms).
+  const [debouncedCurrency, setDebouncedCurrency] = useState<
+    Record<number, CurrencyRange>
+  >({});
+  useEffect(() => {
+    const id = setTimeout(() => setDebouncedCurrency(currencyFilters), 400);
+    return () => clearTimeout(id);
+  }, [currencyFilters]);
+
+  // Nur CURRENCY-Felder sind in P1 filterbar (Spec §4.1).
+  const currencyFields = useMemo(
+    () => customFields.filter((f) => f.data_type === "currency"),
+    [customFields],
+  );
+
+  // Entprellte Eingaben → gültige, kanonische Query-Params
+  // (custom_field_{id}_gte / _lte). Ungültige/leere Grenzen werden ausgelassen;
+  // das Backend ignoriert unbekannte Grenzen ohnehin (kein 500).
+  const customFilters = useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const f of currencyFields) {
+      const range = debouncedCurrency[f.id];
+      if (!range) continue;
+      if (range.gte?.trim()) {
+        const g = toCanonicalValue(range.gte, "currency");
+        if (g.value) out[`custom_field_${f.id}_gte`] = g.value;
+      }
+      if (range.lte?.trim()) {
+        const l = toCanonicalValue(range.lte, "currency");
+        if (l.value) out[`custom_field_${f.id}_lte`] = l.value;
+      }
+    }
+    return out;
+  }, [currencyFields, debouncedCurrency]);
+  const customFilterKey = JSON.stringify(customFilters);
+
   useEffect(() => {
     let active = true;
     setLoading(true);
@@ -131,6 +190,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
       storage_path: storagePath,
       ordering,
       page,
+      customFilters,
     })
       .then((res) => {
         if (!active) return;
@@ -144,11 +204,21 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     return () => {
       active = false;
     };
-  }, [debouncedQ, correspondent, documentType, tag, storagePath, ordering, page, reloadKey]);
+    // customFilterKey serialisiert customFilters für einen stabilen Dep-Vergleich.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debouncedQ, correspondent, documentType, tag, storagePath, ordering, page, reloadKey, customFilterKey]);
 
+  // Sichtbarkeit von „Zurücksetzen" & Empty-State-Text: alle roh getippten Filter.
+  const hasCurrencyInput = useMemo(
+    () =>
+      Object.values(currencyFilters).some((r) => r.gte?.trim() || r.lte?.trim()),
+    [currencyFilters],
+  );
   const hasFilters = useMemo(
-    () => !!(debouncedQ || correspondent || documentType || tag || storagePath),
-    [debouncedQ, correspondent, documentType, tag, storagePath],
+    () =>
+      !!(debouncedQ || correspondent || documentType || tag || storagePath) ||
+      hasCurrencyInput,
+    [debouncedQ, correspondent, documentType, tag, storagePath, hasCurrencyInput],
   );
 
   // Jede Filter-/Suchänderung springt zurück auf Seite 1 – sonst zeigt eine
@@ -177,6 +247,14 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     setOrdering(v);
     setPage(1);
   }
+  // Eine Von-/Bis-Grenze eines CURRENCY-Feldes setzen (setzt auf Seite 1 zurück).
+  function onCurrencyChange(fieldId: number, bound: keyof CurrencyRange, v: string) {
+    setCurrencyFilters((prev) => {
+      const cur = prev[fieldId] ?? { gte: "", lte: "" };
+      return { ...prev, [fieldId]: { ...cur, [bound]: v } };
+    });
+    setPage(1);
+  }
 
   function resetFilters() {
     setQ("");
@@ -185,6 +263,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     setTag("");
     setStoragePath("");
     setOrdering("");
+    setCurrencyFilters({});
     setPage(1);
   }
 
@@ -205,16 +284,25 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
         documentTypes={documentTypes}
         storagePaths={storagePaths}
         allTags={tags}
+        customFields={customFields}
         canEdit={!!me?.can_write}
         onCreateCorrespondent={addCorrespondent}
         onCreateDocumentType={addDocumentType}
         onCreateStoragePath={addStoragePath}
         onCreateTag={addTag}
+        onManageFields={
+          me?.is_dms_admin
+            ? () => {
+                setSelectedId(null);
+                setView("fields");
+              }
+            : undefined
+        }
       />
     );
   }
 
-  const navigate = (v: "docs" | "rules") => {
+  const navigate = (v: "docs" | "rules" | "fields") => {
     setView(v);
     setNavOpen(false); // Overlay auf Mobil nach Auswahl schließen
   };
@@ -226,6 +314,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
         onNavigate={navigate}
         username={me?.username}
         onLogout={handleLogout}
+        isAdmin={!!me?.is_dms_admin}
         open={navOpen}
         onClose={() => setNavOpen(false)}
         correspondents={correspondents}
@@ -241,6 +330,9 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
         onDocumentTypeChange={onDocumentTypeChange}
         onStoragePathChange={onStoragePathChange}
         storagePathEnabled={STORAGE_PATH_FILTER_ENABLED}
+        currencyFields={currencyFields}
+        currencyFilters={currencyFilters}
+        onCurrencyChange={onCurrencyChange}
       />
 
       <div className="content">
@@ -255,7 +347,11 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
             </svg>
           </button>
           <h1 className="content-title">
-            {view === "rules" ? "Regeln" : "Dokumente"}
+            {view === "rules"
+              ? "Regeln"
+              : view === "fields"
+                ? "Zusatzfelder"
+                : "Dokumente"}
           </h1>
           {view === "docs" && (
             <input
@@ -270,6 +366,11 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
         <div className="content-body">
           {view === "rules" ? (
             <RulesPage canEdit={!!me?.can_write} />
+          ) : view === "fields" ? (
+            <CustomFieldsAdmin
+              canEdit={!!me?.can_write}
+              onChanged={loadCustomFields}
+            />
           ) : (
             <>
               {me?.can_write && (
@@ -384,6 +485,7 @@ function Sidebar({
   onNavigate,
   username,
   onLogout,
+  isAdmin,
   open,
   onClose,
   correspondents,
@@ -399,11 +501,15 @@ function Sidebar({
   onDocumentTypeChange,
   onStoragePathChange,
   storagePathEnabled,
+  currencyFields,
+  currencyFilters,
+  onCurrencyChange,
 }: {
-  view: "docs" | "rules";
-  onNavigate: (v: "docs" | "rules") => void;
+  view: "docs" | "rules" | "fields";
+  onNavigate: (v: "docs" | "rules" | "fields") => void;
   username?: string;
   onLogout: () => void;
+  isAdmin: boolean;
   open: boolean;
   onClose: () => void;
   correspondents: NamedRef[];
@@ -419,6 +525,13 @@ function Sidebar({
   onDocumentTypeChange: (v: number | "") => void;
   onStoragePathChange: (v: number | "") => void;
   storagePathEnabled: boolean;
+  currencyFields: CustomField[];
+  currencyFilters: Record<number, CurrencyRange>;
+  onCurrencyChange: (
+    fieldId: number,
+    bound: keyof CurrencyRange,
+    v: string,
+  ) => void;
 }) {
   // Nach einer Filterauswahl auf Mobil das Overlay schließen (Desktop no-op).
   const pick = (fn: (v: number | "") => void) => (v: number | "") => {
@@ -457,6 +570,14 @@ function Sidebar({
           label="Regeln"
           icon="M3 5h18v2H3zm0 6h12v2H3zm0 6h18v2H3z"
         />
+        {isAdmin && (
+          <NavItem
+            active={view === "fields"}
+            onClick={() => onNavigate("fields")}
+            label="Zusatzfelder"
+            icon="M4 4h16v4H4zm0 6h16v4H4zm0 6h10v4H4z"
+          />
+        )}
 
         {view === "docs" && (
           <div className="nav-filters">
@@ -486,6 +607,11 @@ function Sidebar({
               onSelect={pick(onStoragePathChange)}
               disabled={!storagePathEnabled}
               note={storagePathEnabled ? undefined : "Backend folgt"}
+            />
+            <CurrencyFilterSection
+              fields={currencyFields}
+              filters={currencyFilters}
+              onChange={onCurrencyChange}
             />
           </div>
         )}
@@ -573,6 +699,79 @@ function FilterSection({
             );
           })}
         </ul>
+      )}
+    </div>
+  );
+}
+
+// CURRENCY-Zusatzfeld-Filter (STOAA-113): pro Währungsfeld ein Von-/Bis-Paar.
+// Wird ausgeblendet, wenn keine CURRENCY-Felder definiert sind.
+function CurrencyFilterSection({
+  fields,
+  filters,
+  onChange,
+}: {
+  fields: CustomField[];
+  filters: Record<number, CurrencyRange>;
+  onChange: (fieldId: number, bound: keyof CurrencyRange, v: string) => void;
+}) {
+  const [expanded, setExpanded] = useState(true);
+  if (fields.length === 0) return null;
+
+  return (
+    <div className="nav-section">
+      <button
+        className="nav-section__head"
+        onClick={() => setExpanded((e) => !e)}
+        aria-expanded={expanded}
+      >
+        <svg
+          className={`nav-section__chevron${expanded ? " nav-section__chevron--open" : ""}`}
+          viewBox="0 0 24 24"
+          width="14"
+          height="14"
+          aria-hidden="true"
+        >
+          <path fill="currentColor" d="M8 5l8 7-8 7z" />
+        </svg>
+        <span className="nav-section__title">Beträge</span>
+        <span className="nav-section__count">{fields.length}</span>
+      </button>
+      {expanded && (
+        <div className="nav-section__list currency-filters">
+          {fields.map((f) => {
+            const range = filters[f.id] ?? { gte: "", lte: "" };
+            return (
+              <div key={f.id} className="currency-filter">
+                <span className="currency-filter__name">{f.name}</span>
+                <div className="currency-filter__row">
+                  <label className="currency-filter__field">
+                    <span className="currency-filter__label">Von</span>
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      placeholder="0"
+                      aria-label={`${f.name} von`}
+                      value={range.gte}
+                      onChange={(e) => onChange(f.id, "gte", e.target.value)}
+                    />
+                  </label>
+                  <label className="currency-filter__field">
+                    <span className="currency-filter__label">Bis</span>
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      placeholder="∞"
+                      aria-label={`${f.name} bis`}
+                      value={range.lte}
+                      onChange={(e) => onChange(f.id, "lte", e.target.value)}
+                    />
+                  </label>
+                </div>
+              </div>
+            );
+          })}
+        </div>
       )}
     </div>
   );

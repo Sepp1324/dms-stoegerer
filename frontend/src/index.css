@@ -1202,3 +1202,169 @@ button.freigabe__reject {
 button.freigabe__reject:hover:not(:disabled) {
   background: rgba(239, 68, 68, 0.12);
 }
+
+/* --- Zusatzfelder (Custom Fields, STOAA-113) --- */
+/* Dezenter State-Block (kein Alarm), z. B. "Keine Zusatzfelder definiert". */
+.state-block--subtle {
+  border-style: dashed;
+  padding: 1.5rem 1rem;
+  color: var(--muted);
+}
+
+/* Sektion in DocumentDetail (nach den Standard-Metadaten). */
+.custom-fields {
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+.custom-fields__head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+.custom-fields__head h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+.custom-fields__edit {
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0.1rem 0.35rem;
+}
+.custom-fields__manage {
+  margin-top: 0.6rem;
+}
+/* Anzeige-Modus: schlanke Definitionsliste (Name → Wert). */
+.custom-fields__list {
+  margin: 0;
+}
+.custom-fields__row {
+  display: grid;
+  grid-template-columns: minmax(9rem, 40%) 1fr;
+  gap: 0.4rem 1rem;
+  padding: 0.3rem 0;
+}
+.custom-fields__row dt {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+.custom-fields__row dd {
+  margin: 0;
+}
+/* Edit-Modus: Feld-Stapel wie das bestehende Bearbeiten-Formular. */
+.custom-fields__form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+}
+.custom-fields__field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.custom-fields__label {
+  color: var(--muted);
+}
+.input-error {
+  font-size: 0.8rem;
+}
+
+/* Währungs-Input mit €-Suffix (Anzeige inline hinter dem Feld). */
+.input-with-suffix {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.input-with-suffix input {
+  flex: 1;
+}
+.input-with-suffix .suffix {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+/* CURRENCY-Filter in der Sidebar (Von/Bis je Währungsfeld). */
+.currency-filters {
+  padding: 0.4rem 0.25rem 0.2rem;
+}
+.currency-filter {
+  margin-bottom: 0.6rem;
+}
+.currency-filter__name {
+  display: block;
+  font-size: 0.78rem;
+  color: var(--muted);
+  margin-bottom: 0.25rem;
+}
+.currency-filter__row {
+  display: flex;
+  gap: 0.4rem;
+}
+.currency-filter__field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  flex: 1;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+.currency-filter__field input {
+  font-size: 0.85rem;
+  padding: 0.3rem 0.4rem;
+}
+
+/* --- Zusatzfelder-Verwaltung (Admin-View) --- */
+.field-form {
+  margin-bottom: 1.25rem;
+}
+.field-form__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+.field-form__grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.field-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.field-item {
+  margin-bottom: 0.6rem;
+  padding: 0.75rem 1rem;
+}
+.field-item__head {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+.field-item__name {
+  font-weight: 600;
+}
+.field-item__type {
+  font-size: 0.85rem;
+}
+.field-item__rename {
+  max-width: 16rem;
+}
+.field-item__actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.field-item__delete {
+  color: var(--error);
+}
+.field-item__delete:hover {
+  color: #fca5a5;
+}
