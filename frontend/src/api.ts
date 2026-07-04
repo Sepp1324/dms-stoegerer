@@ -246,6 +246,15 @@ export interface ShareLinkCreated extends ShareLink {
   token: string;
 }
 
+// Schmale Nutzer-Auswahl (GET /api/users/, STOAA-221): read-only, admin-only,
+// bare Liste der aktiven Nutzer nach Benutzername sortiert. Nur für Zuordnungs-
+// Dropdowns (z. B. Standard-Empfänger eines Mailkontos), keine Rechteinfos.
+export interface User {
+  id: number;
+  username: string;
+  email: string;
+}
+
 // --- Mailkonten (IMAP-Postfächer, STOAA-214/215) ---
 // Verwaltungs-Sicht eines Mailkontos. Das Backend liefert das Passwort NIE in
 // der Response (write_only); ``password_env``, ``last_checked_at`` und
@@ -667,6 +676,11 @@ export async function deleteRule(id: number): Promise<void> {
 // zurück.
 export async function getMailAccounts(): Promise<MailAccount[]> {
   return listAll<MailAccount>("/mail-accounts/");
+}
+
+// Aktive Nutzer für Zuordnungs-Dropdowns (admin-only im Backend). Bare Liste.
+export async function getUsers(): Promise<User[]> {
+  return listAll<User>("/users/");
 }
 export function createMailAccount(
   payload: MailAccountPayload,
