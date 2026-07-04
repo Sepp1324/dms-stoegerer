@@ -517,12 +517,19 @@ export async function getDocumentVersionFile(
   return res.blob();
 }
 
-// --- Versionsvergleich Stufe 1 (STOAA-288/289/290) ---
-// Contract entspricht ``VersionCompareResultSerializer`` (Backend STOAA-289 auf
-// origin/main). Metadaten-/Tag-/Feld-Diff wird in Stufe 1 aus dem aktuellen
-// Dokument berechnet (beide Versionen zeigen auf dasselbe ``Document``) und ist
-// daher vorerst faktisch immer leer; die Felder bleiben Teil des Contracts,
-// damit Stufe 2 (echte Metadaten-Versionierung) rein additiv andockt.
+// --- Versionsvergleich (STOAA-288/289/290 Stufe 1 + STOAA-312/313 Stufe 2) ---
+// Contract = ``VersionComparison.to_dict()`` aus ``services/version_compare.py``;
+// der Compare-View (``DocumentViewSet.compare_versions``) gibt dieses Dict roh
+// zurück – NICHT über den (ungenutzten) ``VersionCompareResultSerializer``.
+// Deshalb hier exakt die ``to_dict``-Shape abbilden.
+//
+// Stufe 2 (STOAA-312) füllt die Metadaten-/Tag-/Feld-Sektionen aus je Version
+// gespeicherten ``metadata_snapshot``-Werten. Nur wenn BEIDE verglichenen
+// Versionen einen Snapshot tragen, ist ``metadata_versioning_supported: true``
+// und die Sektionen sind als ``{added, removed, changed}`` befüllt. Andernfalls
+// bleibt das Flag ``false`` und die Sektionen sind leer (Stufe-1-Verhalten).
+
+// Einzelne alt→neu-Änderung eines Wertes.
 export interface CompareFieldChange {
   old: string | null;
   new: string | null;
@@ -530,13 +537,11 @@ export interface CompareFieldChange {
 
 export interface CompareSummary {
   text_changed: boolean;
+  binary_changed: boolean;
+  pages_changed: boolean;
   metadata_changed: boolean;
   tags_changed: boolean;
   custom_fields_changed: boolean;
-  binary_changed: boolean;
-  pages_changed: boolean;
-  tag_changes: number;
-  field_changes: number;
 }
 
 export interface CompareFileDiff {
@@ -544,14 +549,34 @@ export interface CompareFileDiff {
   new_sha256: string;
   old_size: number;
   new_size: number;
-  old_mime: string;
-  new_mime: string;
-  changed: boolean;
+  old_mime_type: string;
+  new_mime_type: string;
   old_page_count: number | null;
   new_page_count: number | null;
-  pages_changed: boolean;
-  // Stufe-2-Vorbereitung (PDF-Seitendiff); vom Stufe-1-Backend nicht geliefert.
-  both_pdf?: boolean;
+  changed: boolean;
+  // Beide Versionen sind PDF (Voraussetzung für Seiten-Diff einer späteren Stufe).
+  both_pdf: boolean;
+}
+
+// Sektions-Diff für Metadaten und Zusatzfelder: ``added``/``removed`` sind
+// Feldname→Wert-Maps neu hinzugekommener bzw. weggefallener Schlüssel, ``changed``
+// je Schlüssel die alt/neu-Werte. Nur bei ``metadata_versioning_supported: true``
+// befüllt (sonst liefert das Backend die Leersektion und das Frontend rendert sie
+// gar nicht erst).
+export interface CompareSectionDiff {
+  added: Record<string, string | null>;
+  removed: Record<string, string | null>;
+  changed: Record<string, CompareFieldChange>;
+}
+
+// Tag-Diff trägt volle ``{id, name}``-Objekte (nicht nur Namen) → stabile React-Keys.
+export interface CompareTagRef {
+  id: number;
+  name: string;
+}
+export interface CompareTagDiff {
+  added: CompareTagRef[];
+  removed: CompareTagRef[];
 }
 
 export interface VersionCompare {
@@ -560,16 +585,17 @@ export interface VersionCompare {
   to_version: number;
   summary: CompareSummary;
   text_diff: string;
-  // HtmlDiff-Tabelle; erst ab Stufe 2 gefüllt. Wenn vorhanden, wird sie dem
-  // Plaintext-Diff vorgezogen.
-  text_diff_html?: string;
-  metadata: Record<string, CompareFieldChange>;
-  tags: { added: string[]; removed: string[] };
-  custom_fields: Record<string, CompareFieldChange>;
+  // HtmlDiff-Tabelle (difflib). Nur bei tatsächlicher Textänderung gefüllt, sonst
+  // "" (dann wird der unified ``text_diff`` zeilenweise gerendert). MUSS vor dem
+  // Rendern client-seitig sanitized werden (DOMPurify) – nie roh in
+  // dangerouslySetInnerHTML.
+  text_diff_html: string;
+  metadata: CompareSectionDiff;
+  tags: CompareTagDiff;
+  custom_fields: CompareSectionDiff;
   files: CompareFileDiff;
-  // Ob Metadaten/Tags/Felder pro Version verglichen werden können (Stufe 2).
-  // Das Stufe-1-Backend liefert das Feld nicht → im Frontend als false behandeln.
-  metadata_versioning_supported?: boolean;
+  // true nur, wenn beide Versionen einen Metadaten-Snapshot tragen (Stufe 2).
+  metadata_versioning_supported: boolean;
 }
 
 // Vergleicht zwei Versionen desselben Dokuments (STOAA-288).

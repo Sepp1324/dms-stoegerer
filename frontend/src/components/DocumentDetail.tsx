@@ -21,6 +21,7 @@ import {
   updateDocument,
   type AuditEntry,
   type CompareFieldChange,
+  type CompareSectionDiff,
   type CustomField,
   type CustomFieldValue,
   type DocumentDetail as Detail,
@@ -31,6 +32,7 @@ import {
   type ShareLink,
   type VersionCompare,
 } from "../api";
+import { sanitizeDiffHtml } from "../sanitize";
 import {
   formatCustomFieldValue,
   toCanonicalValue,
@@ -1799,9 +1801,38 @@ function ChangeRow({ label, change }: { label: string; change: CompareFieldChang
   );
 }
 
-// Vergleichsansicht (STOAA-290): zwei Versionen wählen und OCR-/Datei-Diff
-// anzeigen. Metadaten-/Tag-/Feld-Sektionen sind für Stufe 2 vorbereitet und
-// in Stufe 1 leer (Backend vergleicht sie noch nicht pro Version).
+// Rendert einen ``{added, removed, changed}``-Sektions-Diff (Metadaten bzw.
+// Zusatzfelder, Stufe 2 / STOAA-312). ``added`` wird als „— → Wert", ``removed``
+// als „Wert → —" dargestellt, ``changed`` mit den echten alt/neu-Werten – alles
+// über die bestehende ChangeRow. Leere Sektion → dezenter Hinweis.
+function SectionDiff({ diff }: { diff: CompareSectionDiff }) {
+  const changed = Object.entries(diff.changed ?? {});
+  const added = Object.entries(diff.added ?? {});
+  const removed = Object.entries(diff.removed ?? {});
+
+  if (!changed.length && !added.length && !removed.length) {
+    return <p className="muted">Keine Änderungen.</p>;
+  }
+
+  return (
+    <div className="compare-changes">
+      {changed.map(([key, change]) => (
+        <ChangeRow key={`c-${key}`} label={key} change={change} />
+      ))}
+      {added.map(([key, value]) => (
+        <ChangeRow key={`a-${key}`} label={key} change={{ old: null, new: value }} />
+      ))}
+      {removed.map(([key, value]) => (
+        <ChangeRow key={`r-${key}`} label={key} change={{ old: value, new: null }} />
+      ))}
+    </div>
+  );
+}
+
+// Vergleichsansicht (STOAA-290/313): zwei Versionen wählen und OCR-/Datei-Diff
+// anzeigen. Metadaten-/Tag-/Feld-Sektionen werden ab Stufe 2 (STOAA-312) befüllt,
+// sobald beide Versionen einen Snapshot tragen (``metadata_versioning_supported``);
+// sonst greift weiter der Stufe-1-Hinweis „noch nicht verfügbar".
 function ComparePanel({
   documentId,
   versions,
@@ -1908,15 +1939,18 @@ function CompareResultView({
   onDownload: (versionNo: number) => void;
 }) {
   const { summary, files } = result;
-  // Stufe-1-Backend liefert das Flag nicht → Metadaten/Tags/Felder gelten als
-  // (noch) nicht pro Version vergleichbar.
+  // Nur wenn beide Versionen einen Metadaten-Snapshot tragen, liefert das Backend
+  // echte Metadaten-/Tag-/Feld-Diffs (Stufe 2). Sonst bleibt es beim Stufe-1-
+  // Verhalten: „nicht verfügbar"-Hinweis, keine Sektionen.
   const supported = result.metadata_versioning_supported === true;
-  const hasHtml = !!result.text_diff_html;
+  // ``text_diff_html`` VOR dem Rendern sanitizen (Team-Vorgabe DOMPurify) – nie
+  // ungesäubertes Backend-HTML in dangerouslySetInnerHTML.
+  const safeDiffHtml = sanitizeDiffHtml(result.text_diff_html);
+  const hasHtml = !!safeDiffHtml;
   const hasText = hasHtml || !!result.text_diff;
 
-  const metaEntries = Object.entries(result.metadata);
-  const fieldEntries = Object.entries(result.custom_fields);
-  const { added, removed } = result.tags;
+  const tagsAdded = result.tags?.added ?? [];
+  const tagsRemoved = result.tags?.removed ?? [];
 
   return (
     <div className="compare-result">
@@ -1971,8 +2005,8 @@ function CompareResultView({
             </tr>
             <tr>
               <th>MIME</th>
-              <td>{files.old_mime || "—"}</td>
-              <td>{files.new_mime || "—"}</td>
+              <td>{files.old_mime_type || "—"}</td>
+              <td>{files.new_mime_type || "—"}</td>
             </tr>
             <tr>
               <th>Seiten</th>
@@ -2007,8 +2041,8 @@ function CompareResultView({
         ) : hasHtml ? (
           <div
             className="compare-diff compare-diff--html"
-            // Vom Backend erzeugte HtmlDiff-Tabelle (Stufe 2).
-            dangerouslySetInnerHTML={{ __html: result.text_diff_html as string }}
+            // Vom Backend erzeugte HtmlDiff-Tabelle (Stufe 2), DOMPurify-sanitized.
+            dangerouslySetInnerHTML={{ __html: safeDiffHtml }}
           />
         ) : (
           <pre className="compare-diff compare-diff--text">
@@ -2021,54 +2055,48 @@ function CompareResultView({
         )}
       </div>
 
-      {/* Metadaten (Stufe 2 – platzhaltend) */}
-      <div className="compare-section">
-        <h4>Metadaten</h4>
-        {metaEntries.length ? (
-          <div className="compare-changes">
-            {metaEntries.map(([key, change]) => (
-              <ChangeRow key={key} label={key} change={change} />
-            ))}
+      {/* Metadaten / Tags / Zusatzfelder – nur bei echter Metadaten-Versionierung
+          (Stufe 2, STOAA-312). Ohne beidseitigen Snapshot bleibt es beim
+          Stufe-1-Hinweis oben; die Sektionen erscheinen dann gar nicht. */}
+      {supported && (
+        <>
+          <div className="compare-section">
+            <h4>Metadaten</h4>
+            <SectionDiff diff={result.metadata} />
           </div>
-        ) : (
-          <p className="muted">Keine Metadaten-Änderungen.</p>
-        )}
-      </div>
 
-      {/* Tags (Stufe 2 – platzhaltend) */}
-      <div className="compare-section">
-        <h4>Tags</h4>
-        {added.length || removed.length ? (
-          <div className="compare-tags">
-            {added.map((t) => (
-              <span key={`a-${t}`} className="compare-tag compare-tag--added">
-                + {t}
-              </span>
-            ))}
-            {removed.map((t) => (
-              <span key={`r-${t}`} className="compare-tag compare-tag--removed">
-                − {t}
-              </span>
-            ))}
+          <div className="compare-section">
+            <h4>Tags</h4>
+            {tagsAdded.length || tagsRemoved.length ? (
+              <div className="compare-tags">
+                {tagsAdded.map((t) => (
+                  <span
+                    key={`a-${t.id}`}
+                    className="compare-tag compare-tag--added"
+                  >
+                    + {t.name}
+                  </span>
+                ))}
+                {tagsRemoved.map((t) => (
+                  <span
+                    key={`r-${t.id}`}
+                    className="compare-tag compare-tag--removed"
+                  >
+                    − {t.name}
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <p className="muted">Keine Tag-Änderungen.</p>
+            )}
           </div>
-        ) : (
-          <p className="muted">Keine Tag-Änderungen.</p>
-        )}
-      </div>
 
-      {/* Zusatzfelder (Stufe 2 – platzhaltend) */}
-      <div className="compare-section">
-        <h4>Zusatzfelder</h4>
-        {fieldEntries.length ? (
-          <div className="compare-changes">
-            {fieldEntries.map(([key, change]) => (
-              <ChangeRow key={key} label={key} change={change} />
-            ))}
+          <div className="compare-section">
+            <h4>Zusatzfelder</h4>
+            <SectionDiff diff={result.custom_fields} />
           </div>
-        ) : (
-          <p className="muted">Keine Feld-Änderungen.</p>
-        )}
-      </div>
+        </>
+      )}
     </div>
   );
 }
