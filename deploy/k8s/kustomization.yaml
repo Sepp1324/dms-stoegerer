@@ -10,11 +10,14 @@ namespace: dms
 # denselben Tag bauen/pushen und `kubectl apply -k` ausführen.
 # (Überschreibt den Tag in allen Deployments – keine Änderung an den *.yaml nötig.)
 images:
-  # 0.4.0: Freigabelinks (STOAA-96/187/190/191/192/193) – Migration 0011 (DocumentShareLink) + Share-API + Dialog + /share-Aufrufseite.
+  # 0.5.0: Mailkonto-Verwaltung (STOAA-215) + Bulk-Actions (STOAA-206/208) + Processing State Machine (PR #70)
+  #        Backend: neue Migrationen 0012/0013/0014, MailAccount CRUD API, Bulk-Endpoints
+  #        Frontend: MailAccountsAdmin.tsx, Einstellungen-Integration
+  #        Deployed: 2026-07-04 11:50 UTC, Git-SHA 7fefa08, via GitHub Actions
   - name: registry.stoegerer-home.at/dms-backend
-    newTag: "0.4.0"
+    newTag: "0.5.0"
   - name: registry.stoegerer-home.at/dms-frontend
-    newTag: "0.4.0"
+    newTag: "0.5.0"
 
 resources:
   - namespace.yaml
