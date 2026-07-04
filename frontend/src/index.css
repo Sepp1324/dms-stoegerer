@@ -1241,16 +1241,21 @@ button.freigabe__reject:hover:not(:disabled) {
 }
 .custom-fields__row {
   display: grid;
-  grid-template-columns: minmax(9rem, 40%) 1fr;
+  grid-template-columns: minmax(9rem, 40%) minmax(0, 1fr);
+  align-items: baseline;
   gap: 0.4rem 1rem;
   padding: 0.3rem 0;
 }
 .custom-fields__row dt {
   color: var(--muted);
   font-size: 0.85rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .custom-fields__row dd {
   margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 /* Edit-Modus: Feld-Stapel wie das bestehende Bearbeiten-Formular. */
 .custom-fields__form {
