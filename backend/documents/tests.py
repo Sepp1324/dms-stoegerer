@@ -1216,6 +1216,60 @@ class ConsumeFolderScanTests(TestCase):
         self.assertEqual(Document.objects.get().title, "good")
         delay.assert_called_once()
 
+    def test_fehlender_ordner_wird_idempotent_angelegt(self):
+        """(d) STOAA-321: Fehlt CONSUME_DIR, wird er angelegt (found=0, WARN einmal);
+        beim zweiten Scan liegt eine reife Datei drin -> found=1, keine erneute WARN.
+        """
+        import os
+        import time
+        from pathlib import Path
+        from unittest import mock
+
+        from . import storage, tasks
+
+        # Frischer, noch NICHT existierender Consume-Pfad.
+        missing = Path(self._tmp.name) / "consume_neu"
+        self.assertFalse(missing.exists())
+
+        with self.settings(CONSUME_MIN_AGE=15):
+            with mock.patch.object(
+                storage, "CONSUME_DIR", missing
+            ), mock.patch.object(
+                storage, "ORIGINALS_DIR", self.originals
+            ), mock.patch.object(tasks.process_document_version, "delay"):
+                with self.assertLogs("documents.tasks", level="WARNING") as logs:
+                    result1 = tasks.scan_consume_folder()
+
+        # Ordner (inkl. _processed/_failed) wurde angelegt, kein Fehler, nichts gefunden.
+        self.assertTrue(missing.is_dir())
+        self.assertTrue((missing / "_processed").is_dir())
+        self.assertTrue((missing / "_failed").is_dir())
+        self.assertEqual(result1["found"], 0)
+        # Genau EINE WARN-Zeile zur Neuanlage.
+        anlage = [m for m in logs.output if "CONSUME_DIR angelegt" in m]
+        self.assertEqual(len(anlage), 1)
+
+        # Zweiter Scan: reife Datei liegt jetzt drin -> found=1, keine erneute WARN.
+        f = missing / "reif.pdf"
+        f.write_bytes(b"%PDF-1.4 dummy")
+        mtime = time.time() - 3600
+        os.utime(f, (mtime, mtime))
+
+        with self.settings(CONSUME_MIN_AGE=15):
+            with mock.patch.object(
+                storage, "CONSUME_DIR", missing
+            ), mock.patch.object(
+                storage, "ORIGINALS_DIR", self.originals
+            ), mock.patch.object(tasks.process_document_version, "delay") as delay:
+                # Ordner existiert bereits -> keine erneute WARN.
+                with self.assertNoLogs("documents.tasks", level="WARNING"):
+                    result2 = tasks.scan_consume_folder()
+
+        self.assertEqual(result2["found"], 1)
+        self.assertEqual(result2["failed"], 0)
+        self.assertTrue((missing / "_processed" / "reif.pdf").exists())
+        delay.assert_called_once()
+
 
 class ConsumePerUserScanTests(TestCase):
     """STOAA-261: Pro-User-Attribution des Consume-Ingest.
