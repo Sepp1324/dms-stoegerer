@@ -18,6 +18,7 @@ from .models import (
     CustomField,
     CustomFieldValue,
     Document,
+    DocumentShareLink,
     DocumentType,
     DocumentVersion,
     MailAccount,
@@ -1205,3 +1206,157 @@ class ConsumeFolderScanTests(TestCase):
         self.assertEqual(Document.objects.count(), 1)
         self.assertEqual(Document.objects.get().title, "good")
         delay.assert_called_once()
+
+
+class DocumentShareLinkTests(APITestCase):
+    """Verwaltungs-API der Freigabelinks (STOAA-190).
+
+    Belegt: nur der Hash wird gespeichert (Klartext-Token einmalig),
+    Pflicht-Ablauf serverseitig erzwungen, Owner-Scoping und Widerruf.
+    """
+
+    BASE = "/api/document-share-links/"
+
+    @classmethod
+    def setUpTestData(cls):
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        cls.timezone = timezone
+        cls.timedelta = timedelta
+        cls.owner = User.objects.create_user(username="s_owner", password="pw", role="user")
+        cls.other = User.objects.create_user(username="s_other", password="pw", role="user")
+        cls.guest = User.objects.create_user(username="s_guest", password="pw", role="guest")
+        cls.admin = User.objects.create_user(username="s_admin", password="pw", role="admin")
+        cls.doc = Document.objects.create(title="Freizugebendes Dokument", owner=cls.owner)
+        cls.other_doc = Document.objects.create(title="Fremd", owner=cls.other)
+
+    def _future(self, days=7):
+        return (self.timezone.now() + self.timedelta(days=days)).isoformat()
+
+    # --- Create -----------------------------------------------------------
+    def test_create_liefert_token_einmalig_und_speichert_nur_hash(self):
+        self.client.force_authenticate(self.owner)
+        resp = self.client.post(
+            self.BASE, {"document": self.doc.id, "expires_at": self._future()}
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        token = resp.data["token"]
+        self.assertGreaterEqual(len(token), 32)
+        self.assertNotIn("token_hash", resp.data)
+        link = DocumentShareLink.objects.get(id=resp.data["id"])
+        # Es wird ausschließlich der Hash gespeichert, nie der Klartext.
+        self.assertEqual(link.token_hash, DocumentShareLink.hash_token(token))
+        self.assertNotEqual(link.token_hash, token)
+        self.assertTrue(link.is_valid)
+        self.assertEqual(link.created_by, self.owner)
+
+    def test_create_ohne_expires_at_ist_400_kein_stillschweigendes_nie(self):
+        self.client.force_authenticate(self.owner)
+        resp = self.client.post(self.BASE, {"document": self.doc.id})
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(DocumentShareLink.objects.count(), 0)
+
+    def test_create_mit_vergangenem_expires_at_ist_400(self):
+        self.client.force_authenticate(self.owner)
+        past = (self.timezone.now() - self.timedelta(days=1)).isoformat()
+        resp = self.client.post(
+            self.BASE, {"document": self.doc.id, "expires_at": past}
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(DocumentShareLink.objects.count(), 0)
+
+    def test_gast_darf_nicht_erstellen(self):
+        self.client.force_authenticate(self.guest)
+        resp = self.client.post(
+            self.BASE, {"document": self.doc.id, "expires_at": self._future()}
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_create_fuer_fremdes_dokument_ist_404(self):
+        self.client.force_authenticate(self.owner)
+        resp = self.client.post(
+            self.BASE, {"document": self.other_doc.id, "expires_at": self._future()}
+        )
+        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(DocumentShareLink.objects.count(), 0)
+
+    # --- List -------------------------------------------------------------
+    def test_list_je_dokument_ohne_hash_und_owner_gescoped(self):
+        link = DocumentShareLink.objects.create(
+            document=self.doc,
+            token_hash=DocumentShareLink.hash_token("t"),
+            expires_at=self.timezone.now() + self.timedelta(days=3),
+            created_by=self.owner,
+        )
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get(self.BASE + f"?document={self.doc.id}")
+        self.assertEqual(resp.status_code, 200)
+        results = resp.data["results"] if isinstance(resp.data, dict) else resp.data
+        self.assertEqual(len(results), 1)
+        row = results[0]
+        self.assertEqual(row["id"], link.id)
+        self.assertNotIn("token_hash", row)
+        self.assertNotIn("token", row)
+        self.assertIn("is_valid", row)
+
+    def test_fremder_sieht_link_nicht(self):
+        DocumentShareLink.objects.create(
+            document=self.doc,
+            token_hash=DocumentShareLink.hash_token("x"),
+            expires_at=self.timezone.now() + self.timedelta(days=3),
+        )
+        self.client.force_authenticate(self.other)
+        resp = self.client.get(self.BASE)
+        results = resp.data["results"] if isinstance(resp.data, dict) else resp.data
+        self.assertEqual(len(results), 0)
+
+    # --- Revoke -----------------------------------------------------------
+    def test_delete_widerruft_soft_und_is_valid_false(self):
+        link = DocumentShareLink.objects.create(
+            document=self.doc,
+            token_hash=DocumentShareLink.hash_token("d"),
+            expires_at=self.timezone.now() + self.timedelta(days=3),
+        )
+        self.client.force_authenticate(self.owner)
+        resp = self.client.delete(self.BASE + f"{link.id}/")
+        self.assertIn(resp.status_code, (200, 204))
+        link.refresh_from_db()
+        self.assertIsNotNone(link.revoked_at)
+        self.assertFalse(link.is_valid)
+
+    def test_patch_revoked_at_widerruft(self):
+        link = DocumentShareLink.objects.create(
+            document=self.doc,
+            token_hash=DocumentShareLink.hash_token("p"),
+            expires_at=self.timezone.now() + self.timedelta(days=3),
+        )
+        self.client.force_authenticate(self.owner)
+        resp = self.client.patch(
+            self.BASE + f"{link.id}/", {"revoked_at": self.timezone.now().isoformat()}
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.data["is_valid"])
+        link.refresh_from_db()
+        self.assertIsNotNone(link.revoked_at)
+
+    def test_fremder_kann_nicht_widerrufen(self):
+        link = DocumentShareLink.objects.create(
+            document=self.doc,
+            token_hash=DocumentShareLink.hash_token("f"),
+            expires_at=self.timezone.now() + self.timedelta(days=3),
+        )
+        self.client.force_authenticate(self.other)
+        resp = self.client.delete(self.BASE + f"{link.id}/")
+        self.assertEqual(resp.status_code, 404)
+        link.refresh_from_db()
+        self.assertIsNone(link.revoked_at)
+
+    def test_is_valid_false_wenn_abgelaufen(self):
+        link = DocumentShareLink.objects.create(
+            document=self.doc,
+            token_hash=DocumentShareLink.hash_token("e"),
+            expires_at=self.timezone.now() - self.timedelta(seconds=1),
+        )
+        self.assertFalse(link.is_valid)

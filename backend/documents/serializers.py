@@ -7,11 +7,33 @@ from .models import (
     CustomField,
     CustomFieldValue,
     Document,
+    DocumentShareLink,
     DocumentType,
     DocumentVersion,
     StoragePath,
     Tag,
 )
+
+
+class DocumentShareLinkSerializer(serializers.ModelSerializer):
+    """Ausgabe-Serializer für Freigabelinks (STOAA-190).
+
+    Enthält bewusst **weder** ``token_hash`` **noch** den Klartext-Token –
+    der Klartext wird ausschließlich einmalig in der Create-Response ergänzt
+    (siehe ``DocumentShareLinkViewSet.create``). ``is_valid`` kommt aus der
+    Model-Property (nicht widerrufen UND nicht abgelaufen).
+    """
+
+    class Meta:
+        model = DocumentShareLink
+        fields = (
+            "id",
+            "document",
+            "created_at",
+            "expires_at",
+            "revoked_at",
+            "is_valid",
+        )
 
 
 class TagSerializer(serializers.ModelSerializer):

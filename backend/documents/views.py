@@ -1,5 +1,6 @@
 import os
 import re
+import secrets
 from datetime import date as date_cls
 from datetime import datetime, time
 from datetime import timezone as dt_timezone
@@ -43,6 +44,7 @@ from .models import (
     CustomField,
     CustomFieldValue,
     Document,
+    DocumentShareLink,
     DocumentType,
     StoragePath,
     Tag,
@@ -53,6 +55,7 @@ from .serializers import (
     CorrespondentSerializer,
     CustomFieldSerializer,
     DocumentSerializer,
+    DocumentShareLinkSerializer,
     DocumentTypeSerializer,
     StoragePathSerializer,
     TagSerializer,
@@ -844,3 +847,134 @@ class CustomFieldViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_409_CONFLICT,
             )
         return super().destroy(request, *args, **kwargs)
+
+
+class DocumentShareLinkViewSet(viewsets.ModelViewSet):
+    """Verwaltungs-API für Freigabelinks (STOAA-190).
+
+    Login-PFLICHT-Variante mit Pflicht-Ablauf. Endpunkte:
+
+      * ``POST``   – Link erstellen (nur ``can_write``). Erzeugt einen Token via
+        ``secrets.token_urlsafe(32)``, speichert **ausschließlich** dessen
+        SHA-256-Hash und liefert den **Klartext-Token EINMALIG** in der Response
+        (Feld ``token``). ``expires_at`` ist Pflicht und muss in der Zukunft
+        liegen – fehlt es oder liegt es in der Vergangenheit → 400 (KEIN
+        stillschweigendes „nie").
+      * ``GET``    – Links auflisten (optional je Dokument via ``?document=<id>``)
+        bzw. Detail – **ohne** ``token_hash``/Klartext.
+      * ``DELETE`` / ``PATCH`` – Widerruf (Soft-Delete): setzt ``revoked_at`` auf
+        jetzt → danach ``is_valid == False``. Der Datensatz bleibt für den
+        Verlauf sichtbar.
+
+    Owner-Scoping: Nutzer sehen/erstellen/widerrufen ausschließlich Links zu
+    **eigenen** Dokumenten (DMS-Admin sieht alle). Gäste dürfen nur lesen.
+    Die Abrufrouten ``/api/share/<token>/…`` sind NICHT Teil dieses Tickets.
+    """
+
+    queryset = DocumentShareLink.objects.all()  # für Basename-Ableitung im Router
+    serializer_class = DocumentShareLinkSerializer
+    permission_classes = [ReadOnlyOrCanWrite]
+    # Voll-Ersatz (PUT) ist nicht sinnvoll; nur Widerruf via PATCH/DELETE.
+    http_method_names = ["get", "post", "patch", "delete", "head", "options"]
+
+    def get_queryset(self):
+        # Owner-Scoping: nur Links zu eigenen Dokumenten (Admin sieht alles).
+        # get_object() nutzt dieses Queryset → fremde IDs ergeben 404 (kein Leak).
+        qs = DocumentShareLink.objects.select_related("document")
+        user = self.request.user
+        if not getattr(user, "is_dms_admin", False):
+            qs = qs.filter(document__owner=user)
+        doc_id = self.request.query_params.get("document")
+        if doc_id:
+            qs = qs.filter(document_id=doc_id)
+        return qs
+
+    def _get_owned_document(self, doc_id):
+        """Lädt das Zieldokument owner-gescoped; fremd/unbekannt → 404 (kein Leak)."""
+        from rest_framework.exceptions import ValidationError
+
+        if not doc_id:
+            raise ValidationError({"document": "Feld 'document' ist erforderlich."})
+        qs = Document.objects.all()
+        user = self.request.user
+        if not getattr(user, "is_dms_admin", False):
+            qs = qs.filter(owner=user)
+        document = qs.filter(pk=doc_id).first()
+        if document is None:
+            # 404 statt 403: verrät nicht, ob eine fremde Dokument-ID existiert.
+            raise Http404("Dokument nicht gefunden.")
+        return document
+
+    def _parse_future_expiry(self, raw):
+        """Erzwingt Pflicht-Ablauf: vorhanden + gültiges ISO-Datum + in der Zukunft."""
+        from rest_framework.exceptions import ValidationError
+        from rest_framework.fields import DateTimeField as DRFDateTimeField
+
+        if raw in (None, ""):
+            raise ValidationError(
+                {"expires_at": "Pflicht-Ablauf: 'expires_at' ist erforderlich."}
+            )
+        try:
+            value = DRFDateTimeField().to_internal_value(raw)
+        except ValidationError:
+            raise ValidationError(
+                {"expires_at": "Ungültiges Datumsformat (ISO 8601 erwartet)."}
+            )
+        if value <= timezone.now():
+            raise ValidationError(
+                {"expires_at": "'expires_at' muss in der Zukunft liegen."}
+            )
+        return value
+
+    def create(self, request, *args, **kwargs):
+        # Schreibrecht wird bereits durch ReadOnlyOrCanWrite erzwungen (403 für Gäste).
+        document = self._get_owned_document(request.data.get("document"))
+        expires_at = self._parse_future_expiry(request.data.get("expires_at"))
+
+        # ≥32 Zeichen Entropie; nur der Hash landet in der DB.
+        token = secrets.token_urlsafe(32)
+        link = DocumentShareLink.objects.create(
+            document=document,
+            token_hash=DocumentShareLink.hash_token(token),
+            expires_at=expires_at,
+            created_by=request.user,
+        )
+        AuditLogEntry.objects.create(
+            actor=request.user,
+            action="share_link_create",
+            object_type="Document",
+            object_id=str(document.id),
+            detail={"share_link_id": link.id, "expires_at": expires_at.isoformat()},
+        )
+
+        data = self.get_serializer(link).data
+        # Klartext-Token EINMALIG – danach nie wieder abrufbar.
+        data["token"] = token
+        headers = self.get_success_headers(data)
+        return Response(data, status=status.HTTP_201_CREATED, headers=headers)
+
+    def _revoke(self, request, link):
+        """Idempotenter Soft-Widerruf: setzt ``revoked_at`` genau einmal."""
+        if link.revoked_at is None:
+            link.revoked_at = timezone.now()
+            link.save(update_fields=["revoked_at"])
+            AuditLogEntry.objects.create(
+                actor=request.user,
+                action="share_link_revoke",
+                object_type="Document",
+                object_id=str(link.document_id),
+                detail={"share_link_id": link.id},
+            )
+        return Response(self.get_serializer(link).data)
+
+    def partial_update(self, request, *args, **kwargs):
+        # Einzig unterstützte Änderung: Widerruf (revoked_at=now). Andere Felder
+        # sind unveränderlich – ein Freigabelink wird widerrufen, nicht editiert.
+        link = self.get_object()
+        return self._revoke(request, link)
+
+    def destroy(self, request, *args, **kwargs):
+        # Soft-Delete: Widerruf statt Zeilenlöschung, damit der Link im Verlauf
+        # sichtbar bleibt (is_valid=False). Antwort 200 mit dem widerrufenen Link.
+        link = self.get_object()
+        return self._revoke(request, link)

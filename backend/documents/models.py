@@ -5,6 +5,7 @@ Ein `Document` ist ein logisches Objekt mit mehreren `DocumentVersion`s.
 Jede Version trägt einen SHA-256-Hash und den Hash der Vorgängerversion
 (Hash-Kette) – die Grundlage für Versionierung und spätere Revisionssicherheit.
 """
+import hashlib
 import os
 
 from django.conf import settings
@@ -449,3 +450,75 @@ class ProcessedMail(models.Model):
 
     def __str__(self) -> str:
         return f"{self.subject or '(ohne Betreff)'} · {self.processed_at:%Y-%m-%d %H:%M}"
+
+
+# ---------------------------------------------------------------------------
+# Freigabelinks (STOAA-96/STOAA-190) – tokenbasierter Dokument-Zugriff
+# ---------------------------------------------------------------------------
+class DocumentShareLink(models.Model):
+    """Ein widerrufbarer, ablaufpflichtiger Freigabelink auf ein Dokument.
+
+    Sicherheitsmodell (Login-PFLICHT-Variante):
+      * **Nur der SHA-256-Hash** des Tokens wird gespeichert (``token_hash``),
+        nie der Klartext. Der Klartext-Token wird ausschließlich **einmalig**
+        bei der Erstellung zurückgegeben und ist danach nicht wieder abrufbar –
+        selbst bei DB-Leak lässt sich aus dem Hash kein gültiger Link ableiten.
+      * ``expires_at`` ist **Pflicht** (NOT NULL): ein Freigabelink gilt nie
+        unbegrenzt. Die serverseitige Zukunftsprüfung erfolgt in der API.
+      * Widerruf über ``revoked_at`` (Soft-Delete): ein widerrufener Link bleibt
+        für den Verlauf sichtbar, ist aber sofort ``is_valid == False``.
+
+    Die eigentlichen Abrufrouten (``/api/share/<token>/…``) sind NICHT Teil
+    dieses Modells/Tickets (→ Ticket B); hier entsteht nur das Fundament
+    (Model + Verwaltungs-API).
+    """
+
+    document = models.ForeignKey(
+        Document, on_delete=models.CASCADE, related_name="share_links"
+    )
+    token_hash = models.CharField(
+        max_length=64,
+        unique=True,  # unique impliziert bereits einen Index (Lookup beim Abruf)
+        help_text=(
+            "SHA-256-Hex des Freigabe-Tokens. NUR der Hash wird gespeichert, "
+            "nie der Klartext."
+        ),
+    )
+    expires_at = models.DateTimeField(
+        help_text="Pflicht-Ablauf – ein Freigabelink gilt nie unbegrenzt."
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="created_share_links",
+    )
+    revoked_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Zeitpunkt des Widerrufs (Soft-Delete); gesetzt → is_valid=False.",
+    )
+
+    class Meta:
+        verbose_name = "Freigabelink"
+        verbose_name_plural = "Freigabelinks"
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"Freigabelink für Dokument #{self.document_id} (…{self.token_hash[:8]})"
+
+    @staticmethod
+    def hash_token(token: str) -> str:
+        """Bildet den zu speichernden SHA-256-Hex-Hash eines Klartext-Tokens."""
+        return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+    @property
+    def is_expired(self) -> bool:
+        return timezone.now() >= self.expires_at
+
+    @property
+    def is_valid(self) -> bool:
+        """Nutzbar = weder widerrufen noch abgelaufen."""
+        return self.revoked_at is None and not self.is_expired
