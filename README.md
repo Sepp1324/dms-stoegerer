@@ -88,6 +88,49 @@ kubectl apply -k deploy/k8s
 
 Danach ist das DMS unter `http://dms.local` erreichbar (Traefik-Ingress).
 
+## Django-Migrationen: Konflikt-Prävention
+
+**Problem:** Wenn mehrere Feature-Branches parallel Modell-Änderungen vornehmen,
+entstehen Migration-Dateien mit derselben Nummer (z. B. mehrere `0007_*.py`).
+Beim Merge führt das zu einem P0, weil Django nicht weiß, welche Migration zuerst
+laufen soll.
+
+**Lösung:** Die CI prüft mit `makemigrations --check --dry-run` (siehe
+`.github/workflows/ci.yml`), ob ausstehende Migrationen fehlen. Ein roter CI-Build
+blockt den Merge. Zusätzlich verhindert folgender Workflow die meisten Konflikte:
+
+### Workflow für Migrations-PRs
+
+1. **Vor dem Branchen:** `git switch main && git pull` – immer vom aktuellen `main` abzweigen.
+2. **Migration sofort erstellen:** Nach der Modell-Änderung direkt `python manage.py makemigrations` ausführen und committen. Nicht aufschieben.
+3. **Vor dem PR:** `git fetch origin main && git rebase origin/main` – wenn `main` inzwischen weitergegangen ist, neu aufsetzen. Django erkennt beim Rebase Konflikt-Nummern und `makemigrations` schlägt fehl → du siehst es lokal, bevor der PR rot wird.
+4. **Bei Konflikt:** siehe unten (Migrations-Merge).
+
+### Migrations-Konflikt auflösen
+
+Wenn trotzdem zwei `0007_*`-Dateien kollidieren (z. B. nach parallelem Merge):
+
+```bash
+# 1. Kollidierende Migrationen identifizieren
+ls -1 backend/documents/migrations/0007_*
+
+# 2. Merge-Migration anlegen – Django fügt beide Zweige zusammen
+python manage.py makemigrations --merge
+
+# 3. Committen
+git add backend/documents/migrations/
+git commit -m "fix: merge parallel migrations 0007"
+```
+
+Django erzeugt eine `0008_merge_…`-Datei, die beide `0007_*` als Vorgänger
+referenziert. Das löst den Konflikt, ohne Daten zu verlieren.
+
+> **CI-Gate:** `.github/workflows/ci.yml` führt `makemigrations --check` aus –
+> ein fehlender Merge schlägt fehl und blockt den PR, BEVOR kaputter Code auf
+> `main` landet. Details: [docs/ci-cd.md](docs/ci-cd.md).
+
+---
+
 ## Nächste Schritte
 
 Stufe 1 (MVP „paperless-Kern"): Upload + Consume-Ordner → OCR-Pipeline
