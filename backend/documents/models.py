@@ -255,8 +255,6 @@ class DocumentVersion(models.Model):
     size = models.BigIntegerField(default=0)
     page_count = models.PositiveIntegerField(null=True, blank=True)
 
-<<<<<<< HEAD
-=======
     class OCRStatus(models.TextChoices):
         PENDING = "pending"
         RUNNING = "running"
@@ -274,7 +272,6 @@ ocr_error = models.TextField(blank=True)
 ocr_duration_ms = models.PositiveIntegerField(default=0)
 ocr_engine = models.CharField(max_length=30, default="ocrmypdf")
 
->>>>>>> a7e415a (Reworked OCR)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL
     )
