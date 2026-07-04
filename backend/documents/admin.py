@@ -20,7 +20,15 @@ from .models import (
 class DocumentVersionInline(admin.TabularInline):
     model = DocumentVersion
     extra = 0
-    fields = ("version_no", "file_path", "sha256", "prev_hash", "is_immutable", "created_at")
+    fields = (
+        "version_no",
+        "file_path",
+        "processing_state",
+        "sha256",
+        "prev_hash",
+        "is_immutable",
+        "created_at",
+    )
     readonly_fields = ("created_at",)
 
 
@@ -40,7 +48,16 @@ class DocumentAdmin(admin.ModelAdmin):
 
 @admin.register(DocumentVersion)
 class DocumentVersionAdmin(admin.ModelAdmin):
-    list_display = ("document", "version_no", "mime_type", "size", "is_immutable", "created_at")
+    list_display = (
+        "document",
+        "version_no",
+        "processing_state",
+        "mime_type",
+        "size",
+        "is_immutable",
+        "created_at",
+    )
+    list_filter = ("processing_state", "is_immutable", "mime_type")
     search_fields = ("document__title", "sha256")
 
 

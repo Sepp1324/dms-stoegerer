@@ -1,12 +1,13 @@
 """Verarbeitungs-Pipeline für Dokumente.
 
 Reihenfolge (siehe KONZEPT.md §4):
-    Datei rein → Hash bilden → OCR (→ PDF/A + Text) → Metadaten → Ablage → Audit
+    UPLOADED → HASHED → OCR_RUNNING → OCR_DONE → CLASSIFICATION_RUNNING
+    → CLASSIFIED → THUMBNAIL_DONE → SEALED → READY
 
 Die schweren Schritte laufen als Celery-Task (tasks.py); hier stehen die
 reinen Funktionen, damit sie testbar und ohne Celery aufrufbar bleiben.
-Der ``ocrmypdf``-Import ist bewusst *lazy* (erst in der Funktion), damit das
-Backend auch ohne installierte OCR-Binaries lädt (z. B. für `manage.py check`).
+Die OCR selbst ist hinter ``documents.services.ocr`` gekapselt; diese Pipeline
+orchestriert Status, Persistenz, Audit und die nachgelagerten Verarbeitungsschritte.
 """
 from __future__ import annotations
 
@@ -167,32 +168,6 @@ def verify_document_integrity(document: Document) -> dict:
     return {"chain_ok": chain_ok, "versions": results}
 
 
-from documents.services.ocr.engine import run_ocr
-
-
-def process_version(version, file_path: str):
-    """
-    Stufe-2 Pipeline Entry Point
-    """
-
-    # 1. Status setzen
-    version.ocr_status = "running"
-    version.save(update_fields=["ocr_status"])
-
-    # 2. OCR ausführen
-    result = run_ocr(file_path)
-
-    # 3. Ergebnis speichern
-    version.ocr_text = result.text
-    version.page_count = result.pages
-    version.ocr_status = result.status.value
-    version.ocr_error = result.error or ""
-    version.ocr_engine = result.engine
-    version.ocr_duration_ms = result.duration_ms
-
-    version.save()
-
-
 def extract_text(pdf_path: str | Path) -> str:
     """Extrahiert den gesamten Text eines PDFs via poppler ``pdftotext``."""
     import subprocess
@@ -255,8 +230,8 @@ def _page_count(pdf_path: Path) -> int | None:
         return None
 
 
-def process_version(version: DocumentVersion) -> dict:
-    """Vollständige Verarbeitung einer Version: Hash-Kette + OCR + Ablage + Audit."""
+def hash_version(version: DocumentVersion) -> None:
+    """Hash-Kette füllen und State ``HASHED`` setzen."""
     version.sha256 = sha256_of(version.file_path)
 
     previous = (
@@ -265,47 +240,137 @@ def process_version(version: DocumentVersion) -> dict:
         .first()
     )
     version.prev_hash = previous.sha256 if previous else ""
+    version.save(update_fields=["sha256", "prev_hash"])
+    version.transition_to(
+        DocumentVersion.ProcessingState.HASHED,
+        actor=version.created_by,
+        detail={"sha256": version.sha256, "prev_hash": version.prev_hash},
+    )
 
-    archive_path = storage.build_archive_path(version.document)
-    text, pages, archive_created = run_ocr(version.file_path, archive_path)
 
-    version.archive_path = str(archive_path) if archive_created else ""
-    version.ocr_text = text
-    version.page_count = pages
+def ocr_version(version: DocumentVersion) -> dict:
+    """OCR ausführen, technische OCR-Felder speichern und State ``OCR_DONE`` setzen."""
+    from .models import OCRStatus
+
+    version.transition_to(
+        DocumentVersion.ProcessingState.OCR_RUNNING,
+        actor=version.created_by,
+    )
+    DocumentVersion.objects.filter(pk=version.pk).update(ocr_status=OCRStatus.RUNNING)
+    version.ocr_status = OCRStatus.RUNNING
+
+    result = run_ocr(version.file_path)
+    archive_candidate = Path(version.file_path).with_suffix(".ocr.pdf")
+    archive_path = str(archive_candidate) if archive_candidate.exists() else ""
+
+    version.archive_path = archive_path
+    version.ocr_text = result.text
+    version.page_count = result.pages
+    version.ocr_status = result.status.value
+    version.ocr_error = result.error or ""
+    version.ocr_engine = result.engine
+    version.ocr_duration_ms = result.duration_ms
     version.save(
         update_fields=[
-            "sha256",
-            "prev_hash",
             "archive_path",
             "ocr_text",
             "page_count",
+            "ocr_status",
+            "ocr_error",
+            "ocr_engine",
+            "ocr_duration_ms",
         ]
     )
+    version.transition_to(
+        DocumentVersion.ProcessingState.OCR_DONE,
+        actor=version.created_by,
+        detail={
+            "pages": result.pages,
+            "ocr_status": result.status.value,
+            "archive_path": archive_path,
+            "chars": len(result.text),
+        },
+    )
+    return {
+        "pages": result.pages,
+        "chars": len(result.text),
+        "ocr_status": result.status.value,
+        "archive_path": archive_path,
+    }
 
-    # Miniaturbild der ersten Seite erzeugen (setzt thumbnail_path selbst).
-    generate_thumbnail(version)
 
+def classify_version(version: DocumentVersion) -> dict:
+    """Regelbasierte Klassifizierung ausführen und State ``CLASSIFIED`` setzen."""
+    from . import classification
+
+    version.refresh_from_db(fields=["processing_state"])
+    version.transition_to(
+        DocumentVersion.ProcessingState.CLASSIFICATION_RUNNING,
+        actor=version.created_by,
+    )
+    result = classification.apply_rules(version.document)
+    version.document.refresh_from_db(fields=["classification"])
+    version.transition_to(
+        DocumentVersion.ProcessingState.CLASSIFIED,
+        actor=version.created_by,
+        detail={"classification": version.document.classification},
+    )
+    return result
+
+
+def generate_version_thumbnail(version: DocumentVersion) -> str | None:
+    """Miniaturbild erzeugen und State ``THUMBNAIL_DONE`` setzen."""
+    thumbnail_path = generate_thumbnail(version)
+    version.refresh_from_db(fields=["thumbnail_path", "processing_state"])
+    version.transition_to(
+        DocumentVersion.ProcessingState.THUMBNAIL_DONE,
+        actor=version.created_by,
+        detail={"thumbnail_path": thumbnail_path or ""},
+    )
+    return thumbnail_path
+
+
+def seal_version(version: DocumentVersion) -> None:
+    """WORM-/Retention-Siegel setzen und danach State ``READY`` erreichen."""
+    version.refresh_from_db(fields=["processing_state"])
+    version.transition_to(
+        DocumentVersion.ProcessingState.SEALED,
+        actor=version.created_by,
+    )
+    _seal_version(version)
+    version.transition_to(
+        DocumentVersion.ProcessingState.READY,
+        actor=version.created_by,
+    )
+
+
+def process_version(version: DocumentVersion) -> dict:
+    """Vollständige Verarbeitung einer Version entlang der State Machine."""
+    hash_version(version)
+    ocr_result = ocr_version(version)
+    classify_version(version)
+    generate_version_thumbnail(version)
     AuditLogEntry.objects.create(
         actor=version.created_by,
         action="ocr",
         object_type="DocumentVersion",
         object_id=str(version.id),
         detail={
-            "pages": pages,
+            "pages": ocr_result["pages"],
             "sha256": version.sha256,
-            "archive_path": version.archive_path,
-            "chars": len(text),
+            "archive_path": ocr_result["archive_path"],
+            "ocr_status": ocr_result["ocr_status"],
+            "chars": ocr_result["chars"],
         },
     )
-
-    # WORM: Version versiegeln + Archiv-Datei schreibschützen.
-    _seal_version(version)
+    seal_version(version)
 
     return {
         "version_id": version.id,
         "sha256": version.sha256,
-        "pages": pages,
-        "chars": len(text),
+        "pages": ocr_result["pages"],
+        "chars": ocr_result["chars"],
+        "processing_state": DocumentVersion.ProcessingState.READY,
         "status": "done",
     }
 

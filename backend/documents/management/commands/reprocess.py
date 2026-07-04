@@ -11,7 +11,7 @@ Regeln siehe ``reclassify``.
 """
 from django.core.management.base import BaseCommand
 
-from documents import classification, pipeline
+from documents import pipeline
 from documents.models import DocumentVersion
 
 
@@ -35,7 +35,6 @@ class Command(BaseCommand):
         for version in qs.iterator():
             try:
                 pipeline.process_version(version)
-                classification.apply_rules(version.document)
                 done += 1
                 self.stdout.write(
                     f"  #{version.document_id} „{version.document.title}“ "

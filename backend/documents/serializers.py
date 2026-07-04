@@ -117,6 +117,7 @@ class DocumentVersionSerializer(serializers.ModelSerializer):
             "version_no",
             "sha256",
             "prev_hash",
+            "processing_state",
             "mime_type",
             "size",
             "page_count",
