@@ -1217,6 +1217,179 @@ class ConsumeFolderScanTests(TestCase):
         delay.assert_called_once()
 
 
+class ConsumePerUserScanTests(TestCase):
+    """STOAA-261: Pro-User-Attribution des Consume-Ingest.
+
+    Bei ``CONSUME_PER_USER=True`` liegen Scans in pro-User-Unterordnern
+    (``CONSUME_DIR/<username>/``); Dateien werden dem passenden Django-User als
+    ``Document.owner`` zugeordnet. Deckt ab: (a) Zuordnung, (b) unbekannter
+    Ordner wird übersprungen + geloggt, (c) Reife-Check, (d) Fehlerpfad →
+    ``_failed/`` im User-Ordner, (e) Flag off → Flat-Regression (owner=None,
+    Unterordner ignoriert). ``process_document_version.delay`` wird gemockt.
+    """
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.consume = root / "consume"
+        self.originals = root / "originals"
+        self.consume.mkdir(parents=True, exist_ok=True)
+        self.originals.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(self._tmp.cleanup)
+
+        self.sebastian = get_user_model().objects.create_user(
+            username="sebastian", password="x"
+        )
+
+    def _write(self, subdir, name, *, age_seconds):
+        """Legt eine Datei in ``consume/<subdir>/`` an und setzt ihr Alter (mtime)."""
+        import os
+        import time
+
+        folder = self.consume / subdir
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / name
+        path.write_bytes(b"%PDF-1.4 dummy")
+        mtime = time.time() - age_seconds
+        os.utime(path, (mtime, mtime))
+        return path
+
+    def _run_scan(self):
+        from unittest import mock
+
+        from . import storage, tasks
+
+        with mock.patch.object(storage, "CONSUME_DIR", self.consume), mock.patch.object(
+            storage, "ORIGINALS_DIR", self.originals
+        ), mock.patch.object(tasks.process_document_version, "delay") as delay:
+            result = tasks.scan_consume_folder()
+        return result, delay
+
+    def test_datei_im_user_ordner_wird_dem_user_zugeordnet(self):
+        """(a) /scans/sebastian/reif.pdf -> Document.owner == sebastian."""
+        with self.settings(CONSUME_PER_USER=True, CONSUME_MIN_AGE=15):
+            self._write("sebastian", "reif.pdf", age_seconds=3600)
+            result, delay = self._run_scan()
+
+        self.assertEqual(result["found"], 1)
+        self.assertEqual(result["failed"], 0)
+        self.assertEqual(Document.objects.count(), 1)
+        doc = Document.objects.get()
+        self.assertEqual(doc.owner, self.sebastian)
+        # _processed/ liegt IM User-Ordner, nicht auf Consume-Ebene.
+        self.assertTrue((self.consume / "sebastian" / "_processed" / "reif.pdf").exists())
+        self.assertFalse((self.consume / "_processed" / "reif.pdf").exists())
+        delay.assert_called_once()
+
+    def test_ordnername_case_insensitive(self):
+        """Ordner ``Sebastian`` löst denselben User (username__iexact) auf."""
+        with self.settings(CONSUME_PER_USER=True, CONSUME_MIN_AGE=15):
+            self._write("Sebastian", "reif.pdf", age_seconds=3600)
+            result, _ = self._run_scan()
+
+        self.assertEqual(result["found"], 1)
+        self.assertEqual(Document.objects.get().owner, self.sebastian)
+
+    def test_unbekannter_ordner_wird_uebersprungen_und_geloggt(self):
+        """(b) Ordner ohne passenden User -> nicht aufgenommen + WARN-Log."""
+        self._write("unbekannt", "reif.pdf", age_seconds=3600)
+
+        with self.settings(CONSUME_PER_USER=True, CONSUME_MIN_AGE=15):
+            with self.assertLogs("documents.tasks", level="WARNING") as cm:
+                result, delay = self._run_scan()
+
+        self.assertEqual(result["found"], 0)
+        self.assertEqual(result["failed"], 0)
+        self.assertEqual(Document.objects.count(), 0)
+        # Datei bleibt liegen (keine stille owner=None-Aufnahme).
+        self.assertTrue((self.consume / "unbekannt" / "reif.pdf").exists())
+        self.assertFalse((self.consume / "unbekannt" / "_processed" / "reif.pdf").exists())
+        delay.assert_not_called()
+        self.assertTrue(any("unbekannt" in line for line in cm.output))
+
+    def test_zu_junge_datei_im_user_ordner_wird_uebersprungen(self):
+        """(c) Datei jünger als CONSUME_MIN_AGE -> übersprungen, nicht verschoben."""
+        with self.settings(CONSUME_PER_USER=True, CONSUME_MIN_AGE=15):
+            self._write("sebastian", "frisch.pdf", age_seconds=0)
+            result, delay = self._run_scan()
+
+        self.assertEqual(result["found"], 0)
+        self.assertEqual(result["skipped"], 1)
+        self.assertTrue((self.consume / "sebastian" / "frisch.pdf").exists())
+        delay.assert_not_called()
+        self.assertEqual(Document.objects.count(), 0)
+
+    def test_fehlerhafte_datei_landet_in_failed_im_user_ordner(self):
+        """(d) Fehlerpfad -> _failed/ im User-Ordner, Scan läuft weiter."""
+        from unittest import mock
+
+        from . import pipeline, storage, tasks
+
+        self._write("sebastian", "bad.pdf", age_seconds=3600)
+        self._write("sebastian", "good.pdf", age_seconds=3600)
+
+        real = pipeline.create_document_from_file
+
+        def flaky(path, *, title, **kwargs):
+            if title == "bad":
+                raise RuntimeError("boom")
+            return real(path, title=title, **kwargs)
+
+        with self.settings(CONSUME_PER_USER=True, CONSUME_MIN_AGE=15):
+            with mock.patch.object(
+                storage, "CONSUME_DIR", self.consume
+            ), mock.patch.object(
+                storage, "ORIGINALS_DIR", self.originals
+            ), mock.patch.object(
+                tasks.process_document_version, "delay"
+            ) as delay, mock.patch.object(
+                tasks.pipeline, "create_document_from_file", side_effect=flaky
+            ):
+                result = tasks.scan_consume_folder()
+
+        self.assertEqual(result["found"], 1)
+        self.assertEqual(result["failed"], 1)
+        # Fehlerhafte Datei nach _failed/ IM User-Ordner.
+        self.assertTrue((self.consume / "sebastian" / "_failed" / "bad.pdf").exists())
+        self.assertTrue((self.consume / "sebastian" / "_processed" / "good.pdf").exists())
+        # Gute Datei ist sebastian zugeordnet.
+        doc = Document.objects.get()
+        self.assertEqual(doc.title, "good")
+        self.assertEqual(doc.owner, self.sebastian)
+        delay.assert_called_once()
+
+    def test_flag_off_flat_regression_ignoriert_unterordner(self):
+        """(e) Flag off -> Flat-Modus: Datei direkt im Consume-Ordner, owner=None;
+        Unterordner werden ignoriert (kein Pro-User-Verhalten)."""
+        import os
+        import time
+
+        # Datei direkt im Consume-Ordner (Flat-Eingang).
+        flat = self.consume / "flat.pdf"
+        flat.write_bytes(b"%PDF-1.4 dummy")
+        mtime = time.time() - 3600
+        os.utime(flat, (mtime, mtime))
+        # Zusätzlich eine Datei in einem User-Unterordner, die im Flat-Modus
+        # ignoriert werden muss.
+        self._write("sebastian", "ignored.pdf", age_seconds=3600)
+
+        with self.settings(CONSUME_PER_USER=False, CONSUME_MIN_AGE=15):
+            result, delay = self._run_scan()
+
+        self.assertEqual(result["found"], 1)
+        self.assertEqual(Document.objects.count(), 1)
+        doc = Document.objects.get()
+        self.assertEqual(doc.title, "flat")
+        self.assertIsNone(doc.owner)
+        # Flat-Idempotenz auf Consume-Ebene; Unterordner unangetastet.
+        self.assertTrue((self.consume / "_processed" / "flat.pdf").exists())
+        self.assertTrue((self.consume / "sebastian" / "ignored.pdf").exists())
+        delay.assert_called_once()
+
+
 class DocumentShareLinkTests(APITestCase):
     """Verwaltungs-API der Freigabelinks (STOAA-190).
 
