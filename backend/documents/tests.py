@@ -3467,5 +3467,8 @@ class VersionCompareAPITests(APITestCase):
         self.assertEqual(resp.status_code, 200)
 
     def test_unauthenticated_denied(self):
+        # JWTAuthentication ist die erste DEFAULT_AUTHENTICATION_CLASS und liefert
+        # einen ``WWW-Authenticate: Bearer``-Header → DRF antwortet mit 401 statt
+        # 403 für den anonymen Fall (Konvention: siehe test_anonymous_unauthorized).
         resp = self.client.get(self._url())
-        self.assertEqual(resp.status_code, 403)
+        self.assertIn(resp.status_code, (401, 403))
