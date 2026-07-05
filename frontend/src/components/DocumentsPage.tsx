@@ -33,6 +33,7 @@ import DuePage from "./DuePage";
 import WorkflowsPage from "./WorkflowsPage";
 import CustomFieldsAdmin from "./CustomFieldsAdmin";
 import MailAccountsAdmin from "./MailAccountsAdmin";
+import CameraUpload from "./CameraUpload";
 
 // Von-/Bis-Eingaben eines CURRENCY-Zusatzfeld-Filters (STOAA-113).
 type CurrencyRange = { gte: string; lte: string };
@@ -138,7 +139,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   // Aktuell geöffnetes Dokument (Detailansicht) oder null (Liste).
   const [selectedId, setSelectedId] = useState<number | null>(null);
   // Aktive Hauptansicht (persistente linke Navigation).
-  const [view, setView] = useState<"docs" | "rules" | "workflows" | "fields" | "mail" | "faellig">("docs");
+  const [view, setView] = useState<"docs" | "rules" | "workflows" | "fields" | "mail" | "faellig" | "camera">("docs");
   // Sidebar auf schmalen Screens ein-/ausklappbar.
   const [navOpen, setNavOpen] = useState(false);
   // Desktop-Sidebar auf Icon-only einklappbar; Zustand persistent (localStorage).
@@ -404,7 +405,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     );
   }
 
-  const navigate = (v: "docs" | "rules" | "workflows" | "fields" | "mail" | "faellig") => {
+  const navigate = (v: "docs" | "rules" | "workflows" | "fields" | "mail" | "faellig" | "camera") => {
     setView(v);
     setNavOpen(false); // Overlay auf Mobil nach Auswahl schließen
   };
@@ -525,6 +526,15 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
             <MailAccountsAdmin canEdit={!!me?.can_write} />
           ) : view === "faellig" ? (
             <DuePage onOpenDocument={(docId) => setSelectedId(docId)} />
+          ) : view === "camera" ? (
+            <CameraUpload
+              onUploaded={(doc) => {
+                setPage(1);
+                setReloadKey((k) => k + 1);
+                setSelectedId(doc.id);
+                setView("docs");
+              }}
+            />
           ) : (
             <>
               {me?.can_write && (
@@ -658,8 +668,8 @@ function Sidebar({
   currencyFilters,
   onCurrencyChange,
 }: {
-  view: "docs" | "rules" | "workflows" | "fields" | "mail" | "faellig";
-  onNavigate: (v: "docs" | "rules" | "workflows" | "fields" | "mail" | "faellig") => void;
+  view: "docs" | "rules" | "workflows" | "fields" | "mail" | "faellig" | "camera";
+  onNavigate: (v: "docs" | "rules" | "workflows" | "fields" | "mail" | "faellig" | "camera") => void;
   username?: string;
   onLogout: () => void;
   isAdmin: boolean;
@@ -750,6 +760,12 @@ function Sidebar({
           onClick={() => onNavigate("faellig")}
           label="Wiedervorlage"
           icon="M12 2a6 6 0 0 0-6 6c0 3.5-1 5-2 6v1h16v-1c-1-1-2-2.5-2-6a6 6 0 0 0-6-6m0 20a2 2 0 0 0 2-2h-4a2 2 0 0 0 2 2z"
+        />
+        <NavItem
+          active={view === "camera"}
+          onClick={() => onNavigate("camera")}
+          label="Kamera"
+          icon="M12 15.2A3.2 3.2 0 0 1 8.8 12 3.2 3.2 0 0 1 12 8.8 3.2 3.2 0 0 1 15.2 12 3.2 3.2 0 0 1 12 15.2M9 2 7.17 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-3.17L15 2z"
         />
         <NavItem
           active={view === "rules"}

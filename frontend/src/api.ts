@@ -808,6 +808,24 @@ export async function getMe(): Promise<Me> {
   return res.json();
 }
 
+export async function uploadImages(images: File[], title?: string): Promise<DocumentItem> {
+  const form = new FormData();
+  for (const img of images) form.append("images", img);
+  if (title) form.append("title", title);
+  const res = await apiFetch("/documents/upload_images/", { method: "POST", body: form });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const data = await res.json();
+      detail = data.detail || detail;
+    } catch {
+      /* keine JSON-Fehlermeldung */
+    }
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
 export async function uploadDocument(file: File, title?: string): Promise<DocumentItem> {
   const form = new FormData();
   form.append("file", file);
