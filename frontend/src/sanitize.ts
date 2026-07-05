@@ -33,3 +33,15 @@ export function sanitizeDiffHtml(html: string | null | undefined): string {
     ALLOW_ARIA_ATTR: false,
   });
 }
+
+// Sanitized ein Suchergebnis-Snippet (STOAA-368/370). Das Backend liefert bereits
+// sicheres HTML (nur ``<mark>``, Rest escaped) – DOMPurify ist Defense-in-Depth vor
+// dem ``dangerouslySetInnerHTML``: erlaubt ausschließlich ``<mark>``, entfernt alles
+// andere. Leerer/fehlender Input → leerer String.
+export function sanitizeSnippet(html: string | null | undefined): string {
+  if (!html) return "";
+  return DOMPurify.sanitize(html, {
+    ALLOWED_TAGS: ["mark"],
+    ALLOWED_ATTR: [],
+  });
+}

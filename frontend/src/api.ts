@@ -154,6 +154,10 @@ export interface DocumentItem {
   // Durchgriff auf ``versions``. Altdaten ohne current_version liefern ``null``.
   processing_state: ProcessingState | null;
   ocr_status: OcrStatus | null;
+  // Suchergebnis-Snippet (STOAA-368/370): sicheres HTML mit ``<mark>`` rund um den
+  // Treffer. Nur bei aktiver Volltextsuche (``?q=``) gefüllt; sonst / kein Treffer
+  // im OCR-Text ``null``. Vor dem Rendern via ``sanitizeSnippet`` säubern.
+  snippet: string | null;
 }
 export interface AiSuggestions {
   title?: string;

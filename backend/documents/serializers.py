@@ -234,6 +234,11 @@ class DocumentSerializer(serializers.ModelSerializer):
     # wird serverseitig vergeben. ``asn_label`` liefert die kanonische Anzeigeform
     # ``ASN000123`` fürs Frontend (Detailansicht/QR-Download).
     asn_label = serializers.SerializerMethodField()
+    # Suchergebnis-Snippet (STOAA-368/370): sicheres HTML mit <mark>-Highlighting
+    # rund um den Treffer. Nur bei aktiver Volltextsuche (``?q=``) gesetzt – dann
+    # trägt das Objekt die ``snippet_raw``-Annotation aus get_queryset; sonst
+    # (Detail, keine Suche, Treffer außerhalb des OCR-Texts) ``None``.
+    snippet = serializers.SerializerMethodField()
     # Zusatzfeld-Werte: GET = nested Liste; PATCH = Upsert per (document, field)
     # in ``update()``/``create()`` (unique_together). ``required=False``, damit
     # ein PATCH ohne diesen Schlüssel die bestehenden Werte unangetastet lässt.
@@ -261,6 +266,7 @@ class DocumentSerializer(serializers.ModelSerializer):
             "processing_state",
             "asn",
             "asn_label",
+            "snippet",
             "ai_suggestions",
             "ai_suggested_at",
             "classification",
@@ -286,6 +292,17 @@ class DocumentSerializer(serializers.ModelSerializer):
         from .services.asn import format_asn
 
         return format_asn(obj.asn)
+
+    def get_snippet(self, obj) -> str | None:
+        """Sanitiziertes Snippet-HTML (nur ``<mark>``) oder ``None``.
+
+        ``snippet_raw`` trägt nur bei aktiver FTS-Suche die ts_headline-Annotation;
+        ``build_snippet`` escaped den Rohtext und ersetzt die Sentinels durch
+        ``<mark>``. Ohne Annotation/Treffer → ``None``.
+        """
+        from .services.search_snippet import build_snippet
+
+        return build_snippet(getattr(obj, "snippet_raw", None))
 
     def _upsert_custom_field_values(self, document, values):
         """Upsert der Zusatzfeld-Werte per unique_together (document, field).

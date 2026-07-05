@@ -24,6 +24,7 @@ import {
   type User,
 } from "../api";
 import { toCanonicalValue } from "../customFields";
+import { sanitizeSnippet } from "../sanitize";
 import { ProcessingBadge } from "./ProcessingStatus";
 import UploadZone from "./UploadZone";
 import DocumentDetail from "./DocumentDetail";
@@ -1082,6 +1083,15 @@ function DocumentCard({ doc, onOpen }: { doc: DocumentItem; onOpen: () => void }
           {doc.correspondent_name ?? "Unbekannt"}
           {doc.document_type_name ? ` · ${doc.document_type_name}` : ""}
         </p>
+        {/* Suchergebnis-Snippet (STOAA-368/370): nur bei aktiver Suche gefüllt.
+            Backend liefert bereits sicheres HTML (nur <mark>); sanitizeSnippet
+            ist Defense-in-Depth vor dangerouslySetInnerHTML. */}
+        {doc.snippet && (
+          <p
+            className="doc-card__snippet"
+            dangerouslySetInnerHTML={{ __html: sanitizeSnippet(doc.snippet) }}
+          />
+        )}
         {doc.tags.length > 0 && (
           <div className="doc-card__tags">
             {doc.tags.map((t) => (
