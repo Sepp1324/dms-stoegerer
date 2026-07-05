@@ -336,7 +336,9 @@ export default function DocumentDetail({
       const { source, ...rest } = updated;
       setDoc(rest as Detail);
       if (source === "unavailable") {
-        setRegenNote("KI nicht verfügbar – es wurden keine Vorschläge erzeugt.");
+        setRegenNote("KI nicht konfiguriert – ANTHROPIC_API_KEY fehlt im Cluster.");
+      } else if (source === "error") {
+        setRegenNote("KI-Fehler bei der Generierung – bitte Administrator informieren.");
       }
     } catch (e) {
       setApplyError(e instanceof Error ? e.message : String(e));
