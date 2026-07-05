@@ -90,9 +90,12 @@ h1 {
   display: flex;
   flex-direction: column;
   gap: 0.25rem;
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
+  flex-shrink: 0;
+}
+.nav-item__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .nav-item {
   display: flex;
@@ -135,6 +138,8 @@ h1 {
 }
 
 /* --- Stammdaten-Filter in der Sidebar (paperless-artig, STOAA-50) --- */
+/* Eigenständig scrollbarer Filter-Bereich, damit die Sidebar die Seite nicht in
+   die Länge zieht (STOAA-420). */
 .nav-filters {
   display: flex;
   flex-direction: column;
@@ -142,7 +147,19 @@ h1 {
   margin-top: 0.5rem;
   border-top: 1px solid var(--border);
   padding-top: 0.5rem;
+  flex: 1;
   min-height: 0;
+  overflow-y: auto;
+  /* dezenter Scrollbalken im dunklen Theme */
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+.nav-filters::-webkit-scrollbar {
+  width: 8px;
+}
+.nav-filters::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 999px;
 }
 .nav-section {
   display: flex;
@@ -204,8 +221,38 @@ h1 {
   display: flex;
   flex-direction: column;
   gap: 0.1rem;
-  max-height: 220px;
-  overflow-y: auto;
+}
+/* Kleines Suchfeld für lange Filterlisten (Korrespondenten/Tags). */
+.nav-search {
+  margin: 0.15rem 0.2rem 0.35rem;
+  padding: 0.35rem 0.55rem;
+  font-size: 0.82rem;
+  color: var(--text);
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+.nav-search:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+}
+/* „mehr/weniger anzeigen“-Umschalter unter der Top-N-Liste. */
+.nav-more {
+  align-self: flex-start;
+  background: transparent;
+  color: var(--accent);
+  font-size: 0.8rem;
+  padding: 0.2rem 0.5rem 0.4rem 1.4rem;
+}
+.nav-more:hover {
+  color: var(--accent-hover);
+  text-decoration: underline;
+  background: transparent;
+}
+.nav-section__empty {
+  color: var(--muted);
+  font-size: 0.82rem;
+  padding: 0.3rem 0.55rem 0.3rem 1.4rem;
 }
 .nav-filter {
   display: flex;
@@ -281,6 +328,41 @@ h1 {
 .nav-toggle:hover {
   color: var(--text);
   background: transparent;
+}
+/* Desktop-Umschalter „Sidebar einklappen“ (Icon-only). Auf Mobil ersetzt der
+   Off-Canvas-Drawer diese Funktion, daher dort ausgeblendet (Media-Query). */
+.sidebar__collapse {
+  display: inline-flex;
+}
+
+/* --- Icon-only eingeklappte Sidebar (STOAA-420, Desktop) --- */
+@media (min-width: 861px) {
+  .sidebar--collapsed {
+    width: 68px;
+    padding-left: 0.5rem;
+    padding-right: 0.5rem;
+  }
+  .sidebar--collapsed .sidebar__logo,
+  .sidebar--collapsed .nav-item__label,
+  .sidebar--collapsed .sidebar__user {
+    display: none;
+  }
+  .sidebar--collapsed .sidebar__brand {
+    justify-content: center;
+    padding: 0;
+  }
+  .sidebar--collapsed .nav-item {
+    justify-content: center;
+    padding-left: 0.5rem;
+    padding-right: 0.5rem;
+    gap: 0;
+  }
+  .sidebar--collapsed .nav-filters {
+    display: none;
+  }
+  .sidebar--collapsed .sidebar__footer {
+    justify-content: center;
+  }
 }
 .content-body {
   width: 100%;
@@ -371,6 +453,10 @@ h1 {
   }
   .nav-toggle {
     display: inline-flex;
+  }
+  /* Einklappen ist ein Desktop-Konzept; im Drawer nicht anbieten. */
+  .sidebar__collapse {
+    display: none;
   }
   .nav-backdrop {
     display: block;
