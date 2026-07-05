@@ -82,6 +82,25 @@ jobs:
           kubectl -n dms rollout status deploy/beat     --timeout=180s
           kubectl -n dms rollout status deploy/frontend --timeout=180s
 
+      - name: Rollout-Diagnose (bei Timeout/Fehler)
+        if: failure()
+        run: |
+          echo "=== Pod-Übersicht ==="
+          kubectl -n dms get pods -o wide
+          echo ""
+          echo "=== Nicht-ready Pods (describe) ==="
+          kubectl -n dms get pods --field-selector=status.phase!=Running -o name | while read pod; do
+            echo "--- $pod ---"
+            kubectl -n dms describe "$pod"
+            echo ""
+          done
+          echo "=== Letzte Logs (nicht-ready Pods) ==="
+          kubectl -n dms get pods --field-selector=status.phase!=Running -o name | while read pod; do
+            echo "--- $pod ---"
+            kubectl -n dms logs "$pod" --tail=50 --all-containers=true || echo "(keine Logs verfügbar)"
+            echo ""
+          done
+
       - name: Zusammenfassung
         if: always()
         run: |
