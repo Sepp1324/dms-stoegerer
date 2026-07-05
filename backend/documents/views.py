@@ -1,3 +1,4 @@
+import io
 import os
 import re
 import secrets
@@ -6,13 +7,16 @@ from datetime import datetime, time, timedelta
 from datetime import timezone as dt_timezone
 from decimal import Decimal, InvalidOperation
 
+import img2pdf
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import connection
 from django.db.models import Case, DecimalField, Q, Value, When
 from django.db.models.functions import Cast
 from django.http import FileResponse, Http404, HttpResponse
 from django.utils import timezone
+from django.utils.text import slugify
 from rest_framework import status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.filters import OrderingFilter
@@ -245,6 +249,138 @@ class DocumentUploadView(APIView):
 
         document, version = pipeline.create_document_from_file(
             file_path, title=title, owner=request.user, mime=mime, size=size
+        )
+        # OCR/Hash-Kette asynchron im Celery-Worker.
+        process_document_version.delay(version.id)
+
+        return Response(
+            DocumentSerializer(document).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class _InvalidImage(Exception):
+    """Interne Markierung: hochgeladene Datei ist kein verarbeitbares Bild."""
+
+
+def _pillow_to_jpeg(raw: bytes) -> bytes:
+    """Öffnet Bytes mit Pillow, flacht nach RGB ab und liefert JPEG Q90.
+
+    Deckt HEIC/HEIF (nach ``register_heif_opener``), PNG mit Alpha und
+    CMYK-JPEG ab – Formate, die ``img2pdf`` sonst ablehnt. Kann Pillow das
+    Bild nicht öffnen, wird ``_InvalidImage`` geworfen (→ 400 im View).
+    """
+    from PIL import Image, UnidentifiedImageError
+
+    try:
+        with Image.open(io.BytesIO(raw)) as im:
+            rgb = im.convert("RGB")
+            out = io.BytesIO()
+            rgb.save(out, format="JPEG", quality=90)
+            return out.getvalue()
+    except (UnidentifiedImageError, OSError, ValueError) as exc:
+        raise _InvalidImage(str(exc))
+
+
+def _normalize_image_to_pdf_source(uploaded) -> bytes:
+    """Liefert Bytes, die ``img2pdf`` sicher zu einer PDF-Seite macht.
+
+    * HEIC/HEIF: ``pillow_heif`` **lazy** registrieren, dann via Pillow nach
+      RGB-JPEG Q90 konvertieren.
+    * JPEG/TIFF u. a.: zuerst direkt an ``img2pdf`` durchreichen (verlustfrei);
+      lehnt ``img2pdf`` ab (z. B. PNG mit Alpha, CMYK-JPEG), defensiv über
+      Pillow nach RGB-JPEG flatten.
+    * Kein gültiges Bild → ``_InvalidImage`` (→ 400).
+    """
+    raw = uploaded.read()
+    name = (getattr(uploaded, "name", "") or "").lower()
+    content_type = (getattr(uploaded, "content_type", "") or "").lower()
+
+    if name.endswith((".heic", ".heif")) or "heif" in content_type or "heic" in content_type:
+        try:
+            import pillow_heif
+
+            pillow_heif.register_heif_opener()
+        except Exception as exc:  # pragma: no cover - Dependency fehlt im Image
+            raise _InvalidImage(f"HEIC-Unterstützung nicht verfügbar: {exc}")
+        return _pillow_to_jpeg(raw)
+
+    try:
+        # Validiert Format und akzeptiert JPEG/TIFF verlustfrei.
+        img2pdf.convert([raw])
+        return raw
+    except Exception:
+        # PNG mit Alpha, CMYK-JPEG etc. → über Pillow flatten (oder _InvalidImage).
+        return _pillow_to_jpeg(raw)
+
+
+class MobileCaptureUploadView(APIView):
+    """Mobile-Erfassung: mehrere Bilder (auch HEIC) → ein PDF → Pipeline.
+
+    Multipart-Feld ``images`` (mehrfach, in Reihenfolge = Seitenreihenfolge),
+    optional ``title``. ``owner`` = eingeloggter Nutzer, ``ingest_source`` =
+    ``"mobile"``. OCR/Hash-Kette laufen anschließend asynchron im Worker.
+    """
+
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    MAX_IMAGES = 30
+    MAX_BYTES_PER_IMAGE = 25 * 1024 * 1024  # ~25 MB
+
+    def post(self, request):
+        if not request.user.can_write:
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        images = request.FILES.getlist("images")
+        if not images:
+            return Response(
+                {"detail": "Feld 'images' fehlt."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(images) > self.MAX_IMAGES:
+            return Response(
+                {"detail": f"Zu viele Bilder – maximal {self.MAX_IMAGES} erlaubt."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        page_sources: list[bytes] = []
+        for uploaded in images:
+            if uploaded.size and uploaded.size > self.MAX_BYTES_PER_IMAGE:
+                return Response(
+                    {"detail": f"Datei {uploaded.name} ist zu groß (max. 25 MB je Bild)."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            try:
+                page_sources.append(_normalize_image_to_pdf_source(uploaded))
+            except _InvalidImage:
+                return Response(
+                    {"detail": f"Datei {uploaded.name} ist kein gültiges Bild."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        # Reihenfolge der Seiten = Reihenfolge im Request.
+        pdf_bytes = img2pdf.convert(page_sources)
+
+        title = request.data.get("title") or (
+            f"Mobile-Erfassung {timezone.localdate().strftime('%d.%m.%Y')}"
+        )
+        safe_title = slugify(title) or "mobile-erfassung"
+        pdf_file = SimpleUploadedFile(
+            f"{safe_title}.pdf", pdf_bytes, content_type="application/pdf"
+        )
+        file_path, size, _mime = storage.save_upload(pdf_file)
+
+        document, version = pipeline.create_document_from_file(
+            file_path,
+            title=title,
+            owner=request.user,
+            mime="application/pdf",
+            size=size,
+            ingest_source="mobile",
         )
         # OCR/Hash-Kette asynchron im Celery-Worker.
         process_document_version.delay(version.id)
