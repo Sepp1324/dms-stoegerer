@@ -1,6 +1,7 @@
 """Celery-Tasks der Verarbeitungs-Pipeline (asynchron, außerhalb des Requests)."""
 import hashlib
 import logging
+import os
 import shutil
 import time
 from pathlib import Path
@@ -243,6 +244,17 @@ def _ingest_consume_dir(
     failed_dir = base / "_failed"
     processed_dir.mkdir(parents=True, exist_ok=True)
 
+    # Preflight-Diagnose (STOAA-433): Am Live-NFS (Synology) trat wiederholt der
+    # Fall auf, dass Dateien aufgenommen wurden (Dokument entsteht), aber NICHT
+    # in ``_processed/``/``_failed/`` landeten. Bei ``root_squash``/``all_squash``
+    # ohne Schreibrecht des Worker-uid schlägt der Kopier-Teil von
+    # ``shutil.move`` (EXDEV-Fallback) still fehl → Datei bleibt im Eingang,
+    # während das Dokument schon erzeugt ist. Damit die Ursache nicht länger
+    # erraten werden muss, wird pro Scan EINMAL geprüft, ob der laufende Prozess
+    # in beiden Zielordnern anlegen+löschen darf; andernfalls loud WARN mit
+    # errno und effektiver uid/gid als eindeutiger Log-Beleg.
+    _probe_move_targets(processed_dir, failed_dir)
+
     ingested = []
     skipped = 0
     failed = 0
@@ -479,6 +491,40 @@ def _unique(path: Path) -> Path:
         candidate = path.with_name(f"{path.stem}-{counter}{path.suffix}")
         counter += 1
     return candidate
+
+
+def _probe_move_targets(*dirs: Path) -> None:
+    """Prüft einmal pro Scan, ob in den Move-Zielen angelegt+gelöscht werden kann.
+
+    Am NFS/NAS-Consume-Ordner kann der Worker-uid durch ``root_squash``/
+    ``all_squash`` das Schreibrecht in ``_processed/``/``_failed/`` fehlen –
+    dann bleiben verarbeitete Dateien still im Eingang liegen (STOAA-433).
+    Diese Probe erzeugt in dem Fall eine eindeutige WARN-Zeile mit ``errno`` und
+    effektiver uid/gid, statt den Fehler erst pro Datei (und ggf. doppelt beim
+    ``_failed/``-Fallback) sichtbar zu machen. Rein diagnostisch – ändert das
+    Verhalten des Scans nicht.
+    """
+    for dest_dir in dirs:
+        probe = dest_dir / ".stoaa433_write_probe"
+        try:
+            probe.write_bytes(b"")
+            probe.unlink()
+        except OSError as exc:
+            uid = getattr(os, "geteuid", lambda: "n/a")()
+            gid = getattr(os, "getegid", lambda: "n/a")()
+            logger.warning(
+                "scan_consume_folder: Move-Ziel %s NICHT beschreibbar "
+                "(errno=%s %s; euid=%s egid=%s). Verarbeitete Dateien können "
+                "nicht nach _processed/_failed verschoben werden und bleiben im "
+                "Eingang liegen. Vermutlich NFS-Export mit root_squash/all_squash "
+                "ohne Schreibrecht des Worker-uid. Export-Mapping (anonuid/anongid) "
+                "prüfen (STOAA-433).",
+                dest_dir,
+                getattr(exc, "errno", "?"),
+                exc.strerror or exc,
+                uid,
+                gid,
+            )
 
 
 def _move_into(src: Path, dest_dir: Path) -> Path:

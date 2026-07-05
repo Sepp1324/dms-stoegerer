@@ -1345,6 +1345,33 @@ class ConsumeFolderScanTests(TestCase):
         self.assertTrue((self.consume / "_processed" / "dup.pdf").exists())
         delay.assert_not_called()
 
+    def test_preflight_probe_warnt_bei_nicht_beschreibbarem_move_ziel(self):
+        """(g) STOAA-433: Kann der Worker-uid nicht in ``_processed/`` schreiben
+        (NFS ``root_squash``/``all_squash``), erzeugt die Preflight-Probe eine
+        eindeutige WARN-Zeile mit ``errno`` – statt dass Dateien still im
+        Eingang liegen bleiben. Rein diagnostisch: der Scan läuft danach weiter.
+        """
+        import errno
+        from pathlib import Path
+        from unittest import mock
+
+        from . import tasks
+
+        real_write_bytes = Path.write_bytes
+
+        def write_denied(self, data, *a, **k):
+            if self.name == ".stoaa433_write_probe":
+                raise OSError(errno.EACCES, "Permission denied")
+            return real_write_bytes(self, data, *a, **k)
+
+        with mock.patch.object(Path, "write_bytes", write_denied):
+            with self.assertLogs("documents.tasks", level="WARNING") as logs:
+                tasks._probe_move_targets(self.consume / "_processed")
+
+        joined = "\n".join(logs.output)
+        self.assertIn("NICHT beschreibbar", joined)
+        self.assertIn("STOAA-433", joined)
+
 
 class ConsumePerUserScanTests(TestCase):
     """STOAA-261: Pro-User-Attribution des Consume-Ingest.
