@@ -927,6 +927,74 @@ export async function deleteWorkflow(id: number): Promise<void> {
   if (!res.ok && res.status !== 204) throw new Error(`Löschen fehlgeschlagen: HTTP ${res.status}`);
 }
 
+// --- Wiedervorlage/Erinnerungen (STOAA-372/374) ---
+// Owner-gescopet über /api/reminders/ (nur Erinnerungen zu eigenen Dokumenten,
+// DMS-Admin sieht alle). ``remind_on`` ist ein reines Datum ("YYYY-MM-DD"),
+// ``created_by``/``notified_at`` sind read-only (Server bzw. Beat).
+export interface Reminder {
+  id: number;
+  document: number;
+  remind_on: string; // Datum "YYYY-MM-DD"
+  note: string;
+  done: boolean;
+  created_by: number | null;
+  notified_at: string | null; // ISO oder null
+  created_at: string;
+  updated_at: string;
+}
+
+// Struktur von GET /api/reminders/due/?days=N (nicht paginiert, siehe STOAA-373).
+export interface DueReminders {
+  faellig: Reminder[]; // remind_on <= heute (überfällig/heute)
+  anstehend: Reminder[]; // heute < remind_on <= heute+N
+}
+
+// Nutzlast beim Anlegen/Ändern. ``document`` nur beim Anlegen relevant.
+export interface ReminderInput {
+  document?: number;
+  remind_on?: string;
+  note?: string;
+  done?: boolean;
+}
+
+// Erinnerungen laden – optional auf ein Dokument gefiltert (client-seitig, da
+// das Backend die Liste nicht nach ``document`` filtert). Folgt der Paginierung.
+export async function listReminders(documentId?: number): Promise<Reminder[]> {
+  const all = await listAllPages<Reminder>("/reminders/");
+  return documentId === undefined
+    ? all
+    : all.filter((r) => r.document === documentId);
+}
+export function createReminder(input: ReminderInput): Promise<Reminder> {
+  return postJson<Reminder>("/reminders/", input);
+}
+export async function updateReminder(
+  id: number,
+  input: ReminderInput,
+): Promise<Reminder> {
+  const res = await apiFetch(`/reminders/${id}/`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) throw new Error(`Speichern fehlgeschlagen: HTTP ${res.status}`);
+  return res.json();
+}
+export async function deleteReminder(id: number): Promise<void> {
+  const res = await apiFetch(`/reminders/${id}/`, { method: "DELETE" });
+  if (!res.ok && res.status !== 204)
+    throw new Error(`Löschen fehlgeschlagen: HTTP ${res.status}`);
+}
+export function markReminderDone(id: number): Promise<Reminder> {
+  return postJson<Reminder>(`/reminders/${id}/done/`, {});
+}
+export async function getDueReminders(days?: number): Promise<DueReminders> {
+  const suffix = days === undefined ? "" : `?days=${days}`;
+  const res = await apiFetch(`/reminders/due/${suffix}`);
+  if (!res.ok) throw new Error(`Laden fehlgeschlagen: HTTP ${res.status}`);
+  return res.json();
+}
+
 // --- Mailkonten (STOAA-214/215) ---
 // CRUD + Verbindungstest unter /api/mail-accounts/. Nur für DMS-Admins
 // (Backend-Permission ``IsDmsAdmin``); Nicht-Admins erhalten 403 (im FE wird der
@@ -1158,4 +1226,28 @@ async function listAll<T>(path: string): Promise<T[]> {
   if (!res.ok) throw new Error(`Laden fehlgeschlagen: HTTP ${res.status}`);
   const data = await res.json();
   return Array.isArray(data) ? data : data.results;
+}
+
+// Wie listAll, folgt aber der Paginierung über alle Seiten (``next``). Nötig,
+// wo client-seitig gefiltert wird (z. B. Erinnerungen je Dokument), damit nicht
+// nur die erste Seite (PAGE_SIZE) berücksichtigt wird.
+async function listAllPages<T>(path: string): Promise<T[]> {
+  const out: T[] = [];
+  let next: string | null = path;
+  while (next) {
+    const res = await apiFetch(next);
+    if (!res.ok) throw new Error(`Laden fehlgeschlagen: HTTP ${res.status}`);
+    const data = await res.json();
+    if (Array.isArray(data)) return data; // unpaginiert
+    out.push(...(data.results as T[]));
+    // ``next`` ist eine absolute URL – in einen /api-relativen Pfad umwandeln,
+    // da apiFetch selbst API_BASE ("/api") voranstellt.
+    if (data.next) {
+      const u = new URL(data.next);
+      next = u.pathname.replace(/^\/api/, "") + u.search;
+    } else {
+      next = null;
+    }
+  }
+  return out;
 }
