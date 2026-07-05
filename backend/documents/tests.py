@@ -3928,3 +3928,127 @@ class ImportPaperlessCommandTests(TestCase):
         with self.assertRaises(CommandError):
             call_command("import_paperless", source=str(self.source), owner="gibtsnicht")
         self.assertEqual(Document.objects.count(), 0)
+
+
+class SearchSnippetTests(APITestCase):
+    """Suchergebnis-Snippets mit Highlighting via ts_headline (STOAA-368/370).
+
+    Deckt die Akzeptanzkriterien ab: Snippet enthält den Suchbegriff in ``<mark>``;
+    ohne ``?q=`` kein Snippet; bösartiges ocr_text wird escaped (kein XSS);
+    Snippet nur bei Treffer im OCR-Text (sonst ``None``). Benötigt PostgreSQL
+    (ts_headline, config ``german``) – läuft in CI.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.owner = User.objects.create_user(
+            username="snip-owner", password="pw", role="user"
+        )
+
+    @staticmethod
+    def _doc(owner, title="", ocr_text=""):
+        doc = Document.objects.create(owner=owner, title=title)
+        version = DocumentVersion.objects.create(
+            document=doc,
+            version_no=1,
+            file_path=f"/data/originals/{doc.id}.pdf",
+            sha256=f"{doc.id:064d}",
+            ocr_text=ocr_text,
+        )
+        doc.current_version = version
+        doc.save(update_fields=["current_version"])
+        return doc
+
+    def _result(self, resp, doc_id):
+        for r in resp.data["results"]:
+            if r["id"] == doc_id:
+                return r
+        self.fail(f"Dokument {doc_id} nicht in Ergebnissen")
+
+    def test_snippet_markiert_treffer(self):
+        """Snippet enthält den Suchbegriff in ``<mark>``."""
+        doc = self._doc(
+            self.owner,
+            title="Belegscan",
+            ocr_text=(
+                "Sehr geehrte Frau Muster, anbei die Rechnung fuer den "
+                "Stromverbrauch des Kalenderjahres. Betrag faellig bis Monatsende."
+            ),
+        )
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get("/api/documents/?q=Rechnung")
+        self.assertEqual(resp.status_code, 200)
+        snippet = self._result(resp, doc.id)["snippet"]
+        self.assertIsNotNone(snippet)
+        self.assertIn("<mark>", snippet)
+        self.assertIn("</mark>", snippet)
+        # Der markierte Begriff ist der Suchbegriff (Stamm ``Rechnung``).
+        self.assertRegex(snippet, r"<mark>Rechnung</mark>")
+
+    def test_ohne_query_kein_snippet(self):
+        """Ohne ``?q=`` gibt es kein Snippet (``None``)."""
+        doc = self._doc(self.owner, title="Vertrag", ocr_text="Irgendein Fliesstext.")
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get("/api/documents/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIsNone(self._result(resp, doc.id)["snippet"])
+
+    def test_boesartiges_ocr_wird_escaped(self):
+        """HTML aus bösartigem ocr_text ergibt kein aktives Markup – nur ``<mark>``.
+
+        Zwei Verteidigungslinien greifen: (1) der PostgreSQL-Textparser von
+        ``ts_headline`` verwirft ``<script>``-artiges Markup bereits; (2) unser
+        Sanitizer ``escape``t den kompletten Rohtext, bevor er die Sentinels
+        durch ``<mark>`` ersetzt. Getestet wird die Wirkung, nicht der Weg:
+        ein einzelnes ``&`` (vom Parser als Literal erhalten) muss als ``&amp;``
+        auftauchen (Beweis, dass ``escape`` lief), und nach dem Entfernen der
+        ``<mark>``-Tags darf KEIN rohes ``<`` mehr im Snippet stehen.
+        """
+        # Payload + ein Literal-``&`` direkt neben dem Suchbegriff, damit beide
+        # sicher im gewählten ts_headline-Fragment liegen.
+        doc = self._doc(
+            self.owner,
+            title="Angriff",
+            ocr_text=(
+                "Die Rechnung & der offene Betrag <script>alert('xss')</script> "
+                "sind laut Schreiben bis Monatsende faellig und beigefuegt."
+            ),
+        )
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get("/api/documents/?q=Rechnung")
+        snippet = self._result(resp, doc.id)["snippet"]
+        self.assertIsNotNone(snippet)
+        # Der Treffer ist markiert.
+        self.assertIn("<mark>", snippet)
+        # ``escape`` lief: das Literal-``&`` ist als ``&amp;`` kodiert.
+        self.assertIn("&amp;", snippet)
+        # Kein rohes Skript-Tag.
+        self.assertNotIn("<script", snippet)
+        # Kern-Invariante: einziges erlaubtes Tag ist <mark>/</mark>. Nach dem
+        # Entfernen dieser Tags bleibt KEIN weiteres rohes '<' übrig – damit ist
+        # jeglicher HTML-Injektionsvektor über ocr_text ausgeschlossen.
+        rest = snippet.replace("<mark>", "").replace("</mark>", "")
+        self.assertNotIn("<", rest)
+
+    def test_treffer_nur_im_titel_kein_snippet(self):
+        """Treffer außerhalb des OCR-Texts (nur Titel) → kein Snippet."""
+        doc = self._doc(
+            self.owner,
+            title="Quartalsbericht",
+            ocr_text="Voellig anderer Inhalt ohne den gesuchten Begriff.",
+        )
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get("/api/documents/?q=Quartalsbericht")
+        self.assertIsNone(self._result(resp, doc.id)["snippet"])
+
+    def test_build_snippet_reine_funktion(self):
+        """Sanitizer isoliert: Sentinels → <mark>, Rest escaped, kein Treffer → None."""
+        from .services.search_snippet import _MARK_END, _MARK_START, build_snippet
+
+        self.assertIsNone(build_snippet(None))
+        self.assertIsNone(build_snippet(""))
+        # Rohtext ohne Sentinel → None (kein Treffer im OCR-Text).
+        self.assertIsNone(build_snippet("nur text ohne marker"))
+        raw = f"a <b> {_MARK_START}Treffer{_MARK_END} & <script>"
+        out = build_snippet(raw)
+        self.assertEqual(out, "a &lt;b&gt; <mark>Treffer</mark> &amp; &lt;script&gt;")

@@ -416,6 +416,14 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 .filter(rank__gt=0)
                 .order_by("-rank", "-added_at")
             )
+            # Ergebnis-Snippet (STOAA-368/370): ts_headline über den OCR-Text der
+            # aktuellen Version, gleiche Config/Query-Form wie oben. Als
+            # Query-Annotation wird es nur für die tatsächlich gelesenen Zeilen
+            # der Ergebnisseite (Pagination) berechnet. Der Serializer sanitized
+            # den Rohtext (Sentinels → <mark>, Rest escaped) zu ``snippet``.
+            from .services.search_snippet import headline_annotation
+
+            qs = qs.annotate(snippet_raw=headline_annotation(q))
 
         if params.get("correspondent"):
             qs = qs.filter(correspondent_id=params["correspondent"])
