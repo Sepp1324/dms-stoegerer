@@ -47,6 +47,51 @@ const PAGE_SIZE = 25;
 // via `storage_path_id`). Der Abschnitt ist damit voll funktionsfähig aktiviert.
 const STORAGE_PATH_FILTER_ENABLED = true;
 
+// Kompaktes „…"-Overflow-Menü für selten genutzte Aktionen der Topbar
+// (STOAA-417). Reines UI-Element (kein neues Verhalten): Klick öffnet ein
+// Panel, ein transparenter Backdrop schließt es wieder (Klick außerhalb).
+function OverflowMenu({
+  label = "Weitere Aktionen",
+  children,
+}: {
+  label?: string;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="overflow-menu">
+      <button
+        type="button"
+        className="overflow-menu__trigger"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={label}
+        title={label}
+        onClick={() => setOpen((o) => !o)}
+      >
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+          <path
+            fill="currentColor"
+            d="M6 10a2 2 0 1 0 0 4 2 2 0 0 0 0-4m6 0a2 2 0 1 0 0 4 2 2 0 0 0 0-4m6 0a2 2 0 1 0 0 4 2 2 0 0 0 0-4"
+          />
+        </svg>
+      </button>
+      {open && (
+        <>
+          <div
+            className="overflow-menu__backdrop"
+            aria-hidden="true"
+            onClick={() => setOpen(false)}
+          />
+          <div className="overflow-menu__panel" role="menu">
+            {children}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   const [q, setQ] = useState("");
   const [correspondent, setCorrespondent] = useState<number | "">("");
@@ -421,12 +466,48 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
                       : "Dokumente"}
           </h1>
           {view === "docs" && (
-            <input
-              className="search topbar-search"
-              placeholder="Volltextsuche (Titel & Inhalt) …"
-              value={q}
-              onChange={(e) => onSearchChange(e.target.value)}
-            />
+            <>
+              <input
+                className="search topbar-search"
+                placeholder="Volltextsuche (Titel & Inhalt) …"
+                value={q}
+                onChange={(e) => onSearchChange(e.target.value)}
+              />
+              {/* Selten genutzte Aktionen (Sortierung, Zurücksetzen, Triage)
+                  gebündelt im „…"-Menü, damit die Suche prominent bleibt. */}
+              <OverflowMenu>
+                <label className="overflow-menu__field">
+                  <span>Sortierung</span>
+                  <select
+                    value={ordering}
+                    onChange={(e) => onOrderingChange(e.target.value)}
+                  >
+                    <option value="">Standard</option>
+                    <option value="-added_at">Datum (neu → alt)</option>
+                    <option value="added_at">Datum (alt → neu)</option>
+                    <option value="title">Titel (A–Z)</option>
+                    <option value="-title">Titel (Z–A)</option>
+                  </select>
+                </label>
+                {/* Triage-Umschalter nur für Admins: zeigt owner-lose Dokumente
+                    (STOAA-296). Für Normalnutzer nicht sichtbar/aktivierbar. */}
+                {me?.is_dms_admin && (
+                  <button
+                    type="button"
+                    className={`triage-toggle${triage ? " triage-toggle--active" : ""}`}
+                    onClick={onToggleTriage}
+                    aria-pressed={triage}
+                  >
+                    {triage ? "Alle Dokumente" : "Nicht zugeordnet (Triage)"}
+                  </button>
+                )}
+                {hasFilters && (
+                  <button className="link" onClick={resetFilters}>
+                    Filter zurücksetzen
+                  </button>
+                )}
+              </OverflowMenu>
+            </>
           )}
         </header>
 
@@ -456,40 +537,9 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
                 />
               )}
 
-              {/* Stammdaten-Filter leben jetzt in der Sidebar (STOAA-50); die
-                  Topleiste beschränkt sich auf Sortierung + Zurücksetzen. */}
-              <section className="filters card">
-                <div className="filter-row">
-                  {/* Triage-Umschalter nur für Admins: zeigt owner-lose Dokumente
-                      (STOAA-296). Für Normalnutzer nicht sichtbar/aktivierbar. */}
-                  {me?.is_dms_admin && (
-                    <button
-                      type="button"
-                      className={`triage-toggle${triage ? " triage-toggle--active" : ""}`}
-                      onClick={onToggleTriage}
-                      aria-pressed={triage}
-                    >
-                      {triage ? "Alle Dokumente" : "Nicht zugeordnet (Triage)"}
-                    </button>
-                  )}
-                  <label className="filter">
-                    <span>Sortierung</span>
-                    <select value={ordering} onChange={(e) => onOrderingChange(e.target.value)}>
-                      <option value="">Standard</option>
-                      <option value="-added_at">Datum (neu → alt)</option>
-                      <option value="added_at">Datum (alt → neu)</option>
-                      <option value="title">Titel (A–Z)</option>
-                      <option value="-title">Titel (Z–A)</option>
-                    </select>
-                  </label>
-                  {hasFilters && (
-                    <button className="link" onClick={resetFilters}>
-                      Zurücksetzen
-                    </button>
-                  )}
-                </div>
-              </section>
-
+              {/* Stammdaten-Filter leben in der Sidebar (STOAA-50); Sortierung/
+                  Zurücksetzen/Triage sind ins „…"-Topbar-Menü gewandert
+                  (STOAA-417) – die Suche bleibt so prominent. */}
               <section>
                 {loading ? (
                   <SkeletonGrid />
