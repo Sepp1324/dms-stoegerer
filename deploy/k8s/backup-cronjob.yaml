@@ -1,50 +1,32 @@
-# Tägliches Offsite-Backup von Datenbank UND Dateiablage (/data).
+# Backup-CronJob: täglich Postgres-Dump + /data tar → offsite NAS via SSH/rsync.
 #
-# Ablauf (ein Pod, zwei Schritte):
-#   1. initContainer "dump" (postgres:16-alpine):
-#        - pg_dump der DMS-DB über den postgres-Service (Creds aus dms-secrets)
-#        - tar czf der revisionssicheren Ablage (/data: originals, archive,
-#          thumbnails) – consume/ ist transienter Eingang und wird NICHT gesichert
-#        - Integritätsprüfung (gzip -t) + SHA256SUMS; alles in ein Staging-emptyDir
-#   2. Container "upload" (rclone): lädt das Staging-Verzeichnis offsite und
-#        wendet die Aufbewahrung an (letzte N Backups behalten).
+# Architektur-Entscheidung (CTO): Offsite = bestehendes NAS (SSH/rsync), KEIN Cloud.
+# Begründung: NAS bereits vorhanden (STOAA-167/197), Cloud würde laufende Kosten +
+# Datenschutz-/CEO-Freigabe erfordern. "Offsite" = anderes Gerät als k3s-Node.
 #
-# Offsite-Ziel: konfigurierbar über rclone. Das rclone-Remote (Zugangsdaten)
-# liegt ausschließlich im gitignored Secret "dms-backup-secret" (rclone.conf) –
-# siehe backup-secret.example.yaml. So sind SFTP aufs NAS (kostenlos, Default-
-# Empfehlung), S3/MinIO oder ein Cloud-Ziel ohne Manifest-Änderung wählbar.
-#
-# Robustheit: RWO-PVC dms-data wird read-only auf demselben Node wie das Backend
-# gemountet (podAffinity analog worker). Jeder Fehlerschritt bricht den Job
-# sichtbar ab (set -eu, gzip -t, rclone check) → kein halbes Artefakt gilt als
-# gültig; der Job-Status wird "Failed". Der postgres-Client wird über den Service
-# angesprochen, daher ist keine Node-Bindung an die DB nötig.
+# Zugangsdaten (SSH-Key/Host/Pfad) aus Secret dms-backup-secrets (siehe secret.example.yaml).
+# NICHTS davon ins Repo committen.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: dms-backup
+  name: backup
   namespace: dms
 spec:
-  # Täglich 02:30 (ruhige Zeit). timeZone: Kubernetes >= 1.27 / k3s aktuell.
-  schedule: "30 2 * * *"
-  timeZone: "Europe/Vienna"
-  # Kein Parallellauf; verpasste Läufe (Node down) nicht nachholen-stapeln.
+  # Täglich um 02:00 Uhr (Server-Lokalzeit).
+  schedule: "0 2 * * *"
   concurrencyPolicy: Forbid
-  startingDeadlineSeconds: 3600
   successfulJobsHistoryLimit: 3
-  failedJobsHistoryLimit: 5
+  failedJobsHistoryLimit: 3
   jobTemplate:
     spec:
-      backoffLimit: 2
-      activeDeadlineSeconds: 3600
       template:
         metadata:
           labels:
-            app: dms-backup
+            app: backup
         spec:
-          restartPolicy: Never
-          # Auf denselben Node wie das Backend – die RWO-PVC dms-data lässt sich
-          # sonst nicht mitmounten (analog worker in celery.yaml).
+          # Worker + Backend teilen die RWO-PVC dms-data → Backup-Job muss auf denselben Node.
+          # (Ohne RWX-Storage kann das PVC nicht von mehreren Nodes aus gemountet werden.)
+          # Wir nutzen dieselbe Affinität wie der Worker: Co-Location mit Backend.
           affinity:
             podAffinity:
               requiredDuringSchedulingIgnoredDuringExecution:
@@ -52,119 +34,94 @@ spec:
                     matchLabels:
                       app: backend
                   topologyKey: kubernetes.io/hostname
-          initContainers:
-            - name: dump
-              image: postgres:16-alpine
+          restartPolicy: OnFailure
+          containers:
+            - name: backup
+              # Nutzen das DMS-Backend-Image, das bereits pg_dump, tar, rsync, ssh enthält
+              # (postgres:16-alpine wäre schmaler, aber hätte kein rsync/ssh).
+              # Alternatives Basis-Image: alpine mit pg_dump + openssh-client + rsync nachinstalliert.
+              image: registry.stoegerer-home.at/dms-backend:0.5.0
               imagePullPolicy: IfNotPresent
-              # POSTGRES_DB/USER/HOST/PORT kommen aus der ConfigMap.
+              command: ["/bin/sh"]
+              args:
+                - -c
+                - |
+                  set -e
+
+                  # Zeitstempel für Backup-Artefakte
+                  TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+                  BACKUP_DIR="/backup"
+                  DB_BACKUP="${BACKUP_DIR}/db-${TIMESTAMP}.sql.gz"
+                  DATA_BACKUP="${BACKUP_DIR}/data-${TIMESTAMP}.tar.gz"
+
+                  mkdir -p "${BACKUP_DIR}"
+
+                  echo "=== DMS Backup Start: ${TIMESTAMP} ==="
+
+                  # 1. Postgres-Dump (komprimiert)
+                  echo "--- pg_dump: postgres/${POSTGRES_DB} → ${DB_BACKUP}"
+                  PGPASSWORD="${POSTGRES_PASSWORD}" pg_dump \
+                    -h "${POSTGRES_HOST}" \
+                    -U "${POSTGRES_USER}" \
+                    -d "${POSTGRES_DB}" \
+                    | gzip > "${DB_BACKUP}"
+
+                  # 2. /data (archive/ + thumbnails/) als tar.gz
+                  # PVC ist read-only gemountet → sicher gegen versehentliche Änderungen
+                  echo "--- tar: /data → ${DATA_BACKUP}"
+                  tar -czf "${DATA_BACKUP}" \
+                    -C /data \
+                    archive thumbnails consume
+
+                  # 3. Offsite-Transfer (SSH/rsync auf NAS)
+                  echo "--- rsync → ${BACKUP_SSH_USER}@${BACKUP_SSH_HOST}:${BACKUP_TARGET_PATH}"
+
+                  # SSH-Key aus Secret in temporäre Datei (mode 600)
+                  SSH_KEY_FILE="/tmp/backup_ssh_key"
+                  echo "${BACKUP_SSH_KEY}" > "${SSH_KEY_FILE}"
+                  chmod 600 "${SSH_KEY_FILE}"
+
+                  # StrictHostKeyChecking=no für Heimnetz (kein MITM-Risiko im privaten LAN);
+                  # für Produktiv-/Cloud-Setup würde man den Host-Key vorab verifizieren.
+                  rsync -avz --progress \
+                    -e "ssh -i ${SSH_KEY_FILE} -o StrictHostKeyChecking=no" \
+                    "${DB_BACKUP}" "${DATA_BACKUP}" \
+                    "${BACKUP_SSH_USER}@${BACKUP_SSH_HOST}:${BACKUP_TARGET_PATH}/"
+
+                  rm -f "${SSH_KEY_FILE}"
+
+                  # 4. Rotation: Letzte N Backups behalten, ältere löschen (remote)
+                  echo "--- Rotation: behalte letzte ${BACKUP_RETENTION} Backups"
+                  echo "${BACKUP_SSH_KEY}" > "${SSH_KEY_FILE}"
+                  chmod 600 "${SSH_KEY_FILE}"
+
+                  ssh -i "${SSH_KEY_FILE}" -o StrictHostKeyChecking=no \
+                    "${BACKUP_SSH_USER}@${BACKUP_SSH_HOST}" \
+                    "cd ${BACKUP_TARGET_PATH} && ls -t db-*.sql.gz | tail -n +$((BACKUP_RETENTION + 1)) | xargs -r rm -v && ls -t data-*.tar.gz | tail -n +$((BACKUP_RETENTION + 1)) | xargs -r rm -v"
+
+                  rm -f "${SSH_KEY_FILE}"
+
+                  echo "=== Backup abgeschlossen: ${TIMESTAMP} ==="
+                  echo "DB:   ${DB_BACKUP}"
+                  echo "Data: ${DATA_BACKUP}"
               envFrom:
                 - configMapRef:
                     name: dms-config
-              env:
-                - name: PGPASSWORD
-                  valueFrom:
-                    secretKeyRef:
-                      name: dms-secrets
-                      key: POSTGRES_PASSWORD
-              command: ["/bin/sh", "-c"]
-              args:
-                - |
-                  set -eu
-                  TS="$(date -u +%Y%m%d-%H%M%S)"
-                  OUT="/staging/$TS"
-                  mkdir -p "$OUT"
-
-                  echo "[backup] pg_dump ${POSTGRES_DB}@${POSTGRES_HOST} -> db.sql.gz"
-                  # Dump ohne Pipe schreiben, damit ein pg_dump-Fehler direkt
-                  # (set -e) abbricht und kein leeres gzip als gültig durchgeht.
-                  pg_dump -h "$POSTGRES_HOST" -p "${POSTGRES_PORT:-5432}" \
-                    -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
-                    --no-owner --format=plain > "$OUT/db.sql"
-                  gzip "$OUT/db.sql"
-                  gzip -t "$OUT/db.sql.gz"
-
-                  echo "[backup] tar /data -> data.tar.gz"
-                  cd /data
-                  DIRS=""
-                  for d in originals archive thumbnails; do
-                    [ -d "$d" ] && DIRS="$DIRS $d"
-                  done
-                  if [ -z "$DIRS" ]; then
-                    echo "[backup] FEHLER: keine Datenverzeichnisse in /data gefunden" >&2
-                    exit 1
-                  fi
-                  tar czf "$OUT/data.tar.gz" $DIRS
-                  gzip -t "$OUT/data.tar.gz"
-
-                  ( cd "$OUT" && sha256sum db.sql.gz data.tar.gz > SHA256SUMS )
-                  echo "[backup] Staging fertig:"
-                  ls -l "$OUT"
+                - secretRef:
+                    name: dms-secrets
+                - secretRef:
+                    name: dms-backup-secrets
               volumeMounts:
+                # PVC read-only mounten → sicher gegen versehentliche Änderungen
                 - name: data
                   mountPath: /data
                   readOnly: true
-                - name: staging
-                  mountPath: /staging
-          containers:
-            - name: upload
-              image: rclone/rclone:1.66.0
-              imagePullPolicy: IfNotPresent
-              env:
-                # rclone-Konfiguration (Remote + Zugangsdaten) aus dem Secret.
-                - name: RCLONE_CONFIG
-                  value: /config/rclone.conf
-                # Ziel: <remote-name aus rclone.conf>:<pfad>. Nur der Name ist
-                # geheim (in rclone.conf); Pfad/Retention hier steuerbar.
-                - name: RCLONE_REMOTE
-                  value: "offsite:dms-backup"
-                - name: BACKUP_RETENTION
-                  value: "14"
-              command: ["/bin/sh", "-c"]
-              args:
-                - |
-                  set -eu
-                  : "${RCLONE_REMOTE:?RCLONE_REMOTE nicht gesetzt}"
-                  KEEP="${BACKUP_RETENTION:-14}"
-                  TS="$(ls /staging)"
-                  if [ -z "$TS" ]; then
-                    echo "[backup] FEHLER: kein Staging-Verzeichnis vorhanden" >&2
-                    exit 1
-                  fi
-
-                  echo "[backup] upload /staging/$TS -> $RCLONE_REMOTE/$TS"
-                  rclone mkdir "$RCLONE_REMOTE/$TS"
-                  rclone copy --checksum "/staging/$TS" "$RCLONE_REMOTE/$TS"
-                  # Verifikation: alle Dateien offsite angekommen (Prüfsumme).
-                  rclone check --one-way "/staging/$TS" "$RCLONE_REMOTE/$TS"
-
-                  echo "[backup] Retention: $KEEP Backups behalten, ältere entfernen"
-                  DIRS="$(rclone lsf --dirs-only "$RCLONE_REMOTE" | sed 's#/$##' | sort)"
-                  TOTAL="$(printf '%s\n' "$DIRS" | grep -c . || true)"
-                  REMOVE=$((TOTAL - KEEP))
-                  if [ "$REMOVE" -gt 0 ]; then
-                    printf '%s\n' "$DIRS" | head -n "$REMOVE" | while IFS= read -r d; do
-                      [ -n "$d" ] || continue
-                      echo "[backup] entferne altes Backup $d"
-                      rclone purge "$RCLONE_REMOTE/$d"
-                    done
-                  fi
-                  echo "[backup] fertig."
-              volumeMounts:
-                - name: staging
-                  mountPath: /staging
-                  readOnly: true
-                - name: rclone-config
-                  mountPath: /config
-                  readOnly: true
+                # emptyDir für temporäre Backup-Artefakte (vor rsync)
+                - name: backup-tmp
+                  mountPath: /backup
           volumes:
             - name: data
               persistentVolumeClaim:
                 claimName: dms-data
-            - name: staging
+            - name: backup-tmp
               emptyDir: {}
-            - name: rclone-config
-              secret:
-                secretName: dms-backup-secret
-                items:
-                  - key: rclone.conf
-                    path: rclone.conf
