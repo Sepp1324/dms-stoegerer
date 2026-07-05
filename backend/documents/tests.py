@@ -1443,6 +1443,64 @@ class ConsumePerUserScanTests(TestCase):
         self.assertTrue((self.consume / "sebastian" / "ignored.pdf").exists())
         delay.assert_called_once()
 
+    def test_streu_datei_im_root_landet_in_failed_und_zaehler(self):
+        """(f) STOAA-409: Datei DIREKT im Consume-Root (Pro-User-Modus) wird
+        nicht mehr still verschluckt -> WARN-Log + nach _failed/ (Root) +
+        failed-Zähler. Eine korrekt platzierte User-Datei wird parallel normal
+        aufgenommen (Root-Streu bricht den Scan nicht ab)."""
+        import os
+        import time
+
+        # Fehlplatzierte Datei direkt im Consume-Root.
+        stray = self.consume / "vergessen.pdf"
+        stray.write_bytes(b"%PDF-1.4 dummy")
+        mtime = time.time() - 3600
+        os.utime(stray, (mtime, mtime))
+        # Korrekt platzierte Datei im User-Ordner.
+        self._write("sebastian", "korrekt.pdf", age_seconds=3600)
+
+        with self.settings(CONSUME_PER_USER=True, CONSUME_MIN_AGE=15):
+            with self.assertLogs("documents.tasks", level="WARNING") as cm:
+                result, delay = self._run_scan()
+
+        # User-Datei normal aufgenommen, Streu-Datei als failed gezählt.
+        self.assertEqual(result["found"], 1)
+        self.assertEqual(result["failed"], 1)
+        # Streu-Datei liegt nachvollziehbar in _failed/ auf Root-Ebene ...
+        self.assertTrue((self.consume / "_failed" / "vergessen.pdf").exists())
+        # ... und ist nicht mehr im Root und nicht in ORIGINALS gelandet.
+        self.assertFalse(stray.exists())
+        self.assertFalse((self.originals / "vergessen.pdf").exists())
+        # WARN-Log nennt die verschluckte Datei.
+        self.assertTrue(any("vergessen.pdf" in line for line in cm.output))
+        # Korrekte User-Datei ist regulär verarbeitet.
+        self.assertTrue((self.consume / "sebastian" / "_processed" / "korrekt.pdf").exists())
+        self.assertEqual(Document.objects.get().owner, self.sebastian)
+        delay.assert_called_once()
+
+    def test_zu_junge_streu_datei_im_root_bleibt_liegen(self):
+        """(g) STOAA-409: Noch nicht fertig geschriebene Streu-Datei im Root
+        (jünger als CONSUME_MIN_AGE) wird NICHT voreilig nach _failed/
+        verschoben -> übersprungen, nächster Scan versucht erneut."""
+        import os
+        import time
+
+        stray = self.consume / "frisch.pdf"
+        stray.write_bytes(b"%PDF-1.4 dummy")
+        mtime = time.time()  # ganz frisch
+        os.utime(stray, (mtime, mtime))
+
+        with self.settings(CONSUME_PER_USER=True, CONSUME_MIN_AGE=15):
+            result, delay = self._run_scan()
+
+        self.assertEqual(result["found"], 0)
+        self.assertEqual(result["failed"], 0)
+        self.assertEqual(result["skipped"], 1)
+        # Datei bleibt unangetastet im Root liegen.
+        self.assertTrue(stray.exists())
+        self.assertFalse((self.consume / "_failed" / "frisch.pdf").exists())
+        delay.assert_not_called()
+
 
 class DocumentShareLinkTests(APITestCase):
     """Verwaltungs-API der Freigabelinks (STOAA-190).

@@ -130,14 +130,62 @@ def _scan_per_user(consume: Path, min_age: float, now: float) -> dict:
     verarbeitet (case-insensitiv); alle Dateien darin erhalten diesen als
     ``owner``. Ordner mit führendem ``_``/``.`` (z. B. ``_processed`` auf
     Consume-Ebene) und unbekannte Benutzer werden übersprungen.
+
+    Streu-Dateien direkt im Consume-Root (statt in ``<username>/``) werden
+    NICHT still verschluckt (STOAA-409): pro Datei WARN-Log + Verschieben nach
+    ``_failed/`` auf Root-Ebene, damit jede Datei nachvollziehbar landet und
+    das Symptom „Datei verschwindet spurlos" ausgeschlossen ist.
     """
     user_model = get_user_model()
+
+    # ``_failed/`` auf Root-Ebene für fehlplatzierte Streu-Dateien (STOAA-409);
+    # lazy angelegt, damit im Normalfall (keine Streu-Dateien) nichts entsteht.
+    root_failed_dir = consume / "_failed"
 
     ingested = []
     skipped = 0
     failed = 0
     for entry in sorted(consume.iterdir()):
-        if not entry.is_dir() or entry.name.startswith(("_", ".")):
+        if entry.name.startswith(("_", ".")):
+            # Interne Ordner (``_processed``/``_failed``) bzw. versteckte
+            # Einträge auf Root-Ebene überspringen.
+            continue
+
+        if entry.is_file():
+            # Fehlplatzierte Datei direkt im Consume-Root: im Pro-User-Modus
+            # gehören Dateien in ``<username>/``. Nicht still ignorieren
+            # (STOAA-409) → Reife-Check, dann WARN + nach ``_failed/`` (Root).
+            try:
+                age = now - entry.stat().st_mtime
+            except OSError:
+                # Datei zwischen ``iterdir`` und ``stat`` verschwunden.
+                skipped += 1
+                continue
+            if age < min_age:
+                # Noch nicht fertig geschrieben – nächster Scan versucht erneut.
+                skipped += 1
+                continue
+
+            logger.warning(
+                "scan_consume_folder: Datei %r direkt im Consume-Root im "
+                "Pro-User-Modus – Dateien gehören in <username>/. Verschiebe "
+                "nach _failed/.",
+                entry.name,
+            )
+            failed += 1
+            try:
+                root_failed_dir.mkdir(parents=True, exist_ok=True)
+                entry.rename(_unique(root_failed_dir / entry.name))
+            except OSError:
+                logger.exception(
+                    "scan_consume_folder: Verschieben nach _failed/ "
+                    "fehlgeschlagen für %s",
+                    entry,
+                )
+            continue
+
+        if not entry.is_dir():
+            # Weder Datei noch Ordner (z. B. Symlink/Socket) – ignorieren.
             continue
 
         user = user_model.objects.filter(username__iexact=entry.name).first()
@@ -146,7 +194,8 @@ def _scan_per_user(consume: Path, min_age: float, now: float) -> dict:
             # übersprungen (nicht als owner=None aufgenommen) und protokolliert.
             logger.warning(
                 "scan_consume_folder: Unbekannter Benutzer-Ordner %r übersprungen "
-                "– kein passender Django-User, keine owner-lose Aufnahme.",
+                "– kein passender Django-User, keine owner-lose Aufnahme. "
+                "Dateien im Pro-User-Modus gehören in <username>/.",
                 entry.name,
             )
             continue
