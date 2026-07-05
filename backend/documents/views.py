@@ -1250,6 +1250,15 @@ class DocumentReminderViewSet(viewsets.ModelViewSet):
         return qs
 
     def perform_create(self, serializer):
+        # Owner-Isolation in Schreibrichtung (STOAA-7): das Ziel-Dokument muss dem
+        # Nutzer gehören (Admin darf alle). Sonst könnte man per POST eine
+        # Erinnerung an ein FREMDES Dokument hängen. Fremd/unbekannt → 404 (kein
+        # Leak, ob die ID existiert). Analog DocumentShareLinkViewSet.
+        document = serializer.validated_data.get("document")
+        user = self.request.user
+        if not getattr(user, "is_dms_admin", False):
+            if document is None or document.owner_id != user.id:
+                raise Http404("Dokument nicht gefunden.")
         # Der Ersteller kommt server-seitig aus dem Request (Serializer read-only),
         # damit er nicht fälschbar ist.
         reminder = serializer.save(created_by=self.request.user)

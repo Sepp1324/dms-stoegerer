@@ -147,6 +147,28 @@ class DocumentReminderTests(APITestCase):
             self.client.post(f"/api/reminders/{fremd.id}/done/").status_code, 404
         )
 
+    def test_create_auf_fremdes_dokument_verboten(self):
+        # Owner-Isolation in Schreibrichtung (STOAA-7): POST mit fremder
+        # document-ID darf keine Erinnerung anlegen → 404 (kein Leak), und es
+        # entsteht KEIN Datensatz.
+        self.client.force_authenticate(self.sebastian)
+        vorher = DocumentReminder.objects.count()
+        resp = self.client.post(
+            "/api/reminders/",
+            {"document": self.fremd_doc.id, "remind_on": "2026-08-01"},
+        )
+        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(DocumentReminder.objects.count(), vorher)
+
+    def test_admin_darf_create_auf_fremdes_dokument(self):
+        # DMS-Admin ist bewusst nicht owner-gescoped.
+        self.client.force_authenticate(self.admin)
+        resp = self.client.post(
+            "/api/reminders/",
+            {"document": self.fremd_doc.id, "remind_on": "2026-08-01"},
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+
     def test_admin_sieht_alle(self):
         fremd = DocumentReminder.objects.create(
             document=self.fremd_doc, remind_on="2026-08-01", created_by=self.manfred
