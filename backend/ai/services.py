@@ -87,7 +87,10 @@ def suggest_metadata(ocr_text: str, *, max_chars: int = 6000) -> dict:
     system = _CLASSIFY_SYSTEM + _existing_context()
     excerpt = ocr_text[:max_chars]
     prompt = f"Hier ist der OCR-Text des Dokuments:\n\n{excerpt}"
-    raw = provider.complete(prompt, system=system)
+    try:
+        raw = provider.complete(prompt, system=system)
+    except Exception as exc:
+        return {"source": "error", "provider": provider.name, "error": str(exc)}
 
     suggestions = _parse_json(raw)
     return {"source": "ai", "provider": provider.name, "suggestions": suggestions}
