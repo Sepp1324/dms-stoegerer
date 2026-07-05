@@ -562,6 +562,9 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
 // Overlay über `open` gesteuert; Aktiv-Zustand über `view`. Unter der Haupt-
 // navigation zeigen ausklappbare Stammdaten-Abschnitte (Korrespondenten, Tags,
 // Dokumenttypen, Speicherpfade) klickbare Filterlisten (STOAA-50).
+// STOAA-410: Sidebar einklappbar (localStorage), Filter eigenständig scrollbar.
+const SIDEBAR_COLLAPSED_KEY = "dms:sidebar:collapsed";
+
 function Sidebar({
   view,
   onNavigate,
@@ -619,16 +622,33 @@ function Sidebar({
     v: string,
   ) => void;
 }) {
+  const [collapsed, setCollapsed] = useState(
+    () => localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1",
+  );
+
+  function toggleCollapse() {
+    setCollapsed((c) => {
+      const next = !c;
+      localStorage.setItem(SIDEBAR_COLLAPSED_KEY, next ? "1" : "0");
+      return next;
+    });
+  }
+
   // Nach einer Filterauswahl auf Mobil das Overlay schließen (Desktop no-op).
   const pick = (fn: (v: number | "") => void) => (v: number | "") => {
     fn(v);
     onClose();
   };
 
+  const cls = ["sidebar", open && "sidebar--open", collapsed && "sidebar--collapsed"]
+    .filter(Boolean)
+    .join(" ");
+
   return (
-    <aside className={`sidebar${open ? " sidebar--open" : ""}`}>
+    <aside className={cls}>
       <div className="sidebar__brand">
         <span className="sidebar__logo">DMS</span>
+        {/* Schließen-Button nur auf Mobil */}
         <button
           className="nav-toggle sidebar__close"
           aria-label="Navigation schließen"
@@ -639,6 +659,19 @@ function Sidebar({
               fill="currentColor"
               d="M6.4 5 5 6.4 10.6 12 5 17.6 6.4 19 12 13.4 17.6 19 19 17.6 13.4 12 19 6.4 17.6 5 12 10.6z"
             />
+          </svg>
+        </button>
+        {/* Collapse-Toggle auf Desktop */}
+        <button
+          className="sidebar__collapse-btn"
+          aria-label={collapsed ? "Sidebar aufklappen" : "Sidebar einklappen"}
+          onClick={toggleCollapse}
+          title={collapsed ? "Aufklappen" : "Einklappen"}
+        >
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+            {collapsed
+              ? <path fill="currentColor" d="M8 5l8 7-8 7z" />
+              : <path fill="currentColor" d="M16 5l-8 7 8 7z" />}
           </svg>
         </button>
       </div>
@@ -685,50 +718,54 @@ function Sidebar({
           />
         )}
 
-        {view === "docs" && (
-          <div className="nav-filters">
-            <ProcessingFilterSection
-              active={processingState}
-              onSelect={(v) => {
-                onProcessingStateChange(v);
-                onClose();
-              }}
-            />
-            <FilterSection
-              title="Korrespondenten"
-              items={correspondents}
-              activeId={correspondent}
-              onSelect={pick(onCorrespondentChange)}
-            />
-            <FilterSection
-              title="Tags"
-              items={tags}
-              activeId={tag}
-              onSelect={pick(onTagChange)}
-              colored
-            />
-            <FilterSection
-              title="Dokumenttypen"
-              items={documentTypes}
-              activeId={documentType}
-              onSelect={pick(onDocumentTypeChange)}
-            />
-            <FilterSection
-              title="Speicherpfade"
-              items={storagePaths}
-              activeId={storagePath}
-              onSelect={pick(onStoragePathChange)}
-              disabled={!storagePathEnabled}
-              note={storagePathEnabled ? undefined : "Backend folgt"}
-            />
-            <CurrencyFilterSection
-              fields={currencyFields}
-              filters={currencyFilters}
-              onChange={onCurrencyChange}
-            />
-          </div>
-        )}
       </nav>
+
+      {/* Stammdaten-Filter: eigenständig scrollbarer Bereich, nur in Docs-Ansicht */}
+      {view === "docs" && (
+        <div className="sidebar__filters">
+          <ProcessingFilterSection
+            active={processingState}
+            onSelect={(v) => {
+              onProcessingStateChange(v);
+              onClose();
+            }}
+          />
+          <FilterSection
+            title="Korrespondenten"
+            items={correspondents}
+            activeId={correspondent}
+            onSelect={pick(onCorrespondentChange)}
+            searchable
+          />
+          <FilterSection
+            title="Tags"
+            items={tags}
+            activeId={tag}
+            onSelect={pick(onTagChange)}
+            colored
+            searchable
+          />
+          <FilterSection
+            title="Dokumenttypen"
+            items={documentTypes}
+            activeId={documentType}
+            onSelect={pick(onDocumentTypeChange)}
+          />
+          <FilterSection
+            title="Speicherpfade"
+            items={storagePaths}
+            activeId={storagePath}
+            onSelect={pick(onStoragePathChange)}
+            disabled={!storagePathEnabled}
+            note={storagePathEnabled ? undefined : "Backend folgt"}
+          />
+          <CurrencyFilterSection
+            fields={currencyFields}
+            filters={currencyFilters}
+            onChange={onCurrencyChange}
+          />
+        </div>
+      )}
 
       <div className="sidebar__footer">
         {username && <span className="muted sidebar__user">{username}</span>}
@@ -740,10 +777,11 @@ function Sidebar({
   );
 }
 
+const FILTER_TOP_N = 5;
+
 // Ausklappbarer Stammdaten-Abschnitt der Sidebar: Titel + Anzahl, darunter eine
-// scrollbare Liste klickbarer Filter. Klick auf den aktiven Eintrag hebt den
-// Filter wieder auf. `disabled` graut den Abschnitt aus (z. B. Speicherpfade,
-// solange der Backend-Filter fehlt). Leere Listen werden ausgeblendet.
+// Liste klickbarer Filter. Standardmäßig eingeklappt; bei langen Listen Top-N + mehr
+// anzeigen + optionales Suchfeld. Klick auf aktiven Eintrag hebt Filter wieder auf.
 function FilterSection({
   title,
   items,
@@ -752,6 +790,7 @@ function FilterSection({
   colored,
   disabled,
   note,
+  searchable,
 }: {
   title: string;
   items: (NamedRef & { color?: string })[];
@@ -760,19 +799,32 @@ function FilterSection({
   colored?: boolean;
   disabled?: boolean;
   note?: string;
+  searchable?: boolean;
 }) {
-  const [expanded, setExpanded] = useState(true);
+  const [expanded, setExpanded] = useState(false);
+  const [showAll, setShowAll] = useState(false);
+  const [q, setQ] = useState("");
   if (items.length === 0) return null;
+
+  // Bei aktivem Filter immer aufklappen
+  const hasActive = activeId !== "" && items.some((i) => i.id === activeId);
+  const isExpanded = expanded || hasActive;
+
+  const filtered = q
+    ? items.filter((i) => i.name.toLowerCase().includes(q.toLowerCase()))
+    : items;
+  const visible = showAll || q ? filtered : filtered.slice(0, FILTER_TOP_N);
+  const hiddenCount = filtered.length - visible.length;
 
   return (
     <div className={`nav-section${disabled ? " nav-section--disabled" : ""}`}>
       <button
         className="nav-section__head"
-        onClick={() => setExpanded((e) => !e)}
-        aria-expanded={expanded}
+        onClick={() => { setExpanded((e) => !e); if (isExpanded) { setQ(""); setShowAll(false); } }}
+        aria-expanded={isExpanded}
       >
         <svg
-          className={`nav-section__chevron${expanded ? " nav-section__chevron--open" : ""}`}
+          className={`nav-section__chevron${isExpanded ? " nav-section__chevron--open" : ""}`}
           viewBox="0 0 24 24"
           width="14"
           height="14"
@@ -784,34 +836,50 @@ function FilterSection({
         {note ? (
           <span className="nav-section__note">{note}</span>
         ) : (
-          <span className="nav-section__count">{items.length}</span>
+          <span className="nav-section__count">{activeId !== "" && hasActive ? "✓" : items.length}</span>
         )}
       </button>
-      {expanded && (
-        <ul className="nav-section__list">
-          {items.map((it) => {
-            const active = activeId === it.id;
-            return (
-              <li key={it.id}>
-                <button
-                  className={`nav-filter${active ? " nav-filter--active" : ""}`}
-                  onClick={() => onSelect(active ? "" : it.id)}
-                  aria-current={active ? "true" : undefined}
-                  disabled={disabled}
-                  title={it.name}
-                >
-                  {colored && (
-                    <span
-                      className="nav-filter__dot"
-                      style={{ background: it.color ?? "var(--muted)" }}
-                    />
-                  )}
-                  <span className="nav-filter__label">{it.name}</span>
-                </button>
-              </li>
-            );
-          })}
-        </ul>
+      {isExpanded && (
+        <>
+          {searchable && items.length > FILTER_TOP_N && (
+            <input
+              className="nav-section__search"
+              placeholder="Filtern …"
+              value={q}
+              onChange={(e) => { setQ(e.target.value); setShowAll(false); }}
+              onClick={(e) => e.stopPropagation()}
+            />
+          )}
+          <ul className="nav-section__list">
+            {visible.map((it) => {
+              const active = activeId === it.id;
+              return (
+                <li key={it.id}>
+                  <button
+                    className={`nav-filter${active ? " nav-filter--active" : ""}`}
+                    onClick={() => onSelect(active ? "" : it.id)}
+                    aria-current={active ? "true" : undefined}
+                    disabled={disabled}
+                    title={it.name}
+                  >
+                    {colored && (
+                      <span
+                        className="nav-filter__dot"
+                        style={{ background: it.color ?? "var(--muted)" }}
+                      />
+                    )}
+                    <span className="nav-filter__label">{it.name}</span>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+          {hiddenCount > 0 && (
+            <button className="nav-section__more" onClick={() => setShowAll(true)}>
+              {hiddenCount} weitere …
+            </button>
+          )}
+        </>
       )}
     </div>
   );
@@ -834,7 +902,7 @@ function ProcessingFilterSection({
   active: ProcessingStateFilter | "";
   onSelect: (v: ProcessingStateFilter | "") => void;
 }) {
-  const [expanded, setExpanded] = useState(true);
+  const [expanded, setExpanded] = useState(false);
 
   return (
     <div className="nav-section">
@@ -889,7 +957,7 @@ function CurrencyFilterSection({
   filters: Record<number, CurrencyRange>;
   onChange: (fieldId: number, bound: keyof CurrencyRange, v: string) => void;
 }) {
-  const [expanded, setExpanded] = useState(true);
+  const [expanded, setExpanded] = useState(false);
   if (fields.length === 0) return null;
 
   return (
@@ -967,11 +1035,12 @@ function NavItem({
       className={`nav-item${active ? " nav-item--active" : ""}`}
       onClick={onClick}
       aria-current={active ? "page" : undefined}
+      title={label}
     >
-      <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+      <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" style={{ flexShrink: 0 }}>
         <path fill="currentColor" d={icon} />
       </svg>
-      {label}
+      <span className="nav-item__label">{label}</span>
     </button>
   );
 }
