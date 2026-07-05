@@ -23,6 +23,7 @@ from .models import (
     CustomField,
     CustomFieldValue,
     Document,
+    DocumentReminder,
     DocumentShareLink,
     DocumentType,
     DocumentVersion,
@@ -4247,3 +4248,132 @@ class SearchSnippetTests(APITestCase):
         raw = f"a <b> {_MARK_START}Treffer{_MARK_END} & <script>"
         out = build_snippet(raw)
         self.assertEqual(out, "a &lt;b&gt; <mark>Treffer</mark> &amp; &lt;script&gt;")
+
+
+class ReminderRouteTests(APITestCase):
+    """Regressionstests für STOAA-449: die Wiedervorlage-/Erinnerungs-Routen.
+
+    Der ``DocumentReminderViewSet`` war zeitweise nicht im DefaultRouter
+    registriert, wodurch das Frontend (``/api/reminders/``) HTTP 404 bekam.
+    Diese Tests belegen, dass die exakt vom Frontend (``frontend/src/api.ts``)
+    erwarteten Pfade aufgelöst werden und für einen eingeloggten Nutzer
+    2xx statt 404 liefern – inklusive Owner-Isolation.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.sebastian = User.objects.create_user(
+            username="sebastian", password="pw", role="user"
+        )
+        cls.manfred = User.objects.create_user(
+            username="manfred", password="pw", role="user"
+        )
+        cls.doc = Document.objects.create(
+            title="Sebastians Vertrag", owner=cls.sebastian
+        )
+        cls.fremd_doc = Document.objects.create(
+            title="Manfreds Beleg", owner=cls.manfred
+        )
+
+    def test_list_route_resolves_not_404(self):
+        """GET /api/reminders/ ist aufgelöst und liefert 200 (nicht 404)."""
+        self.client.force_authenticate(self.sebastian)
+        resp = self.client.get("/api/reminders/")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_create_reminder_own_document(self):
+        """POST /api/reminders/ auf eigenes Dokument liefert 201."""
+        self.client.force_authenticate(self.sebastian)
+        resp = self.client.post(
+            "/api/reminders/",
+            {
+                "document": self.doc.id,
+                "remind_on": timezone.localdate().isoformat(),
+                "note": "Frist prüfen",
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201)
+        reminder = DocumentReminder.objects.get(pk=resp.data["id"])
+        # created_by kommt server-seitig aus dem Request (nicht fälschbar).
+        self.assertEqual(reminder.created_by_id, self.sebastian.id)
+
+    def test_create_reminder_foreign_document_404(self):
+        """POST auf ein FREMDES Dokument wird owner-isoliert mit 404 abgewiesen."""
+        self.client.force_authenticate(self.sebastian)
+        resp = self.client.post(
+            "/api/reminders/",
+            {
+                "document": self.fremd_doc.id,
+                "remind_on": timezone.localdate().isoformat(),
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 404)
+        self.assertFalse(
+            DocumentReminder.objects.filter(document=self.fremd_doc).exists()
+        )
+
+    def test_due_action_route(self):
+        """GET /api/reminders/due/?days=N liefert 200 mit faellig/anstehend."""
+        today = timezone.localdate()
+        DocumentReminder.objects.create(
+            document=self.doc,
+            created_by=self.sebastian,
+            remind_on=today,  # heute → faellig
+        )
+        DocumentReminder.objects.create(
+            document=self.doc,
+            created_by=self.sebastian,
+            remind_on=today + timedelta(days=3),  # innerhalb Horizont → anstehend
+        )
+        self.client.force_authenticate(self.sebastian)
+        resp = self.client.get("/api/reminders/due/?days=7")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("faellig", resp.data)
+        self.assertIn("anstehend", resp.data)
+        self.assertEqual(len(resp.data["faellig"]), 1)
+        self.assertEqual(len(resp.data["anstehend"]), 1)
+
+    def test_done_action_route(self):
+        """POST /api/reminders/{id}/done/ markiert erledigt und liefert 200."""
+        reminder = DocumentReminder.objects.create(
+            document=self.doc,
+            created_by=self.sebastian,
+            remind_on=timezone.localdate(),
+        )
+        self.client.force_authenticate(self.sebastian)
+        resp = self.client.post(f"/api/reminders/{reminder.id}/done/")
+        self.assertEqual(resp.status_code, 200)
+        reminder.refresh_from_db()
+        self.assertTrue(reminder.done)
+
+    def test_delete_reminder_route(self):
+        """DELETE /api/reminders/{id}/ liefert 204."""
+        reminder = DocumentReminder.objects.create(
+            document=self.doc,
+            created_by=self.sebastian,
+            remind_on=timezone.localdate(),
+        )
+        self.client.force_authenticate(self.sebastian)
+        resp = self.client.delete(f"/api/reminders/{reminder.id}/")
+        self.assertEqual(resp.status_code, 204)
+        self.assertFalse(DocumentReminder.objects.filter(pk=reminder.id).exists())
+
+    def test_owner_isolation_list(self):
+        """Ein Nutzer sieht ausschließlich Erinnerungen zu eigenen Dokumenten."""
+        eigene = DocumentReminder.objects.create(
+            document=self.doc,
+            created_by=self.sebastian,
+            remind_on=timezone.localdate(),
+        )
+        DocumentReminder.objects.create(
+            document=self.fremd_doc,
+            created_by=self.manfred,
+            remind_on=timezone.localdate(),
+        )
+        self.client.force_authenticate(self.sebastian)
+        resp = self.client.get("/api/reminders/")
+        self.assertEqual(resp.status_code, 200)
+        ids = [r["id"] for r in resp.data["results"]]
+        self.assertEqual(ids, [eigene.id])
