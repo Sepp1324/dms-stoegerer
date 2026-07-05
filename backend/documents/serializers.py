@@ -7,6 +7,7 @@ from .models import (
     CustomField,
     CustomFieldValue,
     Document,
+    DocumentReminder,
     DocumentShareLink,
     DocumentType,
     DocumentVersion,
@@ -545,3 +546,27 @@ class VersionCompareResultSerializer(_s.Serializer):
         # per Vertrag ist es hier immer False. Stufe 2 kann das Attribut am
         # Ergebnis setzen, dann wird es hier durchgereicht.
         return bool(getattr(obj, "metadata_versioning_supported", False))
+
+
+class DocumentReminderSerializer(serializers.ModelSerializer):
+    """Serializer für Wiedervorlagen/Erinnerungen (STOAA-372 PR1).
+
+    ``document`` ist schreibbar (FK-ID). ``created_by`` und ``notified_at``
+    sind read-only: der Ersteller wird im ViewSet aus ``request.user`` gesetzt,
+    ``notified_at`` ausschließlich vom Beat ``check_due_reminders``.
+    """
+
+    class Meta:
+        model = DocumentReminder
+        fields = [
+            "id",
+            "document",
+            "remind_on",
+            "note",
+            "done",
+            "created_by",
+            "notified_at",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["created_by", "notified_at", "created_at", "updated_at"]

@@ -188,7 +188,27 @@ CELERY_BEAT_SCHEDULE = {
         "task": "documents.tasks.scan_consume_folder",
         "schedule": float(os.getenv("CONSUME_SCAN_INTERVAL", "120")),
     },
+    # Wiedervorlagen/Erinnerungen (STOAA-372): einmal täglich prüfen, ob eine
+    # Erinnerung fällig ist, und ``notified_at`` genau einmal setzen.
+    "check-due-reminders": {
+        "task": "documents.tasks.check_due_reminders",
+        "schedule": float(os.getenv("REMINDER_CHECK_INTERVAL", "86400")),
+    },
 }
+
+# --- E-Mail-Versand (SMTP) ---
+# Erinnerungs-Mails (STOAA-372) werden NUR verschickt, wenn ein SMTP-Host
+# konfiguriert ist. Ohne ``EMAIL_HOST`` überspringt ``check_due_reminders`` den
+# Versand still (kein Fehler); die In-App-Benachrichtigung (die due-Liste)
+# funktioniert unabhängig davon. Default leer = SMTP nicht konfiguriert
+# (überschreibt Djangos Standard ``localhost``, damit der Leer-Fall eindeutig
+# als „nicht konfiguriert" erkennbar ist).
+EMAIL_HOST = os.getenv("EMAIL_HOST", "")
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
+EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
+EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "true").lower() in ("1", "true", "yes")
+DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "dms@localhost")
 
 # --- AI-Anbindung ---
 AI_PROVIDER = os.getenv("AI_PROVIDER", "anthropic")
