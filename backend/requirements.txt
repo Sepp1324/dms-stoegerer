@@ -20,6 +20,9 @@ pikepdf==8.15.1
 # Miniaturbilder (erste Seite → JPEG)
 pdf2image==1.17.0
 Pillow==11.0.0
+# HEIC/HEIF-Support für die Mobile-Erfassung (STOAA-513); die Wheels bündeln
+# libheif → i. d. R. kein apt-Paket nötig. Image-Rebuild erforderlich.
+pillow-heif==0.18.0
 # QR-Codes für die Archivnummer (ASN, STOAA-284/285); rendert als PNG via Pillow
 qrcode==7.4.2
 
