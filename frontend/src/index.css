@@ -2014,3 +2014,145 @@ button.share-links__revoke:hover:not(:disabled) {
 .asn button.link {
   padding: 0.2rem 0.4rem;
 }
+
+/* --- Wiedervorlage/Erinnerungen (STOAA-372/374) --- */
+/* Sektion im Dokumentdetail – Struktur analog .share-links. */
+.reminders {
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+.reminders__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+.reminders__head h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+.reminders__form {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.8rem;
+}
+.reminders__field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+}
+.reminders__field--grow {
+  flex: 1 1 12rem;
+}
+.reminders__field input {
+  width: 100%;
+}
+.reminders__empty {
+  margin: 0;
+}
+.reminders__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.reminders__row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+.reminders__date {
+  font-size: 0.85rem;
+  color: var(--text);
+}
+.reminders__note {
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin-right: auto;
+}
+.reminders__actions {
+  display: flex;
+  gap: 0.5rem;
+}
+button.reminders__delete {
+  color: var(--error);
+}
+
+/* Status-Badge einer Erinnerung (offen/erledigt/überfällig). */
+.reminder-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: var(--radius-pill);
+  padding: 0.15rem 0.7rem;
+  font-size: 0.78rem;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.reminder-badge--open {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.reminder-badge--done {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+.reminder-badge--overdue {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+/* --- Topbar-Seite „Wiedervorlage/Fällig" --- */
+.due-view__head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+.due-group {
+  margin-top: 1.5rem;
+}
+.due-group__title {
+  margin: 0 0 0.6rem;
+  font-size: 1rem;
+}
+.due-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+button.due-item {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  width: 100%;
+  text-align: left;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 0.6rem 0.9rem;
+  color: var(--text);
+  cursor: pointer;
+}
+button.due-item:hover {
+  background: var(--hover-tint);
+}
+.due-item__title {
+  font-weight: 500;
+}
+.due-item__note {
+  margin-left: auto;
+  font-size: 0.85rem;
+}

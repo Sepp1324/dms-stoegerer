@@ -29,6 +29,7 @@ import { ProcessingBadge } from "./ProcessingStatus";
 import UploadZone from "./UploadZone";
 import DocumentDetail from "./DocumentDetail";
 import RulesPage from "./RulesPage";
+import DuePage from "./DuePage";
 import WorkflowsPage from "./WorkflowsPage";
 import CustomFieldsAdmin from "./CustomFieldsAdmin";
 import MailAccountsAdmin from "./MailAccountsAdmin";
@@ -92,7 +93,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   // Aktuell geöffnetes Dokument (Detailansicht) oder null (Liste).
   const [selectedId, setSelectedId] = useState<number | null>(null);
   // Aktive Hauptansicht (persistente linke Navigation).
-  const [view, setView] = useState<"docs" | "rules" | "workflows" | "fields" | "mail">("docs");
+  const [view, setView] = useState<"docs" | "rules" | "workflows" | "fields" | "mail" | "faellig">("docs");
   // Sidebar auf schmalen Screens ein-/ausklappbar.
   const [navOpen, setNavOpen] = useState(false);
 
@@ -343,7 +344,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     );
   }
 
-  const navigate = (v: "docs" | "rules" | "workflows" | "fields" | "mail") => {
+  const navigate = (v: "docs" | "rules" | "workflows" | "fields" | "mail" | "faellig") => {
     setView(v);
     setNavOpen(false); // Overlay auf Mobil nach Auswahl schließen
   };
@@ -398,7 +399,9 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
                   ? "Zusatzfelder"
                   : view === "mail"
                     ? "Mailkonten"
-                    : "Dokumente"}
+                    : view === "faellig"
+                      ? "Wiedervorlage"
+                      : "Dokumente"}
           </h1>
           {view === "docs" && (
             <input
@@ -422,6 +425,8 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
             />
           ) : view === "mail" ? (
             <MailAccountsAdmin canEdit={!!me?.can_write} />
+          ) : view === "faellig" ? (
+            <DuePage onOpenDocument={(docId) => setSelectedId(docId)} />
           ) : (
             <>
               {me?.can_write && (
@@ -584,8 +589,8 @@ function Sidebar({
   currencyFilters,
   onCurrencyChange,
 }: {
-  view: "docs" | "rules" | "workflows" | "fields" | "mail";
-  onNavigate: (v: "docs" | "rules" | "workflows" | "fields" | "mail") => void;
+  view: "docs" | "rules" | "workflows" | "fields" | "mail" | "faellig";
+  onNavigate: (v: "docs" | "rules" | "workflows" | "fields" | "mail" | "faellig") => void;
   username?: string;
   onLogout: () => void;
   isAdmin: boolean;
@@ -644,6 +649,12 @@ function Sidebar({
           onClick={() => onNavigate("docs")}
           label="Dokumente"
           icon="M6 2h7l5 5v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2m7 1.5V8h4.5z"
+        />
+        <NavItem
+          active={view === "faellig"}
+          onClick={() => onNavigate("faellig")}
+          label="Wiedervorlage"
+          icon="M12 2a6 6 0 0 0-6 6c0 3.5-1 5-2 6v1h16v-1c-1-1-2-2.5-2-6a6 6 0 0 0-6-6m0 20a2 2 0 0 0 2-2h-4a2 2 0 0 0 2 2z"
         />
         <NavItem
           active={view === "rules"}
