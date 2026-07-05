@@ -12,17 +12,23 @@ import {
   getMe,
   getStoragePaths,
   getTags,
+  getUsers,
   logout,
+  setDocumentOwner,
   type CustomField,
   type DocumentItem,
   type Me,
   type NamedRef,
+  type ProcessingStateFilter,
   type TagRef,
+  type User,
 } from "../api";
 import { toCanonicalValue } from "../customFields";
+import { ProcessingBadge } from "./ProcessingStatus";
 import UploadZone from "./UploadZone";
 import DocumentDetail from "./DocumentDetail";
 import RulesPage from "./RulesPage";
+import WorkflowsPage from "./WorkflowsPage";
 import CustomFieldsAdmin from "./CustomFieldsAdmin";
 import MailAccountsAdmin from "./MailAccountsAdmin";
 
@@ -47,8 +53,14 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   // Speicherpfad-Filter (STOAA-50). Bis der Backend-Query-Param gemergt ist,
   // bleibt der Speicherpfad-Abschnitt in der Sidebar ausgegraut (no-op).
   const [storagePath, setStoragePath] = useState<number | "">("");
+  // Verarbeitungsstatus-Filter (STOAA-249): leer = kein Filter, sonst UI-Bucket.
+  const [processingState, setProcessingState] = useState<ProcessingStateFilter | "">("");
   // Sortierung; "" = Backend-Standard (FTS-Relevanz bei Suche, sonst Datum neu→alt).
   const [ordering, setOrdering] = useState("");
+  // Triage-Ansicht (STOAA-296): zeigt owner-lose Dokumente (?owner=none). Nur für
+  // Admins sichtbar/aktivierbar; lädt die Nutzerliste erst bei Bedarf.
+  const [triage, setTriage] = useState(false);
+  const [users, setUsers] = useState<User[]>([]);
 
   const [correspondents, setCorrespondents] = useState<NamedRef[]>([]);
   const [documentTypes, setDocumentTypes] = useState<NamedRef[]>([]);
@@ -79,7 +91,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   // Aktuell geöffnetes Dokument (Detailansicht) oder null (Liste).
   const [selectedId, setSelectedId] = useState<number | null>(null);
   // Aktive Hauptansicht (persistente linke Navigation).
-  const [view, setView] = useState<"docs" | "rules" | "fields" | "mail">("docs");
+  const [view, setView] = useState<"docs" | "rules" | "workflows" | "fields" | "mail">("docs");
   // Sidebar auf schmalen Screens ein-/ausklappbar.
   const [navOpen, setNavOpen] = useState(false);
 
@@ -112,6 +124,18 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
       });
     loadCustomFields();
   }, []);
+
+  // Nutzerliste für das „Owner setzen"-Dropdown der Triage-Ansicht. Der Endpunkt
+  // ist admin-only (403 für Normalnutzer), daher erst laden, wenn feststeht, dass
+  // der aktuelle Nutzer Admin ist. Muster wie MailAccountsAdmin (STOAA-215/233).
+  useEffect(() => {
+    if (!me?.is_dms_admin) return;
+    getUsers()
+      .then(setUsers)
+      .catch(() => {
+        /* Nutzerliste optional – Fehler hier nicht blockierend */
+      });
+  }, [me?.is_dms_admin]);
 
   // Stammdaten inline anlegen: erzeugen, in die lokale Liste einsortieren, Item zurückgeben.
   const byName = (a: NamedRef, b: NamedRef) => a.name.localeCompare(b.name);
@@ -189,6 +213,10 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
       document_type: documentType,
       tag,
       storage_path: storagePath,
+      processing_state: processingState,
+      // Triage nur für Admins anfordern; das Backend ignoriert den Param für
+      // Normalnutzer ohnehin, aber so bleibt die FE-Absicht eindeutig.
+      owner: triage && me?.is_dms_admin ? "none" : "",
       ordering,
       page,
       customFilters,
@@ -207,7 +235,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     };
     // customFilterKey serialisiert customFilters für einen stabilen Dep-Vergleich.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [debouncedQ, correspondent, documentType, tag, storagePath, ordering, page, reloadKey, customFilterKey]);
+  }, [debouncedQ, correspondent, documentType, tag, storagePath, processingState, triage, me?.is_dms_admin, ordering, page, reloadKey, customFilterKey]);
 
   // Sichtbarkeit von „Zurücksetzen" & Empty-State-Text: alle roh getippten Filter.
   const hasCurrencyInput = useMemo(
@@ -217,9 +245,9 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   );
   const hasFilters = useMemo(
     () =>
-      !!(debouncedQ || correspondent || documentType || tag || storagePath) ||
+      !!(debouncedQ || correspondent || documentType || tag || storagePath || processingState) ||
       hasCurrencyInput,
-    [debouncedQ, correspondent, documentType, tag, storagePath, hasCurrencyInput],
+    [debouncedQ, correspondent, documentType, tag, storagePath, processingState, hasCurrencyInput],
   );
 
   // Jede Filter-/Suchänderung springt zurück auf Seite 1 – sonst zeigt eine
@@ -244,8 +272,18 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     setStoragePath(v);
     setPage(1);
   }
+  function onProcessingStateChange(v: ProcessingStateFilter | "") {
+    setProcessingState(v);
+    setPage(1);
+  }
   function onOrderingChange(v: string) {
     setOrdering(v);
+    setPage(1);
+  }
+  // Triage-Ansicht umschalten (nur Admins). Zurück auf Seite 1, damit nach dem
+  // Moduswechsel keine leere hohe Seitenzahl gezeigt wird.
+  function onToggleTriage() {
+    setTriage((t) => !t);
     setPage(1);
   }
   // Eine Von-/Bis-Grenze eines CURRENCY-Feldes setzen (setzt auf Seite 1 zurück).
@@ -263,6 +301,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     setDocumentType("");
     setTag("");
     setStoragePath("");
+    setProcessingState("");
     setOrdering("");
     setCurrencyFilters({});
     setPage(1);
@@ -303,7 +342,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     );
   }
 
-  const navigate = (v: "docs" | "rules" | "fields" | "mail") => {
+  const navigate = (v: "docs" | "rules" | "workflows" | "fields" | "mail") => {
     setView(v);
     setNavOpen(false); // Overlay auf Mobil nach Auswahl schließen
   };
@@ -326,10 +365,12 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
         tag={tag}
         documentType={documentType}
         storagePath={storagePath}
+        processingState={processingState}
         onCorrespondentChange={onCorrespondentChange}
         onTagChange={onTagChange}
         onDocumentTypeChange={onDocumentTypeChange}
         onStoragePathChange={onStoragePathChange}
+        onProcessingStateChange={onProcessingStateChange}
         storagePathEnabled={STORAGE_PATH_FILTER_ENABLED}
         currencyFields={currencyFields}
         currencyFilters={currencyFilters}
@@ -350,11 +391,13 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
           <h1 className="content-title">
             {view === "rules"
               ? "Regeln"
-              : view === "fields"
-                ? "Zusatzfelder"
-                : view === "mail"
-                  ? "Mailkonten"
-                  : "Dokumente"}
+              : view === "workflows"
+                ? "Workflows"
+                : view === "fields"
+                  ? "Zusatzfelder"
+                  : view === "mail"
+                    ? "Mailkonten"
+                    : "Dokumente"}
           </h1>
           {view === "docs" && (
             <input
@@ -369,6 +412,8 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
         <div className="content-body">
           {view === "rules" ? (
             <RulesPage canEdit={!!me?.can_write} />
+          ) : view === "workflows" ? (
+            <WorkflowsPage canEdit={!!me?.can_write} />
           ) : view === "fields" ? (
             <CustomFieldsAdmin
               canEdit={!!me?.can_write}
@@ -392,6 +437,18 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
                   Topleiste beschränkt sich auf Sortierung + Zurücksetzen. */}
               <section className="filters card">
                 <div className="filter-row">
+                  {/* Triage-Umschalter nur für Admins: zeigt owner-lose Dokumente
+                      (STOAA-296). Für Normalnutzer nicht sichtbar/aktivierbar. */}
+                  {me?.is_dms_admin && (
+                    <button
+                      type="button"
+                      className={`triage-toggle${triage ? " triage-toggle--active" : ""}`}
+                      onClick={onToggleTriage}
+                      aria-pressed={triage}
+                    >
+                      {triage ? "Alle Dokumente" : "Nicht zugeordnet (Triage)"}
+                    </button>
+                  )}
                   <label className="filter">
                     <span>Sortierung</span>
                     <select value={ordering} onChange={(e) => onOrderingChange(e.target.value)}>
@@ -427,17 +484,21 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
                 ) : docs.length === 0 ? (
                   <StateBlock
                     title={
-                      hasFilters
-                        ? "Keine Treffer für die aktuellen Filter"
-                        : "Noch keine Dokumente"
+                      triage
+                        ? "Keine Dokumente ohne Eigentümer"
+                        : hasFilters
+                          ? "Keine Treffer für die aktuellen Filter"
+                          : "Noch keine Dokumente"
                     }
                     detail={
-                      hasFilters
-                        ? "Passe die Suche oder Filter an."
-                        : "Lade ein Dokument hoch, um zu beginnen."
+                      triage
+                        ? "Aktuell ist alles zugeordnet – hier landen owner-lose Mail-/Consume-Importe."
+                        : hasFilters
+                          ? "Passe die Suche oder Filter an."
+                          : "Lade ein Dokument hoch, um zu beginnen."
                     }
                     action={
-                      hasFilters ? (
+                      !triage && hasFilters ? (
                         <button className="link" onClick={resetFilters}>
                           Filter zurücksetzen
                         </button>
@@ -450,13 +511,23 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
                       {count} {count === 1 ? "Dokument" : "Dokumente"}
                     </p>
                     <div className="doc-grid">
-                      {docs.map((d) => (
-                        <DocumentCard
-                          key={d.id}
-                          doc={d}
-                          onOpen={() => setSelectedId(d.id)}
-                        />
-                      ))}
+                      {docs.map((d) =>
+                        triage ? (
+                          <TriageCard
+                            key={d.id}
+                            doc={d}
+                            users={users}
+                            onOpen={() => setSelectedId(d.id)}
+                            onAssigned={() => setReloadKey((k) => k + 1)}
+                          />
+                        ) : (
+                          <DocumentCard
+                            key={d.id}
+                            doc={d}
+                            onOpen={() => setSelectedId(d.id)}
+                          />
+                        ),
+                      )}
                     </div>
                     <Pagination
                       page={page}
@@ -501,17 +572,19 @@ function Sidebar({
   tag,
   documentType,
   storagePath,
+  processingState,
   onCorrespondentChange,
   onTagChange,
   onDocumentTypeChange,
   onStoragePathChange,
+  onProcessingStateChange,
   storagePathEnabled,
   currencyFields,
   currencyFilters,
   onCurrencyChange,
 }: {
-  view: "docs" | "rules" | "fields" | "mail";
-  onNavigate: (v: "docs" | "rules" | "fields" | "mail") => void;
+  view: "docs" | "rules" | "workflows" | "fields" | "mail";
+  onNavigate: (v: "docs" | "rules" | "workflows" | "fields" | "mail") => void;
   username?: string;
   onLogout: () => void;
   isAdmin: boolean;
@@ -525,10 +598,12 @@ function Sidebar({
   tag: number | "";
   documentType: number | "";
   storagePath: number | "";
+  processingState: ProcessingStateFilter | "";
   onCorrespondentChange: (v: number | "") => void;
   onTagChange: (v: number | "") => void;
   onDocumentTypeChange: (v: number | "") => void;
   onStoragePathChange: (v: number | "") => void;
+  onProcessingStateChange: (v: ProcessingStateFilter | "") => void;
   storagePathEnabled: boolean;
   currencyFields: CustomField[];
   currencyFilters: Record<number, CurrencyRange>;
@@ -575,6 +650,12 @@ function Sidebar({
           label="Regeln"
           icon="M3 5h18v2H3zm0 6h12v2H3zm0 6h18v2H3z"
         />
+        <NavItem
+          active={view === "workflows"}
+          onClick={() => onNavigate("workflows")}
+          label="Workflows"
+          icon="M4 4h6v6H4zm10 0h6v6h-6zM4 14h6v6H4zm13 0v3h3v2h-3v3h-2v-3h-3v-2h3v-3z"
+        />
         {isAdmin && (
           <NavItem
             active={view === "fields"}
@@ -594,6 +675,13 @@ function Sidebar({
 
         {view === "docs" && (
           <div className="nav-filters">
+            <ProcessingFilterSection
+              active={processingState}
+              onSelect={(v) => {
+                onProcessingStateChange(v);
+                onClose();
+              }}
+            />
             <FilterSection
               title="Korrespondenten"
               items={correspondents}
@@ -707,6 +795,67 @@ function FilterSection({
                     />
                   )}
                   <span className="nav-filter__label">{it.name}</span>
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+// Verarbeitungsstatus-Filter (STOAA-249): feste UI-Buckets auf den
+// ``processing_state`` der aktuellen Version. Klick auf den aktiven Bucket hebt
+// den Filter wieder auf. Analog zu FilterSection, aber string-basiert.
+const PROCESSING_FILTERS: { value: ProcessingStateFilter; label: string }[] = [
+  { value: "failed", label: "Fehlgeschlagen" },
+  { value: "processing", label: "In Verarbeitung" },
+  { value: "retry_pending", label: "Wartet auf Retry" },
+  { value: "ready", label: "Bereit" },
+];
+
+function ProcessingFilterSection({
+  active,
+  onSelect,
+}: {
+  active: ProcessingStateFilter | "";
+  onSelect: (v: ProcessingStateFilter | "") => void;
+}) {
+  const [expanded, setExpanded] = useState(true);
+
+  return (
+    <div className="nav-section">
+      <button
+        className="nav-section__head"
+        onClick={() => setExpanded((e) => !e)}
+        aria-expanded={expanded}
+      >
+        <svg
+          className={`nav-section__chevron${expanded ? " nav-section__chevron--open" : ""}`}
+          viewBox="0 0 24 24"
+          width="14"
+          height="14"
+          aria-hidden="true"
+        >
+          <path fill="currentColor" d="M8 5l8 7-8 7z" />
+        </svg>
+        <span className="nav-section__title">Verarbeitung</span>
+        <span className="nav-section__count">{PROCESSING_FILTERS.length}</span>
+      </button>
+      {expanded && (
+        <ul className="nav-section__list">
+          {PROCESSING_FILTERS.map((f) => {
+            const isActive = active === f.value;
+            return (
+              <li key={f.value}>
+                <button
+                  className={`nav-filter${isActive ? " nav-filter--active" : ""}`}
+                  onClick={() => onSelect(isActive ? "" : f.value)}
+                  aria-current={isActive ? "true" : undefined}
+                  title={f.label}
+                >
+                  <span className="nav-filter__label">{f.label}</span>
                 </button>
               </li>
             );
@@ -942,11 +1091,89 @@ function DocumentCard({ doc, onOpen }: { doc: DocumentItem; onOpen: () => void }
             ))}
           </div>
         )}
-        <p className="doc-card__date">
-          {new Date(doc.added_at).toLocaleDateString("de-DE")}
+        <p className="doc-card__footer">
+          <span className="doc-card__date">
+            {new Date(doc.added_at).toLocaleDateString("de-DE")}
+          </span>
+          <ProcessingBadge state={doc.processing_state} />
         </p>
       </div>
     </button>
+  );
+}
+
+// Triage-Karte (STOAA-296): owner-loses Dokument mit „Owner setzen"-Aktion.
+// Anders als DocumentCard ist die Karte ein <div> (verschachtelte Buttons wären
+// ungültig): der Titel öffnet das Detail, darunter weist ein Dropdown + Button
+// über POST set-owner (admin-only) einen Eigentümer zu. Nach Erfolg lädt die
+// Liste neu (onAssigned) – das zugewiesene Dokument fällt aus ?owner=none heraus.
+function TriageCard({
+  doc,
+  users,
+  onOpen,
+  onAssigned,
+}: {
+  doc: DocumentItem;
+  users: User[];
+  onOpen: () => void;
+  onAssigned: () => void;
+}) {
+  const [userId, setUserId] = useState<number | "">("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function assign() {
+    if (userId === "") return;
+    setSaving(true);
+    setError(null);
+    try {
+      await setDocumentOwner(doc.id, userId);
+      onAssigned(); // Liste refreshen – Karte verschwindet aus der Triage-Liste
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setSaving(false); // bei Erfolg bleibt saving aktiv bis zum Neuladen
+    }
+  }
+
+  return (
+    <div className="doc-card doc-card--triage">
+      <button className="triage-card__open" onClick={onOpen} title={doc.title}>
+        <h3 className="doc-card__title">{doc.title}</h3>
+        <p className="doc-card__meta">
+          {doc.correspondent_name ?? "Unbekannt"}
+          {doc.document_type_name ? ` · ${doc.document_type_name}` : ""}
+        </p>
+        <p className="doc-card__footer">
+          <span className="doc-card__date">
+            {new Date(doc.added_at).toLocaleDateString("de-DE")}
+          </span>
+          <ProcessingBadge state={doc.processing_state} />
+        </p>
+      </button>
+      <div className="triage-card__assign">
+        <label className="filter">
+          <span>Owner setzen</span>
+          <select
+            value={userId === "" ? "" : String(userId)}
+            onChange={(e) =>
+              setUserId(e.target.value ? Number(e.target.value) : "")
+            }
+            disabled={saving || users.length === 0}
+          >
+            <option value="">Nutzer wählen …</option>
+            {users.map((u) => (
+              <option key={u.id} value={String(u.id)}>
+                {u.username}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button onClick={assign} disabled={userId === "" || saving}>
+          {saving ? "Zuweisen …" : "Zuweisen"}
+        </button>
+        {error && <p className="status status--error">{error}</p>}
+      </div>
+    </div>
   );
 }
 

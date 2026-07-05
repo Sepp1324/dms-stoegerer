@@ -7,10 +7,11 @@ from datetime import timezone as dt_timezone
 from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
+from django.contrib.auth import get_user_model
 from django.db import connection
 from django.db.models import Case, DecimalField, Q, Value, When
 from django.db.models.functions import Cast
-from django.http import FileResponse, Http404
+from django.http import FileResponse, Http404, HttpResponse
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
@@ -50,6 +51,7 @@ class IsDmsAdmin(BasePermission):
         return bool(getattr(request.user, "is_dms_admin", False))
 
 from . import classification, pipeline, storage
+from .services import version_compare
 from .models import (
     AuditLogEntry,
     ClassificationRule,
@@ -59,9 +61,11 @@ from .models import (
     Document,
     DocumentShareLink,
     DocumentType,
+    DocumentVersion,
     MailAccount,
     StoragePath,
     Tag,
+    Workflow,
 )
 from .serializers import (
     AuditLogEntrySerializer,
@@ -71,14 +75,25 @@ from .serializers import (
     DocumentSerializer,
     DocumentShareLinkSerializer,
     DocumentTypeSerializer,
+    DocumentVersionSerializer,
     MailAccountSerializer,
     StoragePathSerializer,
     TagSerializer,
+    WorkflowSerializer,
 )
-from .tasks import bulk_classify_documents, process_document_version
+from .services import asn as asn_service
+from .tasks import (
+    bulk_classify_documents,
+    process_document_version,
+    retry_document_version,
+)
 
 # Erkennt Bereichsfilter auf Zusatzfeldern: ``custom_field_<id>_gte`` / ``_lte``.
 _CUSTOM_FIELD_PARAM_RE = re.compile(r"^custom_field_(\d+)_(gte|lte)$")
+# Eine Sucheingabe, die *ausschließlich* eine ASN ist: ``ASN12345`` oder die reine
+# Nummer ``12345`` (führende Nullen erlaubt). Beide Formen sind für die Suche
+# äquivalent und liefern exakt das zugehörige Dokument (STOAA-284/285).
+_ASN_QUERY_RE = re.compile(r"(?i)^\s*(?:asn)?\s*[0-9]+\s*$")
 # Werte, die sich verlustfrei zu DECIMAL casten lassen (Vorzeichen + Dezimalpunkt).
 # Andere ``CustomFieldValue.value`` (Text/Datum/„k. A.") werden per CASE zu NULL
 # und fallen aus dem Vergleich – kein Postgres-500 beim Cast.
@@ -281,7 +296,13 @@ class DocumentViewSet(viewsets.ModelViewSet):
     """Dokumente auflisten/abrufen inkl. Volltextsuche und Filtern.
 
     Query-Parameter der Liste:
-      * ``q``             – Volltextsuche über Titel + OCR-Text (PostgreSQL FTS)
+      * ``q``             – Gewichtete Volltextsuche (PostgreSQL FTS) über Titel,
+                            Korrespondent, Dokumenttyp, Schlagworte, Mail-Betreff/
+                            -Absender und OCR-Text. Gewichte: A=Titel+Korrespondent,
+                            B=Dokumenttyp/Tags/Mail-Felder, D=OCR-Text (niedrigste
+                            Priorität) → Treffer im Titel ranken vor OCR-Fließtext.
+                            Kurze Queries (1–2 Zeichen) fallen auf ``icontains`` über
+                            dieselben Felder zurück (FTS-Lexeme greifen dort schlecht).
       * ``correspondent`` – Filter auf Korrespondenten-ID
       * ``document_type`` – Filter auf Dokumenttyp-ID
       * ``storage_path``  – Filter auf Speicherpfad-ID
@@ -325,16 +346,69 @@ class DocumentViewSet(viewsets.ModelViewSet):
 
         params = self.request.query_params
 
+        # Triage-Ansicht (STOAA-295): Admins können mit ``?owner=none`` gezielt
+        # die eigentümerlosen (Triage-)Dokumente auflisten und anschließend per
+        # ``set-owner`` zuweisen. Für Nicht-Admins ist der Param wirkungslos –
+        # ihr Queryset ist bereits auf ``owner=user`` isoliert (STOAA-7), ein
+        # Leak in fremde/eigentümerlose Dokumente ist damit ausgeschlossen.
+        if getattr(user, "is_dms_admin", False) and params.get("owner") == "none":
+            qs = qs.filter(owner__isnull=True)
+
         q = params.get("q", "").strip()
-        if q:
+        # ASN-Suche (STOAA-284/285): Eine Eingabe, die ausschließlich eine ASN ist
+        # (``ASN12345`` oder die reine Nummer ``12345``), liefert exakt das
+        # zugehörige Dokument – beide Formen sind äquivalent. Owner-Scope bleibt
+        # gewahrt (qs ist bereits gefiltert). Gemischte Anfragen laufen weiter
+        # über die Volltextsuche.
+        if q and _ASN_QUERY_RE.match(q):
+            asn_value = asn_service.coerce_asn(q)
+            if asn_value is not None:
+                asn_qs = qs.filter(asn=asn_value)
+                # Nur wenn tatsächlich ein (eigenes) Dokument mit dieser ASN
+                # existiert, wird exakt danach aufgelöst. Sonst fällt die reine
+                # Zahl auf die normale Volltextsuche zurück (z. B. Jahreszahlen).
+                if asn_qs.exists():
+                    return asn_qs.distinct()
+        if 0 < len(q) < 3:
+            # Kurze Query: FTS-Lexeme greifen bei 1–2 Zeichen schlecht →
+            # icontains-ODER über dieselben Felder. Kein ``rank`` → es gilt das
+            # Standard-Ordering (Meta.ordering bzw. ``?ordering=``).
+            qs = qs.filter(
+                Q(title__icontains=q)
+                | Q(correspondent__name__icontains=q)
+                | Q(document_type__name__icontains=q)
+                | Q(tags__name__icontains=q)
+                | Q(mail_subject__icontains=q)
+                | Q(mail_sender__icontains=q)
+                | Q(current_version__ocr_text__icontains=q)
+            )
+        elif q:
             from django.contrib.postgres.search import (
                 SearchQuery,
                 SearchRank,
                 SearchVector,
             )
 
-            vector = SearchVector("title", weight="A", config="german") + SearchVector(
-                "current_version__ocr_text", weight="B", config="german"
+            # Gewichteter Vektor (STOAA-256): Titel/Korrespondent (A) ranken vor
+            # Dokumenttyp/Tags/Mail-Feldern (B), OCR-Fließtext (D) am schwächsten.
+            # Query-Zeit-Vektor (keine materialisierte Spalte/GIN) – bewusst, da
+            # der Vektor Join-Tabellen spannt; performant für Familien-Korpus.
+            # Known-Limitation: PostgreSQL-FTS tokenisiert reine E-Mail-Adressen
+            # als EIN atomares Token → Teilstrings der Sender-Domain (z. B. nur
+            # "energieanbieter") sind nicht als Lexeme suchbar. Der From-Header
+            # wird von mail.py als "Anzeigename <adresse>" gespeichert, sodass
+            # über den Anzeigenamen gesucht werden kann. Substring-Domainsuche
+            # bei anzeigenamenlosen Absendern ist ein optionales Folge-Ticket.
+            vector = (
+                SearchVector("title", weight="A", config="german")
+                + SearchVector("correspondent__name", weight="A", config="german")
+                + SearchVector("document_type__name", weight="B", config="german")
+                + SearchVector("tags__name", weight="B", config="german")
+                + SearchVector("mail_subject", weight="B", config="german")
+                + SearchVector("mail_sender", weight="B", config="german")
+                + SearchVector(
+                    "current_version__ocr_text", weight="D", config="german"
+                )
             )
             query = SearchQuery(q, config="german")
             qs = (
@@ -349,6 +423,36 @@ class DocumentViewSet(viewsets.ModelViewSet):
             qs = qs.filter(document_type_id=params["document_type"])
         if params.get("storage_path"):
             qs = qs.filter(storage_path_id=params["storage_path"])
+        # Verarbeitungsstatus-Filter (STOAA-248): grobe UI-Buckets auf den
+        # ``processing_state`` der aktuellen Version. Bewusst manuell (kein
+        # django-filter). ``processing`` fasst alle In-Flight-States zusammen;
+        # ``failed``/``retry_pending``/``ready`` sind eigene Buckets. Ein Wert,
+        # der kein Bucket ist, wird als exakter State interpretiert; ein
+        # unbekannter Wert wird ignoriert (kein 500, kein Filter).
+        processing_state = params.get("processing_state")
+        if processing_state:
+            PS = DocumentVersion.ProcessingState
+            buckets = {
+                "failed": [PS.FAILED],
+                "retry_pending": [PS.RETRY_PENDING],
+                "ready": [PS.READY],
+                "processing": [
+                    PS.UPLOADED,
+                    PS.HASHED,
+                    PS.OCR_RUNNING,
+                    PS.OCR_DONE,
+                    PS.CLASSIFICATION_RUNNING,
+                    PS.CLASSIFIED,
+                    PS.THUMBNAIL_DONE,
+                    PS.SEALED,
+                ],
+            }
+            states = buckets.get(processing_state)
+            if states is None and processing_state in {c for c, _ in PS.choices}:
+                # Kein Bucket, aber ein gültiger exakter State.
+                states = [processing_state]
+            if states is not None:
+                qs = qs.filter(current_version__processing_state__in=states)
         # ``tag`` mehrfach erlaubt (?tag=1&tag=2) → ODER via ``__in``;
         # ein einzelner Wert bleibt abwärtskompatibel (getlist → ["1"]).
         tags = params.getlist("tag")
@@ -420,6 +524,39 @@ class DocumentViewSet(viewsets.ModelViewSet):
         """
         document = self.get_object()
         return Response(pipeline.verify_document_integrity(document))
+
+    @action(detail=False, methods=["get"], url_path=r"by-asn/(?P<asn>[^/]+)")
+    def by_asn(self, request, asn=None):
+        """Liefert das Dokument zu einer ASN (``GET /api/documents/by-asn/{asn}``).
+
+        Akzeptiert sowohl ``ASN000123`` als auch die reine Nummer ``123``. Owner-
+        Scoping über ``get_queryset()`` – ein fremdes/unbekanntes Dokument ergibt
+        404 (kein Leak). Nur-Lesen. Die ASN-Auflösung liegt vollständig im Service
+        (keine ASN-Logik im ViewSet).
+        """
+        asn_value = asn_service.coerce_asn(asn)
+        if asn_value is None:
+            raise Http404("Ungültige ASN.")
+        document = self.get_queryset().filter(asn=asn_value).first()
+        if document is None:
+            raise Http404("Kein Dokument mit dieser ASN gefunden.")
+        return Response(self.get_serializer(document).data)
+
+    @action(detail=True, methods=["get"])
+    def qr(self, request, pk=None):
+        """Liefert den QR-Code des Dokuments als PNG (``GET /api/documents/{id}/qr``).
+
+        Der Code enthält ausschließlich die ASN (``ASN000123``) – keine URL, kein
+        JSON. Die Erzeugung liegt vollständig im Service ``asn.render_qr``. Nur-
+        Lesen; Owner-Scoping über ``get_object()``.
+        """
+        document = self.get_object()
+        png = asn_service.render_qr(document)
+        response = HttpResponse(png, content_type="image/png")
+        response["Content-Disposition"] = (
+            f'inline; filename="{asn_service.format_asn(document.asn)}.png"'
+        )
+        return response
 
     @action(
         detail=True,
@@ -518,7 +655,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
         }
 
     def perform_update(self, serializer):
-        """Speichert und protokolliert geänderte Metadatenfelder (vorher/nachher)."""
+        """Speichert, protokolliert Metadaten-Änderungen und feuert Workflow-Engine."""
         before = self._metadata_snapshot(serializer.instance)
         super().perform_update(serializer)
         document = serializer.instance
@@ -536,6 +673,9 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 object_id=str(document.id),
                 detail={"changes": changes},
             )
+        # Workflow-Engine: document_updated
+        from . import workflows
+        workflows.run_workflows(document, trigger_type="document_updated", source="api")
 
     def perform_destroy(self, instance):
         """Protokolliert die Löschung, bevor das Dokument entfernt wird.
@@ -823,6 +963,93 @@ class DocumentViewSet(viewsets.ModelViewSet):
             action_name="reject",
         )
 
+    @action(detail=True, methods=["post"], url_path="retry_processing")
+    def retry_processing(self, request, pk=None):
+        """Verarbeitung der aktuellen Version neu anstoßen (STOAA-248).
+
+        Bewusst dokument-scoped (nicht version-scoped): es gibt kein
+        DocumentVersionViewSet, Versionen sind nur nested; der UI-Bedarf ist
+        genau der Retry der *current_version*. Die Owner-Isolation kommt gratis
+        über ``get_object()`` (fremdes Dokument → 404).
+
+        Guard: nur erlaubt, wenn ``current_version.processing_state == failed``
+        (sonst 400). Gast-Rolle → 403. Die – potentiell lange –
+        Neuverarbeitung läuft asynchron (``retry_document_version.delay``); die
+        Antwort ist 202 mit der serialisierten aktuellen Version (noch im
+        Zustand FAILED, das Hochzählen auf RETRY_PENDING passiert im Task).
+        Polling ist nicht nötig – der ``processing_state``-Rollup aktualisiert
+        sich über die Liste.
+        """
+        if not request.user.can_write:
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        document = self.get_object()
+        version = document.current_version
+        PS = DocumentVersion.ProcessingState
+
+        if version is None or version.processing_state != PS.FAILED:
+            return Response(
+                {
+                    "detail": (
+                        "Retry ist nur für eine fehlgeschlagene Verarbeitung "
+                        "(processing_state=failed) möglich."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        retry_document_version.delay(version.id, actor_id=request.user.id)
+        return Response(
+            DocumentVersionSerializer(version).data,
+            status=status.HTTP_202_ACCEPTED,
+        )
+
+    def _resolve_version_no(self, document, version_no):
+        """Löst eine ``version_no`` gegen die DB auf (kein Nutzerpfad).
+
+        Wie das bestehende ``_resolve_version``-Muster: die Nummer wird gegen
+        ``document.versions`` validiert, es gibt keine Nutzer-Dateipfade → keine
+        Traversal. Fehlende/ungültige Version → ``Http404``.
+        """
+        version = document.versions.filter(version_no=version_no).first()
+        if version is None:
+            raise Http404(f"Version {version_no} nicht vorhanden.")
+        return version
+
+    @action(
+        detail=True,
+        methods=["get"],
+        url_path=(
+            "versions/(?P<from_version>[0-9]+)/compare/(?P<to_version>[0-9]+)"
+        ),
+    )
+    def compare_versions(
+        self, request, pk=None, from_version=None, to_version=None
+    ):
+        """Vergleicht zwei Versionen (Stufe 1: OCR-/Datei-/PDF-Diff, STOAA-289).
+
+        Pfad::
+
+            GET /api/documents/{id}/versions/{from_version}/compare/{to_version}/
+
+        ``from_version``/``to_version`` sind ``version_no``-Werte (``from`` = alt,
+        ``to`` = neu); beliebige Reihenfolge ist erlaubt. ``self.get_object()``
+        erzwingt Sichtbarkeit/Owner über das gefilterte Queryset – fremde/nicht
+        sichtbare Dokumente ergeben 404, keine neuen Rechte. Fehlende/ungültige
+        Version → 404. Die gesamte Vergleichslogik liegt im Service
+        ``services.version_compare`` – hier nur Auflösung + Delegation.
+        """
+        document = self.get_object()
+        # ``from_version``/``to_version`` sind durch die url_path-Regex bereits
+        # rein numerisch; int() ist damit crash-frei.
+        old = self._resolve_version_no(document, int(from_version))
+        new = self._resolve_version_no(document, int(to_version))
+        result = version_compare.compare_versions(document, old, new)
+        return Response(result.to_dict())
+
     # Bis zu so vielen Dokumenten wird synchron im Request klassifiziert;
     # größere Batches wandern in einen Celery-Task (Timeout-/Lastschutz).
     BULK_CLASSIFY_SYNC_LIMIT = 10
@@ -969,6 +1196,26 @@ class CustomFieldViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_409_CONFLICT,
             )
         return super().destroy(request, *args, **kwargs)
+
+
+class WorkflowViewSet(viewsets.ModelViewSet):
+    """CRUD für Workflows (STOAA-263) inkl. verschachteltem Trigger + Aktionen.
+
+    Schreiben nur für ``can_write`` (nicht Gäste). Der Serializer nimmt
+    ``trigger`` (Objekt) und ``actions`` (Liste) verschachtelt entgegen und
+    ersetzt sie idempotent – passend zum geführten Frontend-Editor (PR3).
+    """
+
+    queryset = Workflow.objects.prefetch_related(
+        "trigger",
+        "trigger__filter_has_tags",
+        "trigger__filter_has_not_tags",
+        "actions",
+        "actions__assign_tags",
+        "actions__remove_tags",
+    ).all()
+    serializer_class = WorkflowSerializer
+    permission_classes = [ReadOnlyOrCanWrite]
 
 
 class DocumentShareLinkViewSet(viewsets.ModelViewSet):
@@ -1228,19 +1475,52 @@ class MailAccountViewSet(viewsets.ModelViewSet):
         instance.delete()
         self._audit("mailaccount_delete", account_id, {"name": name})
 
+    def _run_connection_test(self, account, *, persist):
+        """IMAP-Verbindung testen und ``(ok, message)`` liefern.
+
+        ``persist=True`` (nur bei gespeicherten Konten): Ergebnis am Konto
+        festhalten – ``last_checked_at`` = jetzt, ``last_error`` = "" bei Erfolg
+        bzw. die Fehlermeldung. So bleibt der Status nach Reload/Seitenwechsel
+        erhalten (STOAA-172: „Banner grün, ``last_checked_at`` aktualisiert").
+        """
+        from django.utils import timezone
+
+        from .mail import connect
+
+        try:
+            conn = connect(account)
+            try:
+                conn.logout()
+            except Exception:  # noqa: BLE001 – Logout-Fehler nach Erfolg ignorieren
+                pass
+            ok, message = True, "Verbindung erfolgreich."
+        except Exception as exc:  # noqa: BLE001 – jede IMAP-/Netzwerkstörung melden
+            ok, message = False, str(exc) or exc.__class__.__name__
+
+        if persist:
+            account.last_checked_at = timezone.now()
+            account.last_error = "" if ok else message
+            account.save(update_fields=["last_checked_at", "last_error"])
+            self._audit("mailaccount_test_connection", account.id, {"ok": ok})
+
+        return ok, message
+
     @action(detail=False, methods=["post"], url_path="test-connection")
     def test_connection(self, request):
         """IMAP-Verbindung mit übergebenen (oder gespeicherten) Zugangsdaten testen.
 
         Body: entweder ``{"id": <pk>}`` (testet ein gespeichertes Konto) **oder**
         vollständige Zugangsdaten ``{host, port, use_ssl, username, password}``
-        (bzw. ``password_env``). Es wird nichts gespeichert.
+        (bzw. ``password_env``).
+
+        Persistierung (STOAA-172): Wird ein **gespeichertes** Konto getestet
+        (``id`` gesetzt bzw. Detail-Route ``/{pk}/test-connection/``), werden
+        ``last_checked_at`` / ``last_error`` am Konto aktualisiert. Ein Test mit
+        rohen Zugangsdaten (Anlege-Formular, noch kein Konto) bleibt zustandslos.
 
         Antwort: ``{"ok": bool, "message": str}`` (HTTP 200 – ein fehlgeschlagener
         Test ist kein Client-Fehler, sondern ein erwartetes Ergebnis).
         """
-        from .mail import connect
-
         data = request.data
         account_id = data.get("id")
         if account_id is not None:
@@ -1250,6 +1530,7 @@ class MailAccountViewSet(viewsets.ModelViewSet):
                     {"detail": "Konto nicht gefunden."},
                     status=status.HTTP_404_NOT_FOUND,
                 )
+            persist = True
         else:
             host = (data.get("host") or "").strip()
             username = (data.get("username") or "").strip()
@@ -1269,13 +1550,19 @@ class MailAccountViewSet(viewsets.ModelViewSet):
                 password=data.get("password") or "",
                 password_env=data.get("password_env") or "",
             )
+            persist = False
 
-        try:
-            conn = connect(account)
-            try:
-                conn.logout()
-            except Exception:  # noqa: BLE001 – Logout-Fehler nach Erfolg ignorieren
-                pass
-            return Response({"ok": True, "message": "Verbindung erfolgreich."})
-        except Exception as exc:  # noqa: BLE001 – jede IMAP-/Netzwerkstörung melden
-            return Response({"ok": False, "message": str(exc) or exc.__class__.__name__})
+        ok, message = self._run_connection_test(account, persist=persist)
+        return Response({"ok": ok, "message": message})
+
+    @action(detail=True, methods=["post"], url_path="test-connection")
+    def test_connection_detail(self, request, pk=None):
+        """Verbindungstest für ein gespeichertes Konto (``/{pk}/test-connection/``).
+
+        Spec-konforme Detail-Route (STOAA-172): testet das adressierte Konto und
+        persistiert ``last_checked_at`` / ``last_error``. Alias-Bequemlichkeit zur
+        Collection-Route mit ``{"id": pk}``.
+        """
+        account = self.get_object()
+        ok, message = self._run_connection_test(account, persist=True)
+        return Response({"ok": ok, "message": message})

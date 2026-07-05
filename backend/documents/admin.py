@@ -2,6 +2,7 @@ from django import forms
 from django.contrib import admin
 
 from .models import (
+    ASNScan,
     AuditLogEntry,
     ClassificationRule,
     Correspondent,
@@ -14,6 +15,9 @@ from .models import (
     ProcessedMail,
     StoragePath,
     Tag,
+    Workflow,
+    WorkflowAction,
+    WorkflowTrigger,
 )
 
 
@@ -37,13 +41,32 @@ class CustomFieldValueInline(admin.TabularInline):
     extra = 0
 
 
+class ASNScanInline(admin.TabularInline):
+    model = ASNScan
+    extra = 0
+    fields = ("scanned_at", "matched_by", "confidence", "version")
+    readonly_fields = ("scanned_at",)
+
+
 @admin.register(Document)
 class DocumentAdmin(admin.ModelAdmin):
-    list_display = ("title", "correspondent", "document_type", "added_at", "owner")
+    # ASN (STOAA-284/285): read-only anzeigen, filter-/suchbar und sortierbar.
+    list_display = ("asn", "title", "correspondent", "document_type", "added_at", "owner")
     list_filter = ("document_type", "correspondent", "tags")
-    search_fields = ("title",)
+    search_fields = ("title", "asn")
+    ordering = ("-added_at",)
+    readonly_fields = ("asn",)
     filter_horizontal = ("tags",)
-    inlines = (DocumentVersionInline, CustomFieldValueInline)
+    inlines = (DocumentVersionInline, CustomFieldValueInline, ASNScanInline)
+
+
+@admin.register(ASNScan)
+class ASNScanAdmin(admin.ModelAdmin):
+    list_display = ("document", "matched_by", "confidence", "version", "scanned_at")
+    list_filter = ("matched_by",)
+    search_fields = ("document__title", "document__asn")
+    ordering = ("-scanned_at",)
+    readonly_fields = ("document", "version", "matched_by", "confidence", "scanned_at")
 
 
 @admin.register(DocumentVersion)
@@ -59,6 +82,12 @@ class DocumentVersionAdmin(admin.ModelAdmin):
     )
     list_filter = ("processing_state", "is_immutable", "mime_type")
     search_fields = ("document__title", "sha256")
+    readonly_fields = (
+        "processing_error",
+        "processing_failed_step",
+        "processing_failed_at",
+        "processing_attempts",
+    )
 
 
 @admin.register(ClassificationRule)
@@ -153,6 +182,38 @@ class ProcessedMailAdmin(admin.ModelAdmin):
         "imported_count",
         "processed_at",
     )
+
+
+class WorkflowTriggerInline(admin.StackedInline):
+    model = WorkflowTrigger
+    extra = 0
+    filter_horizontal = ("filter_has_tags", "filter_has_not_tags")
+
+
+class WorkflowActionInline(admin.TabularInline):
+    model = WorkflowAction
+    extra = 0
+    filter_horizontal = ("assign_tags", "remove_tags")
+
+
+class WorkflowAdmin(admin.ModelAdmin):
+    list_display = ("name", "order", "enabled")
+    list_editable = ("order", "enabled")
+    inlines = [WorkflowTriggerInline, WorkflowActionInline]
+
+
+# Idempotente Registrierung: In manchen Build-Umgebungen (collectstatic während
+# des Docker-Builds) werden App-Module durch das Zusammenspiel von Djangos
+# App-Population und Celerys ``autodiscover_tasks`` nicht-deterministisch ein
+# zweites Mal importiert (sichtbar an den „Model … was already registered"-
+# RuntimeWarnings). Der harte ``@admin.register``-Dekorator würde dann mit
+# ``AlreadyRegistered`` abbrechen und collectstatic (und damit den Image-Build)
+# scheitern lassen. Das ``try/except`` macht die Registrierung robust, ohne die
+# fachliche Funktion (Admin-Verwaltung der Workflows) zu verändern.
+try:
+    admin.site.register(Workflow, WorkflowAdmin)
+except admin.sites.AlreadyRegistered:
+    pass
 
 
 admin.site.site_header = "DMS-Verwaltung"

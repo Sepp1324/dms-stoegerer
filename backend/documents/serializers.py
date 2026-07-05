@@ -13,6 +13,9 @@ from .models import (
     MailAccount,
     StoragePath,
     Tag,
+    Workflow,
+    WorkflowAction,
+    WorkflowTrigger,
 )
 
 
@@ -118,6 +121,16 @@ class DocumentVersionSerializer(serializers.ModelSerializer):
             "sha256",
             "prev_hash",
             "processing_state",
+            "processing_error",
+            "processing_failed_step",
+            "processing_failed_at",
+            "processing_attempts",
+            "ocr_status",
+            "ocr_error",
+            "ocr_engine",
+            "ocr_duration_ms",
+            "ocr_started_at",
+            "ocr_finished_at",
             "mime_type",
             "size",
             "page_count",
@@ -127,6 +140,21 @@ class DocumentVersionSerializer(serializers.ModelSerializer):
             "created_by_name",
             "has_archive",
             "created_at",
+        )
+        # Fehler-/Retry-Felder (STOAA-228) und OCR-State-Machine (STOAA-225) sind
+        # beide serverseitig (Pipeline) gesetzt – nur lesbar, damit das Monitoring
+        # die Werte über die API sieht.
+        read_only_fields = (
+            "processing_error",
+            "processing_failed_step",
+            "processing_failed_at",
+            "processing_attempts",
+            "ocr_status",
+            "ocr_error",
+            "ocr_engine",
+            "ocr_duration_ms",
+            "ocr_started_at",
+            "ocr_finished_at",
         )
 
     def get_created_by_name(self, obj) -> str | None:
@@ -188,9 +216,24 @@ class DocumentSerializer(serializers.ModelSerializer):
     page_count = serializers.IntegerField(
         source="current_version.page_count", read_only=True, default=None
     )
+    # OCR-Status der aktuellen Version direkt am Dokument – für Listen-Monitoring
+    # ohne die verschachtelte ``versions``-Liste durchsuchen zu müssen (STOAA-225).
+    ocr_status = serializers.CharField(
+        source="current_version.ocr_status", read_only=True, default=None
+    )
+    # Rollup des Verarbeitungsstatus der aktuellen Version (STOAA-248): erspart
+    # dem Frontend fürs Listen-Badge den Griff in die nested ``versions``-Liste.
+    # Read-only; ``None`` wenn (noch) keine current_version existiert.
+    processing_state = serializers.CharField(
+        source="current_version.processing_state", read_only=True, default=None
+    )
     storage_path_name = serializers.CharField(
         source="storage_path.name", read_only=True, default=None
     )
+    # Archivnummer (STOAA-284/285): read-only – die ASN ist unveränderlich und
+    # wird serverseitig vergeben. ``asn_label`` liefert die kanonische Anzeigeform
+    # ``ASN000123`` fürs Frontend (Detailansicht/QR-Download).
+    asn_label = serializers.SerializerMethodField()
     # Zusatzfeld-Werte: GET = nested Liste; PATCH = Upsert per (document, field)
     # in ``update()``/``create()`` (unique_together). ``required=False``, damit
     # ein PATCH ohne diesen Schlüssel die bestehenden Werte unangetastet lässt.
@@ -214,6 +257,10 @@ class DocumentSerializer(serializers.ModelSerializer):
             "owner",
             "current_version",
             "page_count",
+            "ocr_status",
+            "processing_state",
+            "asn",
+            "asn_label",
             "ai_suggestions",
             "ai_suggested_at",
             "classification",
@@ -225,11 +272,20 @@ class DocumentSerializer(serializers.ModelSerializer):
             "added_at",
             "current_version",
             "owner",  # Eigentümer serverseitig gesetzt – nicht per Request änderbar (STOAA-7)
+            "asn",  # unveränderlich, serverseitig vergeben (STOAA-284/285)
             "ai_suggestions",
             "ai_suggested_at",
             "classification",
             "status",  # Statuswechsel NUR über submit/approve/reject – nie per PATCH (STOAA-63)
         )
+
+    def get_asn_label(self, obj) -> str | None:
+        """Kanonische Anzeigeform der ASN (``ASN000123``) oder ``None``."""
+        if not obj.asn:
+            return None
+        from .services.asn import format_asn
+
+        return format_asn(obj.asn)
 
     def _upsert_custom_field_values(self, document, values):
         """Upsert der Zusatzfeld-Werte per unique_together (document, field).
@@ -310,3 +366,165 @@ class MailAccountSerializer(serializers.ModelSerializer):
         if validated_data.get("password", None) == "":
             validated_data.pop("password")
         return super().update(instance, validated_data)
+
+
+# ---------------------------------------------------------------------------
+# Workflow-Engine (STOAA-263) – verschachtelte Serializer für Trigger/Aktionen
+# ---------------------------------------------------------------------------
+class WorkflowTriggerSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = WorkflowTrigger
+        fields = (
+            "id",
+            "trigger_type",
+            "sources",
+            "filter_path",
+            "filter_correspondent",
+            "filter_document_type",
+            "filter_has_tags",
+            "filter_has_not_tags",
+            "filter_text_contains",
+            "filter_text_regex",
+        )
+
+
+class WorkflowActionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = WorkflowAction
+        fields = (
+            "id",
+            "order",
+            "action_type",
+            "assign_title",
+            "assign_correspondent",
+            "assign_document_type",
+            "assign_storage_path",
+            "assign_tags",
+            "assign_owner",
+            "assign_custom_fields",
+            "remove_tags",
+        )
+
+
+class WorkflowSerializer(serializers.ModelSerializer):
+    """Workflow mit verschachteltem Trigger (1:1) und Aktionsliste (1:n).
+
+    Schreiben (POST/PUT/PATCH) akzeptiert ``trigger`` als Objekt und ``actions``
+    als Liste; die Engine liest sie deterministisch in ``order``-Reihenfolge.
+    Beim Update werden Aktionen vollständig ersetzt (idempotent, einfaches
+    Contract für den Frontend-Editor).
+    """
+
+    trigger = WorkflowTriggerSerializer(required=False)
+    actions = WorkflowActionSerializer(many=True, required=False)
+
+    class Meta:
+        model = Workflow
+        fields = ("id", "name", "order", "enabled", "trigger", "actions")
+
+    def _write_nested(self, workflow, trigger_data, actions_data):
+        # Trigger (OneToOne) – ersetzen/aktualisieren
+        if trigger_data is not None:
+            has_tags = trigger_data.pop("filter_has_tags", None)
+            has_not_tags = trigger_data.pop("filter_has_not_tags", None)
+            trigger, _ = WorkflowTrigger.objects.update_or_create(
+                workflow=workflow, defaults=trigger_data
+            )
+            if has_tags is not None:
+                trigger.filter_has_tags.set(has_tags)
+            if has_not_tags is not None:
+                trigger.filter_has_not_tags.set(has_not_tags)
+
+        # Aktionen (1:n) – vollständig ersetzen
+        if actions_data is not None:
+            workflow.actions.all().delete()
+            for action_data in actions_data:
+                assign_tags = action_data.pop("assign_tags", [])
+                remove_tags = action_data.pop("remove_tags", [])
+                action = WorkflowAction.objects.create(workflow=workflow, **action_data)
+                if assign_tags:
+                    action.assign_tags.set(assign_tags)
+                if remove_tags:
+                    action.remove_tags.set(remove_tags)
+
+    def create(self, validated_data):
+        trigger_data = validated_data.pop("trigger", None)
+        actions_data = validated_data.pop("actions", None)
+        workflow = Workflow.objects.create(**validated_data)
+        self._write_nested(workflow, trigger_data, actions_data)
+        return workflow
+
+    def update(self, instance, validated_data):
+        trigger_data = validated_data.pop("trigger", None)
+        actions_data = validated_data.pop("actions", None)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        self._write_nested(instance, trigger_data, actions_data)
+        return instance
+
+
+
+# ---------------------------------------------------------------------------
+# Versionsvergleich-Serializer (STOAA-288) – rein lesend, kein Model gebunden
+# ---------------------------------------------------------------------------
+
+from rest_framework import serializers as _s
+
+
+class FieldChangeSerializer(_s.Serializer):
+    old = _s.CharField(allow_null=True)
+    new = _s.CharField(allow_null=True)
+
+
+class TagDiffSerializer(_s.Serializer):
+    added = _s.ListField(child=_s.CharField())
+    removed = _s.ListField(child=_s.CharField())
+
+
+class FileDiffSerializer(_s.Serializer):
+    old_sha256 = _s.CharField()
+    new_sha256 = _s.CharField()
+    old_size = _s.IntegerField()
+    new_size = _s.IntegerField()
+    old_mime = _s.CharField()
+    new_mime = _s.CharField()
+    changed = _s.BooleanField()
+    old_page_count = _s.IntegerField(allow_null=True)
+    new_page_count = _s.IntegerField(allow_null=True)
+    pages_changed = _s.BooleanField()
+
+
+class CompareSummarySerializer(_s.Serializer):
+    text_changed = _s.BooleanField()
+    metadata_changed = _s.BooleanField()
+    tags_changed = _s.BooleanField()
+    custom_fields_changed = _s.BooleanField()
+    binary_changed = _s.BooleanField()
+    pages_changed = _s.BooleanField()
+    tag_changes = _s.IntegerField()
+    field_changes = _s.IntegerField()
+
+
+class VersionCompareResultSerializer(_s.Serializer):
+    document = _s.IntegerField()
+    from_version = _s.IntegerField()
+    to_version = _s.IntegerField()
+    summary = CompareSummarySerializer()
+    text_diff = _s.CharField()
+    metadata = _s.DictField(child=FieldChangeSerializer())
+    tags = TagDiffSerializer()
+    custom_fields = _s.DictField(child=FieldChangeSerializer())
+    files = FileDiffSerializer()
+    # Stufe 1 vergleicht beide Versionen gegen dasselbe ``Document`` – ein
+    # echter Metadaten-/Tag-/Feld-Diff pro Version ist erst mit Stufe 2
+    # (Metadaten-Versionierung) möglich. Das Flag ist Teil des Contracts, damit
+    # das Frontend die entsprechenden Badges gezielt aus-/einblenden kann
+    # (STOAA-290). In Stufe 1 immer ``False``.
+    metadata_versioning_supported = _s.SerializerMethodField()
+
+    def get_metadata_versioning_supported(self, obj):
+        # ``VersionCompareResult`` (dataclass) trägt das Flag in Stufe 1 nicht;
+        # per Vertrag ist es hier immer False. Stufe 2 kann das Attribut am
+        # Ergebnis setzen, dann wird es hier durchgereicht.
+        return bool(getattr(obj, "metadata_versioning_supported", False))

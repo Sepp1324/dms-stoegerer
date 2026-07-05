@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Führt die Backend-Testsuite + Migrations-Check im gebauten Backend-Image
-# gegen eine wegwerfbare Postgres-16-Instanz aus.
+# Führt Django-Check + Migrations-Check + Backend-Testsuite im gebauten
+# Backend-Image gegen eine wegwerfbare Postgres-16-Instanz aus.
 #
 #   Aufruf:  run-tests.sh <backend-image>
 #
@@ -8,7 +8,8 @@
 # django.contrib.postgres (Volltextsuche via SearchVector), das unter SQLite
 # nicht läuft. Deshalb testen wir gegen dieselbe Engine wie in Produktion.
 #
-# Verwendet von .github/workflows/ci.yml (PR-Gate) und deploy.yml (Deploy-Gate).
+# Verwendet von .github/workflows/pr-checks.yml (PR-Gate) und deploy.yml
+# (Deploy-Gate).
 # Läuft auf dem self-hosted Runner (Label "dms"), der Docker bereitstellt.
 set -euo pipefail
 
@@ -46,11 +47,16 @@ if [ "$ready" -ne 1 ]; then
 fi
 echo "::endgroup::"
 
-echo "::group::Migrations-Check + Testsuite im Backend-Image"
+echo "::group::Django-Check + Migrations-Check + Testsuite im Backend-Image"
 # POSTGRES_HOST zeigt auf den DB-Container im selben Docker-Netz.
 # DJANGO_SECRET_KEY/DEBUG explizit gesetzt, damit der Lauf nicht vom
 # Default-Verhalten abhängt. Der User "dms" ist im Postgres-Image Superuser
 # und darf damit die Test-DB (test_dms) anlegen.
+#
+# Reihenfolge (harter Abbruch bei jedem Fehler dank &&):
+#   1. manage.py check                   – System-/Konfig-Checks
+#   2. makemigrations --check --dry-run  – fail bei vergessenen Migrationen
+#   3. manage.py test                    – Testsuite
 docker run --rm --network "$NET" \
   -e POSTGRES_HOST="$PG" \
   -e POSTGRES_DB=dms \
@@ -59,5 +65,5 @@ docker run --rm --network "$NET" \
   -e DJANGO_SECRET_KEY=ci-test-not-a-real-secret \
   -e DJANGO_DEBUG=0 \
   "$IMAGE" \
-  sh -c "python manage.py makemigrations --check --dry-run && python manage.py test --noinput -v2"
+  sh -c "python manage.py check && python manage.py makemigrations --check --dry-run && python manage.py test --noinput -v2"
 echo "::endgroup::"

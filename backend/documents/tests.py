@@ -14,6 +14,7 @@ from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APITestCase
 
+from . import pipeline
 from .classification import apply_rules, rule_matches
 from .models import (
     AuditLogEntry,
@@ -1215,6 +1216,233 @@ class ConsumeFolderScanTests(TestCase):
         self.assertEqual(Document.objects.get().title, "good")
         delay.assert_called_once()
 
+    def test_fehlender_ordner_wird_idempotent_angelegt(self):
+        """(d) STOAA-321: Fehlt CONSUME_DIR, wird er angelegt (found=0, WARN einmal);
+        beim zweiten Scan liegt eine reife Datei drin -> found=1, keine erneute WARN.
+        """
+        import os
+        import time
+        from pathlib import Path
+        from unittest import mock
+
+        from . import storage, tasks
+
+        # Frischer, noch NICHT existierender Consume-Pfad.
+        missing = Path(self._tmp.name) / "consume_neu"
+        self.assertFalse(missing.exists())
+
+        with self.settings(CONSUME_MIN_AGE=15):
+            with mock.patch.object(
+                storage, "CONSUME_DIR", missing
+            ), mock.patch.object(
+                storage, "ORIGINALS_DIR", self.originals
+            ), mock.patch.object(tasks.process_document_version, "delay"):
+                with self.assertLogs("documents.tasks", level="WARNING") as logs:
+                    result1 = tasks.scan_consume_folder()
+
+        # Ordner (inkl. _processed/_failed) wurde angelegt, kein Fehler, nichts gefunden.
+        self.assertTrue(missing.is_dir())
+        self.assertTrue((missing / "_processed").is_dir())
+        self.assertTrue((missing / "_failed").is_dir())
+        self.assertEqual(result1["found"], 0)
+        # Genau EINE WARN-Zeile zur Neuanlage.
+        anlage = [m for m in logs.output if "CONSUME_DIR angelegt" in m]
+        self.assertEqual(len(anlage), 1)
+
+        # Zweiter Scan: reife Datei liegt jetzt drin -> found=1, keine erneute WARN.
+        f = missing / "reif.pdf"
+        f.write_bytes(b"%PDF-1.4 dummy")
+        mtime = time.time() - 3600
+        os.utime(f, (mtime, mtime))
+
+        with self.settings(CONSUME_MIN_AGE=15):
+            with mock.patch.object(
+                storage, "CONSUME_DIR", missing
+            ), mock.patch.object(
+                storage, "ORIGINALS_DIR", self.originals
+            ), mock.patch.object(tasks.process_document_version, "delay") as delay:
+                # Ordner existiert bereits -> keine erneute WARN.
+                with self.assertNoLogs("documents.tasks", level="WARNING"):
+                    result2 = tasks.scan_consume_folder()
+
+        self.assertEqual(result2["found"], 1)
+        self.assertEqual(result2["failed"], 0)
+        self.assertTrue((missing / "_processed" / "reif.pdf").exists())
+        delay.assert_called_once()
+
+
+class ConsumePerUserScanTests(TestCase):
+    """STOAA-261: Pro-User-Attribution des Consume-Ingest.
+
+    Bei ``CONSUME_PER_USER=True`` liegen Scans in pro-User-Unterordnern
+    (``CONSUME_DIR/<username>/``); Dateien werden dem passenden Django-User als
+    ``Document.owner`` zugeordnet. Deckt ab: (a) Zuordnung, (b) unbekannter
+    Ordner wird übersprungen + geloggt, (c) Reife-Check, (d) Fehlerpfad →
+    ``_failed/`` im User-Ordner, (e) Flag off → Flat-Regression (owner=None,
+    Unterordner ignoriert). ``process_document_version.delay`` wird gemockt.
+    """
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.consume = root / "consume"
+        self.originals = root / "originals"
+        self.consume.mkdir(parents=True, exist_ok=True)
+        self.originals.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(self._tmp.cleanup)
+
+        self.sebastian = get_user_model().objects.create_user(
+            username="sebastian", password="x"
+        )
+
+    def _write(self, subdir, name, *, age_seconds):
+        """Legt eine Datei in ``consume/<subdir>/`` an und setzt ihr Alter (mtime)."""
+        import os
+        import time
+
+        folder = self.consume / subdir
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / name
+        path.write_bytes(b"%PDF-1.4 dummy")
+        mtime = time.time() - age_seconds
+        os.utime(path, (mtime, mtime))
+        return path
+
+    def _run_scan(self):
+        from unittest import mock
+
+        from . import storage, tasks
+
+        with mock.patch.object(storage, "CONSUME_DIR", self.consume), mock.patch.object(
+            storage, "ORIGINALS_DIR", self.originals
+        ), mock.patch.object(tasks.process_document_version, "delay") as delay:
+            result = tasks.scan_consume_folder()
+        return result, delay
+
+    def test_datei_im_user_ordner_wird_dem_user_zugeordnet(self):
+        """(a) /scans/sebastian/reif.pdf -> Document.owner == sebastian."""
+        with self.settings(CONSUME_PER_USER=True, CONSUME_MIN_AGE=15):
+            self._write("sebastian", "reif.pdf", age_seconds=3600)
+            result, delay = self._run_scan()
+
+        self.assertEqual(result["found"], 1)
+        self.assertEqual(result["failed"], 0)
+        self.assertEqual(Document.objects.count(), 1)
+        doc = Document.objects.get()
+        self.assertEqual(doc.owner, self.sebastian)
+        # _processed/ liegt IM User-Ordner, nicht auf Consume-Ebene.
+        self.assertTrue((self.consume / "sebastian" / "_processed" / "reif.pdf").exists())
+        self.assertFalse((self.consume / "_processed" / "reif.pdf").exists())
+        delay.assert_called_once()
+
+    def test_ordnername_case_insensitive(self):
+        """Ordner ``Sebastian`` löst denselben User (username__iexact) auf."""
+        with self.settings(CONSUME_PER_USER=True, CONSUME_MIN_AGE=15):
+            self._write("Sebastian", "reif.pdf", age_seconds=3600)
+            result, _ = self._run_scan()
+
+        self.assertEqual(result["found"], 1)
+        self.assertEqual(Document.objects.get().owner, self.sebastian)
+
+    def test_unbekannter_ordner_wird_uebersprungen_und_geloggt(self):
+        """(b) Ordner ohne passenden User -> nicht aufgenommen + WARN-Log."""
+        self._write("unbekannt", "reif.pdf", age_seconds=3600)
+
+        with self.settings(CONSUME_PER_USER=True, CONSUME_MIN_AGE=15):
+            with self.assertLogs("documents.tasks", level="WARNING") as cm:
+                result, delay = self._run_scan()
+
+        self.assertEqual(result["found"], 0)
+        self.assertEqual(result["failed"], 0)
+        self.assertEqual(Document.objects.count(), 0)
+        # Datei bleibt liegen (keine stille owner=None-Aufnahme).
+        self.assertTrue((self.consume / "unbekannt" / "reif.pdf").exists())
+        self.assertFalse((self.consume / "unbekannt" / "_processed" / "reif.pdf").exists())
+        delay.assert_not_called()
+        self.assertTrue(any("unbekannt" in line for line in cm.output))
+
+    def test_zu_junge_datei_im_user_ordner_wird_uebersprungen(self):
+        """(c) Datei jünger als CONSUME_MIN_AGE -> übersprungen, nicht verschoben."""
+        with self.settings(CONSUME_PER_USER=True, CONSUME_MIN_AGE=15):
+            self._write("sebastian", "frisch.pdf", age_seconds=0)
+            result, delay = self._run_scan()
+
+        self.assertEqual(result["found"], 0)
+        self.assertEqual(result["skipped"], 1)
+        self.assertTrue((self.consume / "sebastian" / "frisch.pdf").exists())
+        delay.assert_not_called()
+        self.assertEqual(Document.objects.count(), 0)
+
+    def test_fehlerhafte_datei_landet_in_failed_im_user_ordner(self):
+        """(d) Fehlerpfad -> _failed/ im User-Ordner, Scan läuft weiter."""
+        from unittest import mock
+
+        from . import pipeline, storage, tasks
+
+        self._write("sebastian", "bad.pdf", age_seconds=3600)
+        self._write("sebastian", "good.pdf", age_seconds=3600)
+
+        real = pipeline.create_document_from_file
+
+        def flaky(path, *, title, **kwargs):
+            if title == "bad":
+                raise RuntimeError("boom")
+            return real(path, title=title, **kwargs)
+
+        with self.settings(CONSUME_PER_USER=True, CONSUME_MIN_AGE=15):
+            with mock.patch.object(
+                storage, "CONSUME_DIR", self.consume
+            ), mock.patch.object(
+                storage, "ORIGINALS_DIR", self.originals
+            ), mock.patch.object(
+                tasks.process_document_version, "delay"
+            ) as delay, mock.patch.object(
+                tasks.pipeline, "create_document_from_file", side_effect=flaky
+            ):
+                result = tasks.scan_consume_folder()
+
+        self.assertEqual(result["found"], 1)
+        self.assertEqual(result["failed"], 1)
+        # Fehlerhafte Datei nach _failed/ IM User-Ordner.
+        self.assertTrue((self.consume / "sebastian" / "_failed" / "bad.pdf").exists())
+        self.assertTrue((self.consume / "sebastian" / "_processed" / "good.pdf").exists())
+        # Gute Datei ist sebastian zugeordnet.
+        doc = Document.objects.get()
+        self.assertEqual(doc.title, "good")
+        self.assertEqual(doc.owner, self.sebastian)
+        delay.assert_called_once()
+
+    def test_flag_off_flat_regression_ignoriert_unterordner(self):
+        """(e) Flag off -> Flat-Modus: Datei direkt im Consume-Ordner, owner=None;
+        Unterordner werden ignoriert (kein Pro-User-Verhalten)."""
+        import os
+        import time
+
+        # Datei direkt im Consume-Ordner (Flat-Eingang).
+        flat = self.consume / "flat.pdf"
+        flat.write_bytes(b"%PDF-1.4 dummy")
+        mtime = time.time() - 3600
+        os.utime(flat, (mtime, mtime))
+        # Zusätzlich eine Datei in einem User-Unterordner, die im Flat-Modus
+        # ignoriert werden muss.
+        self._write("sebastian", "ignored.pdf", age_seconds=3600)
+
+        with self.settings(CONSUME_PER_USER=False, CONSUME_MIN_AGE=15):
+            result, delay = self._run_scan()
+
+        self.assertEqual(result["found"], 1)
+        self.assertEqual(Document.objects.count(), 1)
+        doc = Document.objects.get()
+        self.assertEqual(doc.title, "flat")
+        self.assertIsNone(doc.owner)
+        # Flat-Idempotenz auf Consume-Ebene; Unterordner unangetastet.
+        self.assertTrue((self.consume / "_processed" / "flat.pdf").exists())
+        self.assertTrue((self.consume / "sebastian" / "ignored.pdf").exists())
+        delay.assert_called_once()
+
 
 class DocumentShareLinkTests(APITestCase):
     """Verwaltungs-API der Freigabelinks (STOAA-190).
@@ -1681,6 +1909,84 @@ class MailAccountApiTests(APITestCase):
         self.assertTrue(resp.data["ok"])
         self.assertEqual(captured["pw"], "stored-pw")
 
+    def test_test_connection_by_id_persists_success_status(self):
+        """Erfolgreicher Test eines gespeicherten Kontos aktualisiert
+        ``last_checked_at`` und löscht ``last_error`` (STOAA-172-Spec)."""
+        from unittest import mock
+
+        self.client.force_authenticate(self.admin)
+        acc = MailAccount.objects.create(
+            name="A", host="h", username="u", last_error="alter Fehler"
+        )
+        with mock.patch("documents.mail.connect", return_value=mock.Mock()):
+            resp = self.client.post(
+                "/api/mail-accounts/test-connection/", {"id": acc.id}, format="json"
+            )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertTrue(resp.data["ok"])
+        acc.refresh_from_db()
+        self.assertIsNotNone(acc.last_checked_at)
+        self.assertEqual(acc.last_error, "")
+        # In der API-Response sichtbar (read-only Statusfelder)
+        detail = self.client.get(f"/api/mail-accounts/{acc.id}/")
+        self.assertIsNotNone(detail.data["last_checked_at"])
+        self.assertEqual(detail.data["last_error"], "")
+        self.assertTrue(
+            AuditLogEntry.objects.filter(
+                action="mailaccount_test_connection", object_id=str(acc.id)
+            ).exists()
+        )
+
+    def test_test_connection_by_id_persists_error(self):
+        """Fehlgeschlagener Test schreibt ``last_error`` und setzt ``last_checked_at``."""
+        from unittest import mock
+
+        self.client.force_authenticate(self.admin)
+        acc = MailAccount.objects.create(name="A", host="h", username="u")
+        with mock.patch(
+            "documents.mail.connect", side_effect=OSError("connect refused")
+        ):
+            resp = self.client.post(
+                "/api/mail-accounts/test-connection/", {"id": acc.id}, format="json"
+            )
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.data["ok"])
+        acc.refresh_from_db()
+        self.assertIsNotNone(acc.last_checked_at)
+        self.assertIn("connect refused", acc.last_error)
+
+    def test_test_connection_detail_route_persists(self):
+        """Spec-Route ``/{pk}/test-connection/`` testet + persistiert das Konto."""
+        from unittest import mock
+
+        self.client.force_authenticate(self.admin)
+        acc = MailAccount.objects.create(name="A", host="h", username="u")
+        with mock.patch("documents.mail.connect", return_value=mock.Mock()):
+            resp = self.client.post(
+                f"/api/mail-accounts/{acc.id}/test-connection/", {}, format="json"
+            )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertTrue(resp.data["ok"])
+        acc.refresh_from_db()
+        self.assertIsNotNone(acc.last_checked_at)
+        self.assertEqual(acc.last_error, "")
+
+    def test_test_connection_transient_does_not_persist(self):
+        """Test mit rohen Zugangsdaten (Anlege-Formular) bleibt zustandslos:
+        legt kein Konto an und berührt keinen Datensatz."""
+        from unittest import mock
+
+        self.client.force_authenticate(self.admin)
+        with mock.patch("documents.mail.connect", return_value=mock.Mock()):
+            resp = self.client.post(
+                "/api/mail-accounts/test-connection/",
+                {"host": "imap.example.org", "username": "u", "password": "p"},
+                format="json",
+            )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertTrue(resp.data["ok"])
+        self.assertEqual(MailAccount.objects.count(), 0)
+
     def test_non_admin_cannot_test_connection(self):
         self.client.force_authenticate(self.user)
         resp = self.client.post(
@@ -1933,3 +2239,1692 @@ class DocumentProcessingStateMachineTests(TestCase):
                 DocumentVersion.ProcessingState.READY,
             ],
         )
+
+    def test_ocr_fehlerfall_setzt_status_failed_ohne_crash(self):
+        """run_ocr liefert FAILED → ocr_status=failed + ocr_error gesetzt, kein Crash;
+        Hash-Kette, Audit ``ocr`` und WORM-Siegel bleiben trotzdem erhalten."""
+        from pathlib import Path
+        from unittest import mock
+
+        from documents.services.ocr.types import OCRResult, OCRStatusEnum
+        from .tasks import process_document_version
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "kaputt.pdf"
+            source.write_bytes(b"%PDF-1.4\n% broken\n")
+            _, document, version = self._version(str(source))
+
+            with mock.patch(
+                "documents.pipeline.run_ocr",
+                return_value=OCRResult(
+                    text="",
+                    pages=0,
+                    status=OCRStatusEnum.FAILED,
+                    error="ocrmypdf exit 2",
+                    engine="ocrmypdf",
+                ),
+            ), mock.patch(
+                "documents.pipeline.generate_thumbnail",
+                return_value=None,
+            ), mock.patch(
+                "ai.tasks.suggest_document_metadata.delay"
+            ):
+                result = process_document_version(version.id)
+
+        version.refresh_from_db()
+
+        self.assertEqual(result["status"], "done")
+        self.assertEqual(version.ocr_status, OCRStatusEnum.FAILED.value)
+        self.assertEqual(version.ocr_error, "ocrmypdf exit 2")
+        # Trotz OCR-Fehler: Hash-Kette gesetzt, versiegelt (WORM), Endzustand READY.
+        self.assertTrue(version.sha256)
+        self.assertTrue(version.is_immutable)
+        self.assertIsNotNone(version.ocr_started_at)
+        self.assertIsNotNone(version.ocr_finished_at)
+        self.assertEqual(
+            version.processing_state, DocumentVersion.ProcessingState.READY
+        )
+        self.assertTrue(
+            AuditLogEntry.objects.filter(
+                action="ocr",
+                object_type="DocumentVersion",
+                object_id=str(version.id),
+            ).exists()
+        )
+
+    def test_ocr_status_ist_in_der_api_response_sichtbar(self):
+        """Blocker 2: ocr_status ist über DocumentVersion- und Document-Serializer
+        (read-only) in der API-Response sichtbar – Sinn der State-Machine."""
+        from .serializers import DocumentSerializer, DocumentVersionSerializer
+
+        _, document, version = self._version()
+        DocumentVersion.objects.filter(pk=version.pk).update(
+            ocr_status="failed", ocr_error="boom", ocr_engine="ocrmypdf"
+        )
+        version.refresh_from_db()
+
+        vdata = DocumentVersionSerializer(version).data
+        self.assertEqual(vdata["ocr_status"], "failed")
+        self.assertEqual(vdata["ocr_error"], "boom")
+        self.assertIn("ocr_started_at", vdata)
+        self.assertIn("ocr_finished_at", vdata)
+
+        document.refresh_from_db()
+        ddata = DocumentSerializer(document).data
+        self.assertEqual(ddata["ocr_status"], "failed")
+
+
+class DocumentProcessingFailureRetryTests(TestCase):
+    """Fehler-/Retry-Layer der Verarbeitungs-Pipeline (STOAA-228)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.user = User.objects.create_user(
+            username="retry-user", password="pw", role="user"
+        )
+
+    def _version(self):
+        from pathlib import Path
+
+        source = Path(self._tmp.name) / f"doc-{DocumentVersion.objects.count()}.pdf"
+        source.write_bytes(b"%PDF-1.4\n% test\n")
+        document = Document.objects.create(title="Retry Test", owner=self.user)
+        version = DocumentVersion.objects.create(
+            document=document,
+            version_no=1,
+            file_path=str(source),
+            created_by=self.user,
+        )
+        document.current_version = version
+        document.save(update_fields=["current_version"])
+        return document, version
+
+    def _ok_ocr(self):
+        from documents.services.ocr.types import OCRResult, OCRStatusEnum
+
+        return OCRResult(
+            text="Guter OCR-Text",
+            pages=1,
+            status=OCRStatusEnum.SUCCESS,
+            duration_ms=5,
+            engine="test-ocr",
+        )
+
+    def _fake_thumbnail(self, version, *, max_width=700):
+        from pathlib import Path
+
+        thumb = str(Path(self._tmp.name) / f"thumb-{version.id}.jpg")
+        DocumentVersion.objects.filter(pk=version.pk).update(thumbnail_path=thumb)
+        version.thumbnail_path = thumb
+        return thumb
+
+    def _run_to_ready(self, version):
+        from unittest import mock
+
+        with mock.patch(
+            "documents.pipeline.run_ocr", return_value=self._ok_ocr()
+        ), mock.patch(
+            "documents.pipeline.generate_thumbnail", side_effect=self._fake_thumbnail
+        ):
+            return pipeline.process_version(version)
+
+    def test_sealed_und_ready_nicht_auf_failed(self):
+        from django.core.exceptions import ValidationError
+
+        _, version = self._version()
+        self._run_to_ready(version)
+        version.refresh_from_db()
+        self.assertEqual(
+            version.processing_state, DocumentVersion.ProcessingState.READY
+        )
+        self.assertTrue(version.is_immutable)
+
+        with self.assertRaises(ValidationError):
+            version.mark_processing_failed(step="ocr", error="darf nicht")
+
+    def test_begin_retry_nur_aus_failed(self):
+        from django.core.exceptions import ValidationError
+
+        _, version = self._version()
+        # Frische Version ist UPLOADED, nicht FAILED → begin_retry wirft.
+        with self.assertRaises(ValidationError):
+            version.begin_retry()
+
+    def test_ocr_fehler_fuehrt_zu_failed(self):
+        from unittest import mock
+
+        _, version = self._version()
+        with mock.patch(
+            "documents.pipeline.run_ocr", side_effect=RuntimeError("OCR kaputt")
+        ):
+            result = pipeline.process_version(version)
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["step"], "ocr")
+        self.assertEqual(
+            result["processing_state"], DocumentVersion.ProcessingState.FAILED
+        )
+
+        version.refresh_from_db()
+        self.assertEqual(
+            version.processing_state, DocumentVersion.ProcessingState.FAILED
+        )
+        self.assertEqual(version.processing_failed_step, "ocr")
+        self.assertIn("OCR kaputt", version.processing_error)
+        self.assertIsNotNone(version.processing_failed_at)
+        self.assertTrue(
+            AuditLogEntry.objects.filter(
+                action="processing_failed", object_id=str(version.id)
+            ).exists()
+        )
+
+    def test_retry_startet_neu_bis_ready(self):
+        from unittest import mock
+
+        _, version = self._version()
+        with mock.patch(
+            "documents.pipeline.run_ocr", side_effect=RuntimeError("boom")
+        ):
+            pipeline.process_version(version)
+        version.refresh_from_db()
+        self.assertEqual(
+            version.processing_state, DocumentVersion.ProcessingState.FAILED
+        )
+
+        with mock.patch(
+            "documents.pipeline.run_ocr", return_value=self._ok_ocr()
+        ), mock.patch(
+            "documents.pipeline.generate_thumbnail", side_effect=self._fake_thumbnail
+        ):
+            result = pipeline.retry_version(version, actor=self.user)
+
+        self.assertEqual(result["status"], "done")
+        version.refresh_from_db()
+        self.assertEqual(
+            version.processing_state, DocumentVersion.ProcessingState.READY
+        )
+        self.assertEqual(version.processing_attempts, 1)
+
+        # FAILED -> RETRY_PENDING -> (HASHED) -> OCR_RUNNING deckt der Audit ab.
+        self.assertTrue(
+            AuditLogEntry.objects.filter(
+                action="processing_retry", object_id=str(version.id)
+            ).exists()
+        )
+        resume = AuditLogEntry.objects.filter(
+            action="processing_resume", object_id=str(version.id)
+        ).first()
+        self.assertIsNotNone(resume)
+        self.assertEqual(
+            resume.detail["to"], DocumentVersion.ProcessingState.HASHED
+        )
+        self.assertEqual(resume.detail["step"], "ocr")
+
+    def test_audit_enthaelt_fehler_und_retry(self):
+        from unittest import mock
+
+        _, version = self._version()
+        with mock.patch(
+            "documents.pipeline.run_ocr", side_effect=RuntimeError("boom")
+        ):
+            pipeline.process_version(version)
+        with mock.patch(
+            "documents.pipeline.run_ocr", return_value=self._ok_ocr()
+        ), mock.patch(
+            "documents.pipeline.generate_thumbnail", side_effect=self._fake_thumbnail
+        ):
+            pipeline.retry_version(version, actor=self.user)
+
+        actions = set(
+            AuditLogEntry.objects.filter(object_id=str(version.id)).values_list(
+                "action", flat=True
+            )
+        )
+        self.assertIn("processing_failed", actions)
+        self.assertIn("processing_retry", actions)
+
+    def test_command_ueberspringt_ready(self):
+        from django.core.management import call_command
+
+        _, version = self._version()
+        self._run_to_ready(version)
+        version.refresh_from_db()
+        self.assertEqual(
+            version.processing_state, DocumentVersion.ProcessingState.READY
+        )
+
+        before = AuditLogEntry.objects.filter(
+            action="processing_state", object_id=str(version.id)
+        ).count()
+        call_command("retry_processing", "--version-id", str(version.id))
+        after = AuditLogEntry.objects.filter(
+            action="processing_state", object_id=str(version.id)
+        ).count()
+        self.assertEqual(before, after)
+
+    def test_command_idempotent(self):
+        from io import StringIO
+        from unittest import mock
+
+        from django.core.management import call_command
+
+        _, version = self._version()
+        with mock.patch(
+            "documents.pipeline.run_ocr", side_effect=RuntimeError("boom")
+        ):
+            pipeline.process_version(version)
+
+        out = StringIO()
+        with mock.patch(
+            "documents.pipeline.run_ocr", return_value=self._ok_ocr()
+        ), mock.patch(
+            "documents.pipeline.generate_thumbnail", side_effect=self._fake_thumbnail
+        ):
+            call_command("retry_processing", "--failed", stdout=out)
+        self.assertIn("1 neu verarbeitet", out.getvalue())
+
+        out2 = StringIO()
+        call_command("retry_processing", "--failed", stdout=out2)
+        self.assertIn("0 neu verarbeitet", out2.getvalue())
+
+
+class ProcessingStatusAPITests(APITestCase):
+    """Processing-Status-API (STOAA-248): Rollup-Feld, ?processing_state-Filter,
+    dokument-scoped Retry-Endpoint."""
+
+    @classmethod
+    def setUpTestData(cls):
+        PS = DocumentVersion.ProcessingState
+        cls.owner = User.objects.create_user(
+            username="ps_owner", password="pw", role="user"
+        )
+        cls.other = User.objects.create_user(
+            username="ps_other", password="pw", role="user"
+        )
+        cls.guest = User.objects.create_user(
+            username="ps_guest", password="pw", role="guest"
+        )
+
+        # Ein Dokument des Owners je relevantem State (current_version gesetzt).
+        cls.docs = {}
+        for key, state in [
+            ("ready", PS.READY),
+            ("failed", PS.FAILED),
+            ("retry_pending", PS.RETRY_PENDING),
+            ("ocr_running", PS.OCR_RUNNING),  # zählt zu Bucket "processing"
+            ("classified", PS.CLASSIFIED),  # zählt zu Bucket "processing"
+        ]:
+            doc = Document.objects.create(title=f"Doc {key}", owner=cls.owner)
+            version = DocumentVersion.objects.create(
+                document=doc,
+                version_no=1,
+                file_path=f"/data/originals/{key}.pdf",
+                sha256=key.ljust(64, "0")[:64],
+                processing_state=state,
+                processing_failed_step="ocr" if state == PS.FAILED else "",
+            )
+            doc.current_version = version
+            doc.save(update_fields=["current_version"])
+            cls.docs[key] = doc
+
+    # --- Rollup-Feld ------------------------------------------------------
+    def test_rollup_feld_in_liste(self):
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get("/api/documents/")
+        self.assertEqual(resp.status_code, 200)
+        by_title = {d["title"]: d for d in resp.data["results"]}
+        self.assertEqual(by_title["Doc failed"]["processing_state"], "failed")
+        self.assertEqual(by_title["Doc ready"]["processing_state"], "ready")
+
+    # --- Filter-Buckets ---------------------------------------------------
+    def _titles_for(self, value):
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get(f"/api/documents/?processing_state={value}")
+        self.assertEqual(resp.status_code, 200)
+        return {d["title"] for d in resp.data["results"]}
+
+    def test_filter_failed_bucket(self):
+        self.assertEqual(self._titles_for("failed"), {"Doc failed"})
+
+    def test_filter_retry_pending_bucket(self):
+        self.assertEqual(self._titles_for("retry_pending"), {"Doc retry_pending"})
+
+    def test_filter_ready_bucket(self):
+        self.assertEqual(self._titles_for("ready"), {"Doc ready"})
+
+    def test_filter_processing_bucket_umfasst_alle_inflight_states(self):
+        self.assertEqual(
+            self._titles_for("processing"),
+            {"Doc ocr_running", "Doc classified"},
+        )
+
+    def test_filter_exakter_state_als_fallback(self):
+        self.assertEqual(self._titles_for("ocr_running"), {"Doc ocr_running"})
+
+    def test_filter_unbekannter_wert_wird_ignoriert(self):
+        # Kein 500, kein Filter → alle eigenen Dokumente.
+        titles = self._titles_for("voellig_unbekannt")
+        self.assertEqual(len(titles), len(self.docs))
+
+    # --- Retry-Endpoint ---------------------------------------------------
+    def _retry_url(self, doc):
+        return f"/api/documents/{doc.id}/retry_processing/"
+
+    def test_retry_failed_liefert_202_und_delayt(self):
+        from unittest import mock
+
+        self.client.force_authenticate(self.owner)
+        with mock.patch(
+            "documents.views.retry_document_version.delay"
+        ) as delayed:
+            resp = self.client.post(self._retry_url(self.docs["failed"]))
+        self.assertEqual(resp.status_code, 202)
+        version = self.docs["failed"].current_version
+        delayed.assert_called_once_with(version.id, actor_id=self.owner.id)
+        # Antwort serialisiert die (noch FAILED) aktuelle Version.
+        self.assertEqual(resp.data["id"], version.id)
+        self.assertEqual(resp.data["processing_state"], "failed")
+
+    def test_retry_nicht_failed_liefert_400(self):
+        from unittest import mock
+
+        self.client.force_authenticate(self.owner)
+        with mock.patch(
+            "documents.views.retry_document_version.delay"
+        ) as delayed:
+            resp = self.client.post(self._retry_url(self.docs["ready"]))
+        self.assertEqual(resp.status_code, 400)
+        delayed.assert_not_called()
+
+    def test_retry_gast_liefert_403(self):
+        from unittest import mock
+
+        # Gast besitzt selbst ein FAILED-Dokument → 403 kommt vom can_write-Guard,
+        # nicht von der Owner-Isolation.
+        guest_doc = Document.objects.create(title="Gast Doc", owner=self.guest)
+        gv = DocumentVersion.objects.create(
+            document=guest_doc,
+            version_no=1,
+            file_path="/data/originals/guest.pdf",
+            sha256="g" * 64,
+            processing_state=DocumentVersion.ProcessingState.FAILED,
+            processing_failed_step="ocr",
+        )
+        guest_doc.current_version = gv
+        guest_doc.save(update_fields=["current_version"])
+
+        self.client.force_authenticate(self.guest)
+        with mock.patch(
+            "documents.views.retry_document_version.delay"
+        ) as delayed:
+            resp = self.client.post(self._retry_url(guest_doc))
+        self.assertEqual(resp.status_code, 403)
+        delayed.assert_not_called()
+
+    def test_retry_fremdes_dokument_liefert_404(self):
+        from unittest import mock
+
+        self.client.force_authenticate(self.other)
+        with mock.patch(
+            "documents.views.retry_document_version.delay"
+        ) as delayed:
+            resp = self.client.post(self._retry_url(self.docs["failed"]))
+        self.assertEqual(resp.status_code, 404)
+        delayed.assert_not_called()
+
+
+class DocumentSearchTests(APITestCase):
+    """Gewichtete PostgreSQL-Volltextsuche im DocumentViewSet (STOAA-256).
+
+    Deckt AK1–AK6 ab: OCR-Treffer, Titel/Korrespondent, Ranking (Titel vor OCR),
+    Owner-Isolation inkl. Admin, Kurz-/Leer-Query-Fallback sowie
+    Dokumenttyp/Tags/Mail-Betreff/-Absender je als alleiniges Trefferfeld.
+    Benötigt PostgreSQL (SearchVector ``config='german'``) – läuft in CI.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.owner = User.objects.create_user(
+            username="such-owner", password="pw", role="user"
+        )
+        cls.other = User.objects.create_user(
+            username="such-other", password="pw", role="user"
+        )
+        cls.admin = User.objects.create_user(
+            username="such-admin", password="pw", role="admin"
+        )
+
+    @staticmethod
+    def _doc(
+        owner,
+        title="",
+        ocr_text="",
+        correspondent=None,
+        document_type=None,
+        tags=None,
+        mail_subject="",
+        mail_sender="",
+    ):
+        """Legt ein Dokument mit Version (für OCR-Text) und Relationen an."""
+        doc = Document.objects.create(
+            owner=owner,
+            title=title,
+            correspondent=(
+                Correspondent.objects.get_or_create(name=correspondent)[0]
+                if correspondent
+                else None
+            ),
+            document_type=(
+                DocumentType.objects.get_or_create(name=document_type)[0]
+                if document_type
+                else None
+            ),
+            mail_subject=mail_subject,
+            mail_sender=mail_sender,
+        )
+        version = DocumentVersion.objects.create(
+            document=doc,
+            version_no=1,
+            file_path=f"/data/originals/{doc.id}.pdf",
+            sha256=f"{doc.id:064d}",
+            ocr_text=ocr_text,
+        )
+        doc.current_version = version
+        doc.save(update_fields=["current_version"])
+        for name in tags or []:
+            doc.tags.add(Tag.objects.get_or_create(name=name)[0])
+        return doc
+
+    def _ids(self, resp):
+        return [r["id"] for r in resp.data["results"]]
+
+    # --- AK1: Treffer allein über den OCR-Text --------------------------
+    def test_ak1_ocr_only(self):
+        doc = self._doc(
+            self.owner,
+            title="Belegscan",
+            ocr_text="Sehr geehrte Frau Cornelia Muster, ...",
+        )
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get("/api/documents/?q=Cornelia")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._ids(resp), [doc.id])
+
+    # --- AK2: Treffer über Titel bzw. Korrespondentenname ---------------
+    def test_ak2_title_match(self):
+        doc = self._doc(self.owner, title="Grundsteuerbescheid 2024")
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get("/api/documents/?q=Grundsteuerbescheid")
+        self.assertEqual(self._ids(resp), [doc.id])
+
+    def test_ak2_correspondent_match(self):
+        doc = self._doc(self.owner, title="Rechnung", correspondent="Wienstrom")
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get("/api/documents/?q=Wienstrom")
+        self.assertEqual(self._ids(resp), [doc.id])
+
+    # --- AK3: Ranking – Titeltreffer vor reinem OCR-Treffer -------------
+    def test_ak3_title_ranks_before_ocr(self):
+        # ocr_doc zuerst angelegt → hätte bei Gleichstand via -added_at den
+        # Vortritt; korrektes Ranking muss title_doc dennoch vorne einordnen.
+        ocr_doc = self._doc(
+            self.owner, title="Anhang", ocr_text="Zwischenbericht Quartalsbericht Q3"
+        )
+        title_doc = self._doc(self.owner, title="Quartalsbericht Q3 2024")
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get("/api/documents/?q=Quartalsbericht")
+        ids = self._ids(resp)
+        self.assertEqual(set(ids), {title_doc.id, ocr_doc.id})
+        self.assertLess(
+            ids.index(title_doc.id),
+            ids.index(ocr_doc.id),
+            "Titeltreffer (Gewicht A) muss vor OCR-Treffer (Gewicht D) ranken.",
+        )
+
+    # --- AK4: Owner-Isolation inkl. Admin-Ausnahme ----------------------
+    def test_ak4_owner_isolation(self):
+        doc = self._doc(self.owner, title="Privatvertrag Sonderbegriff")
+        # Fremder Nutzer sieht den Treffer nicht.
+        self.client.force_authenticate(self.other)
+        resp = self.client.get("/api/documents/?q=Sonderbegriff")
+        self.assertEqual(self._ids(resp), [])
+        # Admin sieht alles.
+        self.client.force_authenticate(self.admin)
+        resp = self.client.get("/api/documents/?q=Sonderbegriff")
+        self.assertEqual(self._ids(resp), [doc.id])
+
+    # --- AK5: Fallback für leere / kurze Query --------------------------
+    def test_ak5_empty_query_returns_full_list(self):
+        d1 = self._doc(self.owner, title="Alpha")
+        d2 = self._doc(self.owner, title="Beta")
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get("/api/documents/?q=")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(set(self._ids(resp)), {d1.id, d2.id})
+
+    def test_ak5_short_query_icontains(self):
+        hit = self._doc(self.owner, title="XZ-Sonderfall")
+        self._doc(self.owner, title="Unbeteiligt")
+        self.client.force_authenticate(self.owner)
+        # 2-Zeichen-Query → icontains-Fallback (FTS-Lexeme greifen hier nicht).
+        resp = self.client.get("/api/documents/?q=XZ")
+        self.assertEqual(self._ids(resp), [hit.id])
+
+    # --- AK6: weitere Felder je als alleiniges Trefferfeld --------------
+    def test_ak6_document_type_match(self):
+        doc = self._doc(self.owner, title="Scan", document_type="Versicherungspolizze")
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get("/api/documents/?q=Versicherungspolizze")
+        self.assertEqual(self._ids(resp), [doc.id])
+
+    def test_ak6_tag_match(self):
+        doc = self._doc(self.owner, title="Scan", tags=["Nebenkostenabrechnung"])
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get("/api/documents/?q=Nebenkostenabrechnung")
+        self.assertEqual(self._ids(resp), [doc.id])
+
+    def test_ak6_mail_subject_match(self):
+        doc = self._doc(self.owner, title="Scan", mail_subject="Zählerstand Erdgas")
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get("/api/documents/?q=Zählerstand")
+        self.assertEqual(self._ids(resp), [doc.id])
+
+    def test_ak6_mail_sender_match(self):
+        # mail.py speichert den From-Header realistisch als "Anzeigename <adresse>"
+        # (mail.py:201). PostgreSQL-FTS tokenisiert eine reine E-Mail-Adresse als
+        # EIN atomares Token, d. h. Teilstrings der Domain sind nicht als eigene
+        # Lexeme suchbar. Realistische, FTS-taugliche Suche geht über den
+        # Anzeigenamen des Absenders (siehe Known-Limitation-Kommentar in views.py).
+        doc = self._doc(
+            self.owner,
+            title="Scan",
+            mail_sender="Energieanbieter Buchhaltung <buchhaltung@energieanbieter.example>",
+        )
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get("/api/documents/?q=Energieanbieter")
+        self.assertEqual(self._ids(resp), [doc.id])
+
+
+# ---------------------------------------------------------------------------
+# Workflow-Engine-Tests (STOAA-263)
+# ---------------------------------------------------------------------------
+class WorkflowEngineTests(TestCase):
+    """Unit-Tests für run_workflows, Trigger-Matching und Aktionsanwendung."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(username="wf-user", password="pw", role="user")
+        cls.corr = Correspondent.objects.create(name="Stadtwerke")
+        cls.dt = DocumentType.objects.create(name="Rechnung")
+        cls.sp = StoragePath.objects.create(name="Archiv", path_template="archiv/{titel}")
+        cls.tag_finanzen = Tag.objects.create(name="Finanzen")
+        cls.tag_privat = Tag.objects.create(name="Privat")
+
+    def _make_doc(self, title="Testdokument", ingest_source="upload"):
+        doc = Document.objects.create(title=title, owner=self.user)
+        version = DocumentVersion.objects.create(
+            document=doc, version_no=1, file_path="/tmp/x.pdf",
+            created_by=self.user, ingest_source=ingest_source,
+        )
+        doc.current_version = version
+        doc.save(update_fields=["current_version"])
+        return doc, version
+
+    def _make_workflow(self, *, name="WF", order=10, enabled=True,
+                       trigger_type="document_added", sources="",
+                       filter_text_contains="", filter_text_regex="",
+                       filter_correspondent=None, filter_document_type=None):
+        from .models import Workflow, WorkflowAction, WorkflowTrigger
+        wf = Workflow.objects.create(name=name, order=order, enabled=enabled)
+        trig = WorkflowTrigger.objects.create(
+            workflow=wf, trigger_type=trigger_type, sources=sources,
+            filter_text_contains=filter_text_contains,
+            filter_text_regex=filter_text_regex,
+            filter_correspondent=filter_correspondent,
+            filter_document_type=filter_document_type,
+        )
+        return wf, trig
+
+    # ------------------------------------------------------------------
+    # Trigger-Matching: source-Filter
+    # ------------------------------------------------------------------
+    def test_source_filter_trifft_passende_quelle(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction, WorkflowTrigger
+        wf, _ = self._make_workflow(sources="consume")
+        WorkflowAction.objects.create(
+            workflow=wf, order=10, action_type="assign",
+            assign_document_type=self.dt,
+        )
+        doc, _ = self._make_doc()
+        result = run_workflows(doc, trigger_type="document_added", source="consume", text="")
+        self.assertIn("WF", result["workflows"])
+
+    def test_source_filter_ignoriert_falsche_quelle(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction, WorkflowTrigger
+        wf, _ = self._make_workflow(name="WF2", sources="mail")
+        WorkflowAction.objects.create(
+            workflow=wf, order=10, action_type="assign",
+            assign_document_type=self.dt,
+        )
+        doc, _ = self._make_doc()
+        result = run_workflows(doc, trigger_type="document_added", source="upload", text="")
+        self.assertNotIn("WF2", result["workflows"])
+
+    def test_leere_source_trifft_alle(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction
+        wf, _ = self._make_workflow(name="WF_ALL", sources="")
+        WorkflowAction.objects.create(
+            workflow=wf, order=10, action_type="assign",
+            assign_correspondent=self.corr,
+        )
+        doc, _ = self._make_doc()
+        result = run_workflows(doc, trigger_type="document_added", source="api", text="")
+        self.assertIn("WF_ALL", result["workflows"])
+
+    # ------------------------------------------------------------------
+    # Trigger-Matching: text_contains / text_regex
+    # ------------------------------------------------------------------
+    def test_text_contains_trifft(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction
+        wf, _ = self._make_workflow(name="WF_TEXT", filter_text_contains="rechnung")
+        WorkflowAction.objects.create(workflow=wf, order=10, action_type="assign",
+                                       assign_document_type=self.dt)
+        doc, _ = self._make_doc()
+        result = run_workflows(doc, trigger_type="document_added", source="upload",
+                               text="Das ist eine Rechnung von Stadtwerke")
+        self.assertIn("WF_TEXT", result["workflows"])
+
+    def test_text_contains_verfehlt(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction
+        wf, _ = self._make_workflow(name="WF_MISS", filter_text_contains="xyz123")
+        WorkflowAction.objects.create(workflow=wf, order=10, action_type="assign",
+                                       assign_document_type=self.dt)
+        doc, _ = self._make_doc()
+        result = run_workflows(doc, trigger_type="document_added", source="upload", text="normal text")
+        self.assertNotIn("WF_MISS", result["workflows"])
+
+    def test_text_regex_trifft(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction
+        wf, _ = self._make_workflow(name="WF_REGEX", filter_text_regex=r"SR-\d+")
+        WorkflowAction.objects.create(workflow=wf, order=10, action_type="assign",
+                                       assign_document_type=self.dt)
+        doc, _ = self._make_doc()
+        result = run_workflows(doc, trigger_type="document_added", source="upload", text="Beleg SR-4711")
+        self.assertIn("WF_REGEX", result["workflows"])
+
+    # ------------------------------------------------------------------
+    # Trigger-Matching: Korrespondent
+    # ------------------------------------------------------------------
+    def test_filter_correspondent_trifft(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction
+        wf, _ = self._make_workflow(name="WF_CORR", filter_correspondent=self.corr)
+        WorkflowAction.objects.create(workflow=wf, order=10, action_type="assign",
+                                       assign_document_type=self.dt)
+        doc, _ = self._make_doc()
+        doc.correspondent = self.corr
+        doc.save(update_fields=["correspondent"])
+        result = run_workflows(doc, trigger_type="document_added", source="upload", text="")
+        self.assertIn("WF_CORR", result["workflows"])
+
+    def test_filter_correspondent_verfehlt(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction
+        wf, _ = self._make_workflow(name="WF_CORR2", filter_correspondent=self.corr)
+        WorkflowAction.objects.create(workflow=wf, order=10, action_type="assign",
+                                       assign_document_type=self.dt)
+        doc, _ = self._make_doc()
+        result = run_workflows(doc, trigger_type="document_added", source="upload", text="")
+        self.assertNotIn("WF_CORR2", result["workflows"])
+
+    # ------------------------------------------------------------------
+    # Trigger-Matching: Tags
+    # ------------------------------------------------------------------
+    def test_filter_has_tags_trifft(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction, WorkflowTrigger
+        wf, trig = self._make_workflow(name="WF_TAGS")
+        trig.filter_has_tags.add(self.tag_finanzen)
+        WorkflowAction.objects.create(workflow=wf, order=10, action_type="assign",
+                                       assign_correspondent=self.corr)
+        doc, _ = self._make_doc()
+        doc.tags.add(self.tag_finanzen)
+        result = run_workflows(doc, trigger_type="document_added", source="upload", text="")
+        self.assertIn("WF_TAGS", result["workflows"])
+
+    def test_filter_has_not_tags_sperrt(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction, WorkflowTrigger
+        wf, trig = self._make_workflow(name="WF_NOTTAGS")
+        trig.filter_has_not_tags.add(self.tag_privat)
+        WorkflowAction.objects.create(workflow=wf, order=10, action_type="assign",
+                                       assign_correspondent=self.corr)
+        doc, _ = self._make_doc()
+        doc.tags.add(self.tag_privat)
+        result = run_workflows(doc, trigger_type="document_added", source="upload", text="")
+        self.assertNotIn("WF_NOTTAGS", result["workflows"])
+
+    # ------------------------------------------------------------------
+    # Aktions-Anwendung: assign
+    # ------------------------------------------------------------------
+    def test_action_assign_document_type(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction
+        wf, _ = self._make_workflow(name="WF_DT")
+        WorkflowAction.objects.create(workflow=wf, order=10, action_type="assign",
+                                       assign_document_type=self.dt)
+        doc, _ = self._make_doc()
+        run_workflows(doc, trigger_type="document_added", source="upload", text="")
+        doc.refresh_from_db()
+        self.assertEqual(doc.document_type, self.dt)
+
+    def test_action_assign_correspondent(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction
+        wf, _ = self._make_workflow(name="WF_CORR_ASSIGN")
+        WorkflowAction.objects.create(workflow=wf, order=10, action_type="assign",
+                                       assign_correspondent=self.corr)
+        doc, _ = self._make_doc()
+        run_workflows(doc, trigger_type="document_added", source="upload", text="")
+        doc.refresh_from_db()
+        self.assertEqual(doc.correspondent, self.corr)
+
+    def test_action_assign_storage_path(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction
+        wf, _ = self._make_workflow(name="WF_SP")
+        WorkflowAction.objects.create(workflow=wf, order=10, action_type="assign",
+                                       assign_storage_path=self.sp)
+        doc, _ = self._make_doc()
+        run_workflows(doc, trigger_type="document_added", source="upload", text="")
+        doc.refresh_from_db()
+        self.assertEqual(doc.storage_path, self.sp)
+
+    def test_action_assign_tags(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction
+        wf, _ = self._make_workflow(name="WF_TAG_ADD")
+        action = WorkflowAction.objects.create(workflow=wf, order=10, action_type="assign")
+        action.assign_tags.add(self.tag_finanzen)
+        doc, _ = self._make_doc()
+        run_workflows(doc, trigger_type="document_added", source="upload", text="")
+        self.assertIn(self.tag_finanzen, doc.tags.all())
+
+    def test_action_assign_owner(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction
+        wf, _ = self._make_workflow(name="WF_OWNER")
+        WorkflowAction.objects.create(workflow=wf, order=10, action_type="assign",
+                                       assign_owner=self.user)
+        doc, _ = self._make_doc()
+        doc.owner = None
+        doc.save(update_fields=["owner"])
+        run_workflows(doc, trigger_type="document_added", source="upload", text="")
+        doc.refresh_from_db()
+        self.assertEqual(doc.owner, self.user)
+
+    def test_action_assign_title_template(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction
+        wf, _ = self._make_workflow(name="WF_TITLE")
+        doc, _ = self._make_doc()
+        doc.correspondent = self.corr
+        doc.save(update_fields=["correspondent"])
+        WorkflowAction.objects.create(
+            workflow=wf, order=10, action_type="assign",
+            assign_title="{correspondent} – Beleg",
+        )
+        run_workflows(doc, trigger_type="document_added", source="upload", text="")
+        doc.refresh_from_db()
+        self.assertEqual(doc.title, "Stadtwerke – Beleg")
+
+    def test_action_assign_custom_field(self):
+        from .workflows import run_workflows
+        from .models import CustomFieldValue, Workflow, WorkflowAction
+        field = CustomField.objects.create(name="Betrag", data_type="text")
+        wf, _ = self._make_workflow(name="WF_CF")
+        WorkflowAction.objects.create(
+            workflow=wf, order=10, action_type="assign",
+            assign_custom_fields={str(field.pk): "99.00"},
+        )
+        doc, _ = self._make_doc()
+        run_workflows(doc, trigger_type="document_added", source="upload", text="")
+        val = CustomFieldValue.objects.get(document=doc, field=field)
+        self.assertEqual(val.value, "99.00")
+
+    # ------------------------------------------------------------------
+    # Aktions-Anwendung: remove
+    # ------------------------------------------------------------------
+    def test_action_remove_tags(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction
+        wf, _ = self._make_workflow(name="WF_REMOVE")
+        action = WorkflowAction.objects.create(workflow=wf, order=10, action_type="remove")
+        action.remove_tags.add(self.tag_privat)
+        doc, _ = self._make_doc()
+        doc.tags.add(self.tag_privat)
+        run_workflows(doc, trigger_type="document_added", source="upload", text="")
+        self.assertNotIn(self.tag_privat, doc.tags.all())
+
+    # ------------------------------------------------------------------
+    # order-Reihenfolge + disabled
+    # ------------------------------------------------------------------
+    def test_order_reihenfolge_bestimmt_ausfuehrungsfolge(self):
+        """Zweiter Workflow setzt Feld, weil erster es bereits belegt hat → nur erster wirkt."""
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction
+        corr2 = Correspondent.objects.create(name="Zweiter")
+        wf_first, _ = self._make_workflow(name="FIRST", order=1)
+        WorkflowAction.objects.create(workflow=wf_first, order=10, action_type="assign",
+                                       assign_correspondent=self.corr)
+        wf_second, _ = self._make_workflow(name="SECOND", order=2)
+        WorkflowAction.objects.create(workflow=wf_second, order=10, action_type="assign",
+                                       assign_correspondent=corr2)
+        doc, _ = self._make_doc()
+        run_workflows(doc, trigger_type="document_added", source="upload", text="")
+        doc.refresh_from_db()
+        # assign-Logik: Einzelwert nur wenn noch leer → erster Workflow setzt, zweiter überspringt
+        self.assertEqual(doc.correspondent, self.corr)
+
+    def test_disabled_workflow_wird_uebersprungen(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction
+        wf, _ = self._make_workflow(name="WF_DISABLED", enabled=False)
+        WorkflowAction.objects.create(workflow=wf, order=10, action_type="assign",
+                                       assign_document_type=self.dt)
+        doc, _ = self._make_doc()
+        result = run_workflows(doc, trigger_type="document_added", source="upload", text="")
+        self.assertNotIn("WF_DISABLED", result["workflows"])
+        doc.refresh_from_db()
+        self.assertIsNone(doc.document_type)
+
+    # ------------------------------------------------------------------
+    # Trigger-Typ: document_added vs document_updated
+    # ------------------------------------------------------------------
+    def test_document_updated_trigger_nur_bei_updated(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction
+        wf, _ = self._make_workflow(name="WF_UPDATED", trigger_type="document_updated")
+        WorkflowAction.objects.create(workflow=wf, order=10, action_type="assign",
+                                       assign_document_type=self.dt)
+        doc, _ = self._make_doc()
+        result_added = run_workflows(doc, trigger_type="document_added", source="upload", text="")
+        self.assertNotIn("WF_UPDATED", result_added["workflows"])
+        result_updated = run_workflows(doc, trigger_type="document_updated", source="api", text="")
+        self.assertIn("WF_UPDATED", result_updated["workflows"])
+
+    # ------------------------------------------------------------------
+    # Audit-Log
+    # ------------------------------------------------------------------
+    def test_workflow_erstellt_audit_eintrag(self):
+        from .workflows import run_workflows
+        from .models import Workflow, WorkflowAction
+        wf, _ = self._make_workflow(name="WF_AUDIT")
+        WorkflowAction.objects.create(workflow=wf, order=10, action_type="assign",
+                                       assign_document_type=self.dt)
+        doc, _ = self._make_doc()
+        run_workflows(doc, trigger_type="document_added", source="upload", text="")
+        entry = AuditLogEntry.objects.filter(
+            action="workflow", object_type="Document", object_id=str(doc.id)
+        ).first()
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry.detail["workflow"], "WF_AUDIT")
+
+    # ------------------------------------------------------------------
+    # ClassificationRule bleibt unverändert
+    # ------------------------------------------------------------------
+    def test_classification_rule_weiterhin_funktionsfaehig(self):
+        """apply_rules darf durch Workflow-Engine nicht gebrochen werden."""
+        ClassificationRule.objects.create(
+            name="Rechnungsregel",
+            priority=10,
+            match={"text_contains": "Rechnung"},
+            then={"document_type": "Rechnung"},
+        )
+        doc, _ = self._make_doc()
+        result = apply_rules(doc)
+        # Ohne OCR-Text schlägt die Regel nicht an – das ist korrekt
+        self.assertIsInstance(result, dict)
+        self.assertIn("rules", result)
+
+
+# ---------------------------------------------------------------------------
+# Workflow-REST-API-Tests (STOAA-263 PR2)
+# ---------------------------------------------------------------------------
+class WorkflowAPITests(APITestCase):
+    """CRUD über /api/workflows/ inkl. verschachteltem Trigger + Aktionen."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(username="wf_api_user", password="pw", role="user")
+        cls.guest = User.objects.create_user(username="wf_api_guest", password="pw", role="guest")
+        cls.corr = Correspondent.objects.create(name="Stadtwerke")
+        cls.dt = DocumentType.objects.create(name="Rechnung")
+        cls.tag = Tag.objects.create(name="Finanzen")
+
+    def test_list_erfordert_login(self):
+        resp = self.client.get("/api/workflows/")
+        self.assertIn(resp.status_code, (401, 403))
+
+    def test_create_workflow_mit_trigger_und_aktionen(self):
+        self.client.force_authenticate(self.user)
+        payload = {
+            "name": "Rechnungs-Workflow",
+            "order": 5,
+            "enabled": True,
+            "trigger": {
+                "trigger_type": "document_added",
+                "sources": "upload,mail",
+                "filter_correspondent": self.corr.id,
+                "filter_has_tags": [self.tag.id],
+                "filter_text_contains": "rechnung",
+            },
+            "actions": [
+                {
+                    "order": 10,
+                    "action_type": "assign",
+                    "assign_document_type": self.dt.id,
+                    "assign_tags": [self.tag.id],
+                    "assign_title": "{correspondent} – Rechnung",
+                },
+                {
+                    "order": 20,
+                    "action_type": "remove",
+                    "remove_tags": [self.tag.id],
+                },
+            ],
+        }
+        resp = self.client.post("/api/workflows/", payload, format="json")
+        self.assertEqual(resp.status_code, 201, resp.content)
+        from .models import Workflow, WorkflowAction, WorkflowTrigger
+        wf = Workflow.objects.get(name="Rechnungs-Workflow")
+        self.assertEqual(wf.order, 5)
+        self.assertEqual(wf.trigger.trigger_type, "document_added")
+        self.assertEqual(wf.trigger.sources, "upload,mail")
+        self.assertEqual(wf.trigger.filter_correspondent, self.corr)
+        self.assertIn(self.tag, wf.trigger.filter_has_tags.all())
+        self.assertEqual(wf.actions.count(), 2)
+        first = wf.actions.order_by("order").first()
+        self.assertEqual(first.assign_document_type, self.dt)
+        self.assertIn(self.tag, first.assign_tags.all())
+
+    def test_retrieve_liefert_verschachtelte_struktur(self):
+        self.client.force_authenticate(self.user)
+        from .models import Workflow, WorkflowAction, WorkflowTrigger
+        wf = Workflow.objects.create(name="WF-Get", order=1)
+        WorkflowTrigger.objects.create(workflow=wf, trigger_type="document_added", sources="upload")
+        WorkflowAction.objects.create(workflow=wf, order=10, action_type="assign", assign_correspondent=self.corr)
+        resp = self.client.get(f"/api/workflows/{wf.id}/")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["name"], "WF-Get")
+        self.assertEqual(data["trigger"]["sources"], "upload")
+        self.assertEqual(len(data["actions"]), 1)
+        self.assertEqual(data["actions"][0]["assign_correspondent"], self.corr.id)
+
+    def test_update_ersetzt_aktionen(self):
+        self.client.force_authenticate(self.user)
+        from .models import Workflow, WorkflowAction, WorkflowTrigger
+        wf = Workflow.objects.create(name="WF-Update", order=1)
+        WorkflowTrigger.objects.create(workflow=wf, trigger_type="document_added")
+        WorkflowAction.objects.create(workflow=wf, order=10, action_type="assign", assign_correspondent=self.corr)
+        payload = {
+            "name": "WF-Update",
+            "order": 2,
+            "enabled": False,
+            "trigger": {"trigger_type": "document_updated", "sources": "api"},
+            "actions": [
+                {"order": 5, "action_type": "assign", "assign_document_type": self.dt.id},
+            ],
+        }
+        resp = self.client.put(f"/api/workflows/{wf.id}/", payload, format="json")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        wf.refresh_from_db()
+        self.assertFalse(wf.enabled)
+        self.assertEqual(wf.order, 2)
+        self.assertEqual(wf.trigger.trigger_type, "document_updated")
+        self.assertEqual(wf.actions.count(), 1)
+        self.assertEqual(wf.actions.first().assign_document_type, self.dt)
+
+    def test_delete_workflow(self):
+        self.client.force_authenticate(self.user)
+        from .models import Workflow, WorkflowTrigger
+        wf = Workflow.objects.create(name="WF-Del", order=1)
+        WorkflowTrigger.objects.create(workflow=wf, trigger_type="document_added")
+        resp = self.client.delete(f"/api/workflows/{wf.id}/")
+        self.assertEqual(resp.status_code, 204)
+        self.assertFalse(Workflow.objects.filter(id=wf.id).exists())
+
+    def test_gast_darf_nicht_schreiben(self):
+        self.client.force_authenticate(self.guest)
+        resp = self.client.post("/api/workflows/", {"name": "X", "order": 1}, format="json")
+        self.assertEqual(resp.status_code, 403)
+
+    def test_create_ohne_trigger_und_aktionen_moeglich(self):
+        """Minimaler Workflow (nur name/order) ist zulässig – Trigger folgt per Update."""
+        self.client.force_authenticate(self.user)
+        resp = self.client.post("/api/workflows/", {"name": "Leer", "order": 99}, format="json")
+        self.assertEqual(resp.status_code, 201, resp.content)
+        from .models import Workflow
+        self.assertTrue(Workflow.objects.filter(name="Leer").exists())
+
+
+class VersionCompareServiceTests(TestCase):
+    """Unit-Tests für den isolierten Vergleichs-Service (STOAA-289).
+
+    Der Service nimmt zwei ``DocumentVersion`` + das ``Document`` – kein Request,
+    keine Permission-Ebene. Getestet werden OCR-Text-Diff, Datei-Vergleich und
+    die PDF-Stufe (nur Architektur, keine Bildverarbeitung).
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(username="vc_owner", password="pw", role="user")
+        cls.doc = Document.objects.create(title="Vergleichsdokument", owner=cls.user)
+
+    def _version(self, version_no, **kwargs):
+        defaults = dict(
+            document=self.doc,
+            version_no=version_no,
+            file_path=f"/data/originals/v{version_no}.pdf",
+            sha256=str(version_no) * 64,
+            mime_type="application/pdf",
+            size=1000 + version_no,
+            page_count=1,
+            ocr_text="",
+        )
+        defaults.update(kwargs)
+        return DocumentVersion.objects.create(**defaults)
+
+    def _compare(self, old, new):
+        from .services import version_compare
+
+        return version_compare.compare_versions(self.doc, old, new)
+
+    # --- OCR-Text -------------------------------------------------------
+    def test_gleicher_text_kein_change(self):
+        old = self._version(1, ocr_text="Hallo Welt", sha256="a" * 64)
+        new = self._version(2, ocr_text="Hallo Welt", sha256="a" * 64)
+        result = self._compare(old, new)
+        self.assertFalse(result.summary.text_changed)
+
+    def test_geaenderter_text_change_mit_diff_zeilen(self):
+        old = self._version(1, ocr_text="alt")
+        new = self._version(2, ocr_text="neu")
+        result = self._compare(old, new)
+        self.assertTrue(result.summary.text_changed)
+        self.assertIn("-alt", result.text_diff)
+        self.assertIn("+neu", result.text_diff)
+        self.assertIn("<table", result.text_diff_html)
+
+    def test_leerer_text_kein_crash(self):
+        old = self._version(1, ocr_text="")
+        new = self._version(2, ocr_text="jetzt Inhalt")
+        result = self._compare(old, new)
+        self.assertTrue(result.summary.text_changed)
+        # Beidseitig leer → kein Change, kein Crash.
+        empty_old = self._version(3, ocr_text="")
+        empty_new = self._version(4, ocr_text="")
+        result2 = self._compare(empty_old, empty_new)
+        self.assertFalse(result2.summary.text_changed)
+        self.assertEqual(result2.text_diff, "")
+
+    # --- Datei ----------------------------------------------------------
+    def test_gleicher_sha_kein_binary_change(self):
+        old = self._version(1, sha256="c" * 64)
+        new = self._version(2, sha256="c" * 64)
+        result = self._compare(old, new)
+        self.assertFalse(result.summary.binary_changed)
+        self.assertFalse(result.files.changed)
+
+    def test_anderer_sha_binary_change(self):
+        old = self._version(1, sha256="a" * 64)
+        new = self._version(2, sha256="b" * 64)
+        result = self._compare(old, new)
+        self.assertTrue(result.summary.binary_changed)
+        self.assertTrue(result.files.changed)
+        self.assertEqual(result.files.old_sha256, "a" * 64)
+        self.assertEqual(result.files.new_sha256, "b" * 64)
+
+    def test_groesse_und_mime_gespiegelt(self):
+        old = self._version(1, size=1234, mime_type="application/pdf")
+        new = self._version(2, size=2345, mime_type="image/png")
+        result = self._compare(old, new)
+        self.assertEqual(result.files.old_size, 1234)
+        self.assertEqual(result.files.new_size, 2345)
+        self.assertEqual(result.files.old_mime_type, "application/pdf")
+        self.assertEqual(result.files.new_mime_type, "image/png")
+
+    # --- PDF-Stufe ------------------------------------------------------
+    def test_beide_pdf_gleiche_seitenzahl(self):
+        old = self._version(1, mime_type="application/pdf", page_count=3)
+        new = self._version(2, mime_type="application/pdf", page_count=3)
+        result = self._compare(old, new)
+        self.assertTrue(result.files.both_pdf)
+        self.assertFalse(result.summary.pages_changed)
+
+    def test_beide_pdf_andere_seitenzahl(self):
+        old = self._version(1, mime_type="application/pdf", page_count=3)
+        new = self._version(2, mime_type="application/pdf", page_count=4)
+        result = self._compare(old, new)
+        self.assertTrue(result.files.both_pdf)
+        self.assertTrue(result.summary.pages_changed)
+
+    def test_nicht_pdf_kein_pages_changed(self):
+        old = self._version(1, mime_type="image/png", page_count=1)
+        new = self._version(2, mime_type="image/jpeg", page_count=9)
+        result = self._compare(old, new)
+        self.assertFalse(result.files.both_pdf)
+        self.assertFalse(result.summary.pages_changed)
+
+    # --- Summary Stufe-1-Fixwerte ---------------------------------------
+    def test_metadata_flags_fix_false(self):
+        old = self._version(1)
+        new = self._version(2, sha256="z" * 64)
+        result = self._compare(old, new).to_dict()
+        self.assertFalse(result["summary"]["metadata_changed"])
+        self.assertFalse(result["summary"]["tags_changed"])
+        self.assertFalse(result["summary"]["custom_fields_changed"])
+        self.assertFalse(result["metadata_versioning_supported"])
+        self.assertEqual(result["metadata"], {})
+        self.assertEqual(result["tags"], {"added": [], "removed": []})
+        self.assertEqual(result["custom_fields"], {})
+
+
+class VersionCompareApiTests(APITestCase):
+    """API-Tests für ``GET .../versions/{from}/compare/{to}/`` (STOAA-289)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.owner = User.objects.create_user(username="vc_api_owner", password="pw", role="user")
+        cls.other = User.objects.create_user(username="vc_api_other", password="pw", role="user")
+        cls.doc = Document.objects.create(title="API-Vergleich", owner=cls.owner)
+        cls.v2 = DocumentVersion.objects.create(
+            document=cls.doc, version_no=2, file_path="/d/v2.pdf",
+            sha256="a" * 64, mime_type="application/pdf", size=1000,
+            page_count=3, ocr_text="alt",
+        )
+        cls.v5 = DocumentVersion.objects.create(
+            document=cls.doc, version_no=5, file_path="/d/v5.pdf",
+            sha256="b" * 64, mime_type="application/pdf", size=2000,
+            page_count=4, ocr_text="neu",
+        )
+        cls.doc.current_version = cls.v5
+        cls.doc.save(update_fields=["current_version"])
+
+    def _url(self, doc_id, frm, to):
+        return f"/api/documents/{doc_id}/versions/{frm}/compare/{to}/"
+
+    def test_erfolgreicher_vergleich_shape(self):
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get(self._url(self.doc.id, 2, 5))
+        self.assertEqual(resp.status_code, 200, resp.content)
+        data = resp.json()
+        self.assertEqual(data["document"], self.doc.id)
+        self.assertEqual(data["from_version"], 2)
+        self.assertEqual(data["to_version"], 5)
+        self.assertTrue(data["summary"]["text_changed"])
+        self.assertTrue(data["summary"]["binary_changed"])
+        self.assertTrue(data["summary"]["pages_changed"])
+        self.assertEqual(data["files"]["changed"], data["summary"]["binary_changed"])
+        self.assertTrue(data["files"]["both_pdf"])
+        self.assertEqual(data["files"]["old_page_count"], 3)
+        self.assertEqual(data["files"]["new_page_count"], 4)
+        self.assertFalse(data["metadata_versioning_supported"])
+        # Stufe-1-Sektionen vorhanden aber leer.
+        self.assertEqual(data["metadata"], {})
+        self.assertEqual(data["tags"], {"added": [], "removed": []})
+        self.assertEqual(data["custom_fields"], {})
+
+    def test_beliebige_reihenfolge(self):
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get(self._url(self.doc.id, 5, 2))
+        self.assertEqual(resp.status_code, 200, resp.content)
+        data = resp.json()
+        self.assertEqual(data["from_version"], 5)
+        self.assertEqual(data["to_version"], 2)
+
+    def test_fehlende_version_404(self):
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get(self._url(self.doc.id, 2, 99))
+        self.assertEqual(resp.status_code, 404)
+
+    def test_ungueltige_versionsnummer_404(self):
+        # Nicht-numerisch matcht die url_path-Regex nicht → kein Route-Match → 404.
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get(f"/api/documents/{self.doc.id}/versions/abc/compare/2/")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_fremdes_dokument_404(self):
+        self.client.force_authenticate(self.other)
+        resp = self.client.get(self._url(self.doc.id, 2, 5))
+        self.assertEqual(resp.status_code, 404)
+
+    def test_unauthenticated_abgewiesen(self):
+        resp = self.client.get(self._url(self.doc.id, 2, 5))
+        self.assertIn(resp.status_code, (401, 403))
+
+
+# ===========================================================================
+# Versionsvergleich Stufe 2 (STOAA-312): Metadaten-Snapshot beim Sealing,
+# WORM/Siegel, Backfill und Snapshot-Diff im Compare-Endpoint.
+# ===========================================================================
+from django.core.management import call_command  # noqa: E402
+
+from .services import version_compare, version_snapshot  # noqa: E402
+
+
+class VersionSnapshotSealingTests(TestCase):
+    """Snapshot beim Sealing, Write-once/WORM und Siegel-Bindung (STOAA-312)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(username="snap_owner", password="pw", role="user")
+        cls.dtype = DocumentType.objects.create(name="Rechnung")
+        cls.corr = Correspondent.objects.create(name="Stadtwerke")
+        cls.spath = StoragePath.objects.create(name="Finanzen", path_template="{title}")
+        cls.tag_a = Tag.objects.create(name="Finanzen")
+        cls.tag_b = Tag.objects.create(name="Wichtig")
+        cls.cfield = CustomField.objects.create(name="Betrag", data_type="currency")
+
+    def _doc_with_metadata(self, title="Rechnung 2026"):
+        doc = Document.objects.create(
+            title=title,
+            owner=self.user,
+            document_type=self.dtype,
+            correspondent=self.corr,
+            storage_path=self.spath,
+            status="entwurf",
+        )
+        doc.tags.set([self.tag_b, self.tag_a])
+        CustomFieldValue.objects.create(document=doc, field=self.cfield, value="100,00")
+        return doc
+
+    def _version(self, doc, *, version_no=1, sha256="a" * 64, prev_hash=""):
+        return DocumentVersion.objects.create(
+            document=doc,
+            version_no=version_no,
+            file_path=f"/data/v{version_no}.pdf",
+            sha256=sha256,
+            prev_hash=prev_hash,
+            mime_type="application/pdf",
+            size=1000,
+            ocr_text="text",
+        )
+
+    def test_snapshot_inhalt_deterministisch(self):
+        doc = self._doc_with_metadata()
+        version = self._version(doc)
+        wrote = version_snapshot.write_snapshot_on_seal(version)
+        self.assertTrue(wrote)
+        version.refresh_from_db()
+        snap = version.metadata_snapshot
+        self.assertEqual(snap["snapshot_schema_version"], version_snapshot.SNAPSHOT_SCHEMA_VERSION)
+        self.assertEqual(snap["metadata"]["title"], "Rechnung 2026")
+        self.assertEqual(snap["metadata"]["document_type"], "Rechnung")
+        self.assertEqual(snap["metadata"]["correspondent"], "Stadtwerke")
+        self.assertEqual(snap["metadata"]["storage_path"], "Finanzen")
+        self.assertEqual(snap["metadata"]["owner"], "snap_owner")
+        self.assertEqual(snap["metadata"]["status"], "entwurf")
+        # Tags nach id aufsteigend sortiert (id+name Objekte).
+        self.assertEqual(
+            snap["tags"],
+            [{"id": self.tag_a.id, "name": "Finanzen"}, {"id": self.tag_b.id, "name": "Wichtig"}],
+        )
+        self.assertEqual(snap["custom_fields"], {"Betrag": "100,00"})
+        self.assertTrue(version.snapshot_taken_at is not None)
+        self.assertTrue(version.seal_hash)
+
+    def test_sealing_hook_schreibt_snapshot(self):
+        doc = self._doc_with_metadata()
+        version = self._version(doc)
+        # _seal_version ist der echte Sealing-Hook (setzt WORM + schreibt Snapshot).
+        pipeline._seal_version(version)
+        version.refresh_from_db()
+        self.assertIsNotNone(version.metadata_snapshot)
+        self.assertTrue(version.is_immutable)
+        self.assertTrue(version.seal_hash)
+
+    def test_snapshot_write_once_idempotent(self):
+        doc = self._doc_with_metadata()
+        version = self._version(doc)
+        self.assertTrue(version_snapshot.write_snapshot_on_seal(version))
+        first = version.metadata_snapshot
+        # Metadatum am Dokument nachträglich ändern und erneut versuchen.
+        doc.title = "Manipuliert"
+        doc.save(update_fields=["title"])
+        self.assertFalse(version_snapshot.write_snapshot_on_seal(version))
+        version.refresh_from_db()
+        self.assertEqual(version.metadata_snapshot["metadata"]["title"], "Rechnung 2026")
+        self.assertEqual(version.metadata_snapshot, first)
+
+    def test_seal_hash_umfasst_snapshot_manipulation_bricht_siegel(self):
+        doc = self._doc_with_metadata()
+        version = self._version(doc)
+        version_snapshot.write_snapshot_on_seal(version)
+        version.refresh_from_db()
+        # Unverändert → Siegel gültig.
+        self.assertTrue(version_snapshot.verify_seal(version))
+        # Eingefrorenes Metadatum manipulieren → Siegel bricht.
+        version.metadata_snapshot["metadata"]["title"] = "gefälscht"
+        self.assertFalse(version_snapshot.verify_seal(version))
+
+    def test_verify_seal_ohne_snapshot_ist_true(self):
+        doc = self._doc_with_metadata()
+        version = self._version(doc)  # kein Snapshot (Stufe-1-Bestand)
+        self.assertTrue(version_snapshot.verify_seal(version))
+
+    def test_versiegelte_version_ist_worm(self):
+        from django.core.exceptions import ValidationError
+
+        doc = self._doc_with_metadata()
+        version = self._version(doc)
+        pipeline._seal_version(version)
+        version.refresh_from_db()
+        version.metadata_snapshot = {"metadata": {"title": "hack"}}
+        with self.assertRaises(ValidationError):
+            version.save()
+
+
+class BackfillVersionSnapshotsTests(TestCase):
+    """`manage.py backfill_version_snapshots` – idempotent, nur aktuelle Version."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(username="bf_owner", password="pw", role="user")
+
+    def _doc_with_two_versions(self, title):
+        doc = Document.objects.create(title=title, owner=self.user)
+        v1 = DocumentVersion.objects.create(
+            document=doc, version_no=1, file_path="/d/v1.pdf", sha256="a" * 64,
+            mime_type="application/pdf", size=10, ocr_text="alt",
+        )
+        v2 = DocumentVersion.objects.create(
+            document=doc, version_no=2, file_path="/d/v2.pdf", sha256="b" * 64,
+            prev_hash="a" * 64, mime_type="application/pdf", size=20, ocr_text="neu",
+        )
+        doc.current_version = v2
+        doc.save(update_fields=["current_version"])
+        return doc, v1, v2
+
+    def test_backfill_nur_aktuelle_version(self):
+        doc, v1, v2 = self._doc_with_two_versions("Doc A")
+        call_command("backfill_version_snapshots")
+        v1.refresh_from_db()
+        v2.refresh_from_db()
+        self.assertIsNone(v1.metadata_snapshot)  # ältere Version bleibt unberührt
+        self.assertIsNotNone(v2.metadata_snapshot)
+        self.assertTrue(v2.snapshot_taken_at is not None)
+        self.assertTrue(v2.seal_hash)
+
+    def test_backfill_idempotent(self):
+        doc, v1, v2 = self._doc_with_two_versions("Doc B")
+        call_command("backfill_version_snapshots")
+        v2.refresh_from_db()
+        first_snapshot = v2.metadata_snapshot
+        first_taken_at = v2.snapshot_taken_at
+        # Zweiter Lauf: kein Doppelschreiben, Snapshot unverändert.
+        call_command("backfill_version_snapshots")
+        v2.refresh_from_db()
+        self.assertEqual(v2.metadata_snapshot, first_snapshot)
+        self.assertEqual(v2.snapshot_taken_at, first_taken_at)
+
+
+class VersionCompareSnapshotDiffTests(TestCase):
+    """Compare-Endpoint Stufe 2: Snapshot-Diff + supported-Flag + text_diff_html."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(username="vc2_owner", password="pw", role="user")
+        cls.doc = Document.objects.create(title="Diff-Dokument", owner=cls.user)
+
+    def _version(self, version_no, *, snapshot=None, ocr_text="text", sha256=None):
+        version = DocumentVersion.objects.create(
+            document=self.doc,
+            version_no=version_no,
+            file_path=f"/d/v{version_no}.pdf",
+            sha256=sha256 or (str(version_no) * 64),
+            mime_type="application/pdf",
+            size=1000,
+            ocr_text=ocr_text,
+        )
+        if snapshot is not None:
+            DocumentVersion.objects.filter(pk=version.pk).update(
+                metadata_snapshot=snapshot,
+                snapshot_schema_version=version_snapshot.SNAPSHOT_SCHEMA_VERSION,
+            )
+            version.refresh_from_db()
+        return version
+
+    @staticmethod
+    def _snap(*, title, tags, custom_fields, status="entwurf"):
+        return {
+            "snapshot_schema_version": version_snapshot.SNAPSHOT_SCHEMA_VERSION,
+            "snapshot_taken_at": None,
+            "metadata": {
+                "title": title,
+                "document_type": None,
+                "correspondent": None,
+                "storage_path": None,
+                "owner": "vc2_owner",
+                "status": status,
+                "retention_until": None,
+            },
+            "tags": tags,
+            "custom_fields": custom_fields,
+        }
+
+    def _compare(self, old, new):
+        return version_compare.compare_versions(self.doc, old, new).to_dict()
+
+    def test_diff_added_removed_changed(self):
+        old = self._version(
+            1,
+            snapshot=self._snap(
+                title="Alt", status="entwurf",
+                tags=[{"id": 1, "name": "A"}, {"id": 2, "name": "B"}],
+                custom_fields={"Betrag": "100", "Alt": "x"},
+            ),
+        )
+        new = self._version(
+            2,
+            snapshot=self._snap(
+                title="Neu", status="freigegeben",
+                tags=[{"id": 2, "name": "B"}, {"id": 3, "name": "C"}],
+                custom_fields={"Betrag": "200", "Neu": "y"},
+            ),
+        )
+        result = self._compare(old, new)
+        self.assertTrue(result["metadata_versioning_supported"])
+        # Metadaten changed (title + status).
+        meta = result["metadata"]
+        self.assertEqual(meta["changed"]["title"], {"old": "Alt", "new": "Neu"})
+        self.assertEqual(meta["changed"]["status"], {"old": "entwurf", "new": "freigegeben"})
+        self.assertEqual(meta["added"], {})
+        self.assertEqual(meta["removed"], {})
+        # Tags: id 3 hinzu, id 1 weg.
+        self.assertEqual(result["tags"]["added"], [{"id": 3, "name": "C"}])
+        self.assertEqual(result["tags"]["removed"], [{"id": 1, "name": "A"}])
+        # Custom-Fields: Betrag changed, Neu added, Alt removed.
+        cf = result["custom_fields"]
+        self.assertEqual(cf["changed"]["Betrag"], {"old": "100", "new": "200"})
+        self.assertEqual(cf["added"], {"Neu": "y"})
+        self.assertEqual(cf["removed"], {"Alt": "x"})
+        # Summary-Flags.
+        self.assertTrue(result["summary"]["metadata_changed"])
+        self.assertTrue(result["summary"]["tags_changed"])
+        self.assertTrue(result["summary"]["custom_fields_changed"])
+
+    def test_gleiche_snapshots_keine_changes(self):
+        snap = self._snap(title="Gleich", tags=[{"id": 1, "name": "A"}], custom_fields={"F": "1"})
+        old = self._version(1, snapshot=snap, ocr_text="gleich")
+        new = self._version(2, snapshot=dict(snap), ocr_text="gleich")
+        result = self._compare(old, new)
+        self.assertTrue(result["metadata_versioning_supported"])
+        self.assertFalse(result["summary"]["metadata_changed"])
+        self.assertFalse(result["summary"]["tags_changed"])
+        self.assertFalse(result["summary"]["custom_fields_changed"])
+        self.assertEqual(result["tags"], {"added": [], "removed": []})
+
+    def test_supported_nur_wenn_beide_snapshots(self):
+        with_snap = self._version(
+            1, snapshot=self._snap(title="X", tags=[], custom_fields={}),
+        )
+        without_snap = self._version(2)  # kein Snapshot
+        result = self._compare(with_snap, without_snap)
+        # Nur EINE Seite hat einen Snapshot → nicht unterstützt, Leersektionen (Stufe-1-UX).
+        self.assertFalse(result["metadata_versioning_supported"])
+        self.assertEqual(result["metadata"], {})
+        self.assertEqual(result["tags"], {"added": [], "removed": []})
+        self.assertEqual(result["custom_fields"], {})
+        self.assertFalse(result["summary"]["metadata_changed"])
+
+    def test_text_diff_html_leer_bei_gleichheit(self):
+        old = self._version(1, ocr_text="identisch")
+        new = self._version(2, ocr_text="identisch", sha256="1" * 64)
+        result = self._compare(old, new)
+        self.assertFalse(result["summary"]["text_changed"])
+        self.assertEqual(result["text_diff_html"], "")
+
+    def test_text_diff_html_gefuellt_bei_unterschied(self):
+        old = self._version(1, ocr_text="alt")
+        new = self._version(2, ocr_text="neu")
+        result = self._compare(old, new)
+        self.assertTrue(result["summary"]["text_changed"])
+        self.assertIn("<table", result["text_diff_html"])
+
+
+class ImportPaperlessCommandTests(TestCase):
+    """STOAA-332: manage.py import_paperless (paperless-ngx-Export -> DMS).
+
+    ``pipeline.process_version`` wird gemockt, damit die Tests ohne OCR/Celery
+    laufen; die DB-Anlage, das Mapping und die SHA-256-Idempotenz werden real
+    geprüft. ``storage.ORIGINALS_DIR`` zeigt auf ein Temp-Verzeichnis.
+    """
+
+    def setUp(self):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        self.owner = User.objects.create_user(username="importeur", password="x")
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        root = Path(self._tmp.name)
+        self.source = root / "export"
+        self.source.mkdir(parents=True, exist_ok=True)
+        self.originals = root / "originals"
+        self.originals.mkdir(parents=True, exist_ok=True)
+
+        # Zwei Originaldateien mit unterschiedlichem Inhalt.
+        (self.source / "rechnung.pdf").write_bytes(b"%PDF-1.4 rechnung")
+        (self.source / "vertrag.pdf").write_bytes(b"%PDF-1.4 vertrag")
+
+        manifest = [
+            {"model": "documents.correspondent", "pk": 1, "fields": {"name": "Stadtwerke"}},
+            {"model": "documents.documenttype", "pk": 1, "fields": {"name": "Rechnung"}},
+            {"model": "documents.tag", "pk": 1, "fields": {"name": "Finanzen"}},
+            {"model": "documents.tag", "pk": 2, "fields": {"name": "Wichtig"}},
+            {
+                "model": "documents.document",
+                "pk": 10,
+                "__exported_file_name__": "rechnung.pdf",
+                "fields": {
+                    "title": "Stromrechnung 2024",
+                    "correspondent": 1,
+                    "document_type": 1,
+                    "tags": [1, 2],
+                    "created": "2024-03-15T00:00:00+00:00",
+                },
+            },
+            {
+                "model": "documents.document",
+                "pk": 11,
+                "__exported_file_name__": "vertrag.pdf",
+                "fields": {
+                    "title": "Mietvertrag",
+                    "correspondent": None,
+                    "document_type": None,
+                    "tags": [],
+                    "created": "2023-01-01",
+                },
+            },
+        ]
+        (self.source / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    def _run(self, **kwargs):
+        from unittest import mock
+
+        from django.core.management import call_command
+
+        from . import pipeline, storage
+
+        opts = {"source": str(self.source), "owner": "importeur"}
+        opts.update(kwargs)
+        with mock.patch.object(storage, "ORIGINALS_DIR", self.originals), mock.patch.object(
+            pipeline, "process_version"
+        ) as proc:
+            call_command("import_paperless", **opts)
+        return proc
+
+    def test_import_legt_dokumente_an(self):
+        proc = self._run()
+
+        self.assertEqual(Document.objects.count(), 2)
+        rechnung = Document.objects.get(title="Stromrechnung 2024")
+        self.assertEqual(rechnung.owner, self.owner)
+        self.assertEqual(rechnung.correspondent.name, "Stadtwerke")
+        self.assertEqual(rechnung.document_type.name, "Rechnung")
+        self.assertIsNotNone(rechnung.created_at)
+        self.assertEqual(rechnung.created_at.year, 2024)
+        # get_or_create-Stammdaten genau einmal angelegt.
+        self.assertEqual(Correspondent.objects.count(), 1)
+        self.assertEqual(DocumentType.objects.count(), 1)
+        # ingest_source auf der Version gesetzt, Pipeline angestoßen.
+        version = rechnung.current_version
+        self.assertEqual(version.ingest_source, "paperless_import")
+        self.assertTrue(version.sha256)
+        self.assertEqual(proc.call_count, 2)
+        # Ohne --with-tags keine Tags.
+        self.assertEqual(rechnung.tags.count(), 0)
+
+    def test_idempotenz_zweiter_lauf_null_neu(self):
+        self._run()
+        self.assertEqual(Document.objects.count(), 2)
+        # Zweiter Lauf ueber denselben Export: 0 neue Dokumente (SHA-256-Dedup).
+        proc = self._run()
+        self.assertEqual(Document.objects.count(), 2)
+        proc.assert_not_called()
+
+    def test_dry_run_schreibt_nichts(self):
+        proc = self._run(dry_run=True)
+        self.assertEqual(Document.objects.count(), 0)
+        self.assertEqual(Correspondent.objects.count(), 0)
+        self.assertEqual(DocumentType.objects.count(), 0)
+        proc.assert_not_called()
+        # Keine Datei in den storage-Bereich kopiert.
+        self.assertEqual(list(self.originals.iterdir()), [])
+
+    def test_with_tags_importiert_tags(self):
+        self._run(with_tags=True)
+        rechnung = Document.objects.get(title="Stromrechnung 2024")
+        self.assertEqual(
+            sorted(rechnung.tags.values_list("name", flat=True)), ["Finanzen", "Wichtig"]
+        )
+        self.assertEqual(Tag.objects.count(), 2)
+
+    def test_unbekannter_owner_ist_fehler(self):
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+
+        with self.assertRaises(CommandError):
+            call_command("import_paperless", source=str(self.source), owner="gibtsnicht")
+        self.assertEqual(Document.objects.count(), 0)

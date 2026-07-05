@@ -236,6 +236,14 @@ class Document(models.Model):
         default=ApprovalStatus.ENTWURF,
     )
 
+    # Archive Serial Number (STOAA-284/285): dauerhafte, unveränderliche Identität
+    # des logischen Dokuments – gehört zum Document, nie zu einer Version, bleibt
+    # über alle Versionen identisch, wird nie geändert oder wiederverwendet. Die
+    # eigentliche (transaktionssichere, lückenlose) Vergabe-Logik lebt im Service
+    # ``documents.services.asn``; ``save()`` ruft ihn nur als Invarianten-Absicherung
+    # auf, damit JEDER Erstellungspfad garantiert genau eine ASN erhält.
+    asn = models.PositiveBigIntegerField(unique=True, editable=False, db_index=True)
+
     class Meta:
         verbose_name = "Dokument"
         verbose_name_plural = "Dokumente"
@@ -243,6 +251,21 @@ class Document(models.Model):
 
     def __str__(self) -> str:
         return self.title
+
+    def save(self, *args, **kwargs):
+        """Sichert die ASN-Invariante ab: jedes neue Dokument erhält genau eine ASN.
+
+        Die Vergabe (transaktionssicher, per ``select_for_update``) delegiert
+        vollständig an den Service ``documents.services.asn`` – hier steht bewusst
+        keine Businesslogik, nur der Aufruf, der die Invariante an der niedrigsten
+        Ebene erzwingt (unabhängig vom Erstellungspfad: Upload, Mail, Consume,
+        direktes POST). Eine einmal vergebene ASN wird nie überschrieben.
+        """
+        if self._state.adding and not self.asn:
+            from documents.services.asn import assign_asn
+
+            assign_asn(self)
+        super().save(*args, **kwargs)
 
 
 class DocumentVersion(models.Model):
@@ -265,6 +288,12 @@ class DocumentVersion(models.Model):
         THUMBNAIL_DONE = "thumbnail_done", "Thumbnail done"
         SEALED = "sealed", "Sealed"
         READY = "ready", "Ready"
+        # Fehler-/Retry-Layer (STOAA-228): bewusst NICHT als Vorwärtsziele in
+        # PROCESSING_TRANSITIONS – die lineare Erfolgs-Map bleibt lesbar. Die
+        # Übergänge in/aus diesen States laufen über mark_processing_failed /
+        # begin_retry bzw. pipeline.retry_version.
+        FAILED = "failed", "Failed"
+        RETRY_PENDING = "retry_pending", "Retry pending"
 
     PROCESSING_TRANSITIONS = {
         ProcessingState.UPLOADED: {ProcessingState.HASHED},
@@ -303,6 +332,21 @@ class DocumentVersion(models.Model):
         default=ProcessingState.UPLOADED,
         db_index=True,
         help_text="State Machine der Dokumentverarbeitung (uploaded → ready)",
+    )
+
+    # Fehler-/Retry-Layer (STOAA-228) – gehört zur technischen Verarbeitung,
+    # NICHT zur fachlichen Freigabe (Document.status). Read-only für die UI.
+    processing_error = models.TextField(blank=True, default="")
+    processing_failed_step = models.CharField(max_length=40, blank=True, default="")
+    processing_failed_at = models.DateTimeField(null=True, blank=True)
+    processing_attempts = models.PositiveIntegerField(default=0)
+
+    # Ingest-Quelle für die Workflow-Engine (STOAA-263)
+    ingest_source = models.CharField(
+        max_length=16,
+        blank=True,
+        default="upload",
+        help_text="upload | consume | mail | api | paperless_import",
     )
 
     ocr_status = models.CharField(
@@ -346,6 +390,33 @@ class DocumentVersion(models.Model):
         help_text="Löschen gesperrt bis zu diesem Datum",
     )
 
+    # Versionsvergleich Stufe 2 (STOAA-312, Option A aus STOAA-292): beim Sealing
+    # wird ein deterministischer JSON-Snapshot der Metadaten/Tags/Custom-Fields auf
+    # die Version geschrieben (write-once, WORM). ``seal_hash`` bindet den Snapshot
+    # kanonisch an die Datei-/prev_hash-Siegelkette – Manipulation an eingefrorenen
+    # Metadaten wird damit erkennbar. Ältere (Stufe-1-)Versionen bleiben ``null``
+    # ('nicht verfügbar', GoBD – keine erfundenen historischen Zustände).
+    metadata_snapshot = models.JSONField(
+        null=True,
+        blank=True,
+        help_text="Eingefrorener Metadaten-/Tag-/Custom-Field-Stand beim Sealing",
+    )
+    snapshot_schema_version = models.PositiveSmallIntegerField(
+        default=0,
+        help_text="Schema-Version des metadata_snapshot (0 = nicht vorhanden)",
+    )
+    snapshot_taken_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Erfassungszeitpunkt des Snapshots (Sealing bzw. Backfill)",
+    )
+    seal_hash = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text="sha256(sha256 · prev_hash · Snapshot-Bytes) – Metadaten-Siegel",
+    )
+
     class Meta:
         verbose_name = "Dokumentversion"
         verbose_name_plural = "Dokumentversionen"
@@ -379,6 +450,75 @@ class DocumentVersion(models.Model):
             object_type="DocumentVersion",
             object_id=str(self.id),
             detail={"from": old_state, "to": new_state, **(detail or {})},
+        )
+
+    def mark_processing_failed(self, *, step, error, actor=None) -> None:
+        """Markiert die Version als fehlgeschlagen (Fehler-Layer, STOAA-228).
+
+        WORM/READY werden NIE auf FAILED gesetzt – eine gesiegelte oder final
+        freigegebene Version bleibt unangetastet. Der Schreibvorgang läuft wie
+        ``transition_to`` bewusst über ``QuerySet.update``, um den WORM-``save``-
+        Guard zu umgehen, und die lokalen Attribute werden nachgezogen.
+        """
+        if self.is_immutable or self.processing_state in {
+            self.ProcessingState.SEALED,
+            self.ProcessingState.READY,
+        }:
+            raise ValidationError(
+                "Gesiegelte/READY-Version kann nicht auf FAILED gesetzt werden."
+            )
+
+        old_state = self.processing_state
+        failed_at = timezone.now()
+        error_text = str(error)[:4000]
+        DocumentVersion.objects.filter(pk=self.pk).update(
+            processing_state=self.ProcessingState.FAILED,
+            processing_error=error_text,
+            processing_failed_step=step,
+            processing_failed_at=failed_at,
+        )
+        self.processing_state = self.ProcessingState.FAILED
+        self.processing_error = error_text
+        self.processing_failed_step = step
+        self.processing_failed_at = failed_at
+
+        AuditLogEntry.objects.create(
+            actor=actor,
+            action="processing_failed",
+            object_type="DocumentVersion",
+            object_id=str(self.id),
+            detail={"from": old_state, "step": step, "error": str(error)[:1000]},
+        )
+
+    def begin_retry(self, *, actor=None) -> None:
+        """Startet einen Retry aus dem FAILED-Zustand (Retry-Layer, STOAA-228).
+
+        Setzt ``processing_state`` auf RETRY_PENDING und zählt ``processing_attempts``
+        hoch. Der eigentliche Wiedereinstieg (Vorbedingung setzen + Pipeline ab
+        dem fehlgeschlagenen Schritt) übernimmt ``pipeline.retry_version``.
+        """
+        if self.processing_state != self.ProcessingState.FAILED:
+            raise ValidationError("Retry ist nur aus dem Zustand FAILED möglich.")
+        if self.is_immutable or self.processing_state in {
+            self.ProcessingState.SEALED,
+            self.ProcessingState.READY,
+        }:
+            raise ValidationError(
+                "Gesiegelte/READY-Version kann nicht erneut verarbeitet werden."
+            )
+
+        DocumentVersion.objects.filter(pk=self.pk).update(
+            processing_state=self.ProcessingState.RETRY_PENDING,
+            processing_attempts=models.F("processing_attempts") + 1,
+        )
+        self.refresh_from_db(fields=["processing_state", "processing_attempts"])
+
+        AuditLogEntry.objects.create(
+            actor=actor,
+            action="processing_retry",
+            object_type="DocumentVersion",
+            object_id=str(self.id),
+            detail={"attempt": self.processing_attempts, "step": self.processing_failed_step},
         )
 
     def save(self, *args, **kwargs):
@@ -650,3 +790,200 @@ class DocumentShareLink(models.Model):
     def is_valid(self) -> bool:
         """Nutzbar = weder widerrufen noch abgelaufen."""
         return self.revoked_at is None and not self.is_expired
+
+
+# ---------------------------------------------------------------------------
+# ASN (Archive Serial Number, STOAA-284/285)
+# ---------------------------------------------------------------------------
+class ASNCounter(models.Model):
+    """Singleton-Zähler für die lückenlose, transaktionssichere ASN-Vergabe.
+
+    Genau eine Zeile (``pk=1``). Die Vergabe sperrt sie per ``select_for_update``
+    und erhöht ``last_value`` – dadurch serialisieren sich parallele Vergaben und
+    es entstehen weder Doppelvergaben noch Race Conditions. Bewusst **nicht** über
+    ``Document.objects.count()+1`` oder die Datenbank-ID (siehe Service).
+    """
+
+    last_value = models.PositiveBigIntegerField(
+        default=0,
+        help_text="Zuletzt vergebene ASN. Die nächste Vergabe liefert last_value + 1.",
+    )
+
+    class Meta:
+        verbose_name = "ASN-Zähler"
+        verbose_name_plural = "ASN-Zähler"
+
+    def __str__(self) -> str:
+        return f"ASN-Zähler (last_value={self.last_value})"
+
+
+class ASNScan(models.Model):
+    """Import-Historie einer ASN-Erkennung (Erweiterung gegenüber paperless).
+
+    Dokumentiert nachvollziehbar, wann und wodurch eine ASN erkannt wurde und
+    welche Version dadurch entstanden ist (z. B. beim erneuten Scan eines
+    Papierdokuments mit ASN-Etikett).
+    """
+
+    document = models.ForeignKey(
+        Document, on_delete=models.CASCADE, related_name="asn_scans"
+    )
+    version = models.ForeignKey(
+        DocumentVersion,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="asn_scans",
+    )
+    scanned_at = models.DateTimeField(auto_now_add=True)
+    matched_by = models.CharField(
+        max_length=64,
+        help_text="z. B. OCR, QR, Barcode",
+    )
+    confidence = models.FloatField(
+        default=1.0,
+        help_text="OCR-Erkennungswahrscheinlichkeit",
+    )
+
+    class Meta:
+        verbose_name = "ASN-Scan"
+        verbose_name_plural = "ASN-Scans"
+        ordering = ["-scanned_at"]
+
+    def __str__(self) -> str:
+        return f"ASN-Scan Dok#{self.document_id} via {self.matched_by} @ {self.scanned_at:%Y-%m-%d %H:%M}"
+
+
+# ---------------------------------------------------------------------------
+# Workflow-Engine (STOAA-263) – Trigger → Bedingungen → Aktionen
+# ---------------------------------------------------------------------------
+class Workflow(models.Model):
+    """Geordnete Regel: Trigger + Bedingungen → Aktionsliste."""
+
+    name = models.CharField(max_length=255)
+    order = models.IntegerField(default=100, help_text="Kleiner = früher ausgeführt")
+    enabled = models.BooleanField(default=True)
+
+    class Meta:
+        verbose_name = "Workflow"
+        verbose_name_plural = "Workflows"
+        ordering = ["order", "name"]
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class WorkflowTrigger(models.Model):
+    """Wann und unter welchen Bedingungen ein Workflow feuert."""
+
+    class TriggerType(models.TextChoices):
+        DOCUMENT_ADDED = "document_added", "Dokument hinzugefügt"
+        DOCUMENT_UPDATED = "document_updated", "Dokument aktualisiert"
+
+    workflow = models.OneToOneField(
+        Workflow, on_delete=models.CASCADE, related_name="trigger"
+    )
+    trigger_type = models.CharField(
+        max_length=32,
+        choices=TriggerType.choices,
+        default=TriggerType.DOCUMENT_ADDED,
+    )
+
+    # Quell-Filter (Mehrfachauswahl als kommagetrennte Liste, leer = alle)
+    # Werte: upload, consume, mail, api
+    sources = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text="Kommagetrennte Liste: upload,consume,mail,api – leer = alle",
+    )
+
+    # Optionale Bedingungen
+    filter_path = models.CharField(
+        max_length=512, blank=True, default="",
+        help_text="Glob gegen den Dateipfad der Version (optional)",
+    )
+    filter_correspondent = models.ForeignKey(
+        Correspondent, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="+",
+    )
+    filter_document_type = models.ForeignKey(
+        DocumentType, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="+",
+    )
+    filter_has_tags = models.ManyToManyField(
+        Tag, blank=True, related_name="trigger_has",
+        help_text="Dokument muss ALLE diese Tags haben",
+    )
+    filter_has_not_tags = models.ManyToManyField(
+        Tag, blank=True, related_name="trigger_has_not",
+        help_text="Dokument darf KEINEN dieser Tags haben",
+    )
+    # Textbedingungen (nutzen rule_matches-Logik aus classification.py)
+    filter_text_contains = models.CharField(max_length=512, blank=True, default="")
+    filter_text_regex = models.CharField(max_length=512, blank=True, default="")
+
+    class Meta:
+        verbose_name = "Workflow-Trigger"
+        verbose_name_plural = "Workflow-Trigger"
+
+    def __str__(self) -> str:
+        return f"Trigger[{self.trigger_type}] für {self.workflow}"
+
+
+class WorkflowAction(models.Model):
+    """Eine Aktion, die ein Workflow in gegebener Reihenfolge ausführt."""
+
+    class ActionType(models.TextChoices):
+        ASSIGN = "assign", "Zuweisen"
+        REMOVE = "remove", "Entfernen"
+
+    workflow = models.ForeignKey(
+        Workflow, on_delete=models.CASCADE, related_name="actions"
+    )
+    order = models.IntegerField(default=10)
+    action_type = models.CharField(
+        max_length=16, choices=ActionType.choices, default=ActionType.ASSIGN
+    )
+
+    # Felder für action_type=assign
+    assign_title = models.CharField(
+        max_length=512, blank=True, default="",
+        help_text="Titel-Template: {correspondent}, {created}, {doc_type} erlaubt",
+    )
+    assign_correspondent = models.ForeignKey(
+        Correspondent, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="+",
+    )
+    assign_document_type = models.ForeignKey(
+        DocumentType, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="+",
+    )
+    assign_storage_path = models.ForeignKey(
+        StoragePath, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="+",
+    )
+    assign_tags = models.ManyToManyField(
+        Tag, blank=True, related_name="action_assign",
+        help_text="Tags ergänzen",
+    )
+    assign_owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="+",
+    )
+    # Benutzerdefinierte Feldwerte als JSON: {"field_id": wert, ...}
+    assign_custom_fields = models.JSONField(default=dict, blank=True)
+
+    # Felder für action_type=remove
+    remove_tags = models.ManyToManyField(
+        Tag, blank=True, related_name="action_remove",
+        help_text="Tags entfernen",
+    )
+
+    class Meta:
+        verbose_name = "Workflow-Aktion"
+        verbose_name_plural = "Workflow-Aktionen"
+        ordering = ["order"]
+
+    def __str__(self) -> str:
+        return f"Aktion[{self.action_type}] #{self.order} für {self.workflow}"

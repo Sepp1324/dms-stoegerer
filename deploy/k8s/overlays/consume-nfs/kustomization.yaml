@@ -4,8 +4,15 @@
 # der Worker liest von dort. Das NFS-Volume ist BEWUSST nicht in der Basis, damit
 # das CD-Deployment ohne echten NFS-Server nicht am Worker-Rollout hängt.
 #
+# Pro-User-Attribution (STOAA-246/261): Das Overlay setzt zusätzlich
+# CONSUME_PER_USER=true (configmap-nfs-patch.yaml). Die NAS-Freigabe MUSS dann
+# pro-User-Unterordner tragen (/consume-nfs/<username>/); jede Datei wird dem
+# Django-User mit passendem username (case-insensitiv) als owner zugeordnet.
+# Ordner ohne passenden User werden übersprungen+geloggt (nie owner-los).
+#
 # Aktivierung (siehe deploy/k8s/README.md):
-#   1. NAS-Export anlegen, `nfs-common` auf dem/den Node(s) installieren.
+#   1. NAS-Export anlegen (pro-User-Unterordner!), `nfs-common` auf dem/den
+#      Node(s) installieren.
 #   2. In worker-nfs-patch.yaml die Platzhalter NFS_SERVER_PLACEHOLDER /
 #      NFS_EXPORT_PATH_PLACEHOLDER durch Server + Export-Pfad ersetzen.
 #   3. Einmalig anwenden:  kubectl apply -k deploy/k8s/overlays/consume-nfs

@@ -50,6 +50,7 @@ def create_document_from_file(
     owner=None,
     mime: str = "",
     size: int | None = None,
+    ingest_source: str = "upload",
 ) -> tuple[Document, DocumentVersion]:
     """Legt Dokument + erste Version an und protokolliert die Aufnahme.
 
@@ -64,6 +65,7 @@ def create_document_from_file(
         mime_type=mime,
         size=size if size is not None else path.stat().st_size,
         created_by=owner,
+        ingest_source=ingest_source,
     )
     document.current_version = version
     document.save(update_fields=["current_version"])
@@ -250,16 +252,30 @@ def hash_version(version: DocumentVersion) -> None:
 
 def ocr_version(version: DocumentVersion) -> dict:
     """OCR ausführen, technische OCR-Felder speichern und State ``OCR_DONE`` setzen."""
+    from django.utils import timezone
+
     from .models import OCRStatus
 
     version.transition_to(
         DocumentVersion.ProcessingState.OCR_RUNNING,
         actor=version.created_by,
     )
-    DocumentVersion.objects.filter(pk=version.pk).update(ocr_status=OCRStatus.RUNNING)
+    started_at = timezone.now()
+    DocumentVersion.objects.filter(pk=version.pk).update(
+        ocr_status=OCRStatus.RUNNING, ocr_started_at=started_at
+    )
     version.ocr_status = OCRStatus.RUNNING
+    version.ocr_started_at = started_at
 
+    # Weiche OCR-Fehler (``run_ocr`` liefert ein ``OCRResult`` mit status=FAILED)
+    # brechen die Pipeline NICHT ab: ocr_status=failed wird persistiert und die
+    # Verarbeitung läuft bis READY weiter (STOAA-225 Blocker 2, Monitoring).
+    # Eine *geworfene* Exception dagegen reicht der Retry-Layer bewusst an
+    # ``_run_from`` durch → processing_state=FAILED + Retry (STOAA-228). Deshalb
+    # hier KEIN eigenes try/except mehr.
     result = run_ocr(version.file_path)
+
+    finished_at = timezone.now()
     archive_candidate = Path(version.file_path).with_suffix(".ocr.pdf")
     archive_path = str(archive_candidate) if archive_candidate.exists() else ""
 
@@ -270,6 +286,7 @@ def ocr_version(version: DocumentVersion) -> dict:
     version.ocr_error = result.error or ""
     version.ocr_engine = result.engine
     version.ocr_duration_ms = result.duration_ms
+    version.ocr_finished_at = finished_at
     version.save(
         update_fields=[
             "archive_path",
@@ -279,6 +296,8 @@ def ocr_version(version: DocumentVersion) -> dict:
             "ocr_error",
             "ocr_engine",
             "ocr_duration_ms",
+            "ocr_started_at",
+            "ocr_finished_at",
         ]
     )
     version.transition_to(
@@ -300,15 +319,25 @@ def ocr_version(version: DocumentVersion) -> dict:
 
 
 def classify_version(version: DocumentVersion) -> dict:
-    """Regelbasierte Klassifizierung ausführen und State ``CLASSIFIED`` setzen."""
-    from . import classification
+    """Regelbasierte Klassifizierung + Workflow-Engine ausführen."""
+    from . import classification, workflows
 
-    version.refresh_from_db(fields=["processing_state"])
+    version.refresh_from_db(fields=["processing_state", "ingest_source"])
     version.transition_to(
         DocumentVersion.ProcessingState.CLASSIFICATION_RUNNING,
         actor=version.created_by,
     )
     result = classification.apply_rules(version.document)
+
+    # Workflow-Engine (STOAA-263): document_added nach apply_rules
+    source = version.ingest_source or "upload"
+    wf_result = workflows.run_workflows(
+        version.document,
+        trigger_type="document_added",
+        source=source,
+    )
+    result["workflows"] = wf_result.get("workflows", [])
+
     version.document.refresh_from_db(fields=["classification"])
     version.transition_to(
         DocumentVersion.ProcessingState.CLASSIFIED,
@@ -344,35 +373,127 @@ def seal_version(version: DocumentVersion) -> None:
     )
 
 
-def process_version(version: DocumentVersion) -> dict:
-    """Vollständige Verarbeitung einer Version entlang der State Machine."""
-    hash_version(version)
-    ocr_result = ocr_version(version)
-    classify_version(version)
-    generate_version_thumbnail(version)
-    AuditLogEntry.objects.create(
-        actor=version.created_by,
-        action="ocr",
-        object_type="DocumentVersion",
-        object_id=str(version.id),
-        detail={
-            "pages": ocr_result["pages"],
-            "sha256": version.sha256,
-            "archive_path": ocr_result["archive_path"],
-            "ocr_status": ocr_result["ocr_status"],
-            "chars": ocr_result["chars"],
-        },
-    )
-    seal_version(version)
+# ---------------------------------------------------------------------------
+# Pipeline-Schritte als Daten: Name, Funktion und Vorbedingung (der Startzustand,
+# den der Schritt selbst per transition_to erwartet). Die Namen MÜSSEN zu
+# ``DocumentVersion.processing_failed_step`` passen – sie steuern den Retry-
+# Wiedereinstieg (STOAA-228). Die Erfolgs-Map PROCESSING_TRANSITIONS bleibt davon
+# bewusst unberührt.
+PIPELINE_STEPS = [
+    ("hashing",        hash_version,               DocumentVersion.ProcessingState.UPLOADED),
+    ("ocr",            ocr_version,                DocumentVersion.ProcessingState.HASHED),
+    ("classification", classify_version,           DocumentVersion.ProcessingState.OCR_DONE),
+    ("thumbnail",      generate_version_thumbnail, DocumentVersion.ProcessingState.CLASSIFIED),
+    ("sealing",        seal_version,               DocumentVersion.ProcessingState.THUMBNAIL_DONE),
+]
+
+
+def _run_from(version: DocumentVersion, start_index: int) -> dict:
+    """Läuft die Pipeline ab ``start_index`` und fängt Schrittfehler ab.
+
+    Ein fehlgeschlagener Schritt markiert die Version FAILED (sichtbar, kein
+    re-raise – Stil ``scan_consume_folder``) und liefert ein strukturiertes
+    Fehlerergebnis zurück. Der Erfolgsfall endet in READY.
+    """
+    ocr_result = None
+    for name, func, _precond in PIPELINE_STEPS[start_index:]:
+        try:
+            step_result = func(version)
+        except Exception as exc:  # noqa: BLE001 – jeder Schritt darf fehlschlagen
+            version.mark_processing_failed(
+                step=name, error=exc, actor=version.created_by
+            )
+            logger.exception(
+                "Verarbeitungsschritt %r für Version %s fehlgeschlagen",
+                name,
+                version.id,
+            )
+            return {
+                "version_id": version.id,
+                "status": "failed",
+                "step": name,
+                "processing_state": DocumentVersion.ProcessingState.FAILED,
+                "error": str(exc)[:1000],
+            }
+
+        if name == "ocr":
+            ocr_result = step_result
+            # Bestehenden Zwischen-Audit verhaltensgleich erhalten (PR#70).
+            AuditLogEntry.objects.create(
+                actor=version.created_by,
+                action="ocr",
+                object_type="DocumentVersion",
+                object_id=str(version.id),
+                detail={
+                    "pages": step_result["pages"],
+                    "sha256": version.sha256,
+                    "archive_path": step_result["archive_path"],
+                    "ocr_status": step_result["ocr_status"],
+                    "chars": step_result["chars"],
+                },
+            )
+            # ASN-Integration (STOAA-284/285): Nach dem OCR den Text auf eine ASN
+            # prüfen. Erkennt der Service die ASN eines *bestehenden* Dokuments
+            # (erneuter Scan eines Papierdokuments), hängt er diese Version als
+            # neue Version an das bestehende Dokument und entfernt das Duplikat.
+            # Best effort – ein Fehler hier darf die restliche Pipeline nicht
+            # abbrechen (Stil ``scan_consume_folder``).
+            from documents.services import asn as asn_service
+
+            try:
+                asn_service.match_and_reconcile(version, actor=version.created_by)
+            except Exception:  # noqa: BLE001 – Zuordnung ist optional/best effort
+                logger.exception(
+                    "ASN-Reconcile für Version %s fehlgeschlagen", version.id
+                )
 
     return {
         "version_id": version.id,
         "sha256": version.sha256,
-        "pages": ocr_result["pages"],
-        "chars": ocr_result["chars"],
+        "pages": ocr_result["pages"] if ocr_result else version.page_count,
+        "chars": ocr_result["chars"] if ocr_result else len(version.ocr_text or ""),
         "processing_state": DocumentVersion.ProcessingState.READY,
         "status": "done",
     }
+
+
+def process_version(version: DocumentVersion) -> dict:
+    """Vollständige Verarbeitung einer Version entlang der State Machine."""
+    return _run_from(version, 0)
+
+
+def retry_version(version: DocumentVersion, actor=None) -> dict:
+    """Verarbeitet eine FAILED-Version ab dem fehlgeschlagenen Schritt erneut.
+
+    Ablauf (Beispiel OCR-Fehler): ``FAILED → RETRY_PENDING → (HASHED) →
+    OCR_RUNNING → …``. ``begin_retry`` zählt den Versuch hoch; anschließend wird
+    ``processing_state`` auf die Vorbedingung des fehlgeschlagenen Schritts
+    gesetzt, damit der Schritt seine eigene ``transition_to(RUNNING)`` ausführen
+    kann.
+    """
+    version.begin_retry(actor=actor)
+
+    failed_step = version.processing_failed_step
+    start_index = 0
+    name, _func, precond = PIPELINE_STEPS[0]
+    for idx, (step_name, _step_func, step_precond) in enumerate(PIPELINE_STEPS):
+        if step_name == failed_step:
+            start_index = idx
+            name = step_name
+            precond = step_precond
+            break
+
+    DocumentVersion.objects.filter(pk=version.pk).update(processing_state=precond)
+    version.processing_state = precond
+    AuditLogEntry.objects.create(
+        actor=actor,
+        action="processing_resume",
+        object_type="DocumentVersion",
+        object_id=str(version.id),
+        detail={"to": precond, "step": name},
+    )
+
+    return _run_from(version, start_index)
 
 
 def _add_months(d, months: int):
@@ -406,6 +527,18 @@ def _seal_version(version: DocumentVersion) -> None:
         ref = version.document.created_at or version.document.added_at
         base = ref.date() if hasattr(ref, "date") else date.today()
         retention_until = _add_months(base, doc_type.retention_months)
+
+    # Metadaten-Snapshot beim Sealing schreiben (Versionsvergleich Stufe 2,
+    # STOAA-312/Option A). Write-once, vor dem WORM-Flag – der Snapshot fließt in
+    # die Siegelkette (seal_hash) ein. Best effort: ein Snapshot-Fehler darf das
+    # eigentliche WORM-Siegel nicht verhindern (Integrität der Datei-Hash-Kette
+    # hat Vorrang; der Snapshot ist additiv).
+    from documents.services import version_snapshot
+
+    try:
+        version_snapshot.write_snapshot_on_seal(version, actor=version.created_by)
+    except Exception:  # noqa: BLE001 – Snapshot ist additiv, blockiert das Siegel nicht
+        logger.exception("Metadaten-Snapshot für Version %s fehlgeschlagen", version.id)
 
     # Direkt auf DB-Ebene setzen, ohne save()-Guard auszulösen
     DocumentVersion.objects.filter(pk=version.pk).update(

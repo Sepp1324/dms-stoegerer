@@ -41,7 +41,7 @@ jobs:
         run: docker run --rm "$REGISTRY/dms-backend:$TAG" python manage.py check
 
       - name: Testsuite + Migrations-Check (Deploy-Gate)
-        # Zweites Sicherheitsnetz neben dem PR-Gate (ci.yml): fängt auch direkte
+        # Zweites Sicherheitsnetz neben dem PR-Gate (pr-checks.yml): fängt direkte
         # Pushes nach main ab. Roter Test → kein Push, kein Rollout.
         run: backend/ci/run-tests.sh "$REGISTRY/dms-backend:$TAG"
 

@@ -3,11 +3,13 @@ import {
   createMailAccount,
   deleteMailAccount,
   getMailAccounts,
+  getUsers,
   testMailAccount,
   updateMailAccount,
   type MailAccount,
   type MailAccountPayload,
   type MailTestResult,
+  type User,
 } from "../api";
 
 // SPA-Verwaltung der IMAP-Postfächer (STOAA-215, Backend STOAA-214). Nur für
@@ -55,6 +57,14 @@ function draftFromAccount(a: MailAccount): Draft {
   };
 }
 
+// Anzeige-Label des Eigentümers: Benutzername, falls in der Nutzerliste
+// gefunden, sonst Fallback auf die ID (Nutzer könnte deaktiviert/gelöscht sein).
+function ownerLabel(owner: number | null, users: User[]): string {
+  if (owner == null) return "— (Admin-Triage)";
+  const u = users.find((x) => x.id === owner);
+  return u ? u.username : `Nutzer #${owner}`;
+}
+
 // Hand-gerollte Validierung (kein Zod): host/username/name nicht leer, Port
 // 1–65535, optionale Eigentümer-ID positiv, Ordner-Default INBOX. Gibt bei
 // Erfolg die fertige Payload zurück, sonst eine deutsche Fehlermeldung.
@@ -97,6 +107,7 @@ function validate(
 
 export default function MailAccountsAdmin({ canEdit }: { canEdit: boolean }) {
   const [accounts, setAccounts] = useState<MailAccount[]>([]);
+  const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
@@ -112,6 +123,13 @@ export default function MailAccountsAdmin({ canEdit }: { canEdit: boolean }) {
       .finally(() => setLoading(false));
   }
   useEffect(load, []);
+  // Nutzerliste einmalig laden (nur zur Owner-Zuordnung). Ein Fehler hier ist
+  // nicht kritisch – das Dropdown fällt dann auf „nur Admin-Triage" zurück.
+  useEffect(() => {
+    getUsers()
+      .then(setUsers)
+      .catch(() => setUsers([]));
+  }, []);
 
   return (
     <div className="fields-view">
@@ -128,6 +146,7 @@ export default function MailAccountsAdmin({ canEdit }: { canEdit: boolean }) {
             submitLabel="Konto anlegen"
             initial={EMPTY_DRAFT}
             isEdit={false}
+            users={users}
             onCancel={() => setAdding(false)}
             onSubmit={async (payload) => {
               await createMailAccount(payload);
@@ -172,6 +191,7 @@ export default function MailAccountsAdmin({ canEdit }: { canEdit: boolean }) {
             <AccountCard
               key={a.id}
               account={a}
+              users={users}
               canEdit={canEdit}
               onChanged={load}
             />
@@ -187,10 +207,12 @@ export default function MailAccountsAdmin({ canEdit }: { canEdit: boolean }) {
 // Bestätigung (keine window.confirm-Dialoge im dunklen Theme).
 function AccountCard({
   account,
+  users,
   canEdit,
   onChanged,
 }: {
   account: MailAccount;
+  users: User[];
   canEdit: boolean;
   onChanged: () => void;
 }) {
@@ -241,6 +263,7 @@ function AccountCard({
           initial={draftFromAccount(account)}
           isEdit
           hasPassword={account.has_password}
+          users={users}
           onCancel={() => setEditing(false)}
           onSubmit={async (payload) => {
             await updateMailAccount(account.id, payload);
@@ -325,11 +348,7 @@ function AccountCard({
         </div>
         <div>
           <dt>Eigentümer</dt>
-          <dd>
-            {account.owner == null
-              ? "— (Admin-Triage)"
-              : `Nutzer #${account.owner}`}
-          </dd>
+          <dd>{ownerLabel(account.owner, users)}</dd>
         </div>
         {account.password_env && (
           <div>
@@ -381,6 +400,7 @@ function MailAccountForm({
   initial,
   isEdit,
   hasPassword = false,
+  users,
   onCancel,
   onSubmit,
 }: {
@@ -391,6 +411,7 @@ function MailAccountForm({
   // Nur relevant beim Bearbeiten: steuert, ob das leere Passwortfeld „unverändert
   // lassen" (Passwort hinterlegt) oder „App-Passwort" (noch keins) anzeigt.
   hasPassword?: boolean;
+  users: User[];
   onCancel: () => void;
   onSubmit: (payload: MailAccountPayload) => Promise<void>;
 }) {
@@ -479,14 +500,24 @@ function MailAccountForm({
           />
         </label>
         <label>
-          Eigentümer (Nutzer-ID)
-          <input
-            type="number"
-            min={1}
+          Eigentümer
+          <select
             value={draft.owner}
             onChange={(e) => set("owner", e.target.value)}
-            placeholder="— (Admin-Triage)"
-          />
+          >
+            <option value="">— (Admin-Triage)</option>
+            {users.map((u) => (
+              <option key={u.id} value={String(u.id)}>
+                {u.username}
+              </option>
+            ))}
+            {/* Aktueller Eigentümer nicht (mehr) in der Liste (z. B. deaktiviert):
+                als Fallback-Option zeigen, damit er beim Speichern nicht still
+                verloren geht. */}
+            {draft.owner && !users.some((u) => String(u.id) === draft.owner) && (
+              <option value={draft.owner}>Nutzer #{draft.owner}</option>
+            )}
+          </select>
         </label>
       </div>
       <div className="mail-form__checks">

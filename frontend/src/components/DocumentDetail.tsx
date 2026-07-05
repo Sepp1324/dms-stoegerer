@@ -3,20 +3,25 @@ import {
   addDocumentVersion,
   applySuggestions,
   approveDocument,
+  compareVersions,
   createShareLink,
   dismissSuggestions,
   getDocument,
   getDocumentAudit,
   getDocumentIntegrity,
   getDocumentPreview,
+  getDocumentQr,
   getDocumentVersionFile,
   getShareLinks,
   rejectDocument,
+  retryProcessing,
   revokeShareLink,
   submitDocument,
   suggestDocument,
   updateDocument,
   type AuditEntry,
+  type CompareFieldChange,
+  type CompareSectionDiff,
   type CustomField,
   type CustomFieldValue,
   type DocumentDetail as Detail,
@@ -25,12 +30,19 @@ import {
   type DocumentVersion,
   type NamedRef,
   type ShareLink,
+  type VersionCompare,
 } from "../api";
+import { sanitizeDiffHtml } from "../sanitize";
 import {
   formatCustomFieldValue,
   toCanonicalValue,
   toInputValue,
 } from "../customFields";
+import {
+  ProcessingBadge,
+  ocrStatusLabel,
+  processingStateLabel,
+} from "./ProcessingStatus";
 
 interface Props {
   id: number;
@@ -79,6 +91,9 @@ export default function DocumentDetail({
   const [refresh, setRefresh] = useState(0);
   const [addBusy, setAddBusy] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
+  // Retry der Dokumentverarbeitung (STOAA-249): nur bei processing_state=failed.
+  const [retryBusy, setRetryBusy] = useState(false);
+  const [retryError, setRetryError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [editing, setEditing] = useState(false);
@@ -160,6 +175,39 @@ export default function DocumentDetail({
     } finally {
       setAddBusy(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }
+
+  // Verarbeitung der aktuellen Version neu anstoßen und danach das Detail neu
+  // laden (der ``refresh``-Tick triggert getDocument + Integritätsprüfung).
+  async function onRetry() {
+    setRetryBusy(true);
+    setRetryError(null);
+    try {
+      await retryProcessing(id);
+      setRefresh((r) => r + 1);
+    } catch (e) {
+      setRetryError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRetryBusy(false);
+    }
+  }
+
+  // Lädt den ASN-QR-Code als PNG herunter (STOAA-286). Dateiname = ASN-Label,
+  // damit das gedruckte Label eindeutig dem Dokument zuzuordnen ist.
+  async function downloadQr() {
+    try {
+      const blob = await getDocumentQr(id);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${doc?.asn_label ?? "asn"}.png`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setAddError(e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -302,6 +350,10 @@ export default function DocumentDetail({
   const versions = [...(doc?.versions ?? [])].sort(
     (a, b) => b.version_no - a.version_no,
   );
+  // Aktuelle Version für das Verarbeitungs-Widget (STOAA-249). Der Rollup
+  // ``doc.processing_state`` spiegelt genau diese Version; das Widget zeigt
+  // zusätzlich Fehlerdetails/Versuche aus dem vollen Versionsobjekt.
+  const currentVersion = versions.find((v) => v.id === doc?.current_version);
 
   const s = doc?.ai_suggestions ?? {};
   const suggestionRows: { key: string; label: string; value: string }[] = [];
@@ -485,6 +537,13 @@ export default function DocumentDetail({
                   onApprove={() => runFreigabe(() => approveDocument(id))}
                   onReject={(reason) => runFreigabe(() => rejectDocument(id, reason))}
                 />
+                <ProcessingPanel
+                  version={currentVersion}
+                  canEdit={canEdit}
+                  retryBusy={retryBusy}
+                  retryError={retryError}
+                  onRetry={onRetry}
+                />
                 {doc.classification?.rules?.length ? (
                   <p className="class-note">
                     <i aria-hidden="true">⚙</i> Automatisch klassifiziert durch Regel
@@ -493,6 +552,23 @@ export default function DocumentDetail({
                   </p>
                 ) : null}
                 <dl>
+                  <dt>Archivnummer</dt>
+                  <dd className="asn">
+                    {doc.asn_label ? (
+                      <>
+                        <span className="asn__value">{doc.asn_label}</span>
+                        <button
+                          type="button"
+                          className="link"
+                          onClick={downloadQr}
+                        >
+                          QR-Code herunterladen
+                        </button>
+                      </>
+                    ) : (
+                      "—"
+                    )}
+                  </dd>
                   <dt>Korrespondent</dt>
                   <dd>{doc.correspondent_name ?? "—"}</dd>
                   <dt>Typ</dt>
@@ -538,6 +614,12 @@ export default function DocumentDetail({
                   addError={addError}
                   fileInputRef={fileInputRef}
                   onAddVersion={onAddVersion}
+                />
+
+                <ComparePanel
+                  documentId={id}
+                  versions={versions}
+                  onDownload={downloadVersion}
                 />
               </>
             )}
@@ -679,6 +761,100 @@ function DetailTabs({
       >
         Verlauf
       </button>
+    </div>
+  );
+}
+
+// Verarbeitungs-Widget (STOAA-249): kompaktes Monitoring der aktuellen Version –
+// processing_state, OCR-Status, fehlgeschlagener Schritt, letzter Fehlerzeitpunkt
+// und Versuche. Fehlerdetails (processing_error/ocr_error) sind aufklappbar; der
+// Retry-Button erscheint nur bei ``failed`` und Schreibrecht.
+function ProcessingPanel({
+  version,
+  canEdit,
+  retryBusy,
+  retryError,
+  onRetry,
+}: {
+  version: DocumentVersion | undefined;
+  canEdit: boolean;
+  retryBusy: boolean;
+  retryError: string | null;
+  onRetry: () => void;
+}) {
+  const [showErrors, setShowErrors] = useState(false);
+  if (!version) return null;
+
+  const state = version.processing_state ?? null;
+  const isFailed = state === "failed";
+  const hasErrorDetails = !!(version.processing_error || version.ocr_error);
+
+  return (
+    <div className="processing">
+      <div className="processing__head">
+        <span className="processing__label">Verarbeitung</span>
+        <ProcessingBadge state={state} />
+      </div>
+
+      <dl className="processing__grid">
+        <dt>Status</dt>
+        <dd>{processingStateLabel(state)}</dd>
+        <dt>OCR</dt>
+        <dd>{ocrStatusLabel(version.ocr_status ?? null)}</dd>
+        {version.processing_failed_step && (
+          <>
+            <dt>Fehlgeschlagener Schritt</dt>
+            <dd>{version.processing_failed_step}</dd>
+          </>
+        )}
+        {version.processing_failed_at && (
+          <>
+            <dt>Letzter Fehler</dt>
+            <dd>{new Date(version.processing_failed_at).toLocaleString("de-DE")}</dd>
+          </>
+        )}
+        <dt>Versuche</dt>
+        <dd>{version.processing_attempts}</dd>
+      </dl>
+
+      {hasErrorDetails && (
+        <div className="processing__errors">
+          <button
+            className="link processing__toggle"
+            onClick={() => setShowErrors((v) => !v)}
+            aria-expanded={showErrors}
+          >
+            {showErrors ? "Fehlerdetails ausblenden" : "Fehlerdetails anzeigen"}
+          </button>
+          {showErrors && (
+            <div className="processing__error-body">
+              {version.processing_error && (
+                <div>
+                  <p className="processing__error-title">Verarbeitungsfehler</p>
+                  <pre className="processing__error-text">{version.processing_error}</pre>
+                </div>
+              )}
+              {version.ocr_error && (
+                <div>
+                  <p className="processing__error-title">OCR-Fehler</p>
+                  <pre className="processing__error-text">{version.ocr_error}</pre>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {isFailed && canEdit && (
+        <button
+          className="processing__retry"
+          onClick={onRetry}
+          disabled={retryBusy}
+        >
+          {retryBusy ? "Wird neu gestartet …" : "Verarbeitung erneut starten"}
+        </button>
+      )}
+      {retryError && <p className="status status--error">{retryError}</p>}
     </div>
   );
 }
@@ -1579,6 +1755,347 @@ function VersionsPanel({
           </span>
           {addError && <p className="status status--error">{addError}</p>}
         </div>
+      )}
+    </div>
+  );
+}
+
+// SHA-256 für die Anzeige kürzen (Anfang…Ende); leere Hashes als "—".
+function shortHash(hash: string): string {
+  if (!hash) return "—";
+  return hash.length > 20 ? `${hash.slice(0, 10)}…${hash.slice(-6)}` : hash;
+}
+
+// CSS-Klasse für eine Zeile eines unified-diff (Backend liefert difflib-Output).
+function diffLineClass(line: string): string {
+  if (line.startsWith("+++") || line.startsWith("---") || line.startsWith("@@")) {
+    return "compare-diff__line compare-diff__line--meta";
+  }
+  if (line.startsWith("+")) return "compare-diff__line compare-diff__line--add";
+  if (line.startsWith("-")) return "compare-diff__line compare-diff__line--del";
+  return "compare-diff__line";
+}
+
+// Ein Summary-Badge: grün = unverändert, akzent = geändert.
+function CompareBadge({ label, changed }: { label: string; changed: boolean }) {
+  return (
+    <span
+      className={`compare-badge ${
+        changed ? "compare-badge--changed" : "compare-badge--same"
+      }`}
+    >
+      {label}: {changed ? "geändert" : "unverändert"}
+    </span>
+  );
+}
+
+// Eine Änderungszeile alt → neu (für Metadaten/Zusatzfelder, Stufe 2).
+function ChangeRow({ label, change }: { label: string; change: CompareFieldChange }) {
+  return (
+    <div className="compare-change">
+      <span className="compare-change__label">{label}</span>
+      <span className="compare-change__old">{change.old ?? "—"}</span>
+      <span className="compare-change__arrow">→</span>
+      <span className="compare-change__new">{change.new ?? "—"}</span>
+    </div>
+  );
+}
+
+// Rendert einen ``{added, removed, changed}``-Sektions-Diff (Metadaten bzw.
+// Zusatzfelder, Stufe 2 / STOAA-312). ``added`` wird als „— → Wert", ``removed``
+// als „Wert → —" dargestellt, ``changed`` mit den echten alt/neu-Werten – alles
+// über die bestehende ChangeRow. Leere Sektion → dezenter Hinweis.
+function SectionDiff({ diff }: { diff: CompareSectionDiff }) {
+  const changed = Object.entries(diff.changed ?? {});
+  const added = Object.entries(diff.added ?? {});
+  const removed = Object.entries(diff.removed ?? {});
+
+  if (!changed.length && !added.length && !removed.length) {
+    return <p className="muted">Keine Änderungen.</p>;
+  }
+
+  return (
+    <div className="compare-changes">
+      {changed.map(([key, change]) => (
+        <ChangeRow key={`c-${key}`} label={key} change={change} />
+      ))}
+      {added.map(([key, value]) => (
+        <ChangeRow key={`a-${key}`} label={key} change={{ old: null, new: value }} />
+      ))}
+      {removed.map(([key, value]) => (
+        <ChangeRow key={`r-${key}`} label={key} change={{ old: value, new: null }} />
+      ))}
+    </div>
+  );
+}
+
+// Vergleichsansicht (STOAA-290/313): zwei Versionen wählen und OCR-/Datei-Diff
+// anzeigen. Metadaten-/Tag-/Feld-Sektionen werden ab Stufe 2 (STOAA-312) befüllt,
+// sobald beide Versionen einen Snapshot tragen (``metadata_versioning_supported``);
+// sonst greift weiter der Stufe-1-Hinweis „noch nicht verfügbar".
+function ComparePanel({
+  documentId,
+  versions,
+  onDownload,
+}: {
+  documentId: number;
+  versions: DocumentVersion[];
+  onDownload: (versionNo: number) => void;
+}) {
+  // ``versions`` ist absteigend sortiert (neueste zuerst).
+  const newestNo = versions.length ? versions[0].version_no : null;
+  const oldestNo = versions.length ? versions[versions.length - 1].version_no : null;
+
+  // Default: älteste (A) vs. neueste (B).
+  const [fromNo, setFromNo] = useState<number | null>(oldestNo);
+  const [toNo, setToNo] = useState<number | null>(newestNo);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<VersionCompare | null>(null);
+
+  async function onCompare() {
+    if (fromNo === null || toNo === null) return;
+    if (fromNo === toNo) {
+      setError("Bitte zwei unterschiedliche Versionen wählen.");
+      setResult(null);
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await compareVersions(documentId, fromNo, toNo);
+      setResult(r);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setResult(null);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (versions.length < 2) {
+    return (
+      <div className="version-info compare-panel">
+        <h3>Versionsvergleich</h3>
+        <p className="muted">
+          Für einen Vergleich werden mindestens zwei Versionen benötigt.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="version-info compare-panel">
+      <h3>Versionsvergleich</h3>
+
+      <div className="compare-picker">
+        <label className="compare-picker__field">
+          <span>Version A</span>
+          <select
+            value={fromNo ?? ""}
+            onChange={(e) => setFromNo(Number(e.target.value))}
+          >
+            {versions.map((v) => (
+              <option key={v.id} value={v.version_no}>
+                v{v.version_no}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="compare-picker__field">
+          <span>Version B</span>
+          <select
+            value={toNo ?? ""}
+            onChange={(e) => setToNo(Number(e.target.value))}
+          >
+            {versions.map((v) => (
+              <option key={v.id} value={v.version_no}>
+                v{v.version_no}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button
+          type="button"
+          disabled={busy || fromNo === null || toNo === null || fromNo === toNo}
+          onClick={onCompare}
+        >
+          {busy ? "Vergleiche …" : "Vergleichen"}
+        </button>
+      </div>
+
+      {error && <p className="status status--error">{error}</p>}
+
+      {result && <CompareResultView result={result} onDownload={onDownload} />}
+    </div>
+  );
+}
+
+function CompareResultView({
+  result,
+  onDownload,
+}: {
+  result: VersionCompare;
+  onDownload: (versionNo: number) => void;
+}) {
+  const { summary, files } = result;
+  // Nur wenn beide Versionen einen Metadaten-Snapshot tragen, liefert das Backend
+  // echte Metadaten-/Tag-/Feld-Diffs (Stufe 2). Sonst bleibt es beim Stufe-1-
+  // Verhalten: „nicht verfügbar"-Hinweis, keine Sektionen.
+  const supported = result.metadata_versioning_supported === true;
+  // ``text_diff_html`` VOR dem Rendern sanitizen (Team-Vorgabe DOMPurify) – nie
+  // ungesäubertes Backend-HTML in dangerouslySetInnerHTML.
+  const safeDiffHtml = sanitizeDiffHtml(result.text_diff_html);
+  const hasHtml = !!safeDiffHtml;
+  const hasText = hasHtml || !!result.text_diff;
+
+  const tagsAdded = result.tags?.added ?? [];
+  const tagsRemoved = result.tags?.removed ?? [];
+
+  return (
+    <div className="compare-result">
+      <p className="compare-caption">
+        Vergleich v{result.from_version} (A) → v{result.to_version} (B)
+      </p>
+
+      {/* Summary-Badges */}
+      <div className="compare-badges">
+        <CompareBadge label="Text" changed={summary.text_changed} />
+        <CompareBadge label="Datei" changed={summary.binary_changed} />
+        <CompareBadge label="Seiten" changed={summary.pages_changed} />
+        {supported && (
+          <>
+            <CompareBadge label="Metadaten" changed={summary.metadata_changed} />
+            <CompareBadge label="Tags" changed={summary.tags_changed} />
+            <CompareBadge
+              label="Zusatzfelder"
+              changed={summary.custom_fields_changed}
+            />
+          </>
+        )}
+      </div>
+      {!supported && (
+        <p className="muted compare-hint">
+          Metadaten-, Tag- und Feld-Vergleich pro Version ist noch nicht
+          verfügbar (Stufe 2).
+        </p>
+      )}
+
+      {/* Datei-/Summary-Sektion */}
+      <div className="compare-section">
+        <h4>Datei</h4>
+        <table className="compare-file-table">
+          <thead>
+            <tr>
+              <th />
+              <th>Version A (v{result.from_version})</th>
+              <th>Version B (v{result.to_version})</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th>SHA-256</th>
+              <td className="mono">{shortHash(files.old_sha256)}</td>
+              <td className="mono">{shortHash(files.new_sha256)}</td>
+            </tr>
+            <tr>
+              <th>Größe</th>
+              <td>{formatBytes(files.old_size)}</td>
+              <td>{formatBytes(files.new_size)}</td>
+            </tr>
+            <tr>
+              <th>MIME</th>
+              <td>{files.old_mime_type || "—"}</td>
+              <td>{files.new_mime_type || "—"}</td>
+            </tr>
+            <tr>
+              <th>Seiten</th>
+              <td>{files.old_page_count ?? "—"}</td>
+              <td>{files.new_page_count ?? "—"}</td>
+            </tr>
+          </tbody>
+        </table>
+        <div className="compare-downloads">
+          <button
+            type="button"
+            className="link"
+            onClick={() => onDownload(result.from_version)}
+          >
+            Version A herunterladen
+          </button>
+          <button
+            type="button"
+            className="link"
+            onClick={() => onDownload(result.to_version)}
+          >
+            Version B herunterladen
+          </button>
+        </div>
+      </div>
+
+      {/* OCR-Text-Diff */}
+      <div className="compare-section">
+        <h4>OCR-Textvergleich</h4>
+        {!hasText ? (
+          <p className="muted">Kein Textunterschied.</p>
+        ) : hasHtml ? (
+          <div
+            className="compare-diff compare-diff--html"
+            // Vom Backend erzeugte HtmlDiff-Tabelle (Stufe 2), DOMPurify-sanitized.
+            dangerouslySetInnerHTML={{ __html: safeDiffHtml }}
+          />
+        ) : (
+          <pre className="compare-diff compare-diff--text">
+            {result.text_diff.split("\n").map((line, i) => (
+              <span key={i} className={diffLineClass(line)}>
+                {line + "\n"}
+              </span>
+            ))}
+          </pre>
+        )}
+      </div>
+
+      {/* Metadaten / Tags / Zusatzfelder – nur bei echter Metadaten-Versionierung
+          (Stufe 2, STOAA-312). Ohne beidseitigen Snapshot bleibt es beim
+          Stufe-1-Hinweis oben; die Sektionen erscheinen dann gar nicht. */}
+      {supported && (
+        <>
+          <div className="compare-section">
+            <h4>Metadaten</h4>
+            <SectionDiff diff={result.metadata} />
+          </div>
+
+          <div className="compare-section">
+            <h4>Tags</h4>
+            {tagsAdded.length || tagsRemoved.length ? (
+              <div className="compare-tags">
+                {tagsAdded.map((t) => (
+                  <span
+                    key={`a-${t.id}`}
+                    className="compare-tag compare-tag--added"
+                  >
+                    + {t.name}
+                  </span>
+                ))}
+                {tagsRemoved.map((t) => (
+                  <span
+                    key={`r-${t.id}`}
+                    className="compare-tag compare-tag--removed"
+                  >
+                    − {t.name}
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <p className="muted">Keine Tag-Änderungen.</p>
+            )}
+          </div>
+
+          <div className="compare-section">
+            <h4>Zusatzfelder</h4>
+            <SectionDiff diff={result.custom_fields} />
+          </div>
+        </>
       )}
     </div>
   );

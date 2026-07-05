@@ -24,6 +24,7 @@ from email.header import decode_header, make_header
 from email.message import Message
 from email.utils import parseaddr
 
+from django.conf import settings
 from django.db import connection
 from django.utils import timezone
 
@@ -151,6 +152,7 @@ def ingest_message(account, raw_bytes: bytes) -> int | None:
     """
     from . import pipeline, storage
     from .models import ProcessedMail
+    from .owner import log_ingest_owner_audit, resolve_default_owner
     from .tasks import process_document_version
 
     msg = email_mod.message_from_bytes(raw_bytes)
@@ -177,16 +179,31 @@ def ingest_message(account, raw_bytes: bytes) -> int | None:
             continue
         path = storage.save_bytes(payload, _ext_of(filename))
         title = filename.rsplit(".", 1)[0] if "." in filename else filename
+        # Owner-Auflösung (STOAA-295): Konto-Owner hat Vorrang. Ist er leer,
+        # greift der konfigurierte ``MAIL_DEFAULT_OWNER``, sonst wären die
+        # Dokumente für Nicht-Admins durch die Owner-Isolation (STOAA-7)
+        # unsichtbar. Bleibt owner=None, ist das bewusstes Admin-Triage (siehe
+        # MailAccount-Docstring) – ``log_ingest_owner_audit`` macht das explizit.
+        owner = account.owner
+        fallback_used = False
+        if owner is None:
+            owner = resolve_default_owner(getattr(settings, "MAIL_DEFAULT_OWNER", ""))
+            fallback_used = owner is not None
         document, version = pipeline.create_document_from_file(
             str(path),
             title=title or subject or "E-Mail-Anhang",
-            # Standard-Empfänger des Postfachs als Eigentümer setzen, sonst sind
-            # die Dokumente für Nicht-Admins durch die Owner-Isolation (STOAA-7)
-            # unsichtbar. ``owner=None`` bleibt bewusstes Admin-Triage-Verhalten
-            # (siehe MailAccount-Docstring). Setzt auch AuditLogEntry.actor.
-            owner=account.owner,
+            # ``owner`` setzt auch DocumentVersion.created_by + AuditLogEntry.actor.
+            owner=owner,
             mime=ctype,
             size=len(payload),
+            ingest_source="mail",
+        )
+        log_ingest_owner_audit(
+            document,
+            owner=owner,
+            fallback_used=fallback_used,
+            source="mail",
+            reason="account_owner_leer",
         )
         # Hash sofort setzen, damit weitere identische Anhänge im selben Lauf
         # zuverlässig dedupliziert werden (die OCR-Pipeline berechnet ihn später

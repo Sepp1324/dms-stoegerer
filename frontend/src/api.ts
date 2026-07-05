@@ -71,11 +71,49 @@ async function apiFetch(path: string, options: RequestInit = {}): Promise<Respon
 }
 
 // --- Typen ---
+// Fachliche State-Machine der asynchronen Dokumentverarbeitung (STOAA-248).
+// ``ocr_status`` bleibt das technische Detail-Monitoring des OCR-Schritts;
+// ``processing_state`` beschreibt den gesamten DMS-Fluss (uploaded → … → ready)
+// samt Fehler-/Retry-States. Serverseitig gesetzt, read-only.
+export type ProcessingState =
+  | "uploaded"
+  | "hashed"
+  | "ocr_running"
+  | "ocr_done"
+  | "classification_running"
+  | "classified"
+  | "thumbnail_done"
+  | "sealed"
+  | "ready"
+  | "failed"
+  | "retry_pending";
+
+// Technischer OCR-Detailstatus des aktuellen Verarbeitungsschritts (STOAA-225).
+export type OcrStatus = "pending" | "running" | "success" | "failed" | "skipped";
+
+// UI-Buckets für den Listen-Filter ``?processing_state=`` (STOAA-248). ``processing``
+// fasst alle In-Flight-States (uploaded…sealed) zusammen; failed/retry_pending/ready
+// sind eigene Buckets. Unbekannte Werte ignoriert das Backend (kein Filter).
+export type ProcessingStateFilter =
+  | "failed"
+  | "processing"
+  | "ready"
+  | "retry_pending";
+
 export interface DocumentVersion {
   id: number;
   version_no: number;
   sha256: string;
   prev_hash: string;
+  // Verarbeitungs-/Fehler-/Retry-Felder (STOAA-228/248) und OCR-Detailstatus
+  // (STOAA-225). Alle serverseitig (Pipeline) gesetzt und read-only.
+  processing_state: ProcessingState;
+  processing_error: string;
+  processing_failed_step: string;
+  processing_failed_at: string | null;
+  processing_attempts: number;
+  ocr_status: OcrStatus;
+  ocr_error: string;
   mime_type: string;
   size: number;
   page_count: number | null;
@@ -112,6 +150,10 @@ export interface DocumentItem {
   document_type_name: string | null;
   tags: { id: number; name: string; color: string }[];
   page_count: number | null;
+  // Verarbeitungs-Rollup der aktuellen Version (STOAA-248): spart der Liste den
+  // Durchgriff auf ``versions``. Altdaten ohne current_version liefern ``null``.
+  processing_state: ProcessingState | null;
+  ocr_status: OcrStatus | null;
 }
 export interface AiSuggestions {
   title?: string;
@@ -139,6 +181,11 @@ export interface DocumentDetail extends DocumentItem {
   ai_suggested_at: string | null;
   classification: Classification;
   versions: DocumentVersion[];
+  // Archivnummer (STOAA-284/285). ``asn`` ist die rohe fortlaufende Zahl,
+  // ``asn_label`` die kanonische Anzeigeform ``ASN000123``. Beide read-only,
+  // serverseitig vergeben; ``null`` bei Altdaten ohne vergebene ASN.
+  asn: number | null;
+  asn_label: string | null;
   // Zusatzfelder-Werte dieses Dokuments (STOAA-108/112). Nur gesetzte Werte sind
   // enthalten; die vollständige Feldliste kommt aus getCustomFields().
   custom_field_values: CustomFieldValue[];
@@ -193,6 +240,48 @@ export interface ClassificationRule {
     tags?: string[];
   };
 }
+
+// --- Workflow-Engine (STOAA-263) ---
+export type WorkflowTriggerType = "document_added" | "document_updated";
+export type WorkflowActionType = "assign" | "remove";
+
+export interface WorkflowTrigger {
+  id?: number;
+  trigger_type: WorkflowTriggerType;
+  sources: string; // Komma-getrennt: upload,consume,mail,api
+  filter_path: string;
+  filter_correspondent: number | null;
+  filter_document_type: number | null;
+  filter_has_tags: number[];
+  filter_has_not_tags: number[];
+  filter_text_contains: string;
+  filter_text_regex: string;
+}
+
+export interface WorkflowAction {
+  id?: number;
+  order: number;
+  action_type: WorkflowActionType;
+  assign_title: string;
+  assign_correspondent: number | null;
+  assign_document_type: number | null;
+  assign_storage_path: number | null;
+  assign_tags: number[];
+  assign_owner: number | null;
+  assign_custom_fields: Record<string, unknown>;
+  remove_tags: number[];
+}
+
+export interface Workflow {
+  id: number;
+  name: string;
+  order: number;
+  enabled: boolean;
+  trigger: WorkflowTrigger | null;
+  actions: WorkflowAction[];
+}
+
+export type WorkflowPayload = Omit<Workflow, "id">;
 export interface AuditEntry {
   id: number;
   timestamp: string;
@@ -244,6 +333,15 @@ export interface ShareLink {
 // EINMALIG zurückkommt und danach nie wieder abrufbar ist.
 export interface ShareLinkCreated extends ShareLink {
   token: string;
+}
+
+// Schmale Nutzer-Auswahl (GET /api/users/, STOAA-221): read-only, admin-only,
+// bare Liste der aktiven Nutzer nach Benutzername sortiert. Nur für Zuordnungs-
+// Dropdowns (z. B. Standard-Empfänger eines Mailkontos), keine Rechteinfos.
+export interface User {
+  id: number;
+  username: string;
+  email: string;
 }
 
 // --- Mailkonten (IMAP-Postfächer, STOAA-214/215) ---
@@ -304,6 +402,13 @@ export interface DocumentQuery {
   // aus dem Kind-Ticket; unbekannte Params werden vom Backend ignoriert, daher
   // hier bereits vorbereitet.
   storage_path?: number | "";
+  // Verarbeitungsstatus-Filter (STOAA-248): grober UI-Bucket, leer = kein Filter.
+  processing_state?: ProcessingStateFilter | "";
+  // Triage-Ansicht (STOAA-296): nur ``"none"`` ist wirksam und lädt die
+  // owner-losen Dokumente. Ausschließlich für Admins ausgewertet – für
+  // Nicht-Admins ignoriert das Backend den Param (Queryset ist ohnehin auf den
+  // eigenen Owner isoliert, STOAA-295). Leer = kein Triage-Filter.
+  owner?: "none" | "";
   page?: number;
   // Sortierung, z. B. "-added_at" (Datum neu→alt), "added_at" (alt→neu),
   // "title" (A–Z). Leer = Backend-Standard (FTS-Relevanz bei ``q``, sonst
@@ -342,6 +447,27 @@ export async function getDocument(id: number): Promise<DocumentDetail> {
   return res.json();
 }
 
+// Verarbeitung der aktuellen Version neu anstoßen (STOAA-248). Nur erlaubt, wenn
+// ``processing_state === "failed"`` (sonst HTTP 400). Der Retry läuft asynchron;
+// die 202-Antwort enthält die aktuelle Version noch im Zustand ``failed`` – der
+// Rollup wechselt erst, wenn der Task greift, daher danach das Detail neu laden.
+export async function retryProcessing(id: number): Promise<DocumentVersion> {
+  const res = await apiFetch(`/documents/${id}/retry_processing/`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    let detail = `Neustart fehlgeschlagen: HTTP ${res.status}`;
+    try {
+      const data = await res.json();
+      if (data && typeof data.detail === "string") detail = data.detail;
+    } catch {
+      /* keine JSON-Fehlermeldung – Fallback bleibt */
+    }
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
 // Verlauf/Audit-Trail eines Dokuments (paginiert, neueste zuerst).
 export async function getDocumentAudit(
   id: number,
@@ -372,6 +498,15 @@ export async function getDocumentIntegrity(id: number): Promise<DocumentIntegrit
   return res.json();
 }
 
+// Lädt den QR-Code des Dokuments als PNG-Blob (STOAA-284/286). Der Code enthält
+// ausschließlich die ASN (``ASN000123``). Per fetch+Blob wegen JWT – ein direkter
+// <img src="…/qr/"> würde den Bearer-Token nicht mitschicken.
+export async function getDocumentQr(id: number): Promise<Blob> {
+  const res = await apiFetch(`/documents/${id}/qr/`);
+  if (!res.ok) throw new Error(`QR-Code nicht verfügbar (HTTP ${res.status})`);
+  return res.blob();
+}
+
 // Lädt die Originaldatei einer Version als Blob (mit Auth-Header) zum Download.
 export async function getDocumentVersionFile(
   id: number,
@@ -380,6 +515,110 @@ export async function getDocumentVersionFile(
   const res = await apiFetch(`/documents/${id}/download/?version=${versionNo}`);
   if (!res.ok) throw new Error(`Download fehlgeschlagen (HTTP ${res.status})`);
   return res.blob();
+}
+
+// --- Versionsvergleich (STOAA-288/289/290 Stufe 1 + STOAA-312/313 Stufe 2) ---
+// Contract = ``VersionComparison.to_dict()`` aus ``services/version_compare.py``;
+// der Compare-View (``DocumentViewSet.compare_versions``) gibt dieses Dict roh
+// zurück – NICHT über den (ungenutzten) ``VersionCompareResultSerializer``.
+// Deshalb hier exakt die ``to_dict``-Shape abbilden.
+//
+// Stufe 2 (STOAA-312) füllt die Metadaten-/Tag-/Feld-Sektionen aus je Version
+// gespeicherten ``metadata_snapshot``-Werten. Nur wenn BEIDE verglichenen
+// Versionen einen Snapshot tragen, ist ``metadata_versioning_supported: true``
+// und die Sektionen sind als ``{added, removed, changed}`` befüllt. Andernfalls
+// bleibt das Flag ``false`` und die Sektionen sind leer (Stufe-1-Verhalten).
+
+// Einzelne alt→neu-Änderung eines Wertes.
+export interface CompareFieldChange {
+  old: string | null;
+  new: string | null;
+}
+
+export interface CompareSummary {
+  text_changed: boolean;
+  binary_changed: boolean;
+  pages_changed: boolean;
+  metadata_changed: boolean;
+  tags_changed: boolean;
+  custom_fields_changed: boolean;
+}
+
+export interface CompareFileDiff {
+  old_sha256: string;
+  new_sha256: string;
+  old_size: number;
+  new_size: number;
+  old_mime_type: string;
+  new_mime_type: string;
+  old_page_count: number | null;
+  new_page_count: number | null;
+  changed: boolean;
+  // Beide Versionen sind PDF (Voraussetzung für Seiten-Diff einer späteren Stufe).
+  both_pdf: boolean;
+}
+
+// Sektions-Diff für Metadaten und Zusatzfelder: ``added``/``removed`` sind
+// Feldname→Wert-Maps neu hinzugekommener bzw. weggefallener Schlüssel, ``changed``
+// je Schlüssel die alt/neu-Werte. Nur bei ``metadata_versioning_supported: true``
+// befüllt (sonst liefert das Backend die Leersektion und das Frontend rendert sie
+// gar nicht erst).
+export interface CompareSectionDiff {
+  added: Record<string, string | null>;
+  removed: Record<string, string | null>;
+  changed: Record<string, CompareFieldChange>;
+}
+
+// Tag-Diff trägt volle ``{id, name}``-Objekte (nicht nur Namen) → stabile React-Keys.
+export interface CompareTagRef {
+  id: number;
+  name: string;
+}
+export interface CompareTagDiff {
+  added: CompareTagRef[];
+  removed: CompareTagRef[];
+}
+
+export interface VersionCompare {
+  document: number;
+  from_version: number;
+  to_version: number;
+  summary: CompareSummary;
+  text_diff: string;
+  // HtmlDiff-Tabelle (difflib). Nur bei tatsächlicher Textänderung gefüllt, sonst
+  // "" (dann wird der unified ``text_diff`` zeilenweise gerendert). MUSS vor dem
+  // Rendern client-seitig sanitized werden (DOMPurify) – nie roh in
+  // dangerouslySetInnerHTML.
+  text_diff_html: string;
+  metadata: CompareSectionDiff;
+  tags: CompareTagDiff;
+  custom_fields: CompareSectionDiff;
+  files: CompareFileDiff;
+  // true nur, wenn beide Versionen einen Metadaten-Snapshot tragen (Stufe 2).
+  metadata_versioning_supported: boolean;
+}
+
+// Vergleicht zwei Versionen desselben Dokuments (STOAA-288).
+// GET /documents/{id}/versions/{from}/compare/{to}/
+export async function compareVersions(
+  id: number,
+  fromVersion: number,
+  toVersion: number,
+): Promise<VersionCompare> {
+  const res = await apiFetch(
+    `/documents/${id}/versions/${fromVersion}/compare/${toVersion}/`,
+  );
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const data = await res.json();
+      detail = data.detail || detail;
+    } catch {
+      /* keine JSON-Fehlermeldung */
+    }
+    throw new Error(detail);
+  }
+  return res.json();
 }
 
 // Hängt eine neue Datei als nächste Version an ein bestehendes Dokument.
@@ -660,6 +899,30 @@ export async function deleteRule(id: number): Promise<void> {
   if (!res.ok && res.status !== 204) throw new Error(`Löschen fehlgeschlagen: HTTP ${res.status}`);
 }
 
+// --- Workflows (STOAA-263) ---
+export async function getWorkflows(): Promise<Workflow[]> {
+  return listAll<Workflow>("/workflows/");
+}
+export function createWorkflow(payload: WorkflowPayload): Promise<Workflow> {
+  return postJson<Workflow>("/workflows/", payload);
+}
+export async function updateWorkflow(
+  id: number,
+  payload: WorkflowPayload,
+): Promise<Workflow> {
+  const res = await apiFetch(`/workflows/${id}/`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(`Speichern fehlgeschlagen: HTTP ${res.status}`);
+  return res.json();
+}
+export async function deleteWorkflow(id: number): Promise<void> {
+  const res = await apiFetch(`/workflows/${id}/`, { method: "DELETE" });
+  if (!res.ok && res.status !== 204) throw new Error(`Löschen fehlgeschlagen: HTTP ${res.status}`);
+}
+
 // --- Mailkonten (STOAA-214/215) ---
 // CRUD + Verbindungstest unter /api/mail-accounts/. Nur für DMS-Admins
 // (Backend-Permission ``IsDmsAdmin``); Nicht-Admins erhalten 403 (im FE wird der
@@ -667,6 +930,37 @@ export async function deleteRule(id: number): Promise<void> {
 // zurück.
 export async function getMailAccounts(): Promise<MailAccount[]> {
   return listAll<MailAccount>("/mail-accounts/");
+}
+
+// Aktive Nutzer für Zuordnungs-Dropdowns (admin-only im Backend). Bare Liste.
+export async function getUsers(): Promise<User[]> {
+  return listAll<User>("/users/");
+}
+
+// Owner eines (Triage-)Dokuments setzen (STOAA-295/296). Nur für Admins –
+// das Backend erzwingt ``IsDmsAdmin`` (403 für Normalnutzer). Body ``{owner}``
+// erwartet die Nutzer-ID; die Antwort ist das aktualisierte Dokument. Nach
+// Erfolg fällt das Dokument aus der ``?owner=none``-Liste heraus.
+export async function setDocumentOwner(
+  id: number,
+  owner: number,
+): Promise<DocumentDetail> {
+  const res = await apiFetch(`/documents/${id}/set-owner/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ owner }),
+  });
+  if (!res.ok) {
+    let detail = `Zuweisen fehlgeschlagen: HTTP ${res.status}`;
+    try {
+      const data = await res.json();
+      if (data && typeof data.detail === "string") detail = data.detail;
+    } catch {
+      /* keine JSON-Fehlermeldung – Fallback bleibt */
+    }
+    throw new Error(detail);
+  }
+  return res.json();
 }
 export function createMailAccount(
   payload: MailAccountPayload,
