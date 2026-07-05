@@ -1553,6 +1553,41 @@ class ConsumePerUserScanTests(TestCase):
         self.assertEqual(Document.objects.get().owner, self.sebastian)
         delay.assert_called_once()
 
+    def test_streu_datei_im_root_move_ist_exdev_robust(self):
+        """(f2) STOAA-408: Der Root-``_failed/``-Move einer Streu-Datei nutzt
+        ``_move_into`` und übersteht daher eine Mount-Grenze (NFS/NAS). Ein
+        reines ``os.rename`` würde mit ``EXDEV`` scheitern und die Datei erneut
+        im Root liegen lassen; hier landet sie trotzdem in ``_failed/``."""
+        import errno
+        import os
+        import time
+
+        stray = self.consume / "vergessen.pdf"
+        stray.write_bytes(b"%PDF-1.4 dummy")
+        mtime = time.time() - 3600
+        os.utime(stray, (mtime, mtime))
+
+        real_rename = os.rename
+
+        def rename_exdev(src, dst, *a, **k):
+            # os.rename für den Move nach _failed/ als geräteübergreifend
+            # simulieren; alle anderen Renames unangetastet lassen.
+            if "_failed" in str(dst):
+                raise OSError(errno.EXDEV, "Invalid cross-device link")
+            return real_rename(src, dst, *a, **k)
+
+        from unittest import mock
+
+        with self.settings(CONSUME_PER_USER=True, CONSUME_MIN_AGE=15):
+            with mock.patch("os.rename", side_effect=rename_exdev):
+                with self.assertLogs("documents.tasks", level="WARNING"):
+                    result, delay = self._run_scan()
+
+        self.assertEqual(result["failed"], 1)
+        # Trotz EXDEV: Streu-Datei aus dem Root entfernt und in _failed/ gelandet.
+        self.assertFalse(stray.exists())
+        self.assertTrue((self.consume / "_failed" / "vergessen.pdf").exists())
+
     def test_zu_junge_streu_datei_im_root_bleibt_liegen(self):
         """(g) STOAA-409: Noch nicht fertig geschriebene Streu-Datei im Root
         (jünger als CONSUME_MIN_AGE) wird NICHT voreilig nach _failed/

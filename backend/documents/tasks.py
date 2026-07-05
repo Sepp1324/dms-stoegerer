@@ -177,8 +177,11 @@ def _scan_per_user(consume: Path, min_age: float, now: float) -> dict:
             )
             failed += 1
             try:
-                root_failed_dir.mkdir(parents=True, exist_ok=True)
-                entry.rename(_unique(root_failed_dir / entry.name))
+                # EXDEV-robust wie die übrigen Consume-Moves (STOAA-408):
+                # ``_move_into`` fällt bei Mount-Grenzen (NFS/NAS) auf
+                # Kopieren+Löschen zurück, statt mit ``os.rename`` an EXDEV zu
+                # scheitern und die Datei erneut im Root liegen zu lassen.
+                _move_into(entry, root_failed_dir)
             except OSError:
                 logger.exception(
                     "scan_consume_folder: Verschieben nach _failed/ "
