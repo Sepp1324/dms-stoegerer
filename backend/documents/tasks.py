@@ -1,5 +1,7 @@
 """Celery-Tasks der Verarbeitungs-Pipeline (asynchron, außerhalb des Requests)."""
+import hashlib
 import logging
+import shutil
 import time
 from pathlib import Path
 
@@ -145,6 +147,7 @@ def _scan_per_user(consume: Path, min_age: float, now: float) -> dict:
     ingested = []
     skipped = 0
     failed = 0
+    deduped = 0
     for entry in sorted(consume.iterdir()):
         if entry.name.startswith(("_", ".")):
             # Interne Ordner (``_processed``/``_failed``) bzw. versteckte
@@ -204,12 +207,14 @@ def _scan_per_user(consume: Path, min_age: float, now: float) -> dict:
         ingested.extend(result["ingested"])
         skipped += result["skipped"]
         failed += result["failed"]
+        deduped += result.get("deduped", 0)
 
     return {
         "found": len(ingested),
         "ingested": ingested,
         "skipped": skipped,
         "failed": failed,
+        "deduped": deduped,
     }
 
 
@@ -238,6 +243,7 @@ def _ingest_consume_dir(
     ingested = []
     skipped = 0
     failed = 0
+    deduped = 0
     for entry in sorted(base.iterdir()):
         if entry.is_dir() or entry.name.startswith("."):
             continue
@@ -255,11 +261,30 @@ def _ingest_consume_dir(
             continue
 
         try:
+            data = entry.read_bytes()
+
+            # Dedup-Schutz (STOAA-408): Ein Inhalt, dessen SHA-256 bereits als
+            # Version existiert, wird NICHT erneut als Dokument angelegt. Das
+            # verhindert Doppel-Dokumente, wenn eine Datei zuvor bereits
+            # aufgenommen wurde, aber – etwa wegen eines fehlgeschlagenen Moves
+            # über NFS (siehe ``_move_into``) – im Eingang liegengeblieben ist.
+            # Der nächste Scan räumt sie dann still nach ``_processed/`` weg.
+            sha256_hex = hashlib.sha256(data).hexdigest()
+            if pipeline.find_duplicate_version(sha256_hex) is not None:
+                logger.info(
+                    "scan_consume_folder: Duplikat (SHA-256 bereits vorhanden) – "
+                    "kein Neu-Import, verschiebe nach _processed/: %s",
+                    entry,
+                )
+                _move_into(entry, processed_dir)
+                deduped += 1
+                continue
+
             title = entry.stem
             # In den originals-Bereich kopieren, Original aus dem Eingang entfernen.
             storage.ORIGINALS_DIR.mkdir(parents=True, exist_ok=True)
             target = _unique(storage.ORIGINALS_DIR / entry.name)
-            target.write_bytes(entry.read_bytes())
+            target.write_bytes(data)
 
             document, version = pipeline.create_document_from_file(
                 str(target), title=title, size=target.stat().st_size, owner=owner,
@@ -276,7 +301,7 @@ def _ingest_consume_dir(
                 reason="consume_flat_ohne_owner",
             )
             process_document_version.delay(version.id)
-            entry.rename(processed_dir / entry.name)
+            _move_into(entry, processed_dir)
             ingested.append({"document_id": document.id, "title": title})
         except Exception:
             # Eine fehlerhafte Datei darf weder den Scan abbrechen noch
@@ -286,15 +311,19 @@ def _ingest_consume_dir(
                 "scan_consume_folder: Verarbeitung fehlgeschlagen für %s", entry
             )
             try:
-                failed_dir.mkdir(parents=True, exist_ok=True)
-                entry.rename(_unique(failed_dir / entry.name))
+                _move_into(entry, failed_dir)
             except OSError:
                 logger.exception(
                     "scan_consume_folder: Verschieben nach _failed/ fehlgeschlagen für %s",
                     entry,
                 )
 
-    return {"ingested": ingested, "skipped": skipped, "failed": failed}
+    return {
+        "ingested": ingested,
+        "skipped": skipped,
+        "failed": failed,
+        "deduped": deduped,
+    }
 
 
 @shared_task
@@ -447,3 +476,20 @@ def _unique(path: Path) -> Path:
         candidate = path.with_name(f"{path.stem}-{counter}{path.suffix}")
         counter += 1
     return candidate
+
+
+def _move_into(src: Path, dest_dir: Path) -> Path:
+    """Verschiebt ``src`` robust in ``dest_dir`` (dateisystemübergreifend).
+
+    ``shutil.move`` fällt bei ``EXDEV`` (Quelle und Ziel auf unterschiedlichen
+    Geräten/Mounts, wie sie bei NFS/NAS-Consume-Ordnern regelmäßig auftreten)
+    auf Kopieren+Löschen zurück – anders als ``Path.rename``/``os.rename``, das
+    dann ``OSError: [Errno 18] EXDEV`` wirft. Genau das ließ verarbeitete
+    Dateien im Eingang liegen (weder ``_processed/`` noch ``_failed/``), sodass
+    der nächste Scan sie erneut aufnahm → Doppel-Dokumente (STOAA-408).
+    Namenskollisionen werden per ``_unique`` vermieden.
+    """
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = _unique(dest_dir / src.name)
+    shutil.move(str(src), str(dest))
+    return dest

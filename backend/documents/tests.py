@@ -1270,6 +1270,81 @@ class ConsumeFolderScanTests(TestCase):
         self.assertTrue((missing / "_processed" / "reif.pdf").exists())
         delay.assert_called_once()
 
+    def test_move_ist_dateisystemuebergreifend_robust(self):
+        """(e) STOAA-408: Move nach _processed/ funktioniert auch bei EXDEV.
+
+        Auf NFS/NAS liegt der Zielordner ggf. auf einem anderen Gerät; ein
+        reines ``os.rename``/``Path.rename`` wirft dann ``OSError [Errno 18]
+        EXDEV`` und die Datei bliebe im Eingang liegen (→ Doppel-Import beim
+        nächsten Scan). ``_move_into`` nutzt ``shutil.move`` und fällt auf
+        Kopieren+Löschen zurück – die Datei landet trotzdem in ``_processed/``.
+        """
+        import errno
+        import os
+        from unittest import mock
+
+        from . import storage, tasks
+
+        self._write("reif.pdf", age_seconds=3600)
+
+        real_rename = os.rename
+
+        def rename_exdev(src, dst, *a, **k):
+            # os.rename für den Move in _processed/ als geräteübergreifend
+            # simulieren; alle anderen Renames unangetastet lassen.
+            if "_processed" in str(dst):
+                raise OSError(errno.EXDEV, "Invalid cross-device link")
+            return real_rename(src, dst, *a, **k)
+
+        with self.settings(CONSUME_MIN_AGE=15):
+            with mock.patch.object(
+                storage, "CONSUME_DIR", self.consume
+            ), mock.patch.object(
+                storage, "ORIGINALS_DIR", self.originals
+            ), mock.patch.object(
+                tasks.process_document_version, "delay"
+            ) as delay, mock.patch("os.rename", side_effect=rename_exdev):
+                result = tasks.scan_consume_folder()
+
+        self.assertEqual(result["found"], 1)
+        self.assertEqual(result["failed"], 0)
+        # Trotz EXDEV: Datei aus dem Eingang entfernt und in _processed/ gelandet.
+        self.assertFalse((self.consume / "reif.pdf").exists())
+        self.assertTrue((self.consume / "_processed" / "reif.pdf").exists())
+        self.assertEqual(Document.objects.count(), 1)
+        delay.assert_called_once()
+
+    def test_inhaltsduplikat_wird_nicht_erneut_importiert(self):
+        """(f) STOAA-408: Dedup-Schutz – gleicher SHA-256 → kein Neu-Import.
+
+        Existiert bereits eine Version mit identischem Inhalts-Hash (z. B. weil
+        die Datei zuvor aufgenommen, aber wegen eines fehlgeschlagenen Moves im
+        Eingang liegengeblieben war), legt der Scan KEIN zweites Dokument an,
+        räumt die Datei aber still nach ``_processed/`` weg.
+        """
+        import hashlib
+
+        content = b"%PDF-1.4 dummy"
+        sha = hashlib.sha256(content).hexdigest()
+        # Bereits vorhandenes Dokument mit passendem Inhalts-Hash.
+        doc = Document.objects.create(title="schon-da")
+        DocumentVersion.objects.create(
+            document=doc, version_no=1, file_path="/x/schon-da.pdf", sha256=sha
+        )
+
+        with self.settings(CONSUME_MIN_AGE=15):
+            self._write("dup.pdf", age_seconds=3600)  # schreibt exakt ``content``
+            result, delay = self._run_scan()
+
+        self.assertEqual(result["found"], 0)
+        self.assertEqual(result["deduped"], 1)
+        self.assertEqual(result["failed"], 0)
+        # Kein zweites Dokument; Datei aus Eingang nach _processed/ verschoben.
+        self.assertEqual(Document.objects.count(), 1)
+        self.assertFalse((self.consume / "dup.pdf").exists())
+        self.assertTrue((self.consume / "_processed" / "dup.pdf").exists())
+        delay.assert_not_called()
+
 
 class ConsumePerUserScanTests(TestCase):
     """STOAA-261: Pro-User-Attribution des Consume-Ingest.
