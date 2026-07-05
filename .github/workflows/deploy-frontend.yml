@@ -1,0 +1,94 @@
+name: deploy-frontend-only
+
+# Manueller, gezielter Frontend-Deploy (nur UI-Image, Backend bleibt auf aktueller Version).
+# Use-Case: UI-Modernisierung (STOAA-415/417/430/431) deployen, ohne das Backend anzufassen
+# (z.B. nach Rollback auf stabile Backend-Version 0.5.0 — STOAA-497/499).
+#
+# Läuft auf self-hosted Runner "dms" (Heimnetz) mit Zugriff auf Registry + kubectl.
+#
+# Akzeptierte Nebenwirkung (bekannt, CTO-Entscheidung):
+# - main-Frontend enthält Nav-Features (Workflows, Wiedervorlage) + DocumentDetail-Tabs
+#   (Versionen/Audit/Erinnerungen), deren Backend-Endpunkte in älteren Backend-Versionen
+#   (z.B. 0.5.0, Migrationen <0015) fehlen → diese 404en, zeigen aber saubere Fehlerzustände.
+# - Die Kern-UI-Modernisierung (Sidebar/Tokens/Layout/Tabs) ist reine Präsentation und voll funktional.
+
+on:
+  workflow_dispatch:
+    inputs:
+      git_sha:
+        description: 'Git-SHA oder Tag für das Frontend-Image (default: aktueller main-HEAD)'
+        required: false
+        default: ''
+
+concurrency:
+  group: deploy-frontend-only
+  cancel-in-progress: false
+
+env:
+  REGISTRY: registry.stoegerer-home.at
+  KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+jobs:
+  deploy-frontend:
+    runs-on: [self-hosted, dms]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Falls git_sha angegeben wurde, diesen SHA auschecken; sonst main-HEAD.
+          ref: ${{ github.event.inputs.git_sha || 'main' }}
+
+      - name: Image-Tag bestimmen
+        run: |
+          if [ -n "${{ github.event.inputs.git_sha }}" ]; then
+            TAG="${{ github.event.inputs.git_sha }}"
+          else
+            TAG="$(git rev-parse --short HEAD)"
+          fi
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "Deploying frontend with tag: $TAG"
+
+      - name: Frontend-Image bauen
+        run: docker build -t "$REGISTRY/dms-frontend:$TAG" ./frontend
+
+      - name: Frontend-Image pushen
+        run: docker push "$REGISTRY/dms-frontend:$TAG"
+
+      - name: Frontend-Deployment Image aktualisieren (OHNE apply -k)
+        run: |
+          set -euo pipefail
+          echo "Aktualisiere Frontend-Deployment auf Tag $TAG (Backend/Worker/Beat bleiben unangetastet)"
+          kubectl -n dms set image deploy/frontend frontend="$REGISTRY/dms-frontend:$TAG"
+
+      - name: Frontend-Rollout abwarten
+        run: kubectl -n dms rollout status deploy/frontend --timeout=180s
+
+      - name: Rollout-Diagnose (bei Timeout/Fehler)
+        if: failure()
+        run: |
+          echo "=== Frontend-Pods ==="
+          kubectl -n dms get pods -l app=frontend -o wide
+          echo ""
+          echo "=== Frontend-Pod describe ==="
+          kubectl -n dms get pods -l app=frontend -o name | while read pod; do
+            echo "--- $pod ---"
+            kubectl -n dms describe "$pod"
+            echo ""
+          done
+          echo "=== Frontend-Logs ==="
+          kubectl -n dms get pods -l app=frontend -o name | while read pod; do
+            echo "--- $pod ---"
+            kubectl -n dms logs "$pod" --tail=100 || echo "(keine Logs verfügbar)"
+            echo ""
+          done
+
+      - name: Zusammenfassung
+        if: always()
+        run: |
+          echo "### Frontend-Deploy $TAG" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Deployments:**" >> "$GITHUB_STEP_SUMMARY"
+          kubectl -n dms get deploy -o wide >> "$GITHUB_STEP_SUMMARY" 2>&1 || true
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Frontend-Pods:**" >> "$GITHUB_STEP_SUMMARY"
+          kubectl -n dms get pods -l app=frontend -o wide >> "$GITHUB_STEP_SUMMARY" 2>&1 || true
