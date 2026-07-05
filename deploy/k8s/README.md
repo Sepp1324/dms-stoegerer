@@ -432,21 +432,21 @@ Zwei Wege:
 ## 13. Backup & Restore
 
 Gesichert werden **zwei** zusammengehörige Dinge: die **Datenbank** (Metadaten,
-Hash-Kette, Audit-Trail) und **`/data`** (`originals/`, `archive/`, `thumbnails/`).
+Hash-Kette, Audit-Trail) und **`/data`** (`archive/`, `thumbnails/`, `consume/`).
 
-Das läuft automatisiert als k8s-**CronJob** `dms-backup` (`backup-cronjob.yaml`),
-täglich 02:30, mit Integritätsprüfung, Offsite-Ablage (rclone) und Retention.
+Das läuft automatisiert als k8s-**CronJob** `backup` (`backup-cronjob.yaml`),
+täglich 02:00, mit Offsite-Ablage auf das NAS via **SSH/rsync** und Retention.
 
-**Einmalige Einrichtung (Owner):** Offsite-Ziel + Zugangsdaten in ein gitignored
-Secret setzen:
+**Einmalige Einrichtung (Owner):** SSH-Zugang zum NAS in das gitignored Secret
+`dms-backup-secrets` setzen (Vorlage `secret.example.yaml`, zweiter Block):
 
 ```bash
 cd deploy/k8s
-cp backup-secret.example.yaml backup-secret.yaml   # rclone.conf füllen
-kubectl apply -f backup-secret.yaml
+cp secret.example.yaml secret.yaml   # BACKUP_SSH_* + BACKUP_TARGET_PATH füllen
+kubectl apply -f secret.yaml
 ```
 
-Manueller Ad-hoc-Lauf: `kubectl -n dms create job --from=cronjob/dms-backup test`.
+Manueller Ad-hoc-Lauf: `kubectl -n dms create job --from=cronjob/backup backup-manual`.
 
 > **Vollständige Doku – Architektur, Restore-Schritte und Restore-Drill:**
 > siehe [`docs/backup.md`](../../docs/backup.md). Ein Backup gilt erst als echt,
