@@ -96,6 +96,21 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   const [view, setView] = useState<"docs" | "rules" | "workflows" | "fields" | "mail" | "faellig">("docs");
   // Sidebar auf schmalen Screens ein-/ausklappbar.
   const [navOpen, setNavOpen] = useState(false);
+  // Desktop-Sidebar auf Icon-only einklappbar; Zustand persistent (localStorage).
+  const [navCollapsed, setNavCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("dms.sidebar.collapsed") === "1";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("dms.sidebar.collapsed", navCollapsed ? "1" : "0");
+    } catch {
+      /* localStorage optional (z. B. Privatmodus) – kein harter Fehler */
+    }
+  }, [navCollapsed]);
 
   // Zusatzfeld-Definitionen laden (auch nach Admin-Änderungen erneut aufrufbar).
   function loadCustomFields() {
@@ -359,6 +374,8 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
         isAdmin={!!me?.is_dms_admin}
         open={navOpen}
         onClose={() => setNavOpen(false)}
+        collapsed={navCollapsed}
+        onToggleCollapse={() => setNavCollapsed((c) => !c)}
         correspondents={correspondents}
         tags={tags}
         documentTypes={documentTypes}
@@ -570,6 +587,8 @@ function Sidebar({
   isAdmin,
   open,
   onClose,
+  collapsed,
+  onToggleCollapse,
   correspondents,
   tags,
   documentTypes,
@@ -596,6 +615,8 @@ function Sidebar({
   isAdmin: boolean;
   open: boolean;
   onClose: () => void;
+  collapsed: boolean;
+  onToggleCollapse: () => void;
   correspondents: NamedRef[];
   tags: TagRef[];
   documentTypes: NamedRef[];
@@ -626,9 +647,33 @@ function Sidebar({
   };
 
   return (
-    <aside className={`sidebar${open ? " sidebar--open" : ""}`}>
+    <aside
+      className={`sidebar${open ? " sidebar--open" : ""}${collapsed ? " sidebar--collapsed" : ""}`}
+    >
       <div className="sidebar__brand">
-        <span className="sidebar__logo">DMS</span>
+        <span className="sidebar__logo" title="DMS">
+          DMS
+        </span>
+        {/* Desktop: Icon-only ein-/ausklappen (persistiert). */}
+        <button
+          className="nav-toggle sidebar__collapse"
+          aria-label={collapsed ? "Seitenleiste ausklappen" : "Seitenleiste einklappen"}
+          aria-pressed={collapsed}
+          onClick={onToggleCollapse}
+          title={collapsed ? "Ausklappen" : "Einklappen"}
+        >
+          <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+            <path
+              fill="currentColor"
+              d={
+                collapsed
+                  ? "M4 4h2v16H4zm5.5 3.5L11 9l-3 3 3 3-1.5 1.5L5 12z"
+                  : "M18 4h2v16h-2zm-3.5 3.5L16 9l-3 3 3 3-1.5 1.5L9 12z"
+              }
+            />
+          </svg>
+        </button>
+        {/* Mobil: Off-Canvas-Drawer schließen. */}
         <button
           className="nav-toggle sidebar__close"
           aria-label="Navigation schließen"
@@ -684,51 +729,54 @@ function Sidebar({
             icon="M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2m0 2v.5l8 5 8-5V6H4m0 2.8V18h16V8.8l-8 5z"
           />
         )}
-
-        {view === "docs" && (
-          <div className="nav-filters">
-            <ProcessingFilterSection
-              active={processingState}
-              onSelect={(v) => {
-                onProcessingStateChange(v);
-                onClose();
-              }}
-            />
-            <FilterSection
-              title="Korrespondenten"
-              items={correspondents}
-              activeId={correspondent}
-              onSelect={pick(onCorrespondentChange)}
-            />
-            <FilterSection
-              title="Tags"
-              items={tags}
-              activeId={tag}
-              onSelect={pick(onTagChange)}
-              colored
-            />
-            <FilterSection
-              title="Dokumenttypen"
-              items={documentTypes}
-              activeId={documentType}
-              onSelect={pick(onDocumentTypeChange)}
-            />
-            <FilterSection
-              title="Speicherpfade"
-              items={storagePaths}
-              activeId={storagePath}
-              onSelect={pick(onStoragePathChange)}
-              disabled={!storagePathEnabled}
-              note={storagePathEnabled ? undefined : "Backend folgt"}
-            />
-            <CurrencyFilterSection
-              fields={currencyFields}
-              filters={currencyFilters}
-              onChange={onCurrencyChange}
-            />
-          </div>
-        )}
       </nav>
+
+      {/* Filter-Bereich als eigenständige, scrollbare Region unterhalb der
+          schlanken Primär-Nav. Im Icon-only-Modus per CSS ausgeblendet (nur
+          Desktop – der Mobil-Drawer zeigt die Filter stets vollständig). */}
+      {view === "docs" && (
+        <div className="nav-filters">
+          <ProcessingFilterSection
+            active={processingState}
+            onSelect={(v) => {
+              onProcessingStateChange(v);
+              onClose();
+            }}
+          />
+          <FilterSection
+            title="Korrespondenten"
+            items={correspondents}
+            activeId={correspondent}
+            onSelect={pick(onCorrespondentChange)}
+          />
+          <FilterSection
+            title="Tags"
+            items={tags}
+            activeId={tag}
+            onSelect={pick(onTagChange)}
+            colored
+          />
+          <FilterSection
+            title="Dokumenttypen"
+            items={documentTypes}
+            activeId={documentType}
+            onSelect={pick(onDocumentTypeChange)}
+          />
+          <FilterSection
+            title="Speicherpfade"
+            items={storagePaths}
+            activeId={storagePath}
+            onSelect={pick(onStoragePathChange)}
+            disabled={!storagePathEnabled}
+            note={storagePathEnabled ? undefined : "Backend folgt"}
+          />
+          <CurrencyFilterSection
+            fields={currencyFields}
+            filters={currencyFilters}
+            onChange={onCurrencyChange}
+          />
+        </div>
+      )}
 
       <div className="sidebar__footer">
         {username && <span className="muted sidebar__user">{username}</span>}
@@ -740,10 +788,17 @@ function Sidebar({
   );
 }
 
+// Wie viele Einträge je Sektion sofort sichtbar sind, bevor „mehr anzeigen“
+// den Rest einblendet; ab dieser Länge erscheint zudem ein kleines Suchfeld.
+const SECTION_TOP_N = 8;
+const SECTION_SEARCH_THRESHOLD = 10;
+
 // Ausklappbarer Stammdaten-Abschnitt der Sidebar: Titel + Anzahl, darunter eine
-// scrollbare Liste klickbarer Filter. Klick auf den aktiven Eintrag hebt den
-// Filter wieder auf. `disabled` graut den Abschnitt aus (z. B. Speicherpfade,
-// solange der Backend-Filter fehlt). Leere Listen werden ausgeblendet.
+// Liste klickbarer Filter. Klick auf den aktiven Eintrag hebt den Filter wieder
+// auf. Standardmäßig eingeklappt (öffnet automatisch, wenn ein Filter aktiv ist).
+// Lange Listen bekommen ein Suchfeld sowie Top-N + „mehr anzeigen“. `disabled`
+// graut den Abschnitt aus (z. B. Speicherpfade, solange der Backend-Filter
+// fehlt). Leere Listen werden ausgeblendet.
 function FilterSection({
   title,
   items,
@@ -761,8 +816,20 @@ function FilterSection({
   disabled?: boolean;
   note?: string;
 }) {
-  const [expanded, setExpanded] = useState(true);
+  // Eingeklappt als Standard; ist bereits ein Filter dieser Sektion aktiv,
+  // startet sie offen, damit keine aktive Auswahl verborgen bleibt.
+  const [expanded, setExpanded] = useState(activeId !== "");
+  const [query, setQuery] = useState("");
+  const [showAll, setShowAll] = useState(false);
   if (items.length === 0) return null;
+
+  const q = query.trim().toLowerCase();
+  const matches = q
+    ? items.filter((it) => it.name.toLowerCase().includes(q))
+    : items;
+  const visible = showAll ? matches : matches.slice(0, SECTION_TOP_N);
+  const hiddenCount = matches.length - visible.length;
+  const showSearch = items.length >= SECTION_SEARCH_THRESHOLD;
 
   return (
     <div className={`nav-section${disabled ? " nav-section--disabled" : ""}`}>
@@ -788,30 +855,58 @@ function FilterSection({
         )}
       </button>
       {expanded && (
-        <ul className="nav-section__list">
-          {items.map((it) => {
-            const active = activeId === it.id;
-            return (
-              <li key={it.id}>
-                <button
-                  className={`nav-filter${active ? " nav-filter--active" : ""}`}
-                  onClick={() => onSelect(active ? "" : it.id)}
-                  aria-current={active ? "true" : undefined}
-                  disabled={disabled}
-                  title={it.name}
-                >
-                  {colored && (
-                    <span
-                      className="nav-filter__dot"
-                      style={{ background: it.color ?? "var(--muted)" }}
-                    />
-                  )}
-                  <span className="nav-filter__label">{it.name}</span>
-                </button>
-              </li>
-            );
-          })}
-        </ul>
+        <>
+          {showSearch && !disabled && (
+            <input
+              className="nav-search"
+              type="search"
+              placeholder={`${title} filtern …`}
+              aria-label={`${title} filtern`}
+              value={query}
+              onChange={(e) => {
+                setQuery(e.target.value);
+                setShowAll(false);
+              }}
+            />
+          )}
+          <ul className="nav-section__list">
+            {visible.map((it) => {
+              const active = activeId === it.id;
+              return (
+                <li key={it.id}>
+                  <button
+                    className={`nav-filter${active ? " nav-filter--active" : ""}`}
+                    onClick={() => onSelect(active ? "" : it.id)}
+                    aria-current={active ? "true" : undefined}
+                    disabled={disabled}
+                    title={it.name}
+                  >
+                    {colored && (
+                      <span
+                        className="nav-filter__dot"
+                        style={{ background: it.color ?? "var(--muted)" }}
+                      />
+                    )}
+                    <span className="nav-filter__label">{it.name}</span>
+                  </button>
+                </li>
+              );
+            })}
+            {matches.length === 0 && (
+              <li className="nav-section__empty muted">Keine Treffer</li>
+            )}
+          </ul>
+          {hiddenCount > 0 && (
+            <button className="nav-more" onClick={() => setShowAll(true)}>
+              mehr anzeigen ({hiddenCount})
+            </button>
+          )}
+          {showAll && matches.length > SECTION_TOP_N && (
+            <button className="nav-more" onClick={() => setShowAll(false)}>
+              weniger anzeigen
+            </button>
+          )}
+        </>
       )}
     </div>
   );
@@ -834,7 +929,8 @@ function ProcessingFilterSection({
   active: ProcessingStateFilter | "";
   onSelect: (v: ProcessingStateFilter | "") => void;
 }) {
-  const [expanded, setExpanded] = useState(true);
+  // Standardmäßig eingeklappt; offen, falls bereits ein Status-Filter aktiv ist.
+  const [expanded, setExpanded] = useState(active !== "");
 
   return (
     <div className="nav-section">
@@ -889,7 +985,11 @@ function CurrencyFilterSection({
   filters: Record<number, CurrencyRange>;
   onChange: (fieldId: number, bound: keyof CurrencyRange, v: string) => void;
 }) {
-  const [expanded, setExpanded] = useState(true);
+  // Standardmäßig eingeklappt; offen, wenn bereits ein Betrag-Filter gesetzt ist.
+  const hasActive = Object.values(filters).some(
+    (r) => (r?.gte ?? "") !== "" || (r?.lte ?? "") !== "",
+  );
+  const [expanded, setExpanded] = useState(hasActive);
   if (fields.length === 0) return null;
 
   return (
@@ -967,11 +1067,12 @@ function NavItem({
       className={`nav-item${active ? " nav-item--active" : ""}`}
       onClick={onClick}
       aria-current={active ? "page" : undefined}
+      title={label}
     >
       <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
         <path fill="currentColor" d={icon} />
       </svg>
-      {label}
+      <span className="nav-item__label">{label}</span>
     </button>
   );
 }
