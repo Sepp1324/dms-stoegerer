@@ -20,6 +20,9 @@ env:
   REGISTRY: registry.stoegerer-home.at
   # k3s legt die Kubeconfig hier ab; der Runner-Nutzer braucht Lesezugriff.
   KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  # STOAA-450: NFS-Konfiguration aus Secrets (nicht im Repo)
+  NFS_SERVER: ${{ secrets.NFS_SERVER }}
+  NFS_EXPORT_PATH: ${{ secrets.NFS_EXPORT_PATH }}
 
 jobs:
   deploy:
@@ -54,9 +57,14 @@ jobs:
       - name: Manifeste rendern, Tags ersetzen, anwenden
         run: |
           set -euo pipefail
-          kubectl kustomize deploy/k8s \
+          # STOAA-450: Deploy consume-nfs Overlay (statt Basis) → NFS-Volume + securityContext
+          # + CONSUME_FOLDER_PATH + CONSUME_PER_USER landen im Cluster (kein Drift mehr).
+          # NFS-Server-IP/Pfad aus Secrets injizieren (nicht im Repo).
+          kubectl kustomize deploy/k8s/overlays/consume-nfs \
             | sed -E "s#(image: ${REGISTRY}/dms-backend):[^[:space:]]+#\1:${TAG}#g; \
-                      s#(image: ${REGISTRY}/dms-frontend):[^[:space:]]+#\1:${TAG}#g" \
+                      s#(image: ${REGISTRY}/dms-frontend):[^[:space:]]+#\1:${TAG}#g; \
+                      s#NFS_SERVER_PLACEHOLDER#${NFS_SERVER}#g; \
+                      s#NFS_EXPORT_PATH_PLACEHOLDER#${NFS_EXPORT_PATH}#g" \
             | kubectl apply -f -
 
       - name: Rollout abwarten
