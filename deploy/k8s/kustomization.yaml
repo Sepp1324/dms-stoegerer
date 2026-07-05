@@ -1,32 +1,11 @@
+# Basis-Deployment (ohne NFS-Volume).
 # Anwenden mit:  kubectl apply -k deploy/k8s
-# Voraussetzung: zuvor secret.yaml aus secret.example.yaml erstellen und anwenden
-# (oder hier temporär in resources aufnehmen – nicht ins Repo committen).
+#
+# Für NFS-Consume-Integration (Scanner-NAS → Worker):
+#   kubectl apply -k deploy/k8s/overlays/consume-nfs
+# (siehe overlays/consume-nfs/kustomization.yaml)
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-namespace: dms
-
-# Zentrale Versionssteuerung: Beim Release NUR hier den newTag hochsetzen,
-# denselben Tag bauen/pushen und `kubectl apply -k` ausführen.
-# (Überschreibt den Tag in allen Deployments – keine Änderung an den *.yaml nötig.)
-images:
-  # 0.5.0: Mailkonto-Verwaltung (STOAA-215) + Bulk-Actions (STOAA-206/208) + Processing State Machine (PR #70)
-  #        Backend: neue Migrationen 0012/0013/0014, MailAccount CRUD API, Bulk-Endpoints
-  #        Frontend: MailAccountsAdmin.tsx, Einstellungen-Integration
-  #        Deployed: 2026-07-04 11:50 UTC, Git-SHA 7fefa08, via GitHub Actions
-  - name: registry.stoegerer-home.at/dms-backend
-    newTag: "0.5.0"
-  - name: registry.stoegerer-home.at/dms-frontend
-    newTag: "0.5.0"
-
 resources:
-  - namespace.yaml
-  - configmap.yaml
-  - postgres.yaml
-  - redis.yaml
-  - backend.yaml
-  - celery.yaml
-  - beat.yaml
-  - frontend.yaml
-  - ingress.yaml
-  - backup-cronjob.yaml
+  - base

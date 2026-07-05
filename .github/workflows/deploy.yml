@@ -57,6 +57,13 @@ jobs:
       - name: Manifeste rendern, Tags ersetzen, anwenden
         run: |
           set -euo pipefail
+          # STOAA-460: Guard gegen leere NFS-Secrets (sonst landen leere Werte in den Manifesten)
+          if [ -z "${NFS_SERVER:-}" ] || [ -z "${NFS_EXPORT_PATH:-}" ]; then
+            echo "FEHLER: NFS_SERVER und NFS_EXPORT_PATH müssen als GitHub-Repo-Secrets gesetzt sein."
+            echo "NFS_SERVER='${NFS_SERVER:-}'"
+            echo "NFS_EXPORT_PATH='${NFS_EXPORT_PATH:-}'"
+            exit 1
+          fi
           # STOAA-450: Deploy consume-nfs Overlay (statt Basis) → NFS-Volume + securityContext
           # + CONSUME_FOLDER_PATH + CONSUME_PER_USER landen im Cluster (kein Drift mehr).
           # NFS-Server-IP/Pfad aus Secrets injizieren (nicht im Repo).
