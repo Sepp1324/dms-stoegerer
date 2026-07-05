@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import type { KeyboardEvent, ReactNode } from "react";
 import {
   addDocumentVersion,
   applySuggestions,
@@ -68,6 +69,27 @@ interface Props {
   onManageFields?: () => void;
 }
 
+// Tab-Definition der rechten Info-/Aktionsspalte (STOAA-430). Reihenfolge ist
+// verbindlich; ``ai`` erscheint nur bei Schreibrecht (KI-Panel ist canEdit-only).
+type TabId =
+  | "overview"
+  | "versions"
+  | "ai"
+  | "reminder"
+  | "freigabe"
+  | "fields"
+  | "audit";
+
+const DETAIL_TABS: { id: TabId; label: string }[] = [
+  { id: "overview", label: "Übersicht" },
+  { id: "versions", label: "Versionen & Verlauf" },
+  { id: "ai", label: "KI-Vorschläge" },
+  { id: "reminder", label: "Wiedervorlage" },
+  { id: "freigabe", label: "Freigabe" },
+  { id: "fields", label: "Zusatzfelder" },
+  { id: "audit", label: "Audit" },
+];
+
 export default function DocumentDetail({
   id,
   onBack,
@@ -88,7 +110,26 @@ export default function DocumentDetail({
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
   const [pdfError, setPdfError] = useState<string | null>(null);
 
-  const [tab, setTab] = useState<"details" | "history">("details");
+  // Aktiver Tab pro Sitzung merkbar (sessionStorage, dokument-spezifisch).
+  // Fallback: "overview" (Übersicht) bei fehlendem/ungültigem Wert.
+  const [tab, setTab] = useState<TabId>(() => {
+    try {
+      const stored = sessionStorage.getItem(`dd.tab.${id}`);
+      if (stored && DETAIL_TABS.some((t) => t.id === stored)) {
+        return stored as TabId;
+      }
+    } catch {
+      /* sessionStorage evtl. nicht verfügbar */
+    }
+    return "overview";
+  });
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(`dd.tab.${id}`, tab);
+    } catch {
+      /* sessionStorage evtl. nicht verfügbar */
+    }
+  }, [id, tab]);
   // Versionen: aktuell in der Vorschau angezeigte Versionsnummer + Integritätsprüfung.
   const [selectedVersionNo, setSelectedVersionNo] = useState<number | null>(null);
   const [integrity, setIntegrity] = useState<DocumentIntegrity | null>(null);
@@ -242,6 +283,7 @@ export default function DocumentDetail({
       tagIds: new Set(doc.tags.map((t) => t.id)),
     });
     setSaveError(null);
+    setTab("overview"); // Edit-Formular erscheint im Übersicht-Kontext.
     setEditing(true);
   }
 
@@ -373,6 +415,12 @@ export default function DocumentDetail({
   if (s.tags && s.tags.length)
     suggestionRows.push({ key: "tags", label: "Schlagworte", value: s.tags.join(", ") });
 
+  // KI-Tab nur bei Schreibrecht (Panel ist canEdit-only). Aktiver Tab auf die
+  // sichtbaren Tabs klemmen, damit ein gespeicherter „ai"-Tab bei Gästen nicht
+  // in eine leere Ansicht führt.
+  const visibleTabs = DETAIL_TABS.filter((t) => t.id !== "ai" || canEdit);
+  const activeTab: TabId = visibleTabs.some((t) => t.id === tab) ? tab : "overview";
+
   return (
     <div className="shell">
       <header className="topbar">
@@ -387,257 +435,278 @@ export default function DocumentDetail({
 
       {doc && (
         <div className="detail">
-          <section className="card detail-meta">
-            {editing ? (
-              <div className="edit-form">
-                <label>
-                  Titel
-                  <input
-                    value={form.title}
-                    onChange={(e) => setForm((f) => ({ ...f, title: e.target.value }))}
-                  />
-                </label>
-
-                <CreatableSelect
-                  label="Korrespondent"
-                  value={form.correspondent}
-                  onChange={(v) => setForm((f) => ({ ...f, correspondent: v }))}
-                  options={correspondents}
-                  onCreate={onCreateCorrespondent}
-                />
-                <CreatableSelect
-                  label="Typ"
-                  value={form.document_type}
-                  onChange={(v) => setForm((f) => ({ ...f, document_type: v }))}
-                  options={documentTypes}
-                  onCreate={onCreateDocumentType}
-                />
-                <CreatableSelect
-                  label="Ablagepfad"
-                  value={form.storage_path}
-                  onChange={(v) => setForm((f) => ({ ...f, storage_path: v }))}
-                  options={storagePaths}
-                  onCreate={onCreateStoragePath}
-                />
-
-                <div className="edit-tags">
-                  <span className="edit-tags__label">Schlagworte</span>
-                  <div className="tag-toggle-list">
-                    {allTags.map((t) => (
-                      <button
-                        key={t.id}
-                        type="button"
-                        className={`tag tag-toggle ${form.tagIds.has(t.id) ? "tag-toggle--on" : ""}`}
-                        onClick={() => toggleTag(t.id)}
-                      >
-                        {t.name}
-                      </button>
-                    ))}
-                  </div>
-                  <InlineCreate
-                    placeholder="Neues Schlagwort"
-                    buttonLabel="+ Tag"
-                    onCreate={async (name) => {
-                      const item = await onCreateTag(name);
-                      toggleTag(item.id);
-                    }}
-                  />
-                </div>
-
-                {saveError && <p className="status status--error">{saveError}</p>}
-                <div className="edit-actions">
-                  <button onClick={save} disabled={saving || !form.title.trim()}>
-                    {saving ? "Speichern …" : "Speichern"}
-                  </button>
-                  <button className="link" onClick={() => setEditing(false)} disabled={saving}>
-                    Abbrechen
-                  </button>
-                </div>
-              </div>
-            ) : tab === "history" ? (
-              <>
-                <DetailTabs tab={tab} onChange={setTab} />
-                <AuditTrail id={id} />
-              </>
-            ) : (
-              <>
-                <DetailTabs tab={tab} onChange={setTab} />
-                {canEdit && (
-                  <div className="ai-panel">
-                    <div className="ai-panel__head">
-                      <span>
-                        <i aria-hidden="true">✦</i> KI-Vorschläge
-                      </span>
-                      <div className="ai-panel__actions">
-                        <button
-                          className="link"
-                          onClick={regenerate}
-                          disabled={regenerating || applying}
-                        >
-                          {regenerating ? "Generiere …" : "Neu generieren"}
-                        </button>
-                        {suggestionRows.length > 0 && (
-                          <button onClick={() => apply()} disabled={applying || regenerating}>
-                            {applying ? "…" : "Alle übernehmen"}
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                    {s.summary && (
-                      <div className="ai-panel__summary-row">
-                        <p className="ai-panel__summary">{s.summary}</p>
-                        <button
-                          className="link ai-suggestions__dismiss"
-                          onClick={() => dismiss("summary")}
-                          disabled={applying || regenerating}
-                          title="Zusammenfassung verwerfen"
-                        >
-                          Verwerfen
-                        </button>
-                      </div>
-                    )}
-                    {suggestionRows.length > 0 ? (
-                      <ul className="ai-suggestions">
-                        {suggestionRows.map((row) => (
-                          <li key={row.key}>
-                            <span className="ai-suggestions__label">{row.label}</span>
-                            <span className="ai-suggestions__value">{row.value}</span>
-                            <button
-                              className="link"
-                              onClick={() => apply([row.key])}
-                              disabled={applying || regenerating}
-                            >
-                              Übernehmen
-                            </button>
-                            <button
-                              className="link ai-suggestions__dismiss"
-                              onClick={() => dismiss(row.key)}
-                              disabled={applying || regenerating}
-                              title={`${row.label} verwerfen`}
-                            >
-                              Verwerfen
-                            </button>
-                          </li>
-                        ))}
-                      </ul>
-                    ) : (
-                      !s.summary && (
-                        <p className="muted ai-panel__empty">
-                          Keine KI-Vorschläge vorhanden.
-                        </p>
-                      )
-                    )}
-                    {regenNote && <p className="status status--warn">{regenNote}</p>}
-                    {applyError && <p className="status status--error">{applyError}</p>}
-                  </div>
-                )}
-
-                <h2>{doc.title}</h2>
-                <FreigabePanel
-                  status={doc.status}
-                  canEdit={canEdit}
-                  busy={freigabeBusy}
-                  error={freigabeError}
-                  onSubmit={() => runFreigabe(() => submitDocument(id))}
-                  onApprove={() => runFreigabe(() => approveDocument(id))}
-                  onReject={(reason) => runFreigabe(() => rejectDocument(id, reason))}
-                />
-                <ProcessingPanel
-                  version={currentVersion}
-                  canEdit={canEdit}
-                  retryBusy={retryBusy}
-                  retryError={retryError}
-                  onRetry={onRetry}
-                />
-                {doc.classification?.rules?.length ? (
-                  <p className="class-note">
-                    <i aria-hidden="true">⚙</i> Automatisch klassifiziert durch Regel
-                    {doc.classification.rules.length > 1 ? "n" : ""}{" "}
-                    „{doc.classification.rules.join("“, „")}“
-                  </p>
-                ) : null}
-                <dl>
-                  <dt>Archivnummer</dt>
-                  <dd className="asn">
-                    {doc.asn_label ? (
-                      <>
-                        <span className="asn__value">{doc.asn_label}</span>
-                        <button
-                          type="button"
-                          className="link"
-                          onClick={downloadQr}
-                        >
-                          QR-Code herunterladen
-                        </button>
-                      </>
-                    ) : (
-                      "—"
-                    )}
-                  </dd>
-                  <dt>Korrespondent</dt>
-                  <dd>{doc.correspondent_name ?? "—"}</dd>
-                  <dt>Typ</dt>
-                  <dd>{doc.document_type_name ?? "—"}</dd>
-                  <dt>Ablagepfad</dt>
-                  <dd>{doc.storage_path_name ?? "—"}</dd>
-                  <dt>Aufgenommen</dt>
-                  <dd>{new Date(doc.added_at).toLocaleString("de-DE")}</dd>
-                  <dt>Seiten</dt>
-                  <dd>{doc.page_count ?? "—"}</dd>
-                  <dt>Schlagworte</dt>
-                  <dd>
-                    {doc.tags.length > 0
-                      ? doc.tags.map((t) => (
-                          <span key={t.id} className="tag" style={{ borderColor: t.color, color: t.color }}>
-                            {t.name}
-                          </span>
-                        ))
-                      : "—"}
-                  </dd>
-                </dl>
-
-                <CustomFieldsPanel
-                  fields={customFields}
-                  values={doc.custom_field_values ?? []}
-                  canEdit={canEdit}
-                  onSave={saveCustomFields}
-                  onManageFields={onManageFields}
-                />
-
-                <ShareLinksPanel documentId={id} canEdit={canEdit} />
-
-                <ReminderPanel documentId={id} canEdit={canEdit} />
-
-                <VersionsPanel
-                  versions={versions}
-                  currentVersionId={doc.current_version}
-                  selectedVersionNo={selectedVersionNo}
-                  onSelect={setSelectedVersionNo}
-                  onDownload={downloadVersion}
-                  integrity={integrity}
-                  integrityError={integrityError}
-                  canEdit={canEdit}
-                  addBusy={addBusy}
-                  addError={addError}
-                  fileInputRef={fileInputRef}
-                  onAddVersion={onAddVersion}
-                />
-
-                <ComparePanel
-                  documentId={id}
-                  versions={versions}
-                  onDownload={downloadVersion}
-                />
-              </>
-            )}
-          </section>
-
+          {/* Linke Spalte: große Vorschau, beim Scrollen der rechten Spalte sticky. */}
           <section className="card detail-preview">
             {pdfError && <p className="status status--warn">Vorschau: {pdfError}</p>}
             {!pdfError && !pdfUrl && <p className="muted">Lade Vorschau …</p>}
             {pdfUrl && (
               <iframe className="pdf-frame" src={pdfUrl} title={`Vorschau: ${doc.title}`} />
             )}
+          </section>
+
+          {/* Rechte Spalte: kompakte Info-/Aktionsspalte mit ARIA-Tabs. */}
+          <section className="card detail-panels">
+            <DetailTabs tabs={visibleTabs} active={activeTab} onSelect={setTab} />
+
+            {/* Übersicht: Titel, Verarbeitung, Klassifizierung, Metadaten.
+                Im Edit-Modus ersetzt das Formular die Anzeige. */}
+            <TabPanel id="overview" active={activeTab}>
+              {editing ? (
+                <div className="edit-form">
+                  <label>
+                    Titel
+                    <input
+                      value={form.title}
+                      onChange={(e) => setForm((f) => ({ ...f, title: e.target.value }))}
+                    />
+                  </label>
+
+                  <CreatableSelect
+                    label="Korrespondent"
+                    value={form.correspondent}
+                    onChange={(v) => setForm((f) => ({ ...f, correspondent: v }))}
+                    options={correspondents}
+                    onCreate={onCreateCorrespondent}
+                  />
+                  <CreatableSelect
+                    label="Typ"
+                    value={form.document_type}
+                    onChange={(v) => setForm((f) => ({ ...f, document_type: v }))}
+                    options={documentTypes}
+                    onCreate={onCreateDocumentType}
+                  />
+                  <CreatableSelect
+                    label="Ablagepfad"
+                    value={form.storage_path}
+                    onChange={(v) => setForm((f) => ({ ...f, storage_path: v }))}
+                    options={storagePaths}
+                    onCreate={onCreateStoragePath}
+                  />
+
+                  <div className="edit-tags">
+                    <span className="edit-tags__label">Schlagworte</span>
+                    <div className="tag-toggle-list">
+                      {allTags.map((t) => (
+                        <button
+                          key={t.id}
+                          type="button"
+                          className={`tag tag-toggle ${form.tagIds.has(t.id) ? "tag-toggle--on" : ""}`}
+                          onClick={() => toggleTag(t.id)}
+                        >
+                          {t.name}
+                        </button>
+                      ))}
+                    </div>
+                    <InlineCreate
+                      placeholder="Neues Schlagwort"
+                      buttonLabel="+ Tag"
+                      onCreate={async (name) => {
+                        const item = await onCreateTag(name);
+                        toggleTag(item.id);
+                      }}
+                    />
+                  </div>
+
+                  {saveError && <p className="status status--error">{saveError}</p>}
+                  <div className="edit-actions">
+                    <button onClick={save} disabled={saving || !form.title.trim()}>
+                      {saving ? "Speichern …" : "Speichern"}
+                    </button>
+                    <button className="link" onClick={() => setEditing(false)} disabled={saving}>
+                      Abbrechen
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <h2>{doc.title}</h2>
+                  <ProcessingPanel
+                    version={currentVersion}
+                    canEdit={canEdit}
+                    retryBusy={retryBusy}
+                    retryError={retryError}
+                    onRetry={onRetry}
+                  />
+                  {doc.classification?.rules?.length ? (
+                    <p className="class-note">
+                      <i aria-hidden="true">⚙</i> Automatisch klassifiziert durch Regel
+                      {doc.classification.rules.length > 1 ? "n" : ""}{" "}
+                      „{doc.classification.rules.join("“, „")}“
+                    </p>
+                  ) : null}
+                  <dl>
+                    <dt>Archivnummer</dt>
+                    <dd className="asn">
+                      {doc.asn_label ? (
+                        <>
+                          <span className="asn__value">{doc.asn_label}</span>
+                          <button
+                            type="button"
+                            className="link"
+                            onClick={downloadQr}
+                          >
+                            QR-Code herunterladen
+                          </button>
+                        </>
+                      ) : (
+                        "—"
+                      )}
+                    </dd>
+                    <dt>Korrespondent</dt>
+                    <dd>{doc.correspondent_name ?? "—"}</dd>
+                    <dt>Typ</dt>
+                    <dd>{doc.document_type_name ?? "—"}</dd>
+                    <dt>Ablagepfad</dt>
+                    <dd>{doc.storage_path_name ?? "—"}</dd>
+                    <dt>Aufgenommen</dt>
+                    <dd>{new Date(doc.added_at).toLocaleString("de-DE")}</dd>
+                    <dt>Seiten</dt>
+                    <dd>{doc.page_count ?? "—"}</dd>
+                    <dt>Schlagworte</dt>
+                    <dd>
+                      {doc.tags.length > 0
+                        ? doc.tags.map((t) => (
+                            <span key={t.id} className="tag" style={{ borderColor: t.color, color: t.color }}>
+                              {t.name}
+                            </span>
+                          ))
+                        : "—"}
+                    </dd>
+                  </dl>
+                </>
+              )}
+            </TabPanel>
+
+            {/* Versionen & Verlauf: Versionsliste/Integrität + Vergleich. */}
+            <TabPanel id="versions" active={activeTab}>
+              <VersionsPanel
+                versions={versions}
+                currentVersionId={doc.current_version}
+                selectedVersionNo={selectedVersionNo}
+                onSelect={setSelectedVersionNo}
+                onDownload={downloadVersion}
+                integrity={integrity}
+                integrityError={integrityError}
+                canEdit={canEdit}
+                addBusy={addBusy}
+                addError={addError}
+                fileInputRef={fileInputRef}
+                onAddVersion={onAddVersion}
+              />
+              <ComparePanel
+                documentId={id}
+                versions={versions}
+                onDownload={downloadVersion}
+              />
+            </TabPanel>
+
+            {/* KI-Vorschläge (nur bei Schreibrecht). */}
+            {canEdit && (
+              <TabPanel id="ai" active={activeTab}>
+                <div className="ai-panel">
+                  <div className="ai-panel__head">
+                    <span>
+                      <i aria-hidden="true">✦</i> KI-Vorschläge
+                    </span>
+                    <div className="ai-panel__actions">
+                      <button
+                        className="link"
+                        onClick={regenerate}
+                        disabled={regenerating || applying}
+                      >
+                        {regenerating ? "Generiere …" : "Neu generieren"}
+                      </button>
+                      {suggestionRows.length > 0 && (
+                        <button onClick={() => apply()} disabled={applying || regenerating}>
+                          {applying ? "…" : "Alle übernehmen"}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  {s.summary && (
+                    <div className="ai-panel__summary-row">
+                      <p className="ai-panel__summary">{s.summary}</p>
+                      <button
+                        className="link ai-suggestions__dismiss"
+                        onClick={() => dismiss("summary")}
+                        disabled={applying || regenerating}
+                        title="Zusammenfassung verwerfen"
+                      >
+                        Verwerfen
+                      </button>
+                    </div>
+                  )}
+                  {suggestionRows.length > 0 ? (
+                    <ul className="ai-suggestions">
+                      {suggestionRows.map((row) => (
+                        <li key={row.key}>
+                          <span className="ai-suggestions__label">{row.label}</span>
+                          <span className="ai-suggestions__value">{row.value}</span>
+                          <button
+                            className="link"
+                            onClick={() => apply([row.key])}
+                            disabled={applying || regenerating}
+                          >
+                            Übernehmen
+                          </button>
+                          <button
+                            className="link ai-suggestions__dismiss"
+                            onClick={() => dismiss(row.key)}
+                            disabled={applying || regenerating}
+                            title={`${row.label} verwerfen`}
+                          >
+                            Verwerfen
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    !s.summary && (
+                      <p className="muted ai-panel__empty">
+                        Keine KI-Vorschläge vorhanden.
+                      </p>
+                    )
+                  )}
+                  {regenNote && <p className="status status--warn">{regenNote}</p>}
+                  {applyError && <p className="status status--error">{applyError}</p>}
+                </div>
+              </TabPanel>
+            )}
+
+            {/* Wiedervorlage. */}
+            <TabPanel id="reminder" active={activeTab}>
+              <ReminderPanel documentId={id} canEdit={canEdit} />
+            </TabPanel>
+
+            {/* Freigabe: Status/Workflow + Freigabelinks. */}
+            <TabPanel id="freigabe" active={activeTab}>
+              <FreigabePanel
+                status={doc.status}
+                canEdit={canEdit}
+                busy={freigabeBusy}
+                error={freigabeError}
+                onSubmit={() => runFreigabe(() => submitDocument(id))}
+                onApprove={() => runFreigabe(() => approveDocument(id))}
+                onReject={(reason) => runFreigabe(() => rejectDocument(id, reason))}
+              />
+              <ShareLinksPanel documentId={id} canEdit={canEdit} />
+            </TabPanel>
+
+            {/* Zusatzfelder. */}
+            <TabPanel id="fields" active={activeTab}>
+              <CustomFieldsPanel
+                fields={customFields}
+                values={doc.custom_field_values ?? []}
+                canEdit={canEdit}
+                onSave={saveCustomFields}
+                onManageFields={onManageFields}
+              />
+            </TabPanel>
+
+            {/* Audit. */}
+            <TabPanel id="audit" active={activeTab}>
+              <AuditTrail id={id} />
+            </TabPanel>
           </section>
         </div>
       )}
@@ -743,31 +812,81 @@ function InlineCreate({
   );
 }
 
+// Vollwertiges ARIA-Tab-Widget (STOAA-430): ``role=tablist`` mit ``role=tab``-
+// Buttons (aria-selected/aria-controls/id) und Roving-Tabindex. Pfeiltasten
+// (Left/Right) + Home/End bewegen Fokus und aktivieren den Tab (Activation
+// follows focus); Enter/Space aktiviert nativ über den Button-Klick.
 function DetailTabs({
-  tab,
-  onChange,
+  tabs,
+  active,
+  onSelect,
 }: {
-  tab: "details" | "history";
-  onChange: (t: "details" | "history") => void;
+  tabs: { id: TabId; label: string }[];
+  active: TabId;
+  onSelect: (t: TabId) => void;
+}) {
+  const refs = useRef<(HTMLButtonElement | null)[]>([]);
+
+  function onKeyDown(e: KeyboardEvent, idx: number) {
+    let next: number | null = null;
+    if (e.key === "ArrowRight" || e.key === "ArrowDown") next = (idx + 1) % tabs.length;
+    else if (e.key === "ArrowLeft" || e.key === "ArrowUp")
+      next = (idx - 1 + tabs.length) % tabs.length;
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = tabs.length - 1;
+    if (next === null) return;
+    e.preventDefault();
+    onSelect(tabs[next].id);
+    refs.current[next]?.focus();
+  }
+
+  return (
+    <div className="detail-tabs" role="tablist" aria-label="Dokumentbereiche">
+      {tabs.map((t, i) => {
+        const selected = t.id === active;
+        return (
+          <button
+            key={t.id}
+            ref={(el) => {
+              refs.current[i] = el;
+            }}
+            role="tab"
+            id={`dd-tab-${t.id}`}
+            aria-selected={selected}
+            aria-controls={`dd-panel-${t.id}`}
+            tabIndex={selected ? 0 : -1}
+            className={`detail-tab ${selected ? "detail-tab--active" : ""}`}
+            onClick={() => onSelect(t.id)}
+            onKeyDown={(e) => onKeyDown(e, i)}
+          >
+            {t.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// Ein Tab-Panel: bleibt im DOM (Zustand/Requests der Panels erhalten) und wird
+// per ``hidden`` ein-/ausgeblendet. ``aria-labelledby`` verweist auf den Tab.
+function TabPanel({
+  id,
+  active,
+  children,
+}: {
+  id: TabId;
+  active: TabId;
+  children: ReactNode;
 }) {
   return (
-    <div className="detail-tabs" role="tablist">
-      <button
-        role="tab"
-        aria-selected={tab === "details"}
-        className={`detail-tab ${tab === "details" ? "detail-tab--active" : ""}`}
-        onClick={() => onChange("details")}
-      >
-        Details
-      </button>
-      <button
-        role="tab"
-        aria-selected={tab === "history"}
-        className={`detail-tab ${tab === "history" ? "detail-tab--active" : ""}`}
-        onClick={() => onChange("history")}
-      >
-        Verlauf
-      </button>
+    <div
+      role="tabpanel"
+      id={`dd-panel-${id}`}
+      aria-labelledby={`dd-tab-${id}`}
+      tabIndex={0}
+      hidden={active !== id}
+    >
+      {children}
     </div>
   );
 }

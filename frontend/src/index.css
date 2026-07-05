@@ -949,9 +949,10 @@ textarea:focus-visible {
 }
 
 /* --- Detailansicht --- */
+/* STOAA-430: Vorschau LINKS groß (sticky), rechts kompakte Info-/Tab-Spalte. */
 .detail {
   display: grid;
-  grid-template-columns: minmax(260px, 340px) 1fr;
+  grid-template-columns: 1fr minmax(320px, 420px);
   gap: 1.25rem;
   align-items: start;
 }
@@ -959,21 +960,35 @@ textarea:focus-visible {
   .detail {
     grid-template-columns: 1fr;
   }
+  /* Mobil gestapelt (Vorschau oben, Panels darunter) – nicht kleben. */
+  .detail-preview {
+    position: static;
+  }
 }
-.detail-meta h2 {
+/* Vorschau bleibt beim Scrollen der rechten Spalte sichtbar. */
+.detail-preview {
+  position: sticky;
+  top: 1rem;
+  align-self: start;
+}
+.detail-panels {
+  /* Kompakte Spalte darf nicht überlaufen (KI-Panel-Umbruch STOAA-62). */
+  min-width: 0;
+}
+.detail-panels h2 {
   margin-top: 0;
 }
-.detail-meta dl {
+.detail-panels dl {
   display: grid;
   grid-template-columns: auto 1fr;
   gap: 0.35rem 0.9rem;
   margin: 0.5rem 0;
   font-size: 0.9rem;
 }
-.detail-meta dt {
+.detail-panels dt {
   color: var(--muted);
 }
-.detail-meta dd {
+.detail-panels dd {
   margin: 0;
   word-break: break-word;
 }
@@ -1545,6 +1560,9 @@ textarea:focus-visible {
 /* --- Verlauf / Audit-Trail (STOAA-2) --- */
 .detail-tabs {
   display: flex;
+  /* Umbruch statt Überlauf: bei schmaler Spalte (~320px) rutschen die 7 Tabs
+     in mehrere Reihen, nichts läuft horizontal über. */
+  flex-wrap: wrap;
   gap: 4px;
   border-bottom: 1px solid var(--border);
   margin-bottom: 16px;
@@ -1557,9 +1575,16 @@ textarea:focus-visible {
   padding: 8px 12px;
   cursor: pointer;
   font-size: 0.9rem;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+  white-space: nowrap;
 }
 .detail-tab:hover {
   color: var(--text);
+}
+.detail-tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 .detail-tab--active {
   color: var(--text);
