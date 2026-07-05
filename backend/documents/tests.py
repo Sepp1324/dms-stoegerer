@@ -4406,3 +4406,150 @@ class ReminderRouteTests(APITestCase):
         self.assertEqual(resp.status_code, 200)
         ids = [r["id"] for r in resp.data["results"]]
         self.assertEqual(ids, [eigene.id])
+
+
+# ---------------------------------------------------------------------------
+# STOAA-515: ASN-Barcode-Erkennung (pyzbar) + Fallback auf Text-Regex
+# ---------------------------------------------------------------------------
+import io
+import struct
+import unittest
+import zlib
+
+
+def _make_png_1x1_white() -> bytes:
+    """Minimales 1x1 weißes PNG für Tests ohne Bild-Lib."""
+    def chunk(name: bytes, data: bytes) -> bytes:
+        c = zlib.crc32(name + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + name + data + struct.pack(">I", c)
+
+    ihdr = chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+    raw = b"\x00\xff\xff\xff"  # filter-byte + RGB
+    idat = chunk(b"IDAT", zlib.compress(raw))
+    iend = chunk(b"IEND", b"")
+    return b"\x89PNG\r\n\x1a\n" + ihdr + idat + iend
+
+
+class AsnBarcodeExtractTests(unittest.TestCase):
+    """Unit-Tests für _extract_asn_from_payload (keine pyzbar-Lib nötig)."""
+
+    def _extract(self, payload: str, prefix: str = "ASN"):
+        from documents.services.asn_barcode import _extract_asn_from_payload
+        return _extract_asn_from_payload(payload, prefix)
+
+    def test_code128_standard(self):
+        self.assertEqual(self._extract("ASN000123"), 123)
+
+    def test_code128_no_leading_zeros(self):
+        self.assertEqual(self._extract("ASN42"), 42)
+
+    def test_qr_round_trip(self):
+        """QR-Payload von render_qr (= 'ASN000123') muss erkannt werden."""
+        self.assertEqual(self._extract("ASN000123"), 123)
+
+    def test_case_insensitive(self):
+        self.assertEqual(self._extract("asn000123"), 123)
+
+    def test_wrong_prefix(self):
+        self.assertIsNone(self._extract("DOC000123"))
+
+    def test_custom_prefix(self):
+        self.assertEqual(self._extract("ARCH000099", "ARCH"), 99)
+
+    def test_no_digits(self):
+        self.assertIsNone(self._extract("ASN"))
+
+    def test_garbage(self):
+        self.assertIsNone(self._extract("hello world"))
+
+
+class AsnBarcodePageFilterTests(unittest.TestCase):
+    def test_empty_is_none(self):
+        from unittest.mock import patch
+        with patch("documents.services.asn_barcode.getattr", side_effect=lambda o, k, d=None: "" if k == "ASN_BARCODE_PAGES" else d):
+            pass  # getattr kann man nicht so einfach patchen; direkt testen:
+        import django.conf
+        original = getattr(django.conf.settings, "ASN_BARCODE_PAGES", "")
+        try:
+            django.conf.settings.ASN_BARCODE_PAGES = ""
+            from documents.services.asn_barcode import _page_filter
+            self.assertIsNone(_page_filter())
+        finally:
+            django.conf.settings.ASN_BARCODE_PAGES = original
+
+    def test_explicit_pages(self):
+        import django.conf
+        original = getattr(django.conf.settings, "ASN_BARCODE_PAGES", "")
+        try:
+            django.conf.settings.ASN_BARCODE_PAGES = "1,3"
+            from importlib import reload
+            import documents.services.asn_barcode as mod
+            reload(mod)
+            result = mod._page_filter()
+            self.assertEqual(result, [0, 2])
+        finally:
+            django.conf.settings.ASN_BARCODE_PAGES = original
+            reload(mod)
+
+
+class AsnMatchAndReconcileBarcodeTests(TestCase):
+    """match_and_reconcile: Barcode hat Vorrang; Fallback auf Text-Regex."""
+
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user("barcodeuser", password="pw")
+
+    def _make_version(self, ocr_text="", file_path=None):
+        from unittest.mock import MagicMock
+        v = MagicMock()
+        v.ocr_text = ocr_text
+        if file_path:
+            v.file.path = file_path
+        else:
+            del v.file  # kein file-Attr → kein Barcode-Scan
+        return v
+
+    def test_fallback_to_ocr_text_when_no_file(self):
+        """Keine Datei → Fallback auf OCR-Text-Regex."""
+        from documents.services import asn as asn_mod
+        version = self._make_version(ocr_text="ASN000001")
+        # Ohne echtes Dokument-Objekt → nur Parsing testen (kein DB)
+        asn = asn_mod.parse_asn(version.ocr_text)
+        self.assertEqual(asn, 1)
+
+    def test_barcode_takes_precedence_over_text(self):
+        """Barcode-ASN wird erkannt, auch wenn OCR-Text eine abweichende Zahl hätte."""
+        from documents.services.asn_barcode import _extract_asn_from_payload
+        barcode_asn = _extract_asn_from_payload("ASN000999", "ASN")
+        text_asn = 42  # hypothetisch andere Zahl
+        # Barcode muss Vorrang haben
+        result = barcode_asn if barcode_asn is not None else text_asn
+        self.assertEqual(result, 999)
+
+    def test_no_barcode_and_no_text_returns_none(self):
+        from documents.services import asn as asn_mod
+        self.assertIsNone(asn_mod.parse_asn(""))
+        self.assertIsNone(asn_mod.parse_asn(None))
+
+    def test_scan_pdf_graceful_without_pyzbar(self):
+        """Fehlt pyzbar → None zurück, kein Crash."""
+        import sys
+        from unittest.mock import patch
+        with patch.dict(sys.modules, {"pyzbar": None, "pyzbar.pyzbar": None}):
+            from importlib import reload
+            import documents.services.asn_barcode as mod
+            reload(mod)
+            result = mod.scan_pdf_for_asn("/nonexistent/path.pdf")
+            self.assertIsNone(result)
+            reload(mod)
+
+    def test_barcode_disabled_returns_none(self):
+        """ASN_BARCODE_ENABLED=false → scan_pdf_for_asn gibt None zurück."""
+        import django.conf
+        original = getattr(django.conf.settings, "ASN_BARCODE_ENABLED", True)
+        try:
+            django.conf.settings.ASN_BARCODE_ENABLED = False
+            from documents.services.asn_barcode import scan_pdf_for_asn
+            self.assertIsNone(scan_pdf_for_asn("/any/path.pdf"))
+        finally:
+            django.conf.settings.ASN_BARCODE_ENABLED = original

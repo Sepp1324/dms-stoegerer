@@ -33,3 +33,9 @@ data:
   AI_PROVIDER: "anthropic"
   AI_MODEL: "claude-opus-4-8"
   OLLAMA_BASE_URL: "http://ollama:11434"
+  # ASN-Barcode-Erkennung (STOAA-515): Code128 + QR via pyzbar/libzbar0.
+  # Fehlt libzbar0 im Image → WARN + Fallback auf OCR-Text, kein Pipeline-Crash.
+  ASN_BARCODE_ENABLED: "true"
+  ASN_BARCODE_PREFIX: "ASN"
+  # Leer = alle Seiten; komma-getrennte 1-basierte Seitenzahlen z. B. "1,2"
+  ASN_BARCODE_PAGES: ""

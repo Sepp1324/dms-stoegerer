@@ -22,6 +22,8 @@ pdf2image==1.17.0
 Pillow==11.0.0
 # QR-Codes für die Archivnummer (ASN, STOAA-284/285); rendert als PNG via Pillow
 qrcode==7.4.2
+# ASN-Barcode-Erkennung (Code128 + QR) – braucht libzbar0 als System-Lib (STOAA-515)
+pyzbar==0.1.9
 
 # AI-Anbindung (optional je nach Provider)
 anthropic==0.42.0
