@@ -33,3 +33,13 @@ data:
   AI_PROVIDER: "anthropic"
   AI_MODEL: "claude-opus-4-8"
   OLLAMA_BASE_URL: "http://ollama:11434"
+  # ASN-Barcode/QR-Erkennung (STOAA-516): erkennt die Archivnummer zusätzlich aus
+  # aufgeklebten Code128-/QR-Etiketten (Vorrang vor der OCR-Text-Regex). Braucht
+  # libzbar0 im Backend-Image (Image-Rebuild). Fehlt zbar zur Laufzeit → sauberer
+  # Log-WARN + Fallback auf Text, kein Crash. Keine Migration.
+  ASN_BARCODE_ENABLED: "true"
+  # Erwartetes Präfix im Barcode-Inhalt (<PREFIX><Ziffern>), case-insensitiv.
+  ASN_BARCODE_PREFIX: "ASN"
+  # Zu scannende Seiten: leer/"all" = alle; sonst kommagetrennte 1-basierte
+  # Seitennummern (z. B. "1"). Begrenzt den Render-Aufwand großer PDFs.
+  ASN_BARCODE_PAGES: ""

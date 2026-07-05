@@ -150,6 +150,21 @@ CONSUME_PER_USER = os.getenv("CONSUME_PER_USER", "false").strip().lower() in (
 # Env-Vars: Backend-Image/Deployment-Env aktualisieren – KEINE Migration.
 MAIL_DEFAULT_OWNER = os.getenv("MAIL_DEFAULT_OWNER", "")
 CONSUME_DEFAULT_OWNER = os.getenv("CONSUME_DEFAULT_OWNER", "")
+
+# --- ASN-Barcode/QR-Erkennung (STOAA-516) ---
+# Erkennt die ASN zusätzlich aus aufgeklebten Code128-/QR-Etiketten auf den
+# Seiten (Vorrang vor der OCR-Text-Regex). Fehlt zur Laufzeit die native
+# zbar-Bibliothek (``libzbar0``), wird der Scan sauber übersprungen und die
+# Text-Erkennung greift weiter (kein Pipeline-Crash). Neue Env-Vars → nur
+# Image-/Deployment-Env, KEINE Migration.
+ASN_BARCODE_ENABLED = env_bool("ASN_BARCODE_ENABLED", True)
+# Präfix des erwarteten Barcode-Inhalts (``<PREFIX><Ziffern>``), case-insensitiv.
+ASN_BARCODE_PREFIX = os.getenv("ASN_BARCODE_PREFIX", "ASN")
+# Zu scannende Seiten: leer/``all`` = alle Seiten; sonst kommagetrennte
+# 1-basierte Seitennummern (z. B. ``"1"`` oder ``"1,2"``). Begrenzt den
+# Render-Aufwand großer PDFs.
+ASN_BARCODE_PAGES = os.getenv("ASN_BARCODE_PAGES", "")
+
 MEDIA_URL = "media/"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"

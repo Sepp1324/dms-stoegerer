@@ -247,12 +247,31 @@ def _attach_version_to(document, version, *, actor=None) -> int:
     return next_no
 
 
-def match_and_reconcile(version, *, actor=None) -> dict:
-    """OCR-Nachlauf: erkennt eine ASN im OCR-Text und ordnet die Version zu.
+def detect_asn(version) -> tuple[int | None, str]:
+    """Erkennt die ASN einer Version – **Barcode/QR hat Vorrang vor der Text-Regex**.
 
-    Ablauf (Spec „OCR-Integration"):
+    Zuerst werden die Seiten auf Code128-/QR-ASN-Etiketten gescannt (STOAA-516).
+    Nur wenn dort nichts gefunden wird (oder zbar zur Laufzeit fehlt), greift die
+    OCR-Text-Regex (:func:`parse_asn`). Rückgabe ``(asn, matched_by)`` mit
+    ``matched_by`` in ``{"QR", "Barcode", "OCR"}``; ``asn`` ist ``None``, wenn
+    weder Barcode noch Text eine ASN liefern.
+    """
+    from documents.services import asn_barcode
 
-    1. ASN im OCR-Text erkennen (``parse_asn``).
+    found = asn_barcode.scan_asn(version)
+    if found is not None:
+        return found  # (asn, "QR"|"Barcode")
+    return parse_asn(version.ocr_text or ""), "OCR"
+
+
+def match_and_reconcile(version, *, actor=None, asn=None, matched_by="OCR") -> dict:
+    """Nachlauf nach OCR: erkennt eine ASN und ordnet die Version zu.
+
+    Ablauf (Spec „OCR-Integration", erweitert um Barcode/QR – STOAA-516):
+
+    1. ASN erkennen: **Barcode/QR vor Text-Regex** (:func:`detect_asn`). Ist die
+       ASN bereits vorab bestimmt (``asn``-Argument, z. B. aus dem Backfill),
+       wird sie unverändert übernommen.
     2. **Unbekannte/keine ASN** → normale Dokumenterstellung, nichts zu tun.
     3. **Bekannte ASN, dasselbe Dokument** → nur die Erkennung protokollieren.
     4. **Bekannte ASN, anderes Dokument** → Re-Scan eines bestehenden Dokuments:
@@ -266,7 +285,8 @@ def match_and_reconcile(version, *, actor=None) -> dict:
     """
     from documents.models import Document
 
-    asn = parse_asn(version.ocr_text or "")
+    if asn is None:
+        asn, matched_by = detect_asn(version)
     if asn is None:
         return {"matched": False, "asn": None}
 
@@ -279,8 +299,14 @@ def match_and_reconcile(version, *, actor=None) -> dict:
     current = version.document
     if existing.pk == current.pk:
         # Re-Upload auf dasselbe Dokument: nur die Erkennung dokumentieren.
-        record_scan(existing, version, matched_by="OCR")
-        return {"matched": True, "asn": asn, "moved": False, "document_id": existing.pk}
+        record_scan(existing, version, matched_by=matched_by)
+        return {
+            "matched": True,
+            "asn": asn,
+            "moved": False,
+            "matched_by": matched_by,
+            "document_id": existing.pk,
+        }
 
     # Re-Scan eines anderen Dokuments → Version übernehmen, Duplikat vermeiden.
     # Zuerst den OneToOne-Zeiger ``current_version`` des Quell-Dokuments lösen:
@@ -291,10 +317,16 @@ def match_and_reconcile(version, *, actor=None) -> dict:
     current.current_version = None
 
     _attach_version_to(existing, version, actor=actor)
-    record_scan(existing, version, matched_by="OCR")
+    record_scan(existing, version, matched_by=matched_by)
 
     if not current.versions.exists():
         # Das leere, versehentlich neu angelegte Dokument entfernen (keine Duplikate).
         Document.objects.filter(pk=current.pk).delete()
 
-    return {"matched": True, "asn": asn, "moved": True, "document_id": existing.pk}
+    return {
+        "matched": True,
+        "asn": asn,
+        "moved": True,
+        "matched_by": matched_by,
+        "document_id": existing.pk,
+    }

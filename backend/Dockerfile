@@ -18,6 +18,7 @@ RUN apt-get update \
         pngquant \
         qpdf \
         poppler-utils \
+        libzbar0 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

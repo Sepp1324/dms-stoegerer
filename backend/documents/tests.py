@@ -4406,3 +4406,161 @@ class ReminderRouteTests(APITestCase):
         self.assertEqual(resp.status_code, 200)
         ids = [r["id"] for r in resp.data["results"]]
         self.assertEqual(ids, [eigene.id])
+
+
+# ---------------------------------------------------------------------------
+# ASN aus Barcode/QR (STOAA-516)
+# ---------------------------------------------------------------------------
+import io as _io
+import uuid as _uuid
+from unittest import skipUnless
+
+from django.test import override_settings
+
+from .services import asn as asn_service
+from .services import asn_barcode
+
+try:  # pyzbar braucht die native libzbar0 – im Backend-Image vorhanden.
+    import pyzbar.pyzbar  # noqa: F401
+
+    _HAS_ZBAR = True
+except Exception:  # noqa: BLE001
+    _HAS_ZBAR = False
+
+try:  # python-barcode erzeugt die Code128-Testbilder (pure Python).
+    import barcode as _barcode  # noqa: F401
+
+    _HAS_BARCODE = True
+except Exception:  # noqa: BLE001
+    _HAS_BARCODE = False
+
+
+def _blank_png() -> bytes:
+    from PIL import Image
+
+    buf = _io.BytesIO()
+    Image.new("RGB", (300, 300), "white").save(buf, "PNG")
+    return buf.getvalue()
+
+
+def _code128_png(text: str) -> bytes:
+    from barcode import Code128
+    from barcode.writer import ImageWriter
+
+    buf = _io.BytesIO()
+    Code128(text, writer=ImageWriter()).write(buf)
+    return buf.getvalue()
+
+
+@skipUnless(_HAS_ZBAR, "pyzbar/libzbar0 nicht verfügbar (nur im Backend-Image)")
+class ASNBarcodeTests(TestCase):
+    """Barcode/QR-ASN-Erkennung mit Vorrang vor der OCR-Text-Regex (STOAA-516)."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="asnuser", password="pw", role="user"
+        )
+
+    def _version_with_image(self, image_bytes: bytes, *, ocr_text: str = ""):
+        """Legt ein Dokument + Version an, deren Datei das gegebene Bild ist."""
+        doc = Document.objects.create(title="Neu-Scan", owner=self.user)
+        fd, path = tempfile.mkstemp(suffix=".png")
+        os.write(fd, image_bytes)
+        os.close(fd)
+        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+        version = DocumentVersion.objects.create(
+            document=doc,
+            version_no=1,
+            file_path=path,
+            sha256=_uuid.uuid4().hex + _uuid.uuid4().hex,
+            ocr_text=ocr_text,
+        )
+        doc.current_version = version
+        doc.save(update_fields=["current_version"])
+        return doc, version
+
+    def test_qr_roundtrip_detected(self):
+        """Der von ``render_qr`` erzeugte QR ist zurück-parsebar (Round-Trip)."""
+        target = Document.objects.create(title="Ziel", owner=self.user)
+        _, version = self._version_with_image(asn_service.render_qr(target))
+
+        self.assertEqual(asn_barcode.scan_asn(version), (target.asn, "QR"))
+
+    def test_qr_roundtrip_reconciles_to_same_document(self):
+        """Wieder eingescanntes gedrucktes Doc wird demselben Dokument zugeordnet."""
+        target = Document.objects.create(title="Ziel", owner=self.user)
+        dup, version = self._version_with_image(asn_service.render_qr(target))
+
+        result = asn_service.match_and_reconcile(version)
+
+        self.assertTrue(result["matched"])
+        self.assertEqual(result["matched_by"], "QR")
+        version.refresh_from_db()
+        self.assertEqual(version.document_id, target.id)
+        # Das versehentlich neu angelegte (leere) Dokument ist entfernt.
+        self.assertFalse(Document.objects.filter(pk=dup.pk).exists())
+
+    @skipUnless(_HAS_BARCODE, "python-barcode nicht verfügbar")
+    def test_code128_detected_and_assigned(self):
+        """Code128 ``ASN000123`` wird erkannt und über den Service zugeordnet."""
+        target = Document.objects.create(title="Ziel", owner=self.user)
+        png = _code128_png(asn_service.format_asn(target.asn))
+        dup, version = self._version_with_image(png)
+
+        result = asn_service.match_and_reconcile(version)
+
+        self.assertTrue(result["matched"])
+        self.assertEqual(result["matched_by"], "Barcode")
+        version.refresh_from_db()
+        self.assertEqual(version.document_id, target.id)
+        self.assertFalse(Document.objects.filter(pk=dup.pk).exists())
+
+    def test_no_barcode_falls_back_to_text_regex(self):
+        """Ohne Barcode greift weiterhin die OCR-Text-Regex (Fallback)."""
+        target = Document.objects.create(title="Ziel", owner=self.user)
+        _, version = self._version_with_image(
+            _blank_png(),
+            ocr_text=f"Rechnung Nr. 4711 – {asn_service.format_asn(target.asn)}",
+        )
+
+        result = asn_service.match_and_reconcile(version)
+
+        self.assertTrue(result["matched"])
+        self.assertEqual(result["matched_by"], "OCR")
+        version.refresh_from_db()
+        self.assertEqual(version.document_id, target.id)
+
+    @skipUnless(_HAS_BARCODE, "python-barcode nicht verfügbar")
+    def test_barcode_takes_precedence_over_diverging_text(self):
+        """Ein Barcode hat Vorrang vor einer abweichenden ASN-Zahl im Text."""
+        target = Document.objects.create(title="Ziel", owner=self.user)
+        png = _code128_png(asn_service.format_asn(target.asn))
+        # Im Text steht bewusst eine ANDERE ASN – der Barcode muss gewinnen.
+        _, version = self._version_with_image(
+            png, ocr_text=f"ASN {target.asn + 100000}"
+        )
+
+        asn, matched_by = asn_service.detect_asn(version)
+
+        self.assertEqual(asn, target.asn)
+        self.assertEqual(matched_by, "Barcode")
+
+    def test_extract_asn_prefix_and_padding(self):
+        """``extract_asn`` liest Präfix case-insensitiv und normalisiert Nullen."""
+        self.assertEqual(asn_barcode.extract_asn("ASN000123"), 123)
+        self.assertEqual(asn_barcode.extract_asn("asn 42"), 42)
+        self.assertIsNone(asn_barcode.extract_asn("000123"))
+        self.assertIsNone(asn_barcode.extract_asn(""))
+
+    @override_settings(ASN_BARCODE_PREFIX="DOC")
+    def test_extract_asn_custom_prefix(self):
+        """Der Präfix ist über ``ASN_BARCODE_PREFIX`` konfigurierbar."""
+        self.assertEqual(asn_barcode.extract_asn("DOC000123"), 123)
+        self.assertIsNone(asn_barcode.extract_asn("ASN000123"))
+
+    @override_settings(ASN_BARCODE_ENABLED=False)
+    def test_disabled_skips_scan(self):
+        """Bei ``ASN_BARCODE_ENABLED=False`` findet kein Barcode-Scan statt."""
+        target = Document.objects.create(title="Ziel", owner=self.user)
+        _, version = self._version_with_image(asn_service.render_qr(target))
+        self.assertIsNone(asn_barcode.scan_asn(version))
