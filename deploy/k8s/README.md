@@ -341,17 +341,27 @@ einen Eingangsordner und schickt reife Dateien durch die OCR-Pipeline.
    server: NFS_SERVER_PLACEHOLDER    →  server: 192.168.1.10
    path: NFS_EXPORT_PATH_PLACEHOLDER →  path: /volume1/dms-consume
    ```
-   Das Overlay ergänzt Volume + Mount am Worker und überschreibt
+   Das Overlay ergänzt Volume + Mount am Worker, setzt `securityContext` (UID/GID
+   Alignment für NFS-Berechtigungen, STOAA-434) und überschreibt
    `CONSUME_FOLDER_PATH` auf `/consume-nfs` (`configmap-nfs-patch.yaml`).
    Rendern zum Prüfen: `kubectl kustomize deploy/k8s/overlays/consume-nfs`.
+
+   **Synology NFS:** Für Synology DiskStation siehe detaillierte Anleitung in
+   [`overlays/consume-nfs/SYNOLOGY-NFS-SETUP.md`](overlays/consume-nfs/SYNOLOGY-NFS-SETUP.md)
+   — erklärt `all_squash`, `anonuid=1000`, UID-Alignment und Troubleshooting.
 
 4. **Rollout + Verifikation:**
    ```bash
    kubectl apply -k deploy/k8s/overlays/consume-nfs
    kubectl -n dms rollout status deploy/worker
 
-   # Mount im Pod prüfen
+   # Automatisierte Verifikation (inkl. UID-Check, STOAA-434)
+   cd deploy/k8s/overlays/consume-nfs
+   ./verify-nfs-overlay.sh
+
+   # Oder manuell:
    kubectl -n dms exec deploy/worker -- df -h /consume-nfs
+   kubectl -n dms exec deploy/worker -- id  # sollte uid=1000 zeigen
    kubectl -n dms exec deploy/worker -- touch /consume-nfs/test && \
      kubectl -n dms exec deploy/worker -- rm /consume-nfs/test
    # → Schreibzugriff OK, Datei sollte auch auf dem NAS sichtbar sein
@@ -394,7 +404,8 @@ kubectl -n dms exec deploy/worker -- \
 |---|---|
 | Pod `ContainerCreating` hängt, Event `MountVolume.SetUp failed for volume "consume-nfs"` | `nfs-common` fehlt auf dem Node → §2 |
 | `mount.nfs: access denied` | NAS-Export-Berechtigungen prüfen (Node-IP in Allow-List? root-squash?) |
-| Mount OK, aber `Permission denied` beim Schreiben | UID/GID im Pod stimmt nicht mit NAS-Berechtigungen überein → im Pod `id` aufrufen, NAS entsprechend konfigurieren oder `securityContext` im Deployment setzen |
+| Mount OK, aber `Permission denied` beim Schreiben | **STOAA-434:** UID/GID-Mismatch. Pod `id` sollte 1000 sein, NFS Export braucht `all_squash,anonuid=1000,anongid=1000`. Siehe [`SYNOLOGY-NFS-SETUP.md`](overlays/consume-nfs/SYNOLOGY-NFS-SETUP.md) |
+| `OSError: [Errno 13] Permission denied: '/consume-nfs/<user>/_processed'` | **STOAA-434:** Verzeichnisse nicht beschreibbar. Auf NAS: `chown -R 1000:1000 /volume1/dms-consume` + NFS Export auf `anonuid=1000` setzen |
 | Dateien werden nicht verarbeitet | Worker-Logs prüfen; `CONSUME_MIN_AGE` zu hoch? Datei-Timestamp korrekt? |
 | Alte Scans akkumulieren | Beat läuft nicht → `kubectl -n dms logs deploy/beat`, Schedule-Konfig prüfen |
 

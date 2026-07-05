@@ -5,6 +5,15 @@
 # Platzhalter vor der Aktivierung ersetzen (kein Secret/keine IP ins Git):
 #   server: <NAS-IP oder DNS-Name>
 #   path:   <NFS-Export-Pfad, z. B. /volume1/dms-consume>
+#
+# STOAA-434 NFS Permission Fix:
+# securityContext stellt sicher, dass der Worker-Prozess mit einer UID/GID läuft,
+# die kompatibel mit den NFS-Berechtigungen ist. Synology NFS root_squash mappt
+# root (UID 0) auf nobody; wir setzen explizit UID/GID 1000, damit der Worker
+# Dateien auf dem NFS-Share lesen, schreiben und löschen kann.
+#
+# Abstimmung mit Synology NFS Export (empfohlen):
+#   /volume1/dms-consume  <cluster-subnet>(rw,sync,no_subtree_check,all_squash,anonuid=1000,anongid=1000)
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -13,6 +22,10 @@ metadata:
 spec:
   template:
     spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
       containers:
         - name: worker
           volumeMounts:

@@ -37,20 +37,45 @@ else
     ((ERRORS++))
 fi
 
-# 3. Verify write access
+# 3. Verify securityContext (STOAA-434 fix)
 echo ""
-echo "3. Testing write access to NFS mount..."
+echo "3. Checking securityContext (UID/GID alignment for NFS)..."
+RUN_AS_USER=$(kubectl -n dms get deploy/worker -o jsonpath='{.spec.template.spec.securityContext.runAsUser}' 2>/dev/null || echo "")
+RUN_AS_GROUP=$(kubectl -n dms get deploy/worker -o jsonpath='{.spec.template.spec.securityContext.runAsGroup}' 2>/dev/null || echo "")
+FS_GROUP=$(kubectl -n dms get deploy/worker -o jsonpath='{.spec.template.spec.securityContext.fsGroup}' 2>/dev/null || echo "")
+
+if [[ "$RUN_AS_USER" == "1000" && "$RUN_AS_GROUP" == "1000" && "$FS_GROUP" == "1000" ]]; then
+    echo -e "${GREEN}✓${NC} securityContext configured: runAsUser=1000, runAsGroup=1000, fsGroup=1000"
+    # Verify actual UID in pod
+    ACTUAL_UID=$(kubectl -n dms exec deploy/worker -- id -u 2>/dev/null || echo "")
+    if [[ "$ACTUAL_UID" == "1000" ]]; then
+        echo -e "${GREEN}✓${NC} Worker process running as UID 1000"
+    else
+        echo -e "${RED}✗${NC} Worker process running as UID $ACTUAL_UID (expected 1000)"
+        ((ERRORS++))
+    fi
+else
+    echo -e "${YELLOW}⚠${NC} securityContext not configured or incomplete (runAsUser=$RUN_AS_USER, runAsGroup=$RUN_AS_GROUP, fsGroup=$FS_GROUP)"
+    echo "   This may cause NFS permission issues with root_squash enabled"
+    ((ERRORS++))
+fi
+
+# 4. Verify write access
+echo ""
+echo "4. Testing write access to NFS mount..."
 if kubectl -n dms exec deploy/worker -- touch /consume-nfs/.verify-write-test 2>/dev/null; then
     kubectl -n dms exec deploy/worker -- rm /consume-nfs/.verify-write-test
     echo -e "${GREEN}✓${NC} Write access confirmed"
 else
     echo -e "${RED}✗${NC} Write access FAILED - check NFS permissions (UID/GID, root-squash)"
+    echo "   Current worker UID: $(kubectl -n dms exec deploy/worker -- id 2>/dev/null || echo 'unknown')"
+    echo "   NFS mount permissions: $(kubectl -n dms exec deploy/worker -- ls -ld /consume-nfs 2>/dev/null || echo 'unknown')"
     ((ERRORS++))
 fi
 
-# 4. Verify CONSUME_FOLDER_PATH config
+# 5. Verify CONSUME_FOLDER_PATH config
 echo ""
-echo "4. Checking CONSUME_FOLDER_PATH environment variable..."
+echo "5. Checking CONSUME_FOLDER_PATH environment variable..."
 CONSUME_PATH=$(kubectl -n dms exec deploy/worker -- printenv CONSUME_FOLDER_PATH 2>/dev/null || echo "")
 if [[ "$CONSUME_PATH" == "/consume-nfs" ]]; then
     echo -e "${GREEN}✓${NC} CONSUME_FOLDER_PATH=/consume-nfs (overlay active)"
@@ -62,9 +87,9 @@ else
     ((ERRORS++))
 fi
 
-# 4b. Verify CONSUME_PER_USER config (pro-User-Attribution, STOAA-246/261)
+# 5b. Verify CONSUME_PER_USER config (pro-User-Attribution, STOAA-246/261)
 echo ""
-echo "4b. Checking CONSUME_PER_USER environment variable..."
+echo "5b. Checking CONSUME_PER_USER environment variable..."
 PER_USER=$(kubectl -n dms exec deploy/worker -- printenv CONSUME_PER_USER 2>/dev/null || echo "")
 if [[ "$PER_USER" == "true" ]]; then
     echo -e "${GREEN}✓${NC} CONSUME_PER_USER=true (pro-User-Attribution aktiv; /consume-nfs/<username>/ → Document.owner)"
@@ -73,9 +98,9 @@ else
     ((ERRORS++))
 fi
 
-# 5. Verify CONSUME_MIN_AGE
+# 6. Verify CONSUME_MIN_AGE
 echo ""
-echo "5. Checking CONSUME_MIN_AGE..."
+echo "6. Checking CONSUME_MIN_AGE..."
 MIN_AGE=$(kubectl -n dms exec deploy/worker -- printenv CONSUME_MIN_AGE 2>/dev/null || echo "")
 if [[ "$MIN_AGE" == "15" ]]; then
     echo -e "${GREEN}✓${NC} CONSUME_MIN_AGE=15 (correct from STOAA-174)"
@@ -83,17 +108,17 @@ else
     echo -e "${YELLOW}⚠${NC} CONSUME_MIN_AGE='$MIN_AGE' (expected 15)"
 fi
 
-# 6. Verify nfs-common on node
+# 7. Verify nfs-common on node
 echo ""
-echo "6. Checking nfs-common availability on worker node..."
+echo "7. Checking nfs-common availability on worker node..."
 NODE=$(kubectl -n dms get pod -l app=worker -o jsonpath='{.items[0].spec.nodeName}')
 echo "   Worker node: $NODE"
 # This check requires node SSH access - skip if not available
 echo -e "${YELLOW}⚠${NC} Manual verification needed: SSH to $NODE and run 'dpkg -l | grep nfs-common'"
 
-# 7. Test consume folder processing (if scanner data available)
+# 8. Test consume folder processing (if scanner data available)
 echo ""
-echo "7. Manual test: Consume folder processing"
+echo "8. Manual test: Consume folder processing"
 echo "   a. Place a test PDF in the NAS share (verify it appears in /consume-nfs)"
 echo "   b. Wait CONSUME_MIN_AGE seconds (15s)"
 echo "   c. Trigger or wait for next beat: scan_consume_folder runs every 120s"
@@ -115,7 +140,9 @@ else
     echo ""
     echo "Troubleshooting:"
     echo "  - Check deploy/k8s/overlays/consume-nfs/worker-nfs-patch.yaml (NFS_SERVER_PLACEHOLDER replaced?)"
-    echo "  - Verify NAS export permissions (node IP in allow-list, root-squash disabled or UID match)"
+    echo "  - Verify securityContext is set (runAsUser/runAsGroup/fsGroup=1000) - STOAA-434 fix"
+    echo "  - Verify NAS export permissions (node IP in allow-list, all_squash,anonuid=1000,anongid=1000)"
+    echo "  - Recommended Synology export: /volume1/dms-consume  <subnet>(rw,sync,no_subtree_check,all_squash,anonuid=1000,anongid=1000)"
     echo "  - Check pod events: kubectl -n dms describe pod -l app=worker"
     echo "  - Worker logs: kubectl -n dms logs deploy/worker"
     exit 1
