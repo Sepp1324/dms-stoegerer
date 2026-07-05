@@ -218,3 +218,10 @@ AI_MODEL = os.getenv("AI_MODEL", "claude-opus-4-8")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+
+# --- ASN-Barcode-Erkennung (STOAA-515) ---
+# pyzbar + libzbar0 müssen installiert sein; fehlen sie → WARN + Fallback auf OCR-Text.
+ASN_BARCODE_ENABLED = os.getenv("ASN_BARCODE_ENABLED", "true").lower() in ("1", "true", "yes")
+ASN_BARCODE_PREFIX = os.getenv("ASN_BARCODE_PREFIX", "ASN")
+# Komma-getrennte Seitenzahlen (1-basiert) oder leer = alle Seiten scannen.
+ASN_BARCODE_PAGES = os.getenv("ASN_BARCODE_PAGES", "")

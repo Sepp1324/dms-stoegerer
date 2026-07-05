@@ -248,11 +248,13 @@ def _attach_version_to(document, version, *, actor=None) -> int:
 
 
 def match_and_reconcile(version, *, actor=None) -> dict:
-    """OCR-Nachlauf: erkennt eine ASN im OCR-Text und ordnet die Version zu.
+    """OCR-Nachlauf: erkennt eine ASN (Barcode/QR-Vorrang, Fallback Text-Regex).
 
     Ablauf (Spec „OCR-Integration"):
 
-    1. ASN im OCR-Text erkennen (``parse_asn``).
+    0. **Barcode/QR-Erkennung** (pyzbar) – hat Vorrang vor der Text-Regex.
+       Fehlt pyzbar/zbar → WARN + Fallback auf Text-Regex (kein Pipeline-Crash).
+    1. ASN im OCR-Text erkennen (``parse_asn``) – Fallback wenn kein Barcode.
     2. **Unbekannte/keine ASN** → normale Dokumenterstellung, nichts zu tun.
     3. **Bekannte ASN, dasselbe Dokument** → nur die Erkennung protokollieren.
     4. **Bekannte ASN, anderes Dokument** → Re-Scan eines bestehenden Dokuments:
@@ -265,8 +267,24 @@ def match_and_reconcile(version, *, actor=None) -> dict:
     (ein Fehler hier darf die restliche Verarbeitung nicht abbrechen).
     """
     from documents.models import Document
+    from documents.services.asn_barcode import scan_pdf_for_asn
 
-    asn = parse_asn(version.ocr_text or "")
+    # Barcode/QR hat Vorrang – nur wenn die Version eine lokale PDF-Datei hat.
+    matched_by = "OCR"
+    asn = None
+    pdf_path = getattr(getattr(version, "file", None), "path", None)
+    if pdf_path:
+        try:
+            asn = scan_pdf_for_asn(pdf_path)
+            if asn is not None:
+                matched_by = "BARCODE"
+        except Exception:
+            pass  # Barcode-Fehler darf Pipeline nie abbrechen
+
+    # Fallback: Text-Regex
+    if asn is None:
+        asn = parse_asn(version.ocr_text or "")
+
     if asn is None:
         return {"matched": False, "asn": None}
 
@@ -279,7 +297,7 @@ def match_and_reconcile(version, *, actor=None) -> dict:
     current = version.document
     if existing.pk == current.pk:
         # Re-Upload auf dasselbe Dokument: nur die Erkennung dokumentieren.
-        record_scan(existing, version, matched_by="OCR")
+        record_scan(existing, version, matched_by=matched_by)
         return {"matched": True, "asn": asn, "moved": False, "document_id": existing.pk}
 
     # Re-Scan eines anderen Dokuments → Version übernehmen, Duplikat vermeiden.
@@ -291,7 +309,7 @@ def match_and_reconcile(version, *, actor=None) -> dict:
     current.current_version = None
 
     _attach_version_to(existing, version, actor=actor)
-    record_scan(existing, version, matched_by="OCR")
+    record_scan(existing, version, matched_by=matched_by)
 
     if not current.versions.exists():
         # Das leere, versehentlich neu angelegte Dokument entfernen (keine Duplikate).
