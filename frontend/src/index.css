@@ -2387,6 +2387,111 @@ button.due-item:hover {
   font-size: 0.85rem;
 }
 
+/* --- Mobile-Erfass-Ansicht (STOAA-514) ---
+   Kamera-Fotos aufnehmen, ordnen, hochladen. Bewusst schmal gehalten und ohne
+   horizontales Scrollen bei ~320 px. Dark-Theme-Tokens, keine Hardcode-Farben. */
+.capture {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  max-width: 640px;
+}
+.capture__actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+.capture__add {
+  font-size: 1rem;
+  padding: 0.7rem var(--space-5);
+}
+.capture__count {
+  font-size: 0.9rem;
+}
+.capture__title-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: 0.9rem;
+}
+.capture__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.capture__item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.capture__thumb {
+  width: 56px;
+  height: 56px;
+  flex: 0 0 auto;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+}
+.capture__meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0; /* erlaubt Text-Ellipsis, verhindert Overflow bei 320 px */
+  flex: 1 1 auto;
+}
+.capture__page {
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+.capture__name {
+  font-size: 0.8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.capture__reorder {
+  display: flex;
+  gap: var(--space-1);
+  flex: 0 0 auto;
+}
+.capture__reorder button {
+  padding: 0.35rem 0.5rem;
+  font-size: 0.95rem;
+  line-height: 1;
+  background: var(--surface-sunken);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+.capture__reorder button:hover:not(:disabled) {
+  background: var(--hover-tint);
+}
+.capture__del {
+  color: var(--error) !important;
+}
+.capture__upload {
+  align-self: flex-start;
+  padding: 0.7rem var(--space-6);
+  font-size: 1rem;
+}
+.capture__msg {
+  margin: 0;
+  font-size: 0.9rem;
+}
+.capture__msg--ok {
+  color: var(--ok);
+}
+.capture__msg--error {
+  color: var(--error);
+}
+
 /* --- Bewegung reduzieren (Barrierefreiheit, STOAA-417) ---
    Wer im OS „Bewegung reduzieren" wählt, bekommt keine Transitions/Animationen. */
 @media (prefers-reduced-motion: reduce) {

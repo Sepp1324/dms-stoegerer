@@ -827,6 +827,35 @@ export async function uploadDocument(file: File, title?: string): Promise<Docume
   return res.json();
 }
 
+// Mobile-Erfassung (STOAA-514/512b): mehrere Kamerafotos in Reihenfolge zu
+// EINEM Dokument (Backend fügt sie serverseitig zu einem PDF zusammen, siehe
+// STOAA-512a). Jedes File wird als ``images`` angehängt; die Anhänge-Reihenfolge
+// bestimmt die Seitenreihenfolge. Content-Type NICHT setzen (Boundary vom
+// Browser). Antwort 201 = angelegtes Dokument (DocumentSerializer).
+export async function uploadMobileCapture(
+  images: File[],
+  title?: string,
+): Promise<DocumentItem> {
+  const form = new FormData();
+  for (const img of images) form.append("images", img);
+  if (title && title.trim()) form.append("title", title.trim());
+  const res = await apiFetch("/documents/mobile-capture/", {
+    method: "POST",
+    body: form,
+  });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const data = await res.json();
+      detail = data.detail || detail;
+    } catch {
+      /* keine JSON-Fehlermeldung */
+    }
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
 export async function getCorrespondents(): Promise<NamedRef[]> {
   return listAll<NamedRef>("/correspondents/");
 }

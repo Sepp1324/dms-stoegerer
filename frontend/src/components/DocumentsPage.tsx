@@ -27,6 +27,7 @@ import { toCanonicalValue } from "../customFields";
 import { sanitizeSnippet } from "../sanitize";
 import { ProcessingBadge } from "./ProcessingStatus";
 import UploadZone from "./UploadZone";
+import MobileCapture from "./MobileCapture";
 import DocumentDetail from "./DocumentDetail";
 import RulesPage from "./RulesPage";
 import DuePage from "./DuePage";
@@ -138,7 +139,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   // Aktuell geöffnetes Dokument (Detailansicht) oder null (Liste).
   const [selectedId, setSelectedId] = useState<number | null>(null);
   // Aktive Hauptansicht (persistente linke Navigation).
-  const [view, setView] = useState<"docs" | "rules" | "workflows" | "fields" | "mail" | "faellig">("docs");
+  const [view, setView] = useState<"docs" | "capture" | "rules" | "workflows" | "fields" | "mail" | "faellig">("docs");
   // Sidebar auf schmalen Screens ein-/ausklappbar.
   const [navOpen, setNavOpen] = useState(false);
   // Desktop-Sidebar auf Icon-only einklappbar; Zustand persistent (localStorage).
@@ -404,7 +405,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     );
   }
 
-  const navigate = (v: "docs" | "rules" | "workflows" | "fields" | "mail" | "faellig") => {
+  const navigate = (v: "docs" | "capture" | "rules" | "workflows" | "fields" | "mail" | "faellig") => {
     setView(v);
     setNavOpen(false); // Overlay auf Mobil nach Auswahl schließen
   };
@@ -453,17 +454,19 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
             </svg>
           </button>
           <h1 className="content-title">
-            {view === "rules"
-              ? "Regeln"
-              : view === "workflows"
-                ? "Workflows"
-                : view === "fields"
-                  ? "Zusatzfelder"
-                  : view === "mail"
-                    ? "Mailkonten"
-                    : view === "faellig"
-                      ? "Wiedervorlage"
-                      : "Dokumente"}
+            {view === "capture"
+              ? "Erfassen"
+              : view === "rules"
+                ? "Regeln"
+                : view === "workflows"
+                  ? "Workflows"
+                  : view === "fields"
+                    ? "Zusatzfelder"
+                    : view === "mail"
+                      ? "Mailkonten"
+                      : view === "faellig"
+                        ? "Wiedervorlage"
+                        : "Dokumente"}
           </h1>
           {view === "docs" && (
             <>
@@ -523,6 +526,16 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
             />
           ) : view === "mail" ? (
             <MailAccountsAdmin canEdit={!!me?.can_write} />
+          ) : view === "capture" ? (
+            <MobileCapture
+              canWrite={!!me?.can_write}
+              onUploaded={() => {
+                // Nach erfolgreicher Erfassung die Liste frisch ziehen, damit das
+                // neue Dokument sichtbar wird, sobald man zurück wechselt.
+                setPage(1);
+                setReloadKey((k) => k + 1);
+              }}
+            />
           ) : view === "faellig" ? (
             <DuePage onOpenDocument={(docId) => setSelectedId(docId)} />
           ) : (
@@ -658,8 +671,8 @@ function Sidebar({
   currencyFilters,
   onCurrencyChange,
 }: {
-  view: "docs" | "rules" | "workflows" | "fields" | "mail" | "faellig";
-  onNavigate: (v: "docs" | "rules" | "workflows" | "fields" | "mail" | "faellig") => void;
+  view: "docs" | "capture" | "rules" | "workflows" | "fields" | "mail" | "faellig";
+  onNavigate: (v: "docs" | "capture" | "rules" | "workflows" | "fields" | "mail" | "faellig") => void;
   username?: string;
   onLogout: () => void;
   isAdmin: boolean;
@@ -744,6 +757,14 @@ function Sidebar({
           onClick={() => onNavigate("docs")}
           label="Dokumente"
           icon="M6 2h7l5 5v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2m7 1.5V8h4.5z"
+        />
+        {/* Mobil-Erfassung (STOAA-514): Kamera-Foto → PDF → DMS. Prominent
+            direkt unter „Dokumente", damit es am Handy schnell erreichbar ist. */}
+        <NavItem
+          active={view === "capture"}
+          onClick={() => onNavigate("capture")}
+          label="Erfassen"
+          icon="M9 3 7.2 5H4a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-3.2L15 3zm3 5a5 5 0 1 1 0 10 5 5 0 0 1 0-10m0 2a3 3 0 1 0 0 6 3 3 0 0 0 0-6"
         />
         <NavItem
           active={view === "faellig"}
