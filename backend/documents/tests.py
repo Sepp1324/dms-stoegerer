@@ -3994,30 +3994,39 @@ class SearchSnippetTests(APITestCase):
         self.assertIsNone(self._result(resp, doc.id)["snippet"])
 
     def test_boesartiges_ocr_wird_escaped(self):
-        """HTML aus bösartigem ocr_text wird escaped – nur ``<mark>`` überlebt."""
-        # Payload direkt neben dem Suchbegriff, damit er sicher im ausgewählten
-        # ts_headline-Fragment liegt (unabhängig vom Cover-Algorithmus).
+        """HTML aus bösartigem ocr_text ergibt kein aktives Markup – nur ``<mark>``.
+
+        Zwei Verteidigungslinien greifen: (1) der PostgreSQL-Textparser von
+        ``ts_headline`` verwirft ``<script>``-artiges Markup bereits; (2) unser
+        Sanitizer ``escape``t den kompletten Rohtext, bevor er die Sentinels
+        durch ``<mark>`` ersetzt. Getestet wird die Wirkung, nicht der Weg:
+        ein einzelnes ``&`` (vom Parser als Literal erhalten) muss als ``&amp;``
+        auftauchen (Beweis, dass ``escape`` lief), und nach dem Entfernen der
+        ``<mark>``-Tags darf KEIN rohes ``<`` mehr im Snippet stehen.
+        """
+        # Payload + ein Literal-``&`` direkt neben dem Suchbegriff, damit beide
+        # sicher im gewählten ts_headline-Fragment liegen.
         doc = self._doc(
             self.owner,
             title="Angriff",
             ocr_text=(
-                "Einleitender Absatz mit etwas Kontext. Die Rechnung "
-                "<script>alert('xss')</script> fuer den offenen Betrag ist "
-                "beigefuegt und bis Monatsende faellig."
+                "Die Rechnung & der offene Betrag <script>alert('xss')</script> "
+                "sind laut Schreiben bis Monatsende faellig und beigefuegt."
             ),
         )
         self.client.force_authenticate(self.owner)
         resp = self.client.get("/api/documents/?q=Rechnung")
         snippet = self._result(resp, doc.id)["snippet"]
         self.assertIsNotNone(snippet)
-        # Der Treffer ist markiert – der Sanitizer lief.
+        # Der Treffer ist markiert.
         self.assertIn("<mark>", snippet)
-        # Kein rohes Skript-Tag; die spitzen Klammern sind escaped.
-        self.assertNotIn("<script>", snippet)
-        self.assertIn("&lt;script&gt;", snippet)
+        # ``escape`` lief: das Literal-``&`` ist als ``&amp;`` kodiert.
+        self.assertIn("&amp;", snippet)
+        # Kein rohes Skript-Tag.
+        self.assertNotIn("<script", snippet)
         # Kern-Invariante: einziges erlaubtes Tag ist <mark>/</mark>. Nach dem
-        # Entfernen dieser Tags bleibt KEIN weiteres unescaptes '<' übrig – damit
-        # ist jeglicher HTML-Injektionsvektor über ocr_text ausgeschlossen.
+        # Entfernen dieser Tags bleibt KEIN weiteres rohes '<' übrig – damit ist
+        # jeglicher HTML-Injektionsvektor über ocr_text ausgeschlossen.
         rest = snippet.replace("<mark>", "").replace("</mark>", "")
         self.assertNotIn("<", rest)
 
