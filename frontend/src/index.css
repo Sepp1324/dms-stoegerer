@@ -19,6 +19,27 @@
   --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
   --accent-tint: rgba(59, 130, 246, 0.14); /* Nav-/Chip-aktiv */
   --hover-tint: rgba(148, 163, 184, 0.08); /* neutraler Hover */
+  --border-strong: rgba(148, 163, 184, 0.3); /* Rahmen im Hover-Zustand */
+
+  /* Abstands-Skala (STOAA-417, additiv) – vereinheitlicht Paddings/Gaps,
+     Werte entsprechen den bereits genutzten Größen (keine optische Änderung). */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+
+  /* Zusätzliche Radien + Elevation (additiv) */
+  --radius-lg: 16px;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25);
+  --shadow-md: 0 6px 20px rgba(0, 0, 0, 0.28);
+  --shadow-pop: 0 12px 32px rgba(0, 0, 0, 0.45);
+
+  /* Einheitliche Transitions (dezent, respektiert prefers-reduced-motion unten) */
+  --transition-fast: 0.12s ease;
+  --transition-base: 0.18s ease;
 
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
@@ -315,9 +336,75 @@ h1 {
   margin: 0;
   font-size: 1.35rem;
 }
+/* Suchfeld ist die primäre Aktion der Topbar → prominenter (wächst mit,
+   gedeckelt) statt fixer Breite (STOAA-417). */
 .topbar-search {
   margin-left: auto;
-  width: min(420px, 45vw);
+  flex: 1 1 320px;
+  min-width: 200px;
+  max-width: 560px;
+}
+
+/* --- Overflow-/„…"-Menü für selten genutzte Aktionen (STOAA-417) --- */
+.overflow-menu {
+  position: relative;
+  flex-shrink: 0;
+}
+.overflow-menu__trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  padding: 0.45rem;
+  border-radius: var(--radius-sm);
+}
+.overflow-menu__trigger:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--hover-tint);
+}
+.overflow-menu__trigger[aria-expanded="true"] {
+  color: var(--text);
+  background: var(--hover-tint);
+  border-color: var(--accent);
+}
+.overflow-menu__backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+}
+.overflow-menu__panel {
+  position: absolute;
+  top: calc(100% + var(--space-2));
+  right: 0;
+  z-index: 31;
+  min-width: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-pop);
+}
+.overflow-menu__field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.overflow-menu__field select {
+  width: 100%;
+}
+.overflow-menu__panel > button {
+  width: 100%;
+}
+.overflow-menu__panel .link {
+  justify-content: flex-start;
+  padding-left: 0;
 }
 .nav-toggle {
   display: none;
@@ -476,13 +563,20 @@ h1 {
     width: 100%;
     flex-basis: 100%;
   }
+  /* Panel links verankern + auf Viewport begrenzen (kein horiz. Scroll). */
+  .overflow-menu__panel {
+    right: auto;
+    left: 0;
+    max-width: calc(100vw - 2rem);
+  }
 }
 
 .card {
   background: var(--card);
-  border-radius: 12px;
-  padding: 1.25rem;
+  border-radius: var(--radius-md);
+  padding: var(--space-5);
   border: 1px solid var(--border);
+  box-shadow: var(--shadow-sm);
 }
 
 /* --- Buttons / Inputs --- */
@@ -490,13 +584,21 @@ button {
   background: var(--accent);
   color: white;
   border: none;
-  border-radius: 8px;
-  padding: 0.6rem 1rem;
+  border-radius: var(--radius-sm);
+  padding: 0.6rem var(--space-4);
   font-size: 0.95rem;
   cursor: pointer;
+  transition:
+    background var(--transition-fast),
+    box-shadow var(--transition-fast),
+    transform var(--transition-fast),
+    opacity var(--transition-fast);
 }
 button:hover:not(:disabled) {
   background: var(--accent-hover);
+}
+button:active:not(:disabled) {
+  transform: translateY(1px);
 }
 button:disabled {
   opacity: 0.5;
@@ -505,24 +607,40 @@ button:disabled {
 button.link {
   background: transparent;
   color: var(--muted);
-  padding: 0.4rem 0.6rem;
+  padding: var(--space-1) 0.6rem;
 }
-button.link:hover {
+button.link:hover:not(:disabled) {
   color: var(--text);
-  background: transparent;
+  background: var(--hover-tint);
 }
 
 input,
-select {
-  background: #0b1220;
+select,
+textarea {
+  background: var(--surface-sunken);
   color: var(--text);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 0.55rem 0.7rem;
+  border-radius: var(--radius-sm);
+  padding: 0.55rem var(--space-3);
   font-size: 0.95rem;
+  font-family: inherit;
+  transition:
+    border-color var(--transition-fast),
+    box-shadow var(--transition-fast),
+    background var(--transition-fast);
+}
+textarea {
+  resize: vertical;
+  line-height: 1.5;
+}
+input:hover:not(:focus):not(:disabled),
+select:hover:not(:focus):not(:disabled),
+textarea:hover:not(:focus):not(:disabled) {
+  border-color: var(--border-strong);
 }
 input:focus,
-select:focus {
+select:focus,
+textarea:focus {
   outline: none;
   border-color: var(--accent);
 }
@@ -535,7 +653,8 @@ select:focus {
   border-radius: var(--radius-sm);
 }
 input:focus-visible,
-select:focus-visible {
+select:focus-visible,
+textarea:focus-visible {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 2px var(--accent-tint);
@@ -2241,4 +2360,17 @@ button.due-item:hover {
 .due-item__note {
   margin-left: auto;
   font-size: 0.85rem;
+}
+
+/* --- Bewegung reduzieren (Barrierefreiheit, STOAA-417) ---
+   Wer im OS „Bewegung reduzieren" wählt, bekommt keine Transitions/Animationen. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
 }
