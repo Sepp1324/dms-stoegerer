@@ -7,8 +7,11 @@ bleibt die primäre Quelle; KI ergänzt sie transparent (siehe KONZEPT.md §6).
 from __future__ import annotations
 
 import json
+import logging
 
 from .providers import get_provider
+
+logger = logging.getLogger(__name__)
 
 _CLASSIFY_SYSTEM = (
     "Du bist ein Assistent für ein Dokumenten-Management-System. "
@@ -89,7 +92,14 @@ def suggest_metadata(ocr_text: str, *, max_chars: int = 6000) -> dict:
     prompt = f"Hier ist der OCR-Text des Dokuments:\n\n{excerpt}"
     try:
         raw = provider.complete(prompt, system=system)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 – Provider-Fehler sprechend surfacen statt 500
+        # Provider konfiguriert, aber Aufruf schlägt fehl (falscher/abgelaufener
+        # Key, falsches Modell, Netzwerk, Rate-Limit). WARN loggen, damit Ops die
+        # eigentliche Ursache im Pod-Log sieht (die UI zeigt nur eine generische
+        # Meldung); klar von "unavailable" unterschieden.
+        logger.warning(
+            "KI-Generierung fehlgeschlagen (Provider %s): %s", provider.name, exc
+        )
         return {"source": "error", "provider": provider.name, "error": str(exc)}
 
     suggestions = _parse_json(raw)
