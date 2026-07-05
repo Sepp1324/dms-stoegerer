@@ -130,14 +130,57 @@ def _scan_per_user(consume: Path, min_age: float, now: float) -> dict:
     verarbeitet (case-insensitiv); alle Dateien darin erhalten diesen als
     ``owner``. Ordner mit führendem ``_``/``.`` (z. B. ``_processed`` auf
     Consume-Ebene) und unbekannte Benutzer werden übersprungen.
+
+    Dateien, die versehentlich **direkt** in ``consume`` (statt in
+    ``<username>/``) liegen, wurden früher still verschluckt: weder aufgenommen
+    noch verschoben, ohne Log (STOAA-407). Das ist behoben – reife Root-Dateien
+    landen nachvollziehbar in ``consume/_failed/`` inkl. WARN, damit nie eine
+    Datei spurlos verschwindet.
     """
     user_model = get_user_model()
 
     ingested = []
     skipped = 0
     failed = 0
+    # Root-``_failed/`` erst bei Bedarf anlegen (s. u.), damit im Normalfall
+    # (nur ``<username>/``-Ordner) keine leeren Meta-Ordner entstehen.
+    root_failed = consume / "_failed"
     for entry in sorted(consume.iterdir()):
-        if not entry.is_dir() or entry.name.startswith(("_", ".")):
+        if entry.name.startswith(("_", ".")):
+            # Eigene Meta-Ordner (``_processed``/``_failed``) und versteckte
+            # Einträge nie anfassen.
+            continue
+
+        if not entry.is_dir():
+            # Fehlplatzierte Datei direkt im Consume-Root. Nicht still
+            # verschlucken (STOAA-407): reife Dateien mit klarem Grund nach
+            # ``_failed/`` verschieben + WARN; noch zu junge Dateien überspringen
+            # (könnten gerade fertig geschrieben werden).
+            try:
+                age = now - entry.stat().st_mtime
+            except OSError:
+                skipped += 1
+                continue
+            if age < min_age:
+                skipped += 1
+                continue
+            failed += 1
+            logger.warning(
+                "scan_consume_folder: Datei %r liegt im Consume-Root, aber "
+                "CONSUME_PER_USER=true erwartet Dateien in <username>/. Nach "
+                "_failed/ verschoben – bitte in den passenden Benutzer-Ordner "
+                "legen.",
+                entry.name,
+            )
+            try:
+                root_failed.mkdir(parents=True, exist_ok=True)
+                entry.rename(_unique(root_failed / entry.name))
+            except OSError:
+                logger.exception(
+                    "scan_consume_folder: Verschieben der Root-Datei %r nach "
+                    "_failed/ fehlgeschlagen",
+                    entry.name,
+                )
             continue
 
         user = user_model.objects.filter(username__iexact=entry.name).first()

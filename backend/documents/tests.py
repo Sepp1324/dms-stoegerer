@@ -1443,6 +1443,55 @@ class ConsumePerUserScanTests(TestCase):
         self.assertTrue((self.consume / "sebastian" / "ignored.pdf").exists())
         delay.assert_called_once()
 
+    def _write_root(self, name, *, age_seconds):
+        """Legt eine Datei DIREKT in ``consume/`` (nicht in ``<username>/``) an."""
+        import os
+        import time
+
+        path = self.consume / name
+        path.write_bytes(b"%PDF-1.4 dummy")
+        mtime = time.time() - age_seconds
+        os.utime(path, (mtime, mtime))
+        return path
+
+    def test_reife_root_datei_landet_in_failed_und_warnt(self):
+        """(f) STOAA-407: fehlplatzierte Datei im Consume-Root wird nicht mehr
+        still verschluckt -> nach _failed/ verschoben + WARN, Zähler failed."""
+        self._write_root("verirrt.pdf", age_seconds=3600)
+        # Zusätzlich korrekt platzierte Datei -> muss weiter verarbeitet werden.
+        self._write("sebastian", "richtig.pdf", age_seconds=3600)
+
+        with self.settings(CONSUME_PER_USER=True, CONSUME_MIN_AGE=15):
+            with self.assertLogs("documents.tasks", level="WARNING") as cm:
+                result, delay = self._run_scan()
+
+        self.assertEqual(result["found"], 1)
+        self.assertEqual(result["failed"], 1)
+        # Root-Datei nachvollziehbar in consume/_failed/, nicht spurlos weg.
+        self.assertTrue((self.consume / "_failed" / "verirrt.pdf").exists())
+        self.assertFalse((self.consume / "verirrt.pdf").exists())
+        # Korrekte User-Datei unverändert verarbeitet.
+        self.assertTrue((self.consume / "sebastian" / "_processed" / "richtig.pdf").exists())
+        self.assertEqual(Document.objects.count(), 1)
+        self.assertEqual(Document.objects.get().owner, self.sebastian)
+        delay.assert_called_once()
+        self.assertTrue(any("verirrt.pdf" in line for line in cm.output))
+
+    def test_zu_junge_root_datei_wird_uebersprungen_nicht_verschoben(self):
+        """(g) Noch zu junge Root-Datei (könnte gerade geschrieben werden) wird
+        übersprungen, nicht voreilig nach _failed/ verschoben."""
+        self._write_root("frisch.pdf", age_seconds=0)
+
+        with self.settings(CONSUME_PER_USER=True, CONSUME_MIN_AGE=15):
+            result, delay = self._run_scan()
+
+        self.assertEqual(result["found"], 0)
+        self.assertEqual(result["failed"], 0)
+        self.assertEqual(result["skipped"], 1)
+        self.assertTrue((self.consume / "frisch.pdf").exists())
+        self.assertFalse((self.consume / "_failed").exists())
+        delay.assert_not_called()
+
 
 class DocumentShareLinkTests(APITestCase):
     """Verwaltungs-API der Freigabelinks (STOAA-190).
