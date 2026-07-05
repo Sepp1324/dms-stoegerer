@@ -255,6 +255,106 @@ class DocumentUploadView(APIView):
         )
 
 
+class DocumentUploadImagesView(APIView):
+    """Nimmt mehrere Bilder auf, fügt sie via img2pdf zu einem PDF zusammen und stößt die Pipeline an.
+
+    Felder: ``images`` (mehrere Dateien, Pflicht), ``title`` (optional).
+    HEIC/HEIF wird via pillow-heif nach JPEG konvertiert; JPEG/PNG/TIFF direkt an img2pdf.
+    """
+
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    MAX_FILES = 20
+    MAX_SIZE_MB = 30
+    ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "tiff", "tif", "heic", "heif", "webp"}
+
+    def post(self, request):
+        if not request.user.can_write:
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        files = request.FILES.getlist("images")
+        if not files:
+            return Response(
+                {"detail": "Feld 'images' fehlt oder leer."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(files) > self.MAX_FILES:
+            return Response(
+                {"detail": f"Maximal {self.MAX_FILES} Bilder pro Upload."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        import io
+
+        import img2pdf
+
+        image_bytes_list = []
+        for f in files:
+            if f.size > self.MAX_SIZE_MB * 1024 * 1024:
+                return Response(
+                    {"detail": f"{f.name}: Datei zu groß (max {self.MAX_SIZE_MB} MB)."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            ext = f.name.rsplit(".", 1)[-1].lower() if "." in f.name else ""
+            ct = (f.content_type or "").lower()
+            if ext not in self.ALLOWED_EXTENSIONS:
+                return Response(
+                    {"detail": f"{f.name}: Kein unterstütztes Bildformat."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            data = f.read()
+            if ext in {"heic", "heif"} or "heic" in ct or "heif" in ct:
+                try:
+                    import pillow_heif
+                    from PIL import Image as PilImage
+
+                    pillow_heif.register_heif_opener()
+                    img = PilImage.open(io.BytesIO(data))
+                    buf = io.BytesIO()
+                    img.convert("RGB").save(buf, format="JPEG", quality=90)
+                    image_bytes_list.append(buf.getvalue())
+                except Exception as exc:
+                    return Response(
+                        {"detail": f"{f.name}: HEIC-Konvertierung fehlgeschlagen – {exc}"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+            else:
+                image_bytes_list.append(data)
+
+        try:
+            pdf_bytes = img2pdf.convert(image_bytes_list)
+        except Exception as exc:
+            return Response(
+                {"detail": f"PDF-Erstellung fehlgeschlagen: {exc}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        title = (request.data.get("title") or "").strip() or f"Mobile-Upload {date_cls.today().isoformat()}"
+
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        uploaded = SimpleUploadedFile(f"{title}.pdf", pdf_bytes, content_type="application/pdf")
+        file_path, size, mime = storage.save_upload(uploaded)
+
+        document, version = pipeline.create_document_from_file(
+            file_path, title=title, owner=request.user, mime=mime, size=size
+        )
+        version.ingest_source = "mobile"
+        version.save(update_fields=["ingest_source"])
+
+        process_document_version.delay(version.id)
+
+        return Response(
+            DocumentSerializer(document).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
 def _serve_version_preview(version):
     """Liefert das Archiv-PDF (Original als Fallback) einer Version inline.
 

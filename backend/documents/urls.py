@@ -19,6 +19,7 @@ router.register("reminders", views.DocumentReminderViewSet)
 urlpatterns = [
     # Explizit vor dem Router, sonst würde "upload" als Dokument-PK gelesen.
     path("documents/upload/", views.DocumentUploadView.as_view(), name="document-upload"),
+    path("documents/upload_images/", views.DocumentUploadImagesView.as_view(), name="document-upload-images"),
     # Freigabe-Abrufrouten (STOAA-191). Bewusst OHNE Trailing-Slash (exakt wie im
     # Ticket), damit kein APPEND_SLASH-Redirect den Authorization-Header verwirft.
     path("share/<str:token>/preview", views.SharePreviewView.as_view(), name="share-preview"),

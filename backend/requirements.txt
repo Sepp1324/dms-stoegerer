@@ -20,6 +20,7 @@ pikepdf==8.15.1
 # Miniaturbilder (erste Seite → JPEG)
 pdf2image==1.17.0
 Pillow==11.0.0
+pillow-heif>=0.20.0  # HEIC/HEIF-Konvertierung für Mobile-Upload (STOAA-511)
 # QR-Codes für die Archivnummer (ASN, STOAA-284/285); rendert als PNG via Pillow
 qrcode==7.4.2
 
