@@ -823,6 +823,9 @@ class DocumentViewSet(viewsets.ModelViewSet):
         auf und schreibt das Ergebnis nach ``ai_suggestions`` (+ ``ai_suggested_at``).
         Ist kein Provider verfügbar, wird nichts geschrieben und ``source`` ist
         ``"unavailable"`` (Status 200, damit die UI sauber reagieren kann).
+        Schlägt der konfigurierte Provider beim Aufruf fehl (falscher Key/Modell,
+        Netzwerk), ist ``source`` ``"error"`` mit knapper ``error``-Ursache – so
+        verpufft ein Fehlkonfig nicht mehr als 500.
         Owner-Scoping über ``get_object()``; Schreiben nur für ``can_write``.
         """
         if not request.user.can_write:
@@ -858,7 +861,11 @@ class DocumentViewSet(viewsets.ModelViewSet):
             )
 
         data = self.get_serializer(document).data
-        return Response({**data, "source": result.get("source", "unavailable")})
+        payload = {**data, "source": result.get("source", "unavailable")}
+        # Bei source="error" die knappe Ursache mitgeben (kein Secret/Stacktrace).
+        if result.get("error"):
+            payload["error"] = result["error"]
+        return Response(payload)
 
     @action(detail=True, methods=["post"], url_path="dismiss_suggestions")
     def dismiss_suggestions(self, request, pk=None):

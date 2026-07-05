@@ -7,8 +7,11 @@ bleibt die primäre Quelle; KI ergänzt sie transparent (siehe KONZEPT.md §6).
 from __future__ import annotations
 
 import json
+import logging
 
 from .providers import get_provider
+
+logger = logging.getLogger(__name__)
 
 _CLASSIFY_SYSTEM = (
     "Du bist ein Assistent für ein Dokumenten-Management-System. "
@@ -87,10 +90,33 @@ def suggest_metadata(ocr_text: str, *, max_chars: int = 6000) -> dict:
     system = _CLASSIFY_SYSTEM + _existing_context()
     excerpt = ocr_text[:max_chars]
     prompt = f"Hier ist der OCR-Text des Dokuments:\n\n{excerpt}"
-    raw = provider.complete(prompt, system=system)
+    try:
+        raw = provider.complete(prompt, system=system)
+    except Exception as exc:  # noqa: BLE001 – Provider-Fehler sprechend surfacen statt 500
+        # Provider konfiguriert, aber Aufruf schlägt fehl (falscher/abgelaufener
+        # Key, falsches Modell, Netzwerk, Rate-Limit). Klar von "unavailable"
+        # unterscheiden, damit die UI eine sprechende Meldung zeigt.
+        logger.warning(
+            "KI-Generierung fehlgeschlagen (Provider %s): %s", provider.name, exc
+        )
+        return {
+            "source": "error",
+            "provider": provider.name,
+            "suggestions": {},
+            "error": _short_error(exc),
+        }
 
     suggestions = _parse_json(raw)
     return {"source": "ai", "provider": provider.name, "suggestions": suggestions}
+
+
+def _short_error(exc: Exception) -> str:
+    """Kurze, nutzerfreundliche Ursache – ohne Stacktrace/Secrets, längenbegrenzt."""
+    name = type(exc).__name__
+    text = str(exc).strip()
+    first_line = text.splitlines()[0] if text else ""
+    first_line = first_line[:160]
+    return f"{name}: {first_line}" if first_line else name
 
 
 def _parse_json(raw: str) -> dict:

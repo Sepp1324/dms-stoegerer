@@ -384,6 +384,36 @@ class AISuggestionsTests(APITestCase):
             ).exists()
         )
 
+    def test_suggest_provider_fehler_liefert_source_error(self):
+        """Provider konfiguriert, aber complete() wirft → source='error' statt 500."""
+        from unittest import mock
+
+        class _RaisingProvider:
+            name = "anthropic"
+            available = True
+
+            def complete(self, prompt, *, system=None):
+                raise RuntimeError("authentication_error: invalid x-api-key")
+
+        doc = self._doc()
+        self.client.force_authenticate(self.owner)
+        with mock.patch("ai.services.get_provider", return_value=_RaisingProvider()):
+            resp = self.client.post(
+                f"/api/documents/{doc.id}/suggest/", {}, format="json"
+            )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["source"], "error")
+        self.assertIn("authentication_error", resp.data["error"])
+        # Nichts geschrieben, kein Audit-Eintrag.
+        doc.refresh_from_db()
+        self.assertEqual(doc.ai_suggestions, {})
+        self.assertIsNone(doc.ai_suggested_at)
+        self.assertFalse(
+            AuditLogEntry.objects.filter(
+                action="suggest", object_id=str(doc.id)
+            ).exists()
+        )
+
     # --- 6. Dismiss-Endpoint ---------------------------------------------
     def test_dismiss_entfernt_felder(self):
         doc = self._doc(title="A", correspondent="B", date="2024-01-01")

@@ -715,7 +715,9 @@ export async function applySuggestions(
 // Regeneriert die KI-Vorschläge synchron. Bei fehlendem Provider liefert das
 // Backend Status 200 mit source:"unavailable" (nichts wird überschrieben).
 export interface SuggestResult extends DocumentDetail {
-  source: "ai" | "unavailable" | string;
+  source: "ai" | "unavailable" | "error" | string;
+  // Bei source="error": knappe, nutzerfreundliche Ursache (kein Stacktrace/Secret).
+  error?: string;
 }
 
 export async function suggestDocument(id: number): Promise<SuggestResult> {

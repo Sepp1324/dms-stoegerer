@@ -333,10 +333,14 @@ export default function DocumentDetail({
     setApplyError(null);
     try {
       const updated = await suggestDocument(id);
-      const { source, ...rest } = updated;
+      const { source, error, ...rest } = updated;
       setDoc(rest as Detail);
       if (source === "unavailable") {
         setRegenNote("KI nicht verfügbar – es wurden keine Vorschläge erzeugt.");
+      } else if (source === "error") {
+        setRegenNote(
+          `KI-Fehler bei der Generierung${error ? `: ${error}` : ""} – bitte später erneut versuchen.`,
+        );
       }
     } catch (e) {
       setApplyError(e instanceof Error ? e.message : String(e));
