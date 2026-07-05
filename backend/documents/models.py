@@ -987,3 +987,52 @@ class WorkflowAction(models.Model):
 
     def __str__(self) -> str:
         return f"Aktion[{self.action_type}] #{self.order} für {self.workflow}"
+
+
+# ---------------------------------------------------------------------------
+# Wiedervorlage / Erinnerungen (STOAA-369 / STOAA-372 PR1)
+# ---------------------------------------------------------------------------
+class DocumentReminder(models.Model):
+    """Fällig-Datum (Wiedervorlage) je Dokument mit optionaler Notiz.
+
+    CEO-Entscheidung (STOAA-369): KEIN separates Notification-Modell. Die
+    In-App-Benachrichtigung ist schlicht die fällig/anstehend-Liste
+    (``DocumentReminderViewSet.due``). Der tägliche Beat ``check_due_reminders``
+    setzt lediglich ``notified_at`` **genau einmal** (Tages-Dedupe) und versendet
+    nur dann eine E-Mail, wenn SMTP konfiguriert ist – fehlt es, wird still
+    übersprungen (kein Fehler).
+    """
+
+    document = models.ForeignKey(
+        "Document", on_delete=models.CASCADE, related_name="reminders"
+    )
+    remind_on = models.DateField(help_text="Fällig-/Wiedervorlage-Datum")
+    note = models.TextField(blank=True, help_text="Optionale Notiz zur Wiedervorlage")
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="created_reminders",
+    )
+    done = models.BooleanField(
+        default=False, help_text="Erledigt – aus der Wiedervorlage-Liste genommen"
+    )
+    notified_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Wann der Beat diese fällige Erinnerung erstmals benachrichtigt hat "
+            "(genau einmal gesetzt – Dedupe gegen Mehrfach-Benachrichtigung)."
+        ),
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Erinnerung"
+        verbose_name_plural = "Erinnerungen"
+        ordering = ["remind_on"]
+
+    def __str__(self) -> str:
+        return f"Erinnerung {self.remind_on} für Dokument #{self.document_id}"

@@ -285,6 +285,78 @@ def fetch_mail_account(account_id: int) -> dict:
 
 
 @shared_task
+def check_due_reminders() -> dict:
+    """Beat-Task: benachrichtigt einmalig über fällige Wiedervorlagen (STOAA-372).
+
+    Läuft täglich (siehe ``CELERY_BEAT_SCHEDULE``). CEO-Entscheidung
+    (STOAA-369): KEIN separates Notification-Modell. Die In-App-Benachrichtigung
+    ist die fällig/anstehend-Liste (``/api/reminders/due/``); dieser Beat setzt
+    lediglich ``notified_at`` **genau einmal** pro Erinnerung.
+
+    Logik: offene (``done=False``), fällige (``remind_on <= heute``) Erinnerungen
+    ohne ``notified_at`` erhalten ``notified_at = now()``. Da anschließend
+    ``notified_at__isnull=True`` nicht mehr greift, benachrichtigt ein zweiter
+    Lauf dieselbe Erinnerung nicht erneut (Dedupe).
+
+    E-Mail wird nur versendet, wenn SMTP konfiguriert ist
+    (``settings.EMAIL_HOST`` gesetzt); fehlt es, wird der Versand still
+    übersprungen – **kein** Fehler. Die In-App-Benachrichtigung (``notified_at``
+    + due-Liste) funktioniert unabhängig davon.
+    """
+    from django.utils import timezone
+
+    from .models import DocumentReminder
+
+    today = timezone.localdate()
+    due = list(
+        DocumentReminder.objects.select_related("document", "created_by").filter(
+            done=False, remind_on__lte=today, notified_at__isnull=True
+        )
+    )
+
+    smtp_configured = bool(getattr(settings, "EMAIL_HOST", ""))
+    now = timezone.now()
+    notified = 0
+    emailed = 0
+    for reminder in due:
+        # In-App-Benachrichtigung: notified_at genau einmal setzen (Dedupe).
+        reminder.notified_at = now
+        reminder.save(update_fields=["notified_at", "updated_at"])
+        notified += 1
+
+        # E-Mail nur bei konfiguriertem SMTP und vorhandener Empfängeradresse;
+        # sonst still überspringen (kein Fehler).
+        if not smtp_configured:
+            continue
+        recipient = getattr(reminder.created_by, "email", "") or ""
+        if not recipient:
+            continue
+        try:
+            from django.core.mail import send_mail
+
+            send_mail(
+                subject=f"Wiedervorlage fällig: Dokument #{reminder.document_id}",
+                message=(
+                    f"Die Wiedervorlage für Dokument #{reminder.document_id} ist "
+                    f"seit {reminder.remind_on.isoformat()} fällig.\n\n"
+                    f"{reminder.note}".strip()
+                ),
+                from_email=getattr(settings, "DEFAULT_FROM_EMAIL", None),
+                recipient_list=[recipient],
+                fail_silently=True,
+            )
+            emailed += 1
+        except Exception:
+            # E-Mail ist Best-Effort – ein Fehler darf den Beat nicht abbrechen.
+            logger.exception(
+                "check_due_reminders: E-Mail-Versand fehlgeschlagen für Reminder %s",
+                reminder.id,
+            )
+
+    return {"due": len(due), "notified": notified, "emailed": emailed}
+
+
+@shared_task
 def bulk_classify_documents(document_ids, actor_id=None) -> dict:
     """Wendet die Klassifizierungsregeln asynchron auf viele Dokumente an.
 

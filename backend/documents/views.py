@@ -2,7 +2,7 @@ import os
 import re
 import secrets
 from datetime import date as date_cls
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from datetime import timezone as dt_timezone
 from decimal import Decimal, InvalidOperation
 
@@ -59,6 +59,7 @@ from .models import (
     CustomField,
     CustomFieldValue,
     Document,
+    DocumentReminder,
     DocumentShareLink,
     DocumentType,
     DocumentVersion,
@@ -72,6 +73,7 @@ from .serializers import (
     ClassificationRuleSerializer,
     CorrespondentSerializer,
     CustomFieldSerializer,
+    DocumentReminderSerializer,
     DocumentSerializer,
     DocumentShareLinkSerializer,
     DocumentTypeSerializer,
@@ -1216,6 +1218,104 @@ class WorkflowViewSet(viewsets.ModelViewSet):
     ).all()
     serializer_class = WorkflowSerializer
     permission_classes = [ReadOnlyOrCanWrite]
+
+
+class DocumentReminderViewSet(viewsets.ModelViewSet):
+    """CRUD für Wiedervorlagen/Erinnerungen je Dokument (STOAA-372 PR1).
+
+    Owner-Scope analog ``DocumentViewSet.get_queryset`` (STOAA-7): Ein Nutzer
+    sieht/verwaltet ausschließlich Erinnerungen zu **eigenen** Dokumenten
+    (``document__owner=user``); ``is_dms_admin`` sieht alles. Fremde IDs → 404
+    (kein Leak, auch für Detail/Update/Delete/Actions, da ``get_object()`` das
+    gefilterte Queryset nutzt).
+
+    Extra-Endpunkte:
+      * ``POST /api/reminders/{id}/done/`` – markiert erledigt (Audit
+        ``reminder_done``).
+      * ``GET  /api/reminders/due/?days=N`` – offene fällige/anstehende
+        Erinnerungen, getrennt in ``{"faellig": [...], "anstehend": [...]}``.
+    """
+
+    queryset = DocumentReminder.objects.all()
+    serializer_class = DocumentReminderSerializer
+    permission_classes = [ReadOnlyOrCanWrite]
+
+    def get_queryset(self):
+        qs = DocumentReminder.objects.select_related("document", "created_by")
+        # Owner-Isolation (STOAA-7): nur Erinnerungen zu eigenen Dokumenten.
+        # DMS-Admins sehen/verwalten alles.
+        user = self.request.user
+        if not getattr(user, "is_dms_admin", False):
+            qs = qs.filter(document__owner=user)
+        return qs
+
+    def perform_create(self, serializer):
+        # Der Ersteller kommt server-seitig aus dem Request (Serializer read-only),
+        # damit er nicht fälschbar ist.
+        reminder = serializer.save(created_by=self.request.user)
+        AuditLogEntry.objects.create(
+            actor=self.request.user,
+            action="reminder_created",
+            object_type="DocumentReminder",
+            object_id=str(reminder.id),
+            detail={
+                "document": reminder.document_id,
+                "remind_on": reminder.remind_on.isoformat(),
+            },
+        )
+
+    @action(detail=True, methods=["post"])
+    def done(self, request, pk=None):
+        """Markiert die Erinnerung als erledigt (aus der Wiedervorlage genommen)."""
+        reminder = self.get_object()
+        if not reminder.done:
+            reminder.done = True
+            reminder.save(update_fields=["done", "updated_at"])
+        AuditLogEntry.objects.create(
+            actor=request.user,
+            action="reminder_done",
+            object_type="DocumentReminder",
+            object_id=str(reminder.id),
+            detail={"document": reminder.document_id},
+        )
+        return Response(self.get_serializer(reminder).data)
+
+    @action(detail=False, methods=["get"])
+    def due(self, request):
+        """Offene fällige/anstehende Erinnerungen (In-App-Benachrichtigung).
+
+        Query::
+
+            GET /api/reminders/due/?days=N     (N optional, Default 7)
+
+        Liefert nur **offene** (``done=False``) Erinnerungen des Nutzers
+        (owner-gescopet über ``get_queryset``), getrennt::
+
+            {
+              "faellig":   [...],   # remind_on <= heute  (überfällig/heute)
+              "anstehend": [...]    # heute < remind_on <= heute+N
+            }
+        """
+        try:
+            days = int(request.query_params.get("days", 7))
+        except (TypeError, ValueError):
+            days = 7
+        if days < 0:
+            days = 0
+
+        today = timezone.localdate()
+        horizon = today + timedelta(days=days)
+
+        open_qs = self.get_queryset().filter(done=False)
+        faellig = open_qs.filter(remind_on__lte=today)
+        anstehend = open_qs.filter(remind_on__gt=today, remind_on__lte=horizon)
+
+        return Response(
+            {
+                "faellig": self.get_serializer(faellig, many=True).data,
+                "anstehend": self.get_serializer(anstehend, many=True).data,
+            }
+        )
 
 
 class DocumentShareLinkViewSet(viewsets.ModelViewSet):
