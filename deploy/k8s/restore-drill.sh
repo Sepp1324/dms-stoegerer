@@ -1,58 +1,28 @@
 #!/usr/bin/env sh
-# Restore-Drill: holt das JÜNGSTE Offsite-Backup vom NAS (SSH/scp — dasselbe Ziel,
-# das der Backup-CronJob beschreibt) und spielt es in eine WEGWERFBARE Postgres-
-# Instanz + ein Temp-Verzeichnis ein, um die Wiederherstellbarkeit nachzuweisen.
-# Die Produktion wird NICHT angefasst; das Offsite-Ziel wird nur gelesen.
 # Restore-Drill: beweist, dass das jüngste Offsite-Backup wiederherstellbar ist.
 #
-# Muss zum Backup-CronJob (backup-cronjob.yaml) passen: dieser legt via rsync
-# FLACHE Dateien db-<TS>.sql.gz und data-<TS>.tar.gz unter BACKUP_TARGET_PATH ab
-# (kein Unterordner, keine SHA256SUMS-Datei). Der Drill liest exakt dieses Format.
 # Der Drill ist absichtlich NICHT-destruktiv:
 # - Produktions-Postgres wird nicht angefasst.
 # - Das dms-data-PVC wird nicht beschrieben.
 # - Die DB wird in einen temporären Postgres-Pod importiert.
 # - Das /data-Archiv wird lokal in ein Temp-Verzeichnis entpackt.
 #
-# Voraussetzungen: ssh, scp, gzip, docker ODER podman.
-# Zugangsdaten wie beim CronJob (Secret dms-backup-secrets) — per Env übergeben:
-#   BACKUP_SSH_HOST      SSH-Zielhost (NAS)
-#   BACKUP_SSH_USER      SSH-Benutzer
-#   BACKUP_SSH_KEY       SSH Private Key (PEM, mehrzeilig)
-#   BACKUP_TARGET_PATH   Zielverzeichnis auf dem NAS (z. B. /volume1/backups/dms)
 # Standard: Zugangsdaten aus dem k8s Secret dms-backup-secrets lesen.
 # Optional können BACKUP_* Variablen gesetzt werden, um andere Werte zu testen.
 #
-# Nutzung (Werte aus dem Secret ziehen und Drill lokal ausführen):
-#   export BACKUP_SSH_HOST=nas.heimnetz.local BACKUP_SSH_USER=backup-user \
-#          BACKUP_TARGET_PATH=/volume1/backups/dms
-#   export BACKUP_SSH_KEY="$(cat ~/.ssh/dms-backup-key)"
 # Nutzung auf einem k3s-Node mit kubectl:
 #   ./deploy/k8s/restore-drill.sh
 #
 # Optional:
-#   BACKUP_TS   fester Zeitstempel (Datei-Suffix) statt „jüngster"
 #   BACKUP_TS=20260706-084501 ./deploy/k8s/restore-drill.sh
 
 set -eu
 
-: "${BACKUP_SSH_HOST:?BACKUP_SSH_HOST fehlt (siehe Secret dms-backup-secrets)}"
-: "${BACKUP_SSH_USER:?BACKUP_SSH_USER fehlt (siehe Secret dms-backup-secrets)}"
-: "${BACKUP_SSH_KEY:?BACKUP_SSH_KEY fehlt (siehe Secret dms-backup-secrets)}"
-: "${BACKUP_TARGET_PATH:?BACKUP_TARGET_PATH fehlt (siehe Secret dms-backup-secrets)}"
-PG_IMAGE="postgres:16-alpine"
-CONTAINER="dms-restore-drill"
 NAMESPACE="${NAMESPACE:-dms}"
 SECRET_NAME="${SECRET_NAME:-dms-backup-secrets}"
 PG_IMAGE="${PG_IMAGE:-postgres:16-alpine}"
 POD="dms-restore-drill-$(date +%s)"
 
-# --- Container-Runtime ermitteln -------------------------------------------
-if command -v docker >/dev/null 2>&1; then RT=docker
-elif command -v podman >/dev/null 2>&1; then RT=podman
-else echo "FEHLER: docker/podman nicht gefunden" >&2; exit 1; fi
-for t in ssh scp gzip; do
-  command -v "$t" >/dev/null 2>&1 || { echo "FEHLER: $t fehlt" >&2; exit 1; }
 for tool in kubectl ssh gzip tar base64; do
   command -v "$tool" >/dev/null 2>&1 || {
     echo "FEHLER: $tool fehlt" >&2
@@ -66,8 +36,16 @@ secret_value() {
     -o "jsonpath={.data.${key}}" | base64 -d
 }
 
+optional_secret_value() {
+  key="$1"
+  value="$(kubectl -n "$NAMESPACE" get secret "$SECRET_NAME" \
+    -o "jsonpath={.data.${key}}" 2>/dev/null || true)"
+  [ -n "$value" ] || return 1
+  printf '%s' "$value" | base64 -d
+}
+
 BACKUP_SSH_HOST="${BACKUP_SSH_HOST:-$(secret_value BACKUP_SSH_HOST)}"
-BACKUP_SSH_PORT="${BACKUP_SSH_PORT:-$(secret_value BACKUP_SSH_PORT 2>/dev/null || printf '22')}"
+BACKUP_SSH_PORT="${BACKUP_SSH_PORT:-$(optional_secret_value BACKUP_SSH_PORT || printf '22')}"
 BACKUP_SSH_USER="${BACKUP_SSH_USER:-$(secret_value BACKUP_SSH_USER)}"
 BACKUP_TARGET_PATH="${BACKUP_TARGET_PATH:-$(secret_value BACKUP_TARGET_PATH)}"
 
@@ -80,21 +58,93 @@ KEY="$WORK/ssh_key"
 
 cleanup() {
   echo "[drill] Aufräumen ..."
-  $RT rm -f "$CONTAINER" >/dev/null 2>&1 || true
   kubectl -n "$NAMESPACE" delete pod "$POD" --ignore-not-found=true >/dev/null 2>&1 || true
   rm -rf "$WORK"
 }
 trap cleanup EXIT INT TERM
 
-printf '%s\n' "$BACKUP_SSH_KEY" > "$KEY"
 if [ "${BACKUP_SSH_KEY:-}" ]; then
   printf '%s\n' "$BACKUP_SSH_KEY" > "$KEY"
 else
   secret_value BACKUP_SSH_KEY > "$KEY"
 fi
 chmod 600 "$KEY"
-# StrictHostKeyChecking=no für Heimnetz (privates LAN); für Produktiv-/Cloud-
-# Setup würde man den Host-Key vorab verifizieren.
-SSH_OPTS="-i $KEY -o StrictHostKeyChecking=no"
 
 SSH_OPTS="-p ${BACKUP_SSH_PORT:-22} -i $KEY -o IdentitiesOnly=yes -o BatchMode=yes -o PreferredAuthentications=publickey -o StrictHostKeyChecking=no"
+REMOTE="${BACKUP_SSH_USER}@${BACKUP_SSH_HOST}"
+
+echo "[drill] SSH-Ziel: ${REMOTE}:${BACKUP_TARGET_PATH} (Port ${BACKUP_SSH_PORT:-22})"
+ssh $SSH_OPTS "$REMOTE" "echo SSH OK"
+
+TS="${BACKUP_TS:-$(ssh $SSH_OPTS "$REMOTE" "ls -1 ${BACKUP_TARGET_PATH}/db-*.sql.gz" 2>/dev/null \
+  | sed -n 's#.*/db-\(.*\)\.sql\.gz$#\1#p' | sort | tail -1)}"
+
+[ -n "$TS" ] || {
+  echo "FEHLER: kein db-*.sql.gz unter ${REMOTE}:${BACKUP_TARGET_PATH} gefunden" >&2
+  exit 1
+}
+
+DB_REMOTE="${BACKUP_TARGET_PATH}/db-${TS}.sql.gz"
+DATA_REMOTE="${BACKUP_TARGET_PATH}/data-${TS}.tar.gz"
+DB_LOCAL="$WORK/db-${TS}.sql.gz"
+DATA_LOCAL="$WORK/data-${TS}.tar.gz"
+
+echo "[drill] Backup-Zeitstempel: $TS"
+echo "[drill] lade DB-Artefakt per SSH ..."
+ssh $SSH_OPTS "$REMOTE" "cat '${DB_REMOTE}'" > "$DB_LOCAL"
+
+echo "[drill] lade /data-Artefakt per SSH ..."
+ssh $SSH_OPTS "$REMOTE" "cat '${DATA_REMOTE}'" > "$DATA_LOCAL"
+
+echo "[drill] prüfe gzip-Integrität ..."
+gzip -t "$DB_LOCAL"
+gzip -t "$DATA_LOCAL"
+
+echo "[drill] starte temporären Postgres-Pod $POD ($PG_IMAGE) ..."
+kubectl -n "$NAMESPACE" run "$POD" \
+  --image="$PG_IMAGE" \
+  --restart=Never \
+  --env=POSTGRES_USER=dms \
+  --env=POSTGRES_PASSWORD=drill \
+  --env=POSTGRES_DB=dms \
+  >/dev/null
+
+echo "[drill] warte auf Pod ..."
+kubectl -n "$NAMESPACE" wait --for=condition=Ready "pod/$POD" --timeout=120s >/dev/null
+
+echo "[drill] warte auf PostgreSQL ..."
+i=0
+until kubectl -n "$NAMESPACE" exec "$POD" -- pg_isready -U dms >/dev/null 2>&1; do
+  i=$((i + 1))
+  [ "$i" -gt 60 ] && {
+    echo "FEHLER: temporärer Postgres wurde nicht bereit" >&2
+    exit 1
+  }
+  sleep 1
+done
+
+echo "[drill] spiele db-${TS}.sql.gz in temporären Postgres ein ..."
+gunzip -c "$DB_LOCAL" \
+  | kubectl -n "$NAMESPACE" exec -i "$POD" -- \
+      psql -v ON_ERROR_STOP=1 -U dms -d dms >/dev/null
+
+TABLES="$(kubectl -n "$NAMESPACE" exec "$POD" -- psql -U dms -d dms -tAc \
+  "select count(*) from information_schema.tables where table_schema='public';" | tr -d '[:space:]')"
+DOCS="$(kubectl -n "$NAMESPACE" exec "$POD" -- psql -U dms -d dms -tAc \
+  "select count(*) from documents_document;" 2>/dev/null | tr -d '[:space:]' || printf '?')"
+
+echo "[drill] entpacke data-${TS}.tar.gz lokal ..."
+mkdir -p "$WORK/data"
+tar xzf "$DATA_LOCAL" -C "$WORK/data"
+FILES="$(find "$WORK/data" -type f | wc -l | tr -d '[:space:]')"
+TOP_LEVEL="$(find "$WORK/data" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort | tr '\n' ' ')"
+
+echo ""
+echo "==================== RESTORE-DRILL ERFOLGREICH ===================="
+echo " Backup-TS       : $TS"
+echo " DB-Tabellen     : $TABLES"
+echo " Dokumente       : $DOCS"
+echo " /data-Dateien   : $FILES"
+echo " /data-Ordner    : $TOP_LEVEL"
+echo " Produktion      : NICHT verändert"
+echo "==================================================================="
