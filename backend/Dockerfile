@@ -6,10 +6,15 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# Systempakete: psycopg-Runtime + OCR-Werkzeuge (OCRmyPDF-Abhängigkeiten)
+# Systempakete: psycopg-Runtime, OCR-Werkzeuge und Backup-CLI
+# (pg_dump/ssh/rsync werden vom k8s Backup-CronJob im selben Image genutzt).
+RUN apt-get update \
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         libpq5 \
+        postgresql-client \
+        openssh-client \
+        rsync \
         tesseract-ocr \
         tesseract-ocr-deu \
         tesseract-ocr-eng \
