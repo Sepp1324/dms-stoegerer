@@ -79,8 +79,7 @@ spec:
 
                   "${SSH_WRAPPER}" "${BACKUP_SSH_USER}@${BACKUP_SSH_HOST}" "echo SSH OK"
 
-                  rsync -avz --progress \
-                    -e "${SSH_WRAPPER}" \
+                  scp -O -S "${SSH_WRAPPER}" \
                     "${DB_BACKUP}" "${DATA_BACKUP}" \
                     "${BACKUP_SSH_USER}@${BACKUP_SSH_HOST}:${BACKUP_TARGET_PATH}/"
 
