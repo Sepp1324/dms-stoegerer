@@ -9,7 +9,6 @@ WORKDIR /app
 # Systempakete: psycopg-Runtime, OCR-Werkzeuge und Backup-CLI
 # (pg_dump/ssh/rsync werden vom k8s Backup-CronJob im selben Image genutzt).
 RUN apt-get update \
-RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         libpq5 \
         postgresql-client \
