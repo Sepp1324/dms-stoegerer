@@ -24,6 +24,10 @@ spec:
           labels:
             app: backup
         spec:
+          # NAS-Firewalls sehen sonst die Pod-CIDR (k3s/flannel: 10.42.0.0/16)
+          # statt der Node-IP. Mit hostNetwork kommt SSH/rsync vom k3s-Node.
+          hostNetwork: true
+          dnsPolicy: ClusterFirstWithHostNet
           # Worker + Backend teilen die RWO-PVC dms-data → Backup-Job muss auf denselben Node.
           # (Ohne RWX-Storage kann das PVC nicht von mehreren Nodes aus gemountet werden.)
           # Wir nutzen dieselbe Affinität wie der Worker: Co-Location mit Backend.
