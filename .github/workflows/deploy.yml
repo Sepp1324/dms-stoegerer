@@ -34,6 +34,9 @@ jobs:
       - name: Image-Tag = Git-SHA
         run: echo "TAG=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
 
+      - name: Stable Secrets prüfen
+        run: scripts/verify-stable-secrets.sh
+
       - name: Images bauen
         run: |
           set -euo pipefail

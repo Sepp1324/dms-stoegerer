@@ -13,6 +13,65 @@ Kommentaren. Alle Geheimnisse liegen ausschließlich im jeweiligen Secret-Store.
 | Deploy nach `main` | Checkout im Workflow | automatischer `GITHUB_TOKEN` des Runners — **kein** PAT nötig |
 | **GitHub-Push-Token (PAT)** | Agenten pushen Branches & öffnen PRs | **k8s-Secret** (Agent-Runtime) **oder** GitHub-Actions-Secret — siehe unten |
 
+## Stabiles `POSTGRES_PASSWORD`
+
+`POSTGRES_PASSWORD` ist kein normal rotierbares Deploy-Secret. Das offizielle
+Postgres-Image setzt das Passwort nur beim ersten `initdb` auf leerem
+`postgres-data` PVC. Danach lebt das echte DB-Passwort in der Datenbank. Wenn ein
+Kustomize-`secretGenerator` oder ein anderes Deploy-Werkzeug später ein neues
+`POSTGRES_PASSWORD` erzeugt, zeigen Backend, Worker und Backup auf den neuen
+Secret-Wert, während Postgres noch das alte Passwort erwartet. Ergebnis:
+`password authentication failed for user "dms"`.
+
+Regeln:
+- `dms-secrets` wird als stabiler Secret-Name geführt, nicht generiert.
+- `POSTGRES_PASSWORD` bleibt ein fester Wert in `deploy/k8s/secret.yaml`
+  (gitignored) oder in einem echten SealedSecret.
+- Kein `secretGenerator` unter `deploy/k8s`.
+- Passwortwechsel nur kontrolliert: erst DB-User per `ALTER USER` ändern, dann
+  denselben Wert im Secret aktualisieren und Backend/Worker neu starten.
+
+Stabilen Wert einmalig setzen/ersetzen:
+
+```bash
+kubectl -n dms create secret generic dms-secrets \
+  --from-literal=DJANGO_SECRET_KEY='<stabiler-django-secret-key>' \
+  --from-literal=POSTGRES_PASSWORD='<stabiler-db-wert>' \
+  --from-literal=ANTHROPIC_API_KEY='' \
+  --from-literal=OPENAI_API_KEY='' \
+  --from-literal=IMAP_PASSWORD='' \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
+Repository-Guard:
+
+```bash
+scripts/verify-stable-secrets.sh
+```
+
+Dieser Check läuft in PR-Checks und im Deploy-Gate. Er schlägt fehl, sobald unter
+`deploy/k8s` wieder ein `secretGenerator` auftaucht.
+
+### Optional: SealedSecret statt gitignored Secret
+
+Wenn das Passwort versioniert im Repo liegen soll, dann nicht als Klartext-Secret,
+sondern als SealedSecret, verschlüsselt für den Cluster:
+
+```bash
+kubectl -n dms create secret generic dms-secrets \
+  --from-literal=DJANGO_SECRET_KEY='<stabiler-django-secret-key>' \
+  --from-literal=POSTGRES_PASSWORD='<stabiler-db-wert>' \
+  --from-literal=ANTHROPIC_API_KEY='' \
+  --from-literal=OPENAI_API_KEY='' \
+  --from-literal=IMAP_PASSWORD='' \
+  --dry-run=client -o yaml \
+  | kubeseal --format yaml > deploy/k8s/sealed-secret.yaml
+```
+
+`sealed-secret.yaml` darf nur committed werden, wenn der Sealed-Secrets-Controller
+im Cluster installiert ist und der erzeugte Wert wirklich für diesen Cluster
+verschlüsselt wurde.
+
 ## GitHub-Push-Token (PAT) für Agenten
 
 Der automatische `GITHUB_TOKEN` gilt nur *innerhalb* eines Actions-Laufs. Damit

@@ -52,3 +52,21 @@ Damit der Mismatch nicht bei jeder Secret-Rotation wiederkehrt: `POSTGRES_PASSWO
 **stabilen, versionierten Wert** führen (fester Secret-Wert / Sealed-Secret), nicht per
 `secretGenerator` mit wechselndem Hash-Suffix neu erzeugen. Andernfalls muss dieser Fix
 nach jeder Rotation erneut laufen.
+
+Umsetzung im Repo:
+- `deploy/k8s/secret.yaml` bleibt gitignored und enthält den festen Wert.
+- Optional darf ein echtes, clustergebundenes SealedSecret committed werden.
+- `scripts/verify-stable-secrets.sh` blockiert `secretGenerator` unter `deploy/k8s`
+  in PR-Checks und im Deploy-Gate.
+
+Wichtig: Wenn das DB-Passwort bewusst geändert werden soll, reicht ein neues
+Secret allein nicht. Erst den DB-User ändern:
+
+```bash
+PW='<neuer-stabiler-wert>'
+kubectl -n dms exec -i deploy/postgres -- \
+  psql -U dms -v ON_ERROR_STOP=1 -v pw="$PW" -c "ALTER USER dms PASSWORD :'pw';"
+```
+
+Danach exakt denselben Wert in `dms-secrets` schreiben und Backend/Worker neu
+starten.
