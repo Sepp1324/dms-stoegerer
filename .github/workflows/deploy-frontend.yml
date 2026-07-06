@@ -109,7 +109,12 @@ jobs:
           git config user.email "deploy-bot@stoegerer-dms.local"
           git add "$f"
           git commit -m "chore(deploy): frontend newTag -> ${TAG} [skip ci]"
-          git push origin _fe_tagbump:main
+          # NON-FATAL (Branch-Protection): Frontend-Rollout war bereits erfolgreich.
+          if git push origin _fe_tagbump:main; then
+            echo "frontend newTag -> ${TAG} nach main committet."
+          else
+            echo "::warning::frontend-newTag-Bump konnte nicht nach main gepusht werden (Branch-Protection?). Rollout war erfolgreich."
+          fi
 
       - name: Rollout-Diagnose (bei Timeout/Fehler)
         if: failure()

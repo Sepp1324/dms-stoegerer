@@ -144,7 +144,17 @@ jobs:
           git commit -m "chore(deploy): kustomization newTag -> ${TAG} [skip ci]"
           # HEAD ist der gerade deployte main-Commit (+ dieser Bump); dank
           # concurrency-Serialisierung ist main-Tip == deployter Commit → FF-Push.
-          git push origin HEAD:main
+          # NON-FATAL: Der Deploy (Rollout) war bereits erfolgreich. Scheitert der
+          # Rückcommit (z. B. Branch-Protection auf main), darf der Job NICHT rot
+          # werden – wir warnen nur. Damit die kustomization automatisch gepflegt
+          # wird, muss der Owner "dms-deploy-bot"/GitHub-Actions in den
+          # Branch-Protection-Bypass aufnehmen; sonst bleibt newTag manuell
+          # (Preflight: deploy/k8s/verify-image-tags.sh vor `apply -k`).
+          if git push origin HEAD:main; then
+            echo "kustomization newTag -> ${TAG} nach main committet."
+          else
+            echo "::warning::newTag-Bump konnte nicht nach main gepusht werden (Branch-Protection?). Deploy war erfolgreich; kustomization.newTag bleibt unverändert."
+          fi
 
       - name: Rollout-Diagnose (bei Timeout/Fehler)
         if: failure()
