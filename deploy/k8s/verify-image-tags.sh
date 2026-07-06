@@ -33,13 +33,15 @@ for image in dms-backend dms-frontend; do
     echo "WARN: kein newTag für ${image} in ${KUSTOMIZATION} gefunden – übersprungen."
     continue
   fi
-  code="$(curl -sk -o /dev/null -w '%{http_code}' \
-    -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
-    "https://${REGISTRY}/v2/${image}/manifests/${tag}")"
-  if [ "$code" = "200" ]; then
+  ref="${REGISTRY}/${image}:${tag}"
+  # Medientyp-agnostisch: docker manifest inspect (--insecure für self-signed),
+  # Fallback tags/list-API (anonym).
+  if docker manifest inspect "$ref" >/dev/null 2>&1 \
+     || docker manifest inspect --insecure "$ref" >/dev/null 2>&1 \
+     || curl -sk "https://${REGISTRY}/v2/${image}/tags/list" | grep -q "\"${tag}\""; then
     echo "OK:     ${image}:${tag} vorhanden."
   else
-    echo "FEHLER: ${image}:${tag} NICHT in der Registry (HTTP ${code}) – apply -k würde ErrImagePull auslösen."
+    echo "FEHLER: ${image}:${tag} NICHT in der Registry – apply -k würde ErrImagePull auslösen."
     fail=1
   fi
 done

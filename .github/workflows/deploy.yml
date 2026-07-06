@@ -68,15 +68,22 @@ jobs:
         # ein fehlgeschlagener/teilweiser Push später als Geister-Tag deployt wird.
         run: |
           set -euo pipefail
+          # Medientyp-agnostisch (OCI vs. docker schema2 – buildkit pusht OCI):
+          # docker manifest inspect (--insecure für self-signed), Fallback tags/list.
+          verify() {
+            local img="$1" tag="$2" ref="${REGISTRY}/$1:$2"
+            if docker manifest inspect "$ref" >/dev/null 2>&1; then return 0; fi
+            if docker manifest inspect --insecure "$ref" >/dev/null 2>&1; then return 0; fi
+            if curl -sk "https://${REGISTRY}/v2/${img}/tags/list" | grep -q "\"${tag}\""; then return 0; fi
+            return 1
+          }
           for img in dms-backend dms-frontend; do
-            code=$(curl -sk -o /dev/null -w '%{http_code}' \
-              -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
-              "https://${REGISTRY}/v2/${img}/manifests/${TAG}")
-            if [ "$code" != "200" ]; then
-              echo "FEHLER: ${REGISTRY}/${img}:${TAG} nach dem Push nicht abrufbar (HTTP ${code}) – Abbruch vor Rollout/newTag-Bump."
+            if verify "$img" "$TAG"; then
+              echo "OK: ${REGISTRY}/${img}:${TAG} vorhanden."
+            else
+              echo "FEHLER: ${REGISTRY}/${img}:${TAG} nach dem Push nicht auffindbar – Abbruch vor Rollout/newTag-Bump."
               exit 1
             fi
-            echo "OK: ${REGISTRY}/${img}:${TAG} vorhanden (HTTP ${code})."
           done
 
       - name: Manifeste rendern, Tags ersetzen, anwenden
