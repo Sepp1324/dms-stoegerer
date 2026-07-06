@@ -58,6 +58,7 @@ from . import classification, pipeline, storage
 from .services import version_compare
 from .models import (
     AuditLogEntry,
+    BackupMonitor,
     ClassificationRule,
     Correspondent,
     CustomField,
@@ -218,6 +219,111 @@ def health(request):
         },
         status=200 if db_ok else 503,
     )
+
+
+class BackupStatusView(APIView):
+    """Admin-only Betriebsstatus für Backup-CronJob und Restore-Drill."""
+
+    permission_classes = [IsDmsAdmin]
+
+    def get(self, request):
+        now = timezone.now()
+        alert_after_hours = float(getattr(settings, "BACKUP_ALERT_AFTER_HOURS", 36))
+        states = {
+            item.kind: item
+            for item in BackupMonitor.objects.filter(
+                kind__in=[
+                    BackupMonitor.Kind.BACKUP,
+                    BackupMonitor.Kind.RESTORE_DRILL,
+                ]
+            )
+        }
+
+        backup = self._serialize_state(
+            states.get(BackupMonitor.Kind.BACKUP),
+            now=now,
+            alert_after_hours=alert_after_hours,
+            stale_sensitive=True,
+        )
+        restore_drill = self._serialize_state(
+            states.get(BackupMonitor.Kind.RESTORE_DRILL),
+            now=now,
+            alert_after_hours=None,
+            stale_sensitive=False,
+        )
+
+        cronjob = {
+            "name": "backup",
+            "schedule": "0 2 * * *",
+            "expected_interval_hours": 24,
+            "alert_after_hours": alert_after_hours,
+            "last_run_status": backup["status"],
+            "last_success_at": backup["last_success_at"],
+            "stale": backup["stale"],
+        }
+
+        overall = "ok"
+        if backup["status"] == BackupMonitor.Status.FAILED or restore_drill[
+            "status"
+        ] == BackupMonitor.Status.FAILED:
+            overall = "error"
+        elif backup["stale"] or backup["status"] in (
+            BackupMonitor.Status.UNKNOWN,
+            BackupMonitor.Status.RUNNING,
+        ):
+            overall = "warn"
+
+        return Response(
+            {
+                "status": overall,
+                "generated_at": now.isoformat(),
+                "backup": backup,
+                "cronjob": cronjob,
+                "restore_drill": restore_drill,
+            }
+        )
+
+    @staticmethod
+    def _serialize_state(item, *, now, alert_after_hours, stale_sensitive):
+        if item is None:
+            return {
+                "status": BackupMonitor.Status.UNKNOWN,
+                "artifact_timestamp": "",
+                "message": "",
+                "last_started_at": None,
+                "last_success_at": None,
+                "last_finished_at": None,
+                "updated_at": None,
+                "age_hours": None,
+                "stale": bool(stale_sensitive),
+            }
+
+        age_hours = None
+        stale = False
+        if item.last_success_at:
+            age_hours = round((now - item.last_success_at).total_seconds() / 3600, 2)
+            if stale_sensitive and alert_after_hours is not None:
+                stale = age_hours > alert_after_hours
+        elif stale_sensitive:
+            stale = True
+
+        return {
+            "status": item.status,
+            "artifact_timestamp": item.artifact_timestamp,
+            "message": item.message,
+            "last_started_at": item.last_started_at.isoformat()
+            if item.last_started_at
+            else None,
+            "last_success_at": item.last_success_at.isoformat()
+            if item.last_success_at
+            else None,
+            "last_finished_at": item.last_finished_at.isoformat()
+            if item.last_finished_at
+            else None,
+            "updated_at": item.updated_at.isoformat() if item.updated_at else None,
+            "age_hours": age_hours,
+            "stale": stale,
+        }
 
 
 class DocumentUploadView(APIView):

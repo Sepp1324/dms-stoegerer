@@ -22,6 +22,8 @@ NAMESPACE="${NAMESPACE:-dms}"
 SECRET_NAME="${SECRET_NAME:-dms-backup-secrets}"
 PG_IMAGE="${PG_IMAGE:-postgres:16-alpine}"
 POD="dms-restore-drill-$(date +%s)"
+ARTIFACT_TS=""
+MONITOR_OK=0
 
 for tool in kubectl ssh gzip tar base64; do
   command -v "$tool" >/dev/null 2>&1 || {
@@ -61,7 +63,26 @@ cleanup() {
   kubectl -n "$NAMESPACE" delete pod "$POD" --ignore-not-found=true >/dev/null 2>&1 || true
   rm -rf "$WORK"
 }
-trap cleanup EXIT INT TERM
+
+record_drill_status() {
+  kubectl -n "$NAMESPACE" exec deploy/backend -- \
+    python manage.py record_backup_status \
+      --kind restore_drill \
+      --status "$1" \
+      --artifact-timestamp "$ARTIFACT_TS" \
+      --message "$2" >/dev/null 2>&1 || true
+}
+
+on_exit() {
+  code=$?
+  if [ "$code" -ne 0 ] && [ "$MONITOR_OK" -ne 1 ]; then
+    record_drill_status failed "Restore-Drill fehlgeschlagen (Exit ${code})"
+  fi
+  cleanup
+}
+trap on_exit EXIT INT TERM
+
+record_drill_status running "Restore-Drill läuft"
 
 if [ "${BACKUP_SSH_KEY:-}" ]; then
   printf '%s\n' "$BACKUP_SSH_KEY" > "$KEY"
@@ -90,6 +111,7 @@ DB_LOCAL="$WORK/db-${TS}.sql.gz"
 DATA_LOCAL="$WORK/data-${TS}.tar.gz"
 
 echo "[drill] Backup-Zeitstempel: $TS"
+ARTIFACT_TS="$TS"
 echo "[drill] lade DB-Artefakt per SSH ..."
 ssh $SSH_OPTS "$REMOTE" "cat '${DB_REMOTE}'" > "$DB_LOCAL"
 
@@ -138,6 +160,8 @@ mkdir -p "$WORK/data"
 tar xzf "$DATA_LOCAL" -C "$WORK/data"
 FILES="$(find "$WORK/data" -type f | wc -l | tr -d '[:space:]')"
 TOP_LEVEL="$(find "$WORK/data" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort | tr '\n' ' ')"
+record_drill_status success "Restore-Drill erfolgreich: ${DOCS} Dokumente, ${FILES} Dateien"
+MONITOR_OK=1
 
 echo ""
 echo "==================== RESTORE-DRILL ERFOLGREICH ===================="

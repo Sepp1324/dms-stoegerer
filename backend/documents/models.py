@@ -1036,3 +1036,49 @@ class DocumentReminder(models.Model):
 
     def __str__(self) -> str:
         return f"Erinnerung {self.remind_on} für Dokument #{self.document_id}"
+
+
+# ---------------------------------------------------------------------------
+# Betriebsmonitoring
+# ---------------------------------------------------------------------------
+class BackupMonitor(models.Model):
+    """Letzter bekannter Zustand von Backup-CronJob und Restore-Drill.
+
+    Der Cluster schreibt diese Werte aktiv aus Backup-Job/Restore-Drill heraus.
+    Das Backend muss dafür keine Kubernetes-API-Rechte besitzen und kann trotzdem
+    in UI/Admin zuverlässig anzeigen, ob Backups still kaputtgehen.
+    """
+
+    class Kind(models.TextChoices):
+        BACKUP = "backup", "Backup"
+        RESTORE_DRILL = "restore_drill", "Restore-Drill"
+
+    class Status(models.TextChoices):
+        UNKNOWN = "unknown", "Unbekannt"
+        RUNNING = "running", "Läuft"
+        SUCCESS = "success", "Erfolgreich"
+        FAILED = "failed", "Fehlgeschlagen"
+
+    kind = models.CharField(max_length=32, choices=Kind.choices, unique=True)
+    status = models.CharField(
+        max_length=16, choices=Status.choices, default=Status.UNKNOWN
+    )
+    artifact_timestamp = models.CharField(
+        max_length=32,
+        blank=True,
+        default="",
+        help_text="Backup-Zeitstempel wie 20260706-084501.",
+    )
+    message = models.TextField(blank=True, default="")
+    last_started_at = models.DateTimeField(null=True, blank=True)
+    last_success_at = models.DateTimeField(null=True, blank=True)
+    last_finished_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Backup-Monitor"
+        verbose_name_plural = "Backup-Monitoring"
+        ordering = ["kind"]
+
+    def __str__(self) -> str:
+        return f"{self.get_kind_display()}: {self.get_status_display()}"

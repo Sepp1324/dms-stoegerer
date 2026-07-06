@@ -320,6 +320,39 @@ export interface Me {
   can_write: boolean;
 }
 
+export type BackupHealthStatus = "ok" | "warn" | "error";
+export type BackupRunStatus = "unknown" | "running" | "success" | "failed";
+
+export interface BackupMonitorEntry {
+  status: BackupRunStatus;
+  artifact_timestamp: string;
+  message: string;
+  last_started_at: string | null;
+  last_success_at: string | null;
+  last_finished_at: string | null;
+  updated_at: string | null;
+  age_hours: number | null;
+  stale: boolean;
+}
+
+export interface BackupCronJobStatus {
+  name: string;
+  schedule: string;
+  expected_interval_hours: number;
+  alert_after_hours: number;
+  last_run_status: BackupRunStatus;
+  last_success_at: string | null;
+  stale: boolean;
+}
+
+export interface BackupStatus {
+  status: BackupHealthStatus;
+  generated_at: string;
+  backup: BackupMonitorEntry;
+  cronjob: BackupCronJobStatus;
+  restore_drill: BackupMonitorEntry;
+}
+
 // --- Freigabelinks (Share-Links, STOAA-190/192) ---
 // Verwaltungs-Sicht eines Freigabelinks. Enthält bewusst KEINEN Klartext-Token
 // (der kommt einmalig nur aus der Create-Response, siehe ShareLinkCreated).
@@ -805,6 +838,12 @@ export function rejectDocument(
 export async function getMe(): Promise<Me> {
   const res = await apiFetch("/me/");
   if (!res.ok) throw new Error(`Profil laden fehlgeschlagen: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function getBackupStatus(): Promise<BackupStatus> {
+  const res = await apiFetch("/system/backup-status/");
+  if (!res.ok) throw new Error(`Backup-Status laden fehlgeschlagen: HTTP ${res.status}`);
   return res.json();
 }
 

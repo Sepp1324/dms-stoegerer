@@ -459,6 +459,15 @@ kubectl apply -f secret.yaml
 
 Manueller Ad-hoc-Lauf: `kubectl -n dms create job --from=cronjob/backup backup-manual`.
 
+Backup-Monitoring:
+
+- Der Backup-Job schreibt Start/Erfolg/Fehler in die DMS-Datenbank
+  (`BackupMonitor`, sichtbar im Django-Admin).
+- Der Restore-Drill schreibt seinen letzten Status ebenfalls dorthin.
+- Die Admin-UI zeigt den Systemstatus unter **System** an und warnt, wenn das
+  letzte erfolgreiche Backup älter als `BACKUP_ALERT_AFTER_HOURS` ist
+  (Default: 36).
+
 > **Vollständige Doku – Architektur, Restore-Schritte und Restore-Drill:**
 > siehe [`docs/backup.md`](../../docs/backup.md). Ein Backup gilt erst als echt,
 > wenn ein Restore einmal nachweislich durchgespielt wurde

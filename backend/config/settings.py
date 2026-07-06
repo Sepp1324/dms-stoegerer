@@ -154,6 +154,11 @@ MEDIA_URL = "media/"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
+# Backup-Monitoring: wenn der letzte erfolgreiche Backup-Lauf älter ist, zeigt
+# die UI/Admin-API eine Warnung. Für täglichen CronJob sind 36h bewusst großzügig:
+# ein einzelner später/ausgefallener Lauf wird sichtbar, ohne sofort nachts zu lärmen.
+BACKUP_ALERT_AFTER_HOURS = float(os.getenv("BACKUP_ALERT_AFTER_HOURS", "36"))
+
 # --- DRF ---
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
