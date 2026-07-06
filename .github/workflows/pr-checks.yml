@@ -22,6 +22,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  manifest-guards:
+    runs-on: [self-hosted, dms]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Stable Secrets prüfen
+        run: scripts/verify-stable-secrets.sh
+
   # Backend-Gate: baut das Backend-Image und führt darin `manage.py check`,
   # den Migrations-Check und die Testsuite gegen eine wegwerfbare Postgres 16
   # aus. Die gesamte Logik liegt in backend/ci/run-tests.sh (auch von deploy.yml
@@ -65,7 +74,7 @@ jobs:
   # grün, wenn Backend- UND Frontend-Job grün sind.
   pr-checks:
     runs-on: [self-hosted, dms]
-    needs: [backend-tests, frontend-build]
+    needs: [manifest-guards, backend-tests, frontend-build]
     steps:
       - name: Gate erfüllt
         run: echo "Backend- und Frontend-Checks grün – PR ist mergebar."
