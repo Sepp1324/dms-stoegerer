@@ -1073,6 +1073,11 @@ class BackupMonitor(models.Model):
     last_started_at = models.DateTimeField(null=True, blank=True)
     last_success_at = models.DateTimeField(null=True, blank=True)
     last_finished_at = models.DateTimeField(null=True, blank=True)
+    size_bytes = models.BigIntegerField(
+        null=True,
+        blank=True,
+        help_text="Größe des letzten Backup-Artefakts in Bytes.",
+    )
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -1082,3 +1087,27 @@ class BackupMonitor(models.Model):
 
     def __str__(self) -> str:
         return f"{self.get_kind_display()}: {self.get_status_display()}"
+
+
+class BackupRun(models.Model):
+    """Historie einzelner Backup-/Restore-Drill-Läufe (für Verlauf/Trend).
+
+    Während ``BackupMonitor`` genau eine Zeile je ``kind`` hält (letzter Zustand),
+    speichert dieses Modell je Lauf einen Eintrag. Wird beim terminalen Status
+    (success/failed) aus ``record_backup_status`` angelegt.
+    """
+
+    kind = models.CharField(max_length=32, choices=BackupMonitor.Kind.choices)
+    status = models.CharField(max_length=16, choices=BackupMonitor.Status.choices)
+    artifact_timestamp = models.CharField(max_length=32, blank=True, default="")
+    size_bytes = models.BigIntegerField(null=True, blank=True)
+    message = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Backup-Lauf"
+        verbose_name_plural = "Backup-Läufe"
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"{self.get_kind_display()} {self.status} @ {self.created_at:%Y-%m-%d %H:%M}"

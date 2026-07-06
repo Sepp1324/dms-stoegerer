@@ -50,11 +50,13 @@ spec:
                   DATA_BACKUP="${BACKUP_DIR}/data-${TIMESTAMP}.tar.gz"
 
                   record_backup_status() {
+                    size_arg=""
+                    [ -n "$3" ] && size_arg="--size-bytes $3"
                     python manage.py record_backup_status \
                       --kind backup \
                       --status "$1" \
                       --artifact-timestamp "${TIMESTAMP}" \
-                      --message "$2" || true
+                      --message "$2" $size_arg || true
                   }
 
                   on_exit() {
@@ -107,7 +109,9 @@ spec:
                     "cd ${BACKUP_TARGET_PATH} && ls -t db-*.sql.gz | tail -n +$((BACKUP_RETENTION + 1)) | xargs -r rm -v && ls -t data-*.tar.gz | tail -n +$((BACKUP_RETENTION + 1)) | xargs -r rm -v"
 
                   rm -f "${SSH_KEY_FILE}" "${SSH_WRAPPER}"
-                  record_backup_status success "Backup erfolgreich abgeschlossen"
+                  # Gesamtgröße der beiden Artefakte (Bytes) fürs Verlaufs-/Trend-Monitoring.
+                  TOTAL_BYTES=$(( $(wc -c < "${DB_BACKUP}") + $(wc -c < "${DATA_BACKUP}") ))
+                  record_backup_status success "Backup erfolgreich abgeschlossen" "${TOTAL_BYTES}"
                   MONITOR_OK=1
 
                   echo "=== Backup abgeschlossen: ${TIMESTAMP} ==="
