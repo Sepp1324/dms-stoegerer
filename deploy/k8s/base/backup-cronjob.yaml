@@ -74,7 +74,7 @@ spec:
                     archive thumbnails consume
 
                   # 3. Offsite-Transfer (SSH/rsync auf NAS)
-                  echo "--- rsync → ${BACKUP_SSH_USER}@${BACKUP_SSH_HOST}:${BACKUP_TARGET_PATH}"
+                  echo "--- rsync → ${BACKUP_SSH_USER}@${BACKUP_SSH_HOST}:${BACKUP_TARGET_PATH} (SSH-Port ${BACKUP_SSH_PORT:-22})"
 
                   # SSH-Key aus Secret in temporäre Datei (mode 600)
                   SSH_KEY_FILE="/tmp/backup_ssh_key"
@@ -84,7 +84,7 @@ spec:
                   # StrictHostKeyChecking=no für Heimnetz (kein MITM-Risiko im privaten LAN);
                   # für Produktiv-/Cloud-Setup würde man den Host-Key vorab verifizieren.
                   rsync -avz --progress \
-                    -e "ssh -i ${SSH_KEY_FILE} -o StrictHostKeyChecking=no" \
+                    -e "ssh -p ${BACKUP_SSH_PORT:-22} -i ${SSH_KEY_FILE} -o StrictHostKeyChecking=no" \
                     "${DB_BACKUP}" "${DATA_BACKUP}" \
                     "${BACKUP_SSH_USER}@${BACKUP_SSH_HOST}:${BACKUP_TARGET_PATH}/"
 
@@ -95,7 +95,7 @@ spec:
                   echo "${BACKUP_SSH_KEY}" > "${SSH_KEY_FILE}"
                   chmod 600 "${SSH_KEY_FILE}"
 
-                  ssh -i "${SSH_KEY_FILE}" -o StrictHostKeyChecking=no \
+                  ssh -p "${BACKUP_SSH_PORT:-22}" -i "${SSH_KEY_FILE}" -o StrictHostKeyChecking=no \
                     "${BACKUP_SSH_USER}@${BACKUP_SSH_HOST}" \
                     "cd ${BACKUP_TARGET_PATH} && ls -t db-*.sql.gz | tail -n +$((BACKUP_RETENTION + 1)) | xargs -r rm -v && ls -t data-*.tar.gz | tail -n +$((BACKUP_RETENTION + 1)) | xargs -r rm -v"
 
