@@ -12,7 +12,6 @@ metadata:
   name: backup
   namespace: dms
 spec:
-  # Täglich um 02:00 Uhr (Server-Lokalzeit).
   schedule: "0 2 * * *"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
@@ -24,13 +23,8 @@ spec:
           labels:
             app: backup
         spec:
-          # NAS-Firewalls sehen sonst die Pod-CIDR (k3s/flannel: 10.42.0.0/16)
-          # statt der Node-IP. Mit hostNetwork kommt SSH/rsync vom k3s-Node.
           hostNetwork: true
           dnsPolicy: ClusterFirstWithHostNet
-          # Worker + Backend teilen die RWO-PVC dms-data → Backup-Job muss auf denselben Node.
-          # (Ohne RWX-Storage kann das PVC nicht von mehreren Nodes aus gemountet werden.)
-          # Wir nutzen dieselbe Affinität wie der Worker: Co-Location mit Backend.
           affinity:
             podAffinity:
               requiredDuringSchedulingIgnoredDuringExecution:
@@ -41,8 +35,7 @@ spec:
           restartPolicy: OnFailure
           containers:
             - name: backup
-              # Nutzen das DMS-Backend-Image, das bereits pg_dump, tar, rsync, ssh enthält
-              image: registry.stoegerer-home.at/dms-backend:0.5.0
+              image: registry.stoegerer-home.at/dms-backend:46b8f61
               imagePullPolicy: IfNotPresent
               command: ["/bin/sh"]
               args:
@@ -78,16 +71,10 @@ spec:
                   chmod 600 "${SSH_KEY_FILE}"
 
                   SSH_WRAPPER="/tmp/backup_ssh"
-                  cat > "${SSH_WRAPPER}" <<EOF
-                  #!/bin/sh
-                  exec ssh -p "${BACKUP_SSH_PORT:-22}" \
-                    -i "${SSH_KEY_FILE}" \
-                    -o IdentitiesOnly=yes \
-                    -o BatchMode=yes \
-                    -o PreferredAuthentications=publickey \
-                    -o StrictHostKeyChecking=no \
-                    "\$@"
-                  EOF
+                  {
+                    printf '#!/bin/sh\n'
+                    printf 'exec ssh -p "%s" -i "%s" -o IdentitiesOnly=yes -o BatchMode=yes -o PreferredAuthentications=publickey -o StrictHostKeyChecking=no "$@"\n' "${BACKUP_SSH_PORT:-22}" "${SSH_KEY_FILE}"
+                  } > "${SSH_WRAPPER}"
                   chmod 700 "${SSH_WRAPPER}"
 
                   "${SSH_WRAPPER}" "${BACKUP_SSH_USER}@${BACKUP_SSH_HOST}" "echo SSH OK"
@@ -95,20 +82,14 @@ spec:
                   rsync -avz --progress \
                     -e "${SSH_WRAPPER}" \
                     "${DB_BACKUP}" "${DATA_BACKUP}" \
-                    "${BACKUP_SSH_USER}@${BACKUP_SSH_HOST}:${BACKUP_TARGET_PATH}/
-
-                  rm -f "${SSH_KEY_FILE}"
+                    "${BACKUP_SSH_USER}@${BACKUP_SSH_HOST}:${BACKUP_TARGET_PATH}/"
 
                   echo "--- Rotation: behalte letzte ${BACKUP_RETENTION} Backups"
-                  printf '%s\n' "${BACKUP_SSH_KEY}" > "${SSH_KEY_FILE}"
-                  chmod 600 "${SSH_KEY_FILE}"
-                  SSH_OPTS="-p ${BACKUP_SSH_PORT:-22} -i ${SSH_KEY_FILE} -o IdentitiesOnly=yes -o BatchMode=yes -o PreferredAuthentications=publickey -o StrictHostKeyChecking=no"
-
                   "${SSH_WRAPPER}" \
                     "${BACKUP_SSH_USER}@${BACKUP_SSH_HOST}" \
                     "cd ${BACKUP_TARGET_PATH} && ls -t db-*.sql.gz | tail -n +$((BACKUP_RETENTION + 1)) | xargs -r rm -v && ls -t data-*.tar.gz | tail -n +$((BACKUP_RETENTION + 1)) | xargs -r rm -v"
 
-                  rm -f "${SSH_KEY_FILE}"
+                  rm -f "${SSH_KEY_FILE}" "${SSH_WRAPPER}"
 
                   echo "=== Backup abgeschlossen: ${TIMESTAMP} ==="
                   echo "DB:   ${DB_BACKUP}"
