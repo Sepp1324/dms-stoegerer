@@ -6,37 +6,25 @@ kind: Kustomization
 
 namespace: dms
 
-# Zentrale Versionssteuerung: Beim Release NUR hier den newTag hochsetzen,
-# denselben Tag bauen/pushen und `kubectl apply -k` ausführen.
-# (Überschreibt den Tag in allen Deployments – keine Änderung an den *.yaml nötig.)
+# --- Bild-Tags: von CI automatisch gepflegt --------------------------------
+# Die beiden newTags werden vom Deploy-Workflow NACH erfolgreichem, in der
+# Registry verifiziertem Push automatisch auf den gebauten Git-SHA gesetzt und
+# nach main zurückcommittet ([skip ci]):
+#   - .github/workflows/deploy.yml        → Backend + Frontend (Push nach main)
+#   - .github/workflows/deploy-frontend.yml → nur Frontend (workflow_dispatch)
+# Dadurch zeigt `kubectl apply -k deploy/k8s` IMMER auf real vorhandene Images –
+# nie mehr auf ein Geister-Tag (Ursache der ErrImagePull-Ausfälle 2026-07-05).
 #
-# ACHTUNG – ENTKOPPELTE TAGS (STOAA-497/499, 2026-07-05):
-# - Backend BEWUSST auf 0.5.0 eingefroren (stabil), um die Instabilitäts-Kette
-#   STOAA-407→472/478 NICHT zu reaktivieren.
-# - Frontend soll auf main-HEAD (df8abf1) laufen, damit die UI-Modernisierung
-#   (STOAA-415/417/430/431 – kompakte Sidebar, Tokens/Card/Button/Input,
-#   DocumentDetail 2-Spalten + ARIA-Tabs) wieder LIVE ist.
-# - Deploy NUR chirurgisch via .github/workflows/deploy-frontend.yml
-#   (workflow_dispatch, Heimnetz-Runner "dms" → `kubectl set image deploy/frontend`).
-#   NICHT `kubectl apply -k` und NICHT ein Push→main über deploy.yml verwenden:
-#   deploy.yml ersetzt BEIDE Image-Tags auf den git-SHA und würde das Backend
-#   mitziehen (= 472/478-Instabilität reaktivieren).
-# - Bekannte, akzeptierte Nebenwirkung: main-Frontend enthält Nav-Seiten
-#   (Workflows, Wiedervorlage) + DocumentDetail-Tabs (Versionen/Audit/Erinnerungen),
-#   deren Backend-Endpunkte (Migrationen 0015–0020) in 0.5.0 fehlen → 404, aber
-#   saubere Fehlerzustände (kein Crash). Kern-Modernisierung ist reine Präsentation.
+# Manuelles Editieren nur im Notfall und NUR auf einen Tag, der wirklich in der
+# Registry liegt. Prüfen:
+#   curl -sk https://registry.stoegerer-home.at/v2/dms-backend/tags/list
+# Backend und Frontend dürfen unterschiedliche SHAs tragen (Frontend-only-Deploys
+# pflegen ausschließlich den frontend-Tag).
 images:
-  # 0.5.0: Mailkonto-Verwaltung (STOAA-215) + Bulk-Actions (STOAA-206/208) + Processing State Machine (PR #70)
-  #        Backend: neue Migrationen 0012/0013/0014, MailAccount CRUD API, Bulk-Endpoints
-  #        Frontend: MailAccountsAdmin.tsx, Einstellungen-Integration
-  #        Deployed: 2026-07-04 11:50 UTC, Git-SHA 7fefa08, via GitHub Actions
-  #        EINGEFROREN (STOAA-499): 0.5.0 bleibt Prod-Backend, kein Auto-Deploy bei main-Push.
   - name: registry.stoegerer-home.at/dms-backend
-    newTag: "0.5.0"
-  # Frontend entkoppelt: UI-Modernisierung (STOAA-415/417/430/431) auf main-HEAD.
-  # Deploy via deploy-frontend.yml (manuell, workflow_dispatch), Git-SHA df8abf1.
+    newTag: "0.5.0"    # CI-gepflegt – nächster Deploy setzt den echten SHA
   - name: registry.stoegerer-home.at/dms-frontend
-    newTag: "df8abf1"
+    newTag: "df8abf1"  # CI-gepflegt – nächster Deploy setzt den echten SHA
 
 resources:
   - namespace.yaml

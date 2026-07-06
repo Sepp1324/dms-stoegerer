@@ -16,6 +16,11 @@ concurrency:
   group: deploy-main
   cancel-in-progress: false
 
+# Der Deploy-Job committet den gepflegten kustomization-newTag zurück nach main
+# (damit `apply -k` nie auf ein Geister-Image zeigt) → Schreibrecht nötig.
+permissions:
+  contents: write
+
 env:
   REGISTRY: registry.stoegerer-home.at
   # k3s legt die Kubeconfig hier ab; der Runner-Nutzer braucht Lesezugriff.
@@ -57,6 +62,23 @@ jobs:
           docker push "$REGISTRY/dms-backend:$TAG"
           docker push "$REGISTRY/dms-frontend:$TAG"
 
+      - name: Push verifizieren (Images wirklich in der Registry)
+        # Kernabsicherung: erst weiter (Rollout + newTag-Bump), wenn BEIDE Images
+        # unter $TAG tatsächlich per Registry-API abrufbar sind. Verhindert, dass
+        # ein fehlgeschlagener/teilweiser Push später als Geister-Tag deployt wird.
+        run: |
+          set -euo pipefail
+          for img in dms-backend dms-frontend; do
+            code=$(curl -sk -o /dev/null -w '%{http_code}' \
+              -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
+              "https://${REGISTRY}/v2/${img}/manifests/${TAG}")
+            if [ "$code" != "200" ]; then
+              echo "FEHLER: ${REGISTRY}/${img}:${TAG} nach dem Push nicht abrufbar (HTTP ${code}) – Abbruch vor Rollout/newTag-Bump."
+              exit 1
+            fi
+            echo "OK: ${REGISTRY}/${img}:${TAG} vorhanden (HTTP ${code})."
+          done
+
       - name: Manifeste rendern, Tags ersetzen, anwenden
         run: |
           set -euo pipefail
@@ -84,6 +106,38 @@ jobs:
           kubectl -n dms rollout status deploy/worker   --timeout=240s
           kubectl -n dms rollout status deploy/beat     --timeout=180s
           kubectl -n dms rollout status deploy/frontend --timeout=180s
+
+      - name: kustomization newTag auf verifizierten SHA setzen + zurückcommitten
+        # Läuft NUR nach erfolgreichem, verifiziertem Rollout. Setzt beide
+        # dms-*-newTags in der Basis-kustomization auf den frisch gebauten,
+        # gepushten und verifizierten $TAG. Damit spiegelt die kustomization den
+        # echten Cluster-Stand → ein manuelles `kubectl apply -k` kann nie mehr
+        # auf ein nicht existierendes Image zeigen. `[skip ci]` verhindert, dass
+        # der Bump-Commit diesen Workflow erneut auslöst (Endlosschleife).
+        run: |
+          set -euo pipefail
+          f=deploy/k8s/base/kustomization.yaml
+          python3 - "$f" "$TAG" <<'PY'
+          import re, sys
+          path, tag = sys.argv[1], sys.argv[2]
+          s = open(path).read()
+          for img in ("dms-backend", "dms-frontend"):
+              s = re.sub(
+                  r'(name: registry\.stoegerer-home\.at/%s\n\s*newTag:\s*)"[^"]*"' % img,
+                  r'\g<1>"' + tag + '"', s)
+          open(path, "w").write(s)
+          PY
+          if git diff --quiet -- "$f"; then
+            echo "newTag bereits ${TAG} – kein Commit nötig."
+            exit 0
+          fi
+          git config user.name  "dms-deploy-bot"
+          git config user.email "deploy-bot@stoegerer-dms.local"
+          git add "$f"
+          git commit -m "chore(deploy): kustomization newTag -> ${TAG} [skip ci]"
+          # HEAD ist der gerade deployte main-Commit (+ dieser Bump); dank
+          # concurrency-Serialisierung ist main-Tip == deployter Commit → FF-Push.
+          git push origin HEAD:main
 
       - name: Rollout-Diagnose (bei Timeout/Fehler)
         if: failure()
