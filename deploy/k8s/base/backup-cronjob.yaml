@@ -44,13 +44,31 @@ spec:
                   set -e
 
                   TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+                  MONITOR_OK=0
                   BACKUP_DIR="/backup"
                   DB_BACKUP="${BACKUP_DIR}/db-${TIMESTAMP}.sql.gz"
                   DATA_BACKUP="${BACKUP_DIR}/data-${TIMESTAMP}.tar.gz"
 
+                  record_backup_status() {
+                    python manage.py record_backup_status \
+                      --kind backup \
+                      --status "$1" \
+                      --artifact-timestamp "${TIMESTAMP}" \
+                      --message "$2" || true
+                  }
+
+                  on_exit() {
+                    code=$?
+                    if [ "$code" -ne 0 ] && [ "$MONITOR_OK" -ne 1 ]; then
+                      record_backup_status failed "Backup-Job fehlgeschlagen (Exit ${code})"
+                    fi
+                  }
+                  trap on_exit EXIT
+
                   mkdir -p "${BACKUP_DIR}"
 
                   echo "=== DMS Backup Start: ${TIMESTAMP} ==="
+                  record_backup_status running "Backup-Job läuft"
 
                   echo "--- pg_dump: postgres/${POSTGRES_DB} → ${DB_BACKUP}"
                   PGPASSWORD="${POSTGRES_PASSWORD}" pg_dump \
@@ -89,6 +107,8 @@ spec:
                     "cd ${BACKUP_TARGET_PATH} && ls -t db-*.sql.gz | tail -n +$((BACKUP_RETENTION + 1)) | xargs -r rm -v && ls -t data-*.tar.gz | tail -n +$((BACKUP_RETENTION + 1)) | xargs -r rm -v"
 
                   rm -f "${SSH_KEY_FILE}" "${SSH_WRAPPER}"
+                  record_backup_status success "Backup erfolgreich abgeschlossen"
+                  MONITOR_OK=1
 
                   echo "=== Backup abgeschlossen: ${TIMESTAMP} ==="
                   echo "DB:   ${DB_BACKUP}"

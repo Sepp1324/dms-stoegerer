@@ -19,6 +19,7 @@ router.register("reminders", views.DocumentReminderViewSet)
 urlpatterns = [
     # Explizit vor dem Router, sonst würde "upload" als Dokument-PK gelesen.
     path("documents/upload/", views.DocumentUploadView.as_view(), name="document-upload"),
+    path("system/backup-status/", views.BackupStatusView.as_view(), name="backup-status"),
     # Mobile-Erfassung: mehrere Bilder → ein PDF (STOAA-513). Explizit vor dem
     # Router, sonst würde "mobile-capture" als Dokument-PK gelesen.
     path(

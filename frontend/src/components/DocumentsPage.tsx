@@ -34,9 +34,19 @@ import DuePage from "./DuePage";
 import WorkflowsPage from "./WorkflowsPage";
 import CustomFieldsAdmin from "./CustomFieldsAdmin";
 import MailAccountsAdmin from "./MailAccountsAdmin";
+import SystemStatusPage from "./SystemStatusPage";
 
 // Von-/Bis-Eingaben eines CURRENCY-Zusatzfeld-Filters (STOAA-113).
 type CurrencyRange = { gte: string; lte: string };
+type MainView =
+  | "docs"
+  | "capture"
+  | "rules"
+  | "workflows"
+  | "fields"
+  | "mail"
+  | "system"
+  | "faellig";
 
 // Muss dem Backend entsprechen (DRF PageNumberPagination, config/settings.py:
 // REST_FRAMEWORK["PAGE_SIZE"] = 25). Nur für die Anzeige „Seite X von N" nötig;
@@ -139,7 +149,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   // Aktuell geöffnetes Dokument (Detailansicht) oder null (Liste).
   const [selectedId, setSelectedId] = useState<number | null>(null);
   // Aktive Hauptansicht (persistente linke Navigation).
-  const [view, setView] = useState<"docs" | "capture" | "rules" | "workflows" | "fields" | "mail" | "faellig">("docs");
+  const [view, setView] = useState<MainView>("docs");
   // Sidebar auf schmalen Screens ein-/ausklappbar.
   const [navOpen, setNavOpen] = useState(false);
   // Desktop-Sidebar auf Icon-only einklappbar; Zustand persistent (localStorage).
@@ -405,7 +415,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     );
   }
 
-  const navigate = (v: "docs" | "capture" | "rules" | "workflows" | "fields" | "mail" | "faellig") => {
+  const navigate = (v: MainView) => {
     setView(v);
     setNavOpen(false); // Overlay auf Mobil nach Auswahl schließen
   };
@@ -464,9 +474,11 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
                     ? "Zusatzfelder"
                     : view === "mail"
                       ? "Mailkonten"
-                      : view === "faellig"
-                        ? "Wiedervorlage"
-                        : "Dokumente"}
+                      : view === "system"
+                        ? "Systemstatus"
+                        : view === "faellig"
+                          ? "Wiedervorlage"
+                          : "Dokumente"}
           </h1>
           {view === "docs" && (
             <>
@@ -526,6 +538,8 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
             />
           ) : view === "mail" ? (
             <MailAccountsAdmin canEdit={!!me?.can_write} />
+          ) : view === "system" ? (
+            <SystemStatusPage />
           ) : view === "capture" ? (
             <MobileCapture
               canWrite={!!me?.can_write}
@@ -671,8 +685,8 @@ function Sidebar({
   currencyFilters,
   onCurrencyChange,
 }: {
-  view: "docs" | "capture" | "rules" | "workflows" | "fields" | "mail" | "faellig";
-  onNavigate: (v: "docs" | "capture" | "rules" | "workflows" | "fields" | "mail" | "faellig") => void;
+  view: MainView;
+  onNavigate: (v: MainView) => void;
   username?: string;
   onLogout: () => void;
   isAdmin: boolean;
@@ -798,6 +812,14 @@ function Sidebar({
             onClick={() => onNavigate("mail")}
             label="Mailkonten"
             icon="M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2m0 2v.5l8 5 8-5V6H4m0 2.8V18h16V8.8l-8 5z"
+          />
+        )}
+        {isAdmin && (
+          <NavItem
+            active={view === "system"}
+            onClick={() => onNavigate("system")}
+            label="System"
+            icon="M12 2 3 6v6c0 5 3.8 9.4 9 10 5.2-.6 9-5 9-10V6zm-1 5h2v6h-2zm0 8h2v2h-2z"
           />
         )}
       </nav>
@@ -1369,4 +1391,3 @@ function TriageCard({
     </div>
   );
 }
-

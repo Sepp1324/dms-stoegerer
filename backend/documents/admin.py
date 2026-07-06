@@ -4,6 +4,7 @@ from django.contrib import admin
 from .models import (
     ASNScan,
     AuditLogEntry,
+    BackupMonitor,
     ClassificationRule,
     Correspondent,
     CustomField,
@@ -108,6 +109,30 @@ admin.site.register(DocumentType)
 admin.site.register(Tag)
 admin.site.register(StoragePath)
 admin.site.register(CustomField)
+
+
+@admin.register(BackupMonitor)
+class BackupMonitorAdmin(admin.ModelAdmin):
+    list_display = (
+        "kind",
+        "status",
+        "artifact_timestamp",
+        "last_success_at",
+        "last_started_at",
+        "last_finished_at",
+        "updated_at",
+    )
+    list_filter = ("kind", "status")
+    readonly_fields = (
+        "kind",
+        "status",
+        "artifact_timestamp",
+        "message",
+        "last_started_at",
+        "last_success_at",
+        "last_finished_at",
+        "updated_at",
+    )
 
 class MailAccountAdminForm(forms.ModelForm):
     """Maskiert das Klartext-Fallback-Passwort im Admin (write-only-Verhalten)."""
