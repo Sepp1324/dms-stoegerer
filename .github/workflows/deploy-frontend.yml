@@ -24,6 +24,10 @@ concurrency:
   group: deploy-frontend-only
   cancel-in-progress: false
 
+# Pflegt den frontend-newTag in main zurück → Schreibrecht nötig.
+permissions:
+  contents: write
+
 env:
   REGISTRY: registry.stoegerer-home.at
   KUBECONFIG: /etc/rancher/k3s/k3s.yaml
@@ -54,6 +58,18 @@ jobs:
       - name: Frontend-Image pushen
         run: docker push "$REGISTRY/dms-frontend:$TAG"
 
+      - name: Push verifizieren (Frontend-Image wirklich in der Registry)
+        run: |
+          set -euo pipefail
+          code=$(curl -sk -o /dev/null -w '%{http_code}' \
+            -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
+            "https://${REGISTRY}/v2/dms-frontend/manifests/${TAG}")
+          if [ "$code" != "200" ]; then
+            echo "FEHLER: ${REGISTRY}/dms-frontend:${TAG} nach dem Push nicht abrufbar (HTTP ${code}) – Abbruch."
+            exit 1
+          fi
+          echo "OK: ${REGISTRY}/dms-frontend:${TAG} vorhanden (HTTP ${code})."
+
       - name: Frontend-Deployment Image aktualisieren (OHNE apply -k)
         run: |
           set -euo pipefail
@@ -62,6 +78,35 @@ jobs:
 
       - name: Frontend-Rollout abwarten
         run: kubectl -n dms rollout status deploy/frontend --timeout=180s
+
+      - name: Frontend-newTag in main pflegen (nur dms-frontend)
+        # Hält deploy/k8s/base/kustomization.yaml ehrlich, ohne das Backend-Tag
+        # anzufassen (Entkopplung bleibt). Arbeitet auf frischem origin/main, damit
+        # auch bei workflow_dispatch mit abweichendem git_sha korrekt nach main
+        # committet wird. `[skip ci]` verhindert erneutes Triggern.
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B _fe_tagbump origin/main
+          f=deploy/k8s/base/kustomization.yaml
+          python3 - "$f" "$TAG" <<'PY'
+          import re, sys
+          path, tag = sys.argv[1], sys.argv[2]
+          s = open(path).read()
+          s = re.sub(
+              r'(name: registry\.stoegerer-home\.at/dms-frontend\n\s*newTag:\s*)"[^"]*"',
+              r'\g<1>"' + tag + '"', s)
+          open(path, "w").write(s)
+          PY
+          if git diff --quiet -- "$f"; then
+            echo "frontend-newTag bereits ${TAG} – kein Commit nötig."
+            exit 0
+          fi
+          git config user.name  "dms-deploy-bot"
+          git config user.email "deploy-bot@stoegerer-dms.local"
+          git add "$f"
+          git commit -m "chore(deploy): frontend newTag -> ${TAG} [skip ci]"
+          git push origin _fe_tagbump:main
 
       - name: Rollout-Diagnose (bei Timeout/Fehler)
         if: failure()
