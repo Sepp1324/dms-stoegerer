@@ -59,6 +59,7 @@ from .services import version_compare
 from .models import (
     AuditLogEntry,
     BackupMonitor,
+    BackupRun,
     ClassificationRule,
     Correspondent,
     CustomField,
@@ -273,6 +274,13 @@ class BackupStatusView(APIView):
         ):
             overall = "warn"
 
+        history = {
+            BackupMonitor.Kind.BACKUP: self._recent_runs(BackupMonitor.Kind.BACKUP),
+            BackupMonitor.Kind.RESTORE_DRILL: self._recent_runs(
+                BackupMonitor.Kind.RESTORE_DRILL
+            ),
+        }
+
         return Response(
             {
                 "status": overall,
@@ -280,8 +288,24 @@ class BackupStatusView(APIView):
                 "backup": backup,
                 "cronjob": cronjob,
                 "restore_drill": restore_drill,
+                "history": history,
             }
         )
+
+    @staticmethod
+    def _recent_runs(kind, *, limit=10):
+        """Die letzten ``limit`` Läufe eines ``kind`` – neueste zuerst, für Trend."""
+        runs = BackupRun.objects.filter(kind=kind).order_by("-created_at")[:limit]
+        return [
+            {
+                "status": run.status,
+                "artifact_timestamp": run.artifact_timestamp,
+                "size_bytes": run.size_bytes,
+                "message": run.message,
+                "created_at": run.created_at.isoformat() if run.created_at else None,
+            }
+            for run in runs
+        ]
 
     @staticmethod
     def _serialize_state(item, *, now, alert_after_hours, stale_sensitive):
@@ -290,6 +314,7 @@ class BackupStatusView(APIView):
                 "status": BackupMonitor.Status.UNKNOWN,
                 "artifact_timestamp": "",
                 "message": "",
+                "size_bytes": None,
                 "last_started_at": None,
                 "last_success_at": None,
                 "last_finished_at": None,
@@ -311,6 +336,7 @@ class BackupStatusView(APIView):
             "status": item.status,
             "artifact_timestamp": item.artifact_timestamp,
             "message": item.message,
+            "size_bytes": item.size_bytes,
             "last_started_at": item.last_started_at.isoformat()
             if item.last_started_at
             else None,

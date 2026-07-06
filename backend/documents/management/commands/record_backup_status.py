@@ -1,7 +1,7 @@
 from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
-from documents.models import BackupMonitor
+from documents.models import BackupMonitor, BackupRun
 
 
 class Command(BaseCommand):
@@ -25,6 +25,12 @@ class Command(BaseCommand):
         )
         parser.add_argument("--artifact-timestamp", default="")
         parser.add_argument("--message", default="")
+        parser.add_argument(
+            "--size-bytes",
+            type=int,
+            default=None,
+            help="Größe des Backup-Artefakts in Bytes (für Verlauf/Trend).",
+        )
 
     def handle(self, *args, **options):
         kind = options["kind"]
@@ -36,9 +42,13 @@ class Command(BaseCommand):
             defaults={"status": BackupMonitor.Status.UNKNOWN},
         )
 
+        size_bytes = options["size_bytes"]
+
         obj.status = status
         obj.artifact_timestamp = options["artifact_timestamp"] or obj.artifact_timestamp
         obj.message = options["message"]
+        if size_bytes is not None:
+            obj.size_bytes = size_bytes
 
         if status == BackupMonitor.Status.RUNNING:
             obj.last_started_at = now
@@ -53,6 +63,17 @@ class Command(BaseCommand):
             raise CommandError(f"Unbekannter Status: {status}")
 
         obj.save()
+
+        # Verlauf/Trend: je terminalem Lauf (Erfolg/Fehler) einen History-Eintrag
+        # anlegen. ``running`` erzeugt keinen Verlaufseintrag (nur Zwischenzustand).
+        if status in (BackupMonitor.Status.SUCCESS, BackupMonitor.Status.FAILED):
+            BackupRun.objects.create(
+                kind=kind,
+                status=status,
+                artifact_timestamp=options["artifact_timestamp"] or "",
+                size_bytes=size_bytes,
+                message=options["message"],
+            )
         self.stdout.write(
             self.style.SUCCESS(
                 f"{obj.kind}: {obj.status} ({obj.artifact_timestamp or 'ohne TS'})"
