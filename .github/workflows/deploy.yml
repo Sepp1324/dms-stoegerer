@@ -69,14 +69,13 @@ jobs:
         run: |
           set -euo pipefail
           for img in dms-backend dms-frontend; do
-            code=$(curl -sk -o /dev/null -w '%{http_code}' \
-              -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
-              "https://${REGISTRY}/v2/${img}/manifests/${TAG}")
-            if [ "$code" != "200" ]; then
-              echo "FEHLER: ${REGISTRY}/${img}:${TAG} nach dem Push nicht abrufbar (HTTP ${code}) – Abbruch vor Rollout/newTag-Bump."
+            ref="${REGISTRY}/${img}:${TAG}"
+            if docker manifest inspect "$ref" >/dev/null 2>&1 || docker manifest inspect --insecure "$ref" >/dev/null 2>&1; then
+              echo "OK: ${ref} vorhanden."
+            else
+              echo "FEHLER: ${ref} nach dem Push nicht per Docker manifest inspect abrufbar – Abbruch vor Rollout/newTag-Bump."
               exit 1
             fi
-            echo "OK: ${REGISTRY}/${img}:${TAG} vorhanden (HTTP ${code})."
           done
 
       - name: Manifeste rendern, Tags ersetzen, anwenden

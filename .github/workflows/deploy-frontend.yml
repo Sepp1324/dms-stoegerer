@@ -61,14 +61,13 @@ jobs:
       - name: Push verifizieren (Frontend-Image wirklich in der Registry)
         run: |
           set -euo pipefail
-          code=$(curl -sk -o /dev/null -w '%{http_code}' \
-            -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
-            "https://${REGISTRY}/v2/dms-frontend/manifests/${TAG}")
-          if [ "$code" != "200" ]; then
-            echo "FEHLER: ${REGISTRY}/dms-frontend:${TAG} nach dem Push nicht abrufbar (HTTP ${code}) – Abbruch."
+          ref="${REGISTRY}/dms-frontend:${TAG}"
+          if docker manifest inspect "$ref" >/dev/null 2>&1 || docker manifest inspect --insecure "$ref" >/dev/null 2>&1; then
+            echo "OK: ${ref} vorhanden."
+          else
+            echo "FEHLER: ${ref} nach dem Push nicht per Docker manifest inspect abrufbar – Abbruch."
             exit 1
           fi
-          echo "OK: ${REGISTRY}/dms-frontend:${TAG} vorhanden (HTTP ${code})."
 
       - name: Frontend-Deployment Image aktualisieren (OHNE apply -k)
         run: |
