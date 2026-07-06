@@ -76,14 +76,26 @@ spec:
                   SSH_KEY_FILE="/tmp/backup_ssh_key"
                   printf '%s\n' "${BACKUP_SSH_KEY}" > "${SSH_KEY_FILE}"
                   chmod 600 "${SSH_KEY_FILE}"
-                  SSH_OPTS="-p ${BACKUP_SSH_PORT:-22} -i ${SSH_KEY_FILE} -o IdentitiesOnly=yes -o BatchMode=yes -o PreferredAuthentications=publickey -o StrictHostKeyChecking=no"
 
-                  ssh ${SSH_OPTS} "${BACKUP_SSH_USER}@${BACKUP_SSH_HOST}" "echo SSH OK"
+                  SSH_WRAPPER="/tmp/backup_ssh"
+                  cat > "${SSH_WRAPPER}" <<EOF
+                  #!/bin/sh
+                  exec ssh -p "${BACKUP_SSH_PORT:-22}" \
+                    -i "${SSH_KEY_FILE}" \
+                    -o IdentitiesOnly=yes \
+                    -o BatchMode=yes \
+                    -o PreferredAuthentications=publickey \
+                    -o StrictHostKeyChecking=no \
+                    "\$@"
+                  EOF
+                  chmod 700 "${SSH_WRAPPER}"
+
+                  "${SSH_WRAPPER}" "${BACKUP_SSH_USER}@${BACKUP_SSH_HOST}" "echo SSH OK"
 
                   rsync -avz --progress \
-                    -e "ssh ${SSH_OPTS}" \
+                    -e "${SSH_WRAPPER}" \
                     "${DB_BACKUP}" "${DATA_BACKUP}" \
-                    "${BACKUP_SSH_USER}@${BACKUP_SSH_HOST}:${BACKUP_TARGET_PATH}/"
+                    "${BACKUP_SSH_USER}@${BACKUP_SSH_HOST}:${BACKUP_TARGET_PATH}/
 
                   rm -f "${SSH_KEY_FILE}"
 
@@ -92,7 +104,7 @@ spec:
                   chmod 600 "${SSH_KEY_FILE}"
                   SSH_OPTS="-p ${BACKUP_SSH_PORT:-22} -i ${SSH_KEY_FILE} -o IdentitiesOnly=yes -o BatchMode=yes -o PreferredAuthentications=publickey -o StrictHostKeyChecking=no"
 
-                  ssh ${SSH_OPTS} \
+                  "${SSH_WRAPPER}" \
                     "${BACKUP_SSH_USER}@${BACKUP_SSH_HOST}" \
                     "cd ${BACKUP_TARGET_PATH} && ls -t db-*.sql.gz | tail -n +$((BACKUP_RETENTION + 1)) | xargs -r rm -v && ls -t data-*.tar.gz | tail -n +$((BACKUP_RETENTION + 1)) | xargs -r rm -v"
 
