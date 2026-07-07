@@ -158,6 +158,8 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # die UI/Admin-API eine Warnung. Für täglichen CronJob sind 36h bewusst großzügig:
 # ein einzelner später/ausgefallener Lauf wird sichtbar, ohne sofort nachts zu lärmen.
 BACKUP_ALERT_AFTER_HOURS = float(os.getenv("BACKUP_ALERT_AFTER_HOURS", "36"))
+OCR_ALERT_SUCCESS_RATE = float(os.getenv("OCR_ALERT_SUCCESS_RATE", "95"))
+PROCESSING_STUCK_AFTER_MINUTES = float(os.getenv("PROCESSING_STUCK_AFTER_MINUTES", "30"))
 
 # --- DRF ---
 REST_FRAMEWORK = {

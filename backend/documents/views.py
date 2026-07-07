@@ -70,6 +70,7 @@ from .models import (
     DocumentType,
     DocumentVersion,
     MailAccount,
+    OCRStatus,
     StoragePath,
     Tag,
     Workflow,
@@ -350,6 +351,186 @@ class BackupStatusView(APIView):
             "age_hours": age_hours,
             "stale": stale,
         }
+
+
+class OCRHealthView(APIView):
+    """Admin-only Qualitätsdashboard für OCR und Dokumentverarbeitung."""
+
+    permission_classes = [IsDmsAdmin]
+
+    def get(self, request):
+        now = timezone.now()
+        threshold_rate = float(getattr(settings, "OCR_ALERT_SUCCESS_RATE", 95))
+        stuck_after_minutes = float(
+            getattr(settings, "PROCESSING_STUCK_AFTER_MINUTES", 30)
+        )
+        stuck_before = now - timedelta(minutes=stuck_after_minutes)
+        current_versions = self._current_versions()
+
+        total = current_versions.count()
+        skipped = current_versions.filter(ocr_status=OCRStatus.SKIPPED).count()
+        denominator = max(total - skipped, 0)
+        ocr_success = current_versions.filter(ocr_status=OCRStatus.SUCCESS).count()
+        ocr_failed = current_versions.filter(ocr_status=OCRStatus.FAILED).count()
+        ocr_running = current_versions.filter(ocr_status=OCRStatus.RUNNING).count()
+        ocr_pending = current_versions.filter(ocr_status=OCRStatus.PENDING).count()
+        empty_ocr_text = (
+            current_versions.exclude(ocr_status=OCRStatus.SKIPPED)
+            .filter(ocr_text="")
+            .count()
+        )
+
+        PS = DocumentVersion.ProcessingState
+        inflight_states = [
+            PS.UPLOADED,
+            PS.HASHED,
+            PS.OCR_RUNNING,
+            PS.OCR_DONE,
+            PS.CLASSIFICATION_RUNNING,
+            PS.CLASSIFIED,
+            PS.THUMBNAIL_DONE,
+            PS.SEALED,
+        ]
+        processing_failed = current_versions.filter(processing_state=PS.FAILED).count()
+        retry_pending = current_versions.filter(
+            processing_state=PS.RETRY_PENDING
+        ).count()
+        processing_ready = current_versions.filter(processing_state=PS.READY).count()
+        stuck_qs = current_versions.filter(
+            processing_state__in=inflight_states,
+            created_at__lt=stuck_before,
+        )
+        stuck_count = stuck_qs.count()
+        oldest_stuck = stuck_qs.order_by("created_at").first()
+
+        success_rate = (
+            round((ocr_success / denominator) * 100, 1) if denominator else 100.0
+        )
+
+        status_value = "ok"
+        if processing_failed:
+            status_value = "error"
+        elif (
+            success_rate < threshold_rate
+            or empty_ocr_text
+            or ocr_failed
+            or stuck_count
+        ):
+            status_value = "warn"
+
+        issues = self._issue_rows(current_versions)
+
+        return Response(
+            {
+                "status": status_value,
+                "generated_at": now.isoformat(),
+                "thresholds": {
+                    "ocr_success_rate": threshold_rate,
+                    "processing_stuck_after_minutes": stuck_after_minutes,
+                },
+                "summary": {
+                    "total_current_versions": total,
+                    "ocr_success": ocr_success,
+                    "ocr_failed": ocr_failed,
+                    "ocr_running": ocr_running,
+                    "ocr_pending": ocr_pending,
+                    "ocr_skipped": skipped,
+                    "empty_ocr_text": empty_ocr_text,
+                    "ocr_success_rate": success_rate,
+                    "processing_ready": processing_ready,
+                    "processing_failed": processing_failed,
+                    "retry_pending": retry_pending,
+                    "stuck_processing": stuck_count,
+                },
+                "oldest_stuck": self._serialize_issue(oldest_stuck)
+                if oldest_stuck
+                else None,
+                "issues": [self._serialize_issue(v) for v in issues],
+            }
+        )
+
+    @staticmethod
+    def _current_versions():
+        current_ids = Document.objects.exclude(current_version_id__isnull=True).values(
+            "current_version_id"
+        )
+        return DocumentVersion.objects.filter(pk__in=current_ids).select_related(
+            "document"
+        )
+
+    @classmethod
+    def _issue_rows(cls, current_versions, *, limit=25):
+        PS = DocumentVersion.ProcessingState
+        issue_filter = (
+            Q(processing_state=PS.FAILED)
+            | Q(ocr_status=OCRStatus.FAILED)
+            | (Q(ocr_text="") & ~Q(ocr_status=OCRStatus.SKIPPED))
+        )
+        return current_versions.filter(issue_filter).order_by(
+            "-processing_failed_at", "-ocr_finished_at", "-created_at"
+        )[:limit]
+
+    @staticmethod
+    def _serialize_issue(version):
+        if version is None:
+            return None
+        return {
+            "document_id": version.document_id,
+            "document_title": version.document.title,
+            "version_id": version.id,
+            "version_no": version.version_no,
+            "processing_state": version.processing_state,
+            "processing_error": version.processing_error,
+            "processing_failed_step": version.processing_failed_step,
+            "processing_failed_at": version.processing_failed_at.isoformat()
+            if version.processing_failed_at
+            else None,
+            "processing_attempts": version.processing_attempts,
+            "ocr_status": version.ocr_status,
+            "ocr_error": version.ocr_error,
+            "ocr_started_at": version.ocr_started_at.isoformat()
+            if version.ocr_started_at
+            else None,
+            "ocr_finished_at": version.ocr_finished_at.isoformat()
+            if version.ocr_finished_at
+            else None,
+            "ocr_text_length": len(version.ocr_text or ""),
+            "created_at": version.created_at.isoformat() if version.created_at else None,
+            "can_retry": version.processing_state
+            == DocumentVersion.ProcessingState.FAILED,
+        }
+
+
+class OCRRetryFailedView(APIView):
+    """Bulk-Retry für fehlgeschlagene aktuelle Dokumentversionen."""
+
+    permission_classes = [IsDmsAdmin]
+
+    def post(self, request):
+        raw_limit = request.data.get("limit", 25) if hasattr(request, "data") else 25
+        try:
+            limit = int(raw_limit)
+        except (TypeError, ValueError):
+            limit = 25
+        limit = max(1, min(limit, 100))
+
+        PS = DocumentVersion.ProcessingState
+        versions = list(
+            OCRHealthView._current_versions()
+            .filter(processing_state=PS.FAILED)
+            .order_by("processing_failed_at", "id")[:limit]
+        )
+        for version in versions:
+            retry_document_version.delay(version.id, actor_id=request.user.id)
+
+        return Response(
+            {
+                "queued": len(versions),
+                "limit": limit,
+                "version_ids": [v.id for v in versions],
+            },
+            status=status.HTTP_202_ACCEPTED,
+        )
 
 
 class DocumentUploadView(APIView):

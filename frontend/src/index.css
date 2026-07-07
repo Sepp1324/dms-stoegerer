@@ -2598,6 +2598,84 @@ button.due-item:hover {
   color: var(--muted);
   font-size: 0.85rem;
 }
+.system-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--space-3);
+}
+.system-metric {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  background: var(--surface-sunken);
+}
+.system-metric--ok {
+  border-color: color-mix(in srgb, var(--ok) 25%, var(--border));
+}
+.system-metric--warn {
+  border-color: color-mix(in srgb, var(--warn) 40%, var(--border));
+}
+.system-metric--error {
+  border-color: color-mix(in srgb, var(--error) 45%, var(--border));
+}
+.system-metric__value {
+  display: block;
+  font-size: 1.25rem;
+  font-weight: 700;
+}
+.system-metric__label {
+  display: block;
+  margin-top: 0.15rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+.system-panel {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--card);
+  padding: var(--space-4);
+}
+.system-panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-bottom: var(--space-3);
+}
+.system-panel__head h3,
+.system-panel__head p {
+  margin: 0;
+}
+.system-panel__head p {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin-top: 0.15rem;
+}
+.system-table-wrap {
+  overflow-x: auto;
+}
+.system-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.86rem;
+}
+.system-table th,
+.system-table td {
+  text-align: left;
+  padding: 0.55rem 0.5rem;
+  border-top: 1px solid var(--border);
+  vertical-align: top;
+}
+.system-table th {
+  color: var(--muted);
+  font-weight: 600;
+}
+.system-table__sub {
+  display: block;
+  color: var(--muted);
+  font-size: 0.75rem;
+  margin-top: 0.1rem;
+}
 
 /* --- Bewegung reduzieren (Barrierefreiheit, STOAA-417) ---
    Wer im OS „Bewegung reduzieren" wählt, bekommt keine Transitions/Animationen. */

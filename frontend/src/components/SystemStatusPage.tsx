@@ -1,5 +1,14 @@
 import { useEffect, useState } from "react";
-import { getBackupStatus, type BackupMonitorEntry, type BackupStatus } from "../api";
+import {
+  getBackupStatus,
+  getOCRHealth,
+  retryFailedOCRProcessing,
+  type BackupHealthStatus,
+  type BackupMonitorEntry,
+  type BackupStatus,
+  type OCRHealthIssue,
+  type OCRHealthStatus,
+} from "../api";
 
 function formatDate(value: string | null): string {
   if (!value) return "Nie";
@@ -75,16 +84,103 @@ function StatusCard({
   );
 }
 
+function HealthMetric({
+  label,
+  value,
+  tone = "ok",
+}: {
+  label: string;
+  value: string | number;
+  tone?: BackupHealthStatus;
+}) {
+  return (
+    <div className={`system-metric system-metric--${tone}`}>
+      <span className="system-metric__value">{value}</span>
+      <span className="system-metric__label">{label}</span>
+    </div>
+  );
+}
+
+function issueReason(issue: OCRHealthIssue): string {
+  if (issue.processing_state === "failed") return "Verarbeitung fehlgeschlagen";
+  if (issue.ocr_status === "failed") return "OCR fehlgeschlagen";
+  if (issue.ocr_text_length === 0) return "Kein OCR-Text";
+  return "Prüfen";
+}
+
+function OCRIssueList({
+  issues,
+  retrying,
+  onRetryAll,
+}: {
+  issues: OCRHealthIssue[];
+  retrying: boolean;
+  onRetryAll: () => void;
+}) {
+  const retryable = issues.filter((i) => i.can_retry).length;
+  return (
+    <section className="system-panel">
+      <div className="system-panel__head">
+        <div>
+          <h3>OCR-/Verarbeitungsfehler</h3>
+          <p>{issues.length ? `${issues.length} auffällige Dokumente` : "Keine offenen OCR-Auffälligkeiten"}</p>
+        </div>
+        {retryable > 0 && (
+          <button onClick={onRetryAll} disabled={retrying}>
+            {retrying ? "Starte …" : `${retryable} neu verarbeiten`}
+          </button>
+        )}
+      </div>
+      {issues.length > 0 && (
+        <div className="system-table-wrap">
+          <table className="system-table">
+            <thead>
+              <tr>
+                <th>Dokument</th>
+                <th>Grund</th>
+                <th>Processing</th>
+                <th>OCR</th>
+                <th>Versuche</th>
+              </tr>
+            </thead>
+            <tbody>
+              {issues.map((issue) => (
+                <tr key={issue.version_id}>
+                  <td>
+                    <span>{issue.document_title}</span>
+                    <span className="system-table__sub">v{issue.version_no}</span>
+                  </td>
+                  <td>{issueReason(issue)}</td>
+                  <td>{issue.processing_state}</td>
+                  <td>{issue.ocr_status}</td>
+                  <td>{issue.processing_attempts}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
 export default function SystemStatusPage() {
   const [status, setStatus] = useState<BackupStatus | null>(null);
+  const [ocr, setOcr] = useState<OCRHealthStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [retrying, setRetrying] = useState(false);
+  const [retryNote, setRetryNote] = useState<string | null>(null);
 
   function load() {
     setLoading(true);
     setError(null);
-    getBackupStatus()
-      .then(setStatus)
+    setRetryNote(null);
+    Promise.all([getBackupStatus(), getOCRHealth()])
+      .then(([backupStatus, ocrStatus]) => {
+        setStatus(backupStatus);
+        setOcr(ocrStatus);
+      })
       .catch((err) => setError(err instanceof Error ? err.message : String(err)))
       .finally(() => setLoading(false));
   }
@@ -104,13 +200,32 @@ export default function SystemStatusPage() {
   }
   if (!status) return null;
 
-  const tone = status.status;
+  const tone: BackupHealthStatus =
+    status.status === "error" || ocr?.status === "error"
+      ? "error"
+      : status.status === "warn" || ocr?.status === "warn"
+        ? "warn"
+        : "ok";
   const headline =
     tone === "ok"
-      ? "Backup-System läuft"
+      ? "System läuft"
       : tone === "warn"
-        ? "Backup-System braucht Aufmerksamkeit"
-        : "Backup-System hat einen Fehler";
+        ? "System braucht Aufmerksamkeit"
+        : "System hat einen Fehler";
+
+  async function retryAllFailed() {
+    setRetrying(true);
+    setRetryNote(null);
+    try {
+      const result = await retryFailedOCRProcessing(25);
+      setRetryNote(`${result.queued} Verarbeitung${result.queued === 1 ? "" : "en"} neu angestoßen.`);
+      await Promise.all([getBackupStatus().then(setStatus), getOCRHealth().then(setOcr)]);
+    } catch (err) {
+      setRetryNote(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRetrying(false);
+    }
+  }
 
   return (
     <section className="system-status">
@@ -133,6 +248,58 @@ export default function SystemStatusPage() {
         />
         <StatusCard title="Restore-Drill" entry={status.restore_drill} />
       </div>
+
+      {ocr && (
+        <>
+          <section className={`system-card system-card--${ocr.status}`}>
+            <div className="system-card__head">
+              <h3>OCR-Qualität</h3>
+              <span className={`system-pill system-pill--${ocr.status}`}>
+                {ocr.status === "ok" ? "OK" : ocr.status === "warn" ? "Warnung" : "Fehler"}
+              </span>
+            </div>
+            <div className="system-metrics">
+              <HealthMetric
+                label="OCR-Erfolgsquote"
+                value={`${ocr.summary.ocr_success_rate}%`}
+                tone={ocr.summary.ocr_success_rate < ocr.thresholds.ocr_success_rate ? "warn" : "ok"}
+              />
+              <HealthMetric
+                label="Ohne OCR-Text"
+                value={ocr.summary.empty_ocr_text}
+                tone={ocr.summary.empty_ocr_text ? "warn" : "ok"}
+              />
+              <HealthMetric
+                label="OCR fehlgeschlagen"
+                value={ocr.summary.ocr_failed}
+                tone={ocr.summary.ocr_failed ? "warn" : "ok"}
+              />
+              <HealthMetric
+                label="Processing failed"
+                value={ocr.summary.processing_failed}
+                tone={ocr.summary.processing_failed ? "error" : "ok"}
+              />
+              <HealthMetric
+                label="Hängend"
+                value={ocr.summary.stuck_processing}
+                tone={ocr.summary.stuck_processing ? "warn" : "ok"}
+              />
+            </div>
+            {ocr.oldest_stuck && (
+              <p className="system-card__message">
+                Älteste hängende Verarbeitung: {ocr.oldest_stuck.document_title}
+              </p>
+            )}
+          </section>
+
+          {retryNote && <p className="status status--warn">{retryNote}</p>}
+          <OCRIssueList
+            issues={ocr.issues}
+            retrying={retrying}
+            onRetryAll={retryAllFailed}
+          />
+        </>
+      )}
     </section>
   );
 }
