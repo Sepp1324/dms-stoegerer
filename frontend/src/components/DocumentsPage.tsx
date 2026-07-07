@@ -35,6 +35,7 @@ import { sanitizeSnippet } from "../sanitize";
 import { ProcessingBadge } from "./ProcessingStatus";
 import UploadZone from "./UploadZone";
 import MobileCapture from "./MobileCapture";
+import CopilotPage from "./CopilotPage";
 import DocumentDetail from "./DocumentDetail";
 import RulesPage from "./RulesPage";
 import DuePage from "./DuePage";
@@ -49,6 +50,7 @@ type CurrencyRange = { gte: string; lte: string };
 type FolderFilterValue = number | "none" | "";
 type MainView =
   | "docs"
+  | "copilot"
   | "inbox"
   | "capture"
   | "rules"
@@ -659,6 +661,8 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
           <h1 className="content-title">
             {view === "capture"
               ? "Erfassen"
+              : view === "copilot"
+                ? "Copilot"
               : view === "inbox"
                 ? "Inbox"
               : view === "rules"
@@ -722,7 +726,9 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
         </header>
 
         <div className="content-body">
-          {view === "rules" ? (
+          {view === "copilot" ? (
+            <CopilotPage folders={folders} onOpenDocument={(docId) => setSelectedId(docId)} />
+          ) : view === "rules" ? (
             <RulesPage canEdit={!!me?.can_write} />
           ) : view === "inbox" ? (
             <InboxPage
@@ -1182,6 +1188,12 @@ function Sidebar({
           onClick={() => onNavigate("docs")}
           label="Dokumente"
           icon="M6 2h7l5 5v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2m7 1.5V8h4.5z"
+        />
+        <NavItem
+          active={view === "copilot"}
+          onClick={() => onNavigate("copilot")}
+          label="Copilot"
+          icon="M12 2a7 7 0 0 1 7 7v1h1a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2h-1v1a4 4 0 0 1-4 4H9a4 4 0 0 1-4-4v-1H4a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h1V9a7 7 0 0 1 7-7m-3 10a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3m6 0a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3M9 18h6v-2H9z"
         />
         <NavItem
           active={view === "inbox"}

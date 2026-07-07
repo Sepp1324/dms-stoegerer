@@ -855,6 +855,76 @@ textarea:focus-visible {
 .bulk-bar__grid select {
   width: 100%;
 }
+
+/* --- Copilot (RAG mit Quellen) --- */
+.copilot {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  max-width: 980px;
+}
+.copilot__panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+.copilot__query {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 280px);
+  gap: 0.85rem;
+  align-items: end;
+}
+.copilot__query label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+.copilot__answer {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+.copilot__source {
+  margin: 0 0 0.5rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+.copilot__text {
+  margin: 0;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+.copilot__sources {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 0.8rem;
+}
+.copilot-source {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+.copilot-source__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+.copilot-source__snippet {
+  margin: 0;
+  color: var(--text);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+@media (max-width: 760px) {
+  .copilot__query {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* --- Dokument-Karten (Grid) --- */
 .doc-grid {
   display: grid;

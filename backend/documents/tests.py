@@ -599,6 +599,98 @@ class DocumentFolderTests(APITestCase):
         self.assertEqual(resp.status_code, 400)
 
 
+class AskEndpointTests(APITestCase):
+    """Dokumenten-Copilot: Antwort mit Quellen und Owner-/Ordner-Scope."""
+
+    URL = "/api/ask/"
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(username="ask-u", password="pw", role="user")
+        cls.other = User.objects.create_user(username="ask-o", password="pw", role="user")
+        cls.folder = DocumentFolder.objects.create(name="Versicherungen")
+
+    def _doc(self, owner, title, text, *, folder=None):
+        doc = Document.objects.create(title=title, owner=owner, folder=folder)
+        version = DocumentVersion.objects.create(
+            document=doc,
+            version_no=1,
+            file_path="/tmp/test.pdf",
+            ocr_text=text,
+        )
+        doc.current_version = version
+        doc.save(update_fields=["current_version"])
+        return doc
+
+    def test_ask_liefert_quellen_und_ai_antwort(self):
+        from unittest import mock
+
+        doc = self._doc(
+            self.user,
+            "Wüstenrot Polizze",
+            "Die monatliche Prämie der Wüstenrot Versicherung beträgt 225,74 Euro.",
+            folder=self.folder,
+        )
+        self.client.force_authenticate(self.user)
+
+        fake = {
+            "source": "ai",
+            "provider": "test",
+            "answer": "Die Prämie beträgt 225,74 Euro [S1].",
+            "sources": [
+                {
+                    "id": "S1",
+                    "document": doc.id,
+                    "document_title": doc.title,
+                    "folder_path": self.folder.full_path,
+                    "page": None,
+                    "snippet": "Prämie ... 225,74 Euro",
+                }
+            ],
+        }
+        with mock.patch("ai.services.answer_question", return_value=fake):
+            resp = self.client.post(
+                self.URL,
+                {"question": "Wie hoch ist die Wüstenrot Prämie?"},
+                format="json",
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["answer"], "Die Prämie beträgt 225,74 Euro [S1].")
+        self.assertEqual(resp.data["sources"][0]["document"], doc.id)
+        self.assertTrue(AuditLogEntry.objects.filter(action="ask").exists())
+
+    def test_ask_scoped_fremde_dokumente_aus(self):
+        self._doc(self.other, "Fremd", "Cornelia vertraulich")
+        self.client.force_authenticate(self.user)
+
+        resp = self.client.post(
+            self.URL, {"question": "Was steht zu Cornelia?"}, format="json"
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["sources"], [])
+
+    def test_ask_filtert_ordner(self):
+        doc = self._doc(self.user, "Helvetia", "Helvetia Versicherung", folder=self.folder)
+        self._doc(self.user, "Bank", "Helvetia Banktext ohne Ordner")
+        self.client.force_authenticate(self.user)
+
+        resp = self.client.post(
+            self.URL,
+            {"question": "Helvetia", "folder": self.folder.id},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual([s["document"] for s in resp.data["sources"]], [doc.id])
+
+    def test_ask_zu_kurze_frage_400(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.post(self.URL, {"question": "hi"}, format="json")
+        self.assertEqual(resp.status_code, 400)
+
+
 class MailClassificationRuleTests(TestCase):
     """E-Mail-spezifische Regeln (STOAA Stufe 4): subject_contains / from_contains.
 

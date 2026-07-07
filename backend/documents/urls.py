@@ -22,6 +22,7 @@ urlpatterns = [
     path("documents/upload/", views.DocumentUploadView.as_view(), name="document-upload"),
     path("system/backup-status/", views.BackupStatusView.as_view(), name="backup-status"),
     path("system/ocr-health/", views.OCRHealthView.as_view(), name="ocr-health"),
+    path("ask/", views.AskView.as_view(), name="ask"),
     path(
         "system/ocr-health/retry-failed/",
         views.OCRRetryFailedView.as_view(),
