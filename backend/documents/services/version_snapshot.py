@@ -30,10 +30,11 @@ SNAPSHOT_SCHEMA_VERSION = 1
 def build_snapshot_payload(document: "Document", *, taken_at) -> Dict[str, Any]:
     """Baut den deterministischen Snapshot-Dict aus dem *heutigen* Dokument-Stand.
 
-    Enthält Metadaten (title, document_type, correspondent, storage_path, owner,
-    status, retention), die sortierte Tag-Liste (id+name) und die Custom-Fields
-    ({field_name: value}). ``snapshot_taken_at`` ist Teil des Snapshots, damit der
-    Erfassungszeitpunkt mit versiegelt (und damit unveränderlich) ist.
+    Enthält Metadaten (title, document_type, correspondent, storage_path, folder,
+    owner, status, retention), die sortierte Tag-Liste (id+name) und die
+    Custom-Fields ({field_name: value}). ``snapshot_taken_at`` ist Teil des
+    Snapshots, damit der Erfassungszeitpunkt mit versiegelt (und damit
+    unveränderlich) ist.
     """
     owner = document.owner
     metadata = {
@@ -41,6 +42,7 @@ def build_snapshot_payload(document: "Document", *, taken_at) -> Dict[str, Any]:
         "document_type": document.document_type.name if document.document_type else None,
         "correspondent": document.correspondent.name if document.correspondent else None,
         "storage_path": document.storage_path.name if document.storage_path else None,
+        "folder": document.folder.full_path if document.folder else None,
         "owner": owner.username if owner else None,
         "status": document.status,
         "retention_until": (

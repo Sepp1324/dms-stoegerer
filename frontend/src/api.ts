@@ -152,6 +152,9 @@ export interface DocumentItem {
   correspondent_name: string | null;
   document_type: number | null;
   document_type_name: string | null;
+  folder: number | null;
+  folder_name: string | null;
+  folder_path: string | null;
   tags: { id: number; name: string; color: string }[];
   page_count: number | null;
   // Verarbeitungs-Rollup der aktuellen Version (STOAA-248): spart der Liste den
@@ -494,6 +497,8 @@ export interface DocumentQuery {
   // aus dem Kind-Ticket; unbekannte Params werden vom Backend ignoriert, daher
   // hier bereits vorbereitet.
   storage_path?: number | "";
+  // Fachlicher ecoDMS-artiger Ordnerfilter. ``"none"`` zeigt Dokumente ohne Ordner.
+  folder?: number | "none" | "";
   // Verarbeitungsstatus-Filter (STOAA-248): grober UI-Bucket, leer = kein Filter.
   processing_state?: ProcessingStateFilter | "";
   // Fachlicher Inbox-Filter: offene oder bereits geprüfte Dokumente.
@@ -770,6 +775,7 @@ export interface DocumentPatch {
   correspondent?: number | null;
   document_type?: number | null;
   storage_path?: number | null;
+  folder?: number | null;
   tag_ids?: number[];
   // Zusatzfeld-Werte als Upsert-Liste (STOAA-112): jeder Eintrag mit
   // CustomField-PK und kanonischem Wert. Leerer Wert = Feld am Dokument löschen.
@@ -998,6 +1004,14 @@ export async function getTags(): Promise<TagRef[]> {
 }
 export async function getStoragePaths(): Promise<NamedRef[]> {
   return listAll<NamedRef>("/storage-paths/");
+}
+export interface FolderRef extends NamedRef {
+  parent: number | null;
+  full_path: string;
+  document_count: number;
+}
+export async function getFolders(): Promise<FolderRef[]> {
+  return listAll<FolderRef>("/folders/");
 }
 
 // --- Zusatzfelder (Custom Fields) ---
@@ -1379,6 +1393,8 @@ export const createStoragePath = (name: string) =>
     name,
     path_template: "archive/{jahr}/{korrespondent}/{titel}",
   });
+export const createFolder = (name: string, parent: number | null = null) =>
+  postJson<FolderRef>("/folders/", { name, parent });
 
 // Hilfsfunktion: paginierte Liste in ein flaches Array einsammeln (erste Seite genügt hier).
 async function listAll<T>(path: string): Promise<T[]> {

@@ -7,6 +7,7 @@ from .models import (
     CustomField,
     CustomFieldValue,
     Document,
+    DocumentFolder,
     DocumentReminder,
     DocumentShareLink,
     DocumentType,
@@ -67,6 +68,41 @@ class StoragePathSerializer(serializers.ModelSerializer):
             # Beim Inline-Anlegen genügt ein Name; Template hat einen Default.
             "path_template": {"required": False},
         }
+
+
+class DocumentFolderSerializer(serializers.ModelSerializer):
+    full_path = serializers.CharField(read_only=True)
+    document_count = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = DocumentFolder
+        fields = ("id", "name", "parent", "full_path", "document_count")
+        extra_kwargs = {
+            "parent": {"required": False},
+        }
+
+    def validate(self, attrs):
+        parent = attrs.get("parent", getattr(self.instance, "parent", None))
+        name = attrs.get("name", getattr(self.instance, "name", None))
+        if self.instance is not None and parent is not None:
+            if parent.pk == self.instance.pk:
+                raise serializers.ValidationError("Ein Ordner kann nicht sein eigener Parent sein.")
+            cursor = parent.parent
+            while cursor is not None:
+                if cursor.pk == self.instance.pk:
+                    raise serializers.ValidationError(
+                        "Ein Ordner kann nicht in einen eigenen Unterordner verschoben werden."
+                    )
+                cursor = cursor.parent
+        if name:
+            siblings = DocumentFolder.objects.filter(name=name, parent=parent)
+            if self.instance is not None:
+                siblings = siblings.exclude(pk=self.instance.pk)
+            if siblings.exists():
+                raise serializers.ValidationError(
+                    "In diesem Ordner existiert bereits ein Unterordner mit diesem Namen."
+                )
+        return attrs
 
 
 class ClassificationRuleSerializer(serializers.ModelSerializer):
@@ -231,6 +267,12 @@ class DocumentSerializer(serializers.ModelSerializer):
     storage_path_name = serializers.CharField(
         source="storage_path.name", read_only=True, default=None
     )
+    folder_name = serializers.CharField(
+        source="folder.name", read_only=True, default=None
+    )
+    folder_path = serializers.CharField(
+        source="folder.full_path", read_only=True, default=None
+    )
     # Archivnummer (STOAA-284/285): read-only – die ASN ist unveränderlich und
     # wird serverseitig vergeben. ``asn_label`` liefert die kanonische Anzeigeform
     # ``ASN000123`` fürs Frontend (Detailansicht/QR-Download).
@@ -258,6 +300,9 @@ class DocumentSerializer(serializers.ModelSerializer):
             "document_type_name",
             "storage_path",
             "storage_path_name",
+            "folder",
+            "folder_name",
+            "folder_path",
             "tags",
             "tag_ids",
             "owner",

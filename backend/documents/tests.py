@@ -23,6 +23,7 @@ from .models import (
     CustomField,
     CustomFieldValue,
     Document,
+    DocumentFolder,
     DocumentReminder,
     DocumentShareLink,
     DocumentType,
@@ -520,6 +521,82 @@ class StoragePathFilterTests(APITestCase):
         self.client.force_authenticate(self.user)
         resp = self.client.get(f"/api/documents/?tag={self.tag_x.id}")
         self.assertEqual(self._ids(resp), {self.doc_a.id})
+
+
+class DocumentFolderTests(APITestCase):
+    """EcoDMS-artige Ordnerstruktur: Baum, Filter und Dokument-Metadaten."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(
+            username="folderuser", password="pw", role="user"
+        )
+        cls.other = User.objects.create_user(
+            username="folderother", password="pw", role="user"
+        )
+        cls.root = DocumentFolder.objects.create(name="Versicherungen")
+        cls.child = DocumentFolder.objects.create(name="Wüstenrot", parent=cls.root)
+        cls.doc_child = Document.objects.create(
+            title="Polizze", owner=cls.user, folder=cls.child
+        )
+        cls.doc_root = Document.objects.create(
+            title="Allgemein", owner=cls.user, folder=cls.root
+        )
+        cls.doc_none = Document.objects.create(title="Ohne Ordner", owner=cls.user)
+        cls.foreign = Document.objects.create(
+            title="Fremd", owner=cls.other, folder=cls.child
+        )
+
+    def _ids(self, resp):
+        data = resp.json()
+        return {d["id"] for d in data["results"]}
+
+    def test_folder_api_liefert_full_path_und_owner_scoped_count(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.get("/api/folders/")
+        self.assertEqual(resp.status_code, 200)
+        folders = {f["id"]: f for f in resp.json()["results"]}
+        self.assertEqual(folders[self.child.id]["full_path"], "Versicherungen / Wüstenrot")
+        # Nur eigenes Dokument wird gezählt, fremder Owner nicht.
+        self.assertEqual(folders[self.child.id]["document_count"], 1)
+
+    def test_document_list_filtert_folder(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.get(f"/api/documents/?folder={self.child.id}")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._ids(resp), {self.doc_child.id})
+
+    def test_document_list_filtert_ohne_ordner(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.get("/api/documents/?folder=none")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._ids(resp), {self.doc_none.id})
+
+    def test_document_serializer_enthaelt_folder_path(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.get(f"/api/documents/{self.doc_child.id}/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["folder"], self.child.id)
+        self.assertEqual(resp.data["folder_name"], "Wüstenrot")
+        self.assertEqual(resp.data["folder_path"], "Versicherungen / Wüstenrot")
+
+    def test_folder_cycle_wird_abgelehnt(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.patch(
+            f"/api/folders/{self.root.id}/",
+            {"parent": self.child.id},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_folder_name_muss_im_selben_parent_eindeutig_sein(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.post(
+            "/api/folders/",
+            {"name": "Wüstenrot", "parent": self.root.id},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400)
 
 
 class MailClassificationRuleTests(TestCase):

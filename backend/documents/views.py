@@ -13,6 +13,7 @@ from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import connection
 from django.db.models import Case, DecimalField, Q, Value, When
+from django.db.models import Count
 from django.db.models.functions import Cast
 from django.http import FileResponse, Http404, HttpResponse
 from django.utils import timezone
@@ -65,6 +66,7 @@ from .models import (
     CustomField,
     CustomFieldValue,
     Document,
+    DocumentFolder,
     DocumentReminder,
     DocumentShareLink,
     DocumentType,
@@ -82,6 +84,7 @@ from .serializers import (
     CustomFieldSerializer,
     DocumentReminderSerializer,
     DocumentSerializer,
+    DocumentFolderSerializer,
     DocumentShareLinkSerializer,
     DocumentTypeSerializer,
     DocumentVersionSerializer,
@@ -757,6 +760,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
       * ``correspondent`` – Filter auf Korrespondenten-ID
       * ``document_type`` – Filter auf Dokumenttyp-ID
       * ``storage_path``  – Filter auf Speicherpfad-ID
+      * ``folder``        – Filter auf Ordner-ID; ``none`` zeigt Dokumente ohne Ordner
       * ``tag``           – Filter auf Tag-ID (mehrfach angebbar → ODER-Verknüpfung,
                             z. B. ``?tag=1&tag=2``)
       * ``ordering``      – Sortierung, z. B. ``added_at``/``-added_at`` (Datum)
@@ -780,7 +784,11 @@ class DocumentViewSet(viewsets.ModelViewSet):
         qs = (
             Document.objects.all()
             .select_related(
-                "correspondent", "document_type", "storage_path", "current_version"
+                "correspondent",
+                "document_type",
+                "storage_path",
+                "folder",
+                "current_version",
             )
             .prefetch_related(
                 "tags", "versions", "custom_field_values__field"
@@ -883,6 +891,11 @@ class DocumentViewSet(viewsets.ModelViewSet):
             qs = qs.filter(document_type_id=params["document_type"])
         if params.get("storage_path"):
             qs = qs.filter(storage_path_id=params["storage_path"])
+        folder = params.get("folder")
+        if folder == "none":
+            qs = qs.filter(folder__isnull=True)
+        elif folder:
+            qs = qs.filter(folder_id=folder)
         review_status = params.get("review_status")
         if review_status in {choice for choice, _label in Document.ReviewStatus.choices}:
             qs = qs.filter(review_status=review_status)
@@ -1114,6 +1127,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
             "storage_path": (
                 document.storage_path.name if document.storage_path_id else None
             ),
+            "folder": document.folder.full_path if document.folder_id else None,
             "tags": sorted(t.name for t in document.tags.all()),
         }
 
@@ -1655,6 +1669,22 @@ class StoragePathViewSet(viewsets.ModelViewSet):
     queryset = StoragePath.objects.all()
     serializer_class = StoragePathSerializer
     permission_classes = [ReadOnlyOrCanWrite]
+
+
+class DocumentFolderViewSet(viewsets.ModelViewSet):
+    serializer_class = DocumentFolderSerializer
+    permission_classes = [ReadOnlyOrCanWrite]
+
+    def get_queryset(self):
+        user = self.request.user
+        count_filter = None
+        if not getattr(user, "is_dms_admin", False):
+            count_filter = Q(documents__owner=user)
+        return (
+            DocumentFolder.objects.select_related("parent")
+            .annotate(document_count=Count("documents", filter=count_filter))
+            .order_by("parent__name", "name")
+        )
 
 
 class ClassificationRuleViewSet(viewsets.ModelViewSet):

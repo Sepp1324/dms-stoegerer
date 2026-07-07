@@ -60,6 +60,8 @@ export function DetailMeta({
         <dd>{doc.correspondent_name ?? "—"}</dd>
         <dt>Typ</dt>
         <dd>{doc.document_type_name ?? "—"}</dd>
+        <dt>Ordner</dt>
+        <dd>{doc.folder_path ?? "—"}</dd>
         <dt>Ablagepfad</dt>
         <dd>{doc.storage_path_name ?? "—"}</dd>
         <dt>Aufgenommen</dt>
