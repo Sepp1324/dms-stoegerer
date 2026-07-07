@@ -1,4 +1,4 @@
-"""ASN-Barcode-Erkennung: Code128 + QR via pyzbar.
+"""ASN-Barcode-Erkennung nach paperless-ngx-Vorbild.
 
 Erkennt ASN-Barcodes auf Dokumentseiten BEVOR die Text-Regex greift.
 Keine ASN-Vergabe-Logik – nur Extraktion; der bestehende match_and_reconcile
@@ -7,14 +7,23 @@ im asn-Service bleibt allein zuständig für Counter/Audit/Reconcile.
 Konfiguration (Django-Settings / Env):
   ASN_BARCODE_ENABLED  – default True
   ASN_BARCODE_PREFIX   – default "ASN" (case-insensitiv)
+  ASN_BARCODE_SCANNER  – "ZXING" (default) oder "PYZBAR"
+  ASN_BARCODE_DPI      – default 300
+  ASN_BARCODE_UPSCALE  – default 2.0
+  ASN_BARCODE_MAX_PAGES – 0 = alle Seiten
   ASN_BARCODE_PAGES    – komma-getrennte Seitenzahlen (1-basiert) oder leer = alle
 """
 from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from django.conf import settings
+
+if TYPE_CHECKING:
+    from PIL import Image
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +34,10 @@ def _enabled() -> bool:
 
 def _prefix() -> str:
     return getattr(settings, "ASN_BARCODE_PREFIX", "ASN")
+
+
+def _scanner() -> str:
+    return str(getattr(settings, "ASN_BARCODE_SCANNER", "ZXING")).upper()
 
 
 def _page_filter() -> list[int] | None:
@@ -53,21 +66,83 @@ def _dpi() -> int:
         return 300
 
 
+def _upscale() -> float:
+    raw = getattr(settings, "ASN_BARCODE_UPSCALE", 2.0)
+    try:
+        return max(1.0, float(raw))
+    except (TypeError, ValueError):
+        return 2.0
+
+
+def _max_pages() -> int:
+    raw = getattr(settings, "ASN_BARCODE_MAX_PAGES", 0)
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _extract_asn_from_payload(payload: str, prefix: str) -> int | None:
     """Extrahiert die ASN-Zahl aus einem Barcode-Payload.
 
-    Akzeptiert:
-      - Code128: "<PREFIX><Ziffern>" z. B. "ASN000123"
-      - QR: identisches Format (render_qr erzeugt "ASN000123")
+    Paperless-ngx-Logik: Der Barcode muss mit dem ASN-Prefix beginnen. Danach
+    werden alle Nicht-Ziffern entfernt und die restliche Zahl wird als ASN
+    gelesen. Dadurch funktionieren auch Payloads wie ``ASN: 000123``.
     """
-    pattern = re.compile(
-        r"^" + re.escape(prefix) + r"\s*([0-9]+)$",
-        re.IGNORECASE,
-    )
-    m = pattern.match(payload.strip())
-    if m:
-        return int(m.group(1))
-    return None
+    value = payload.strip()
+    if not value.lower().startswith(prefix.lower()):
+        return None
+    suffix = value[len(prefix) :].strip()
+    digits = re.sub(r"\D", "", suffix)
+    return int(digits) if digits else None
+
+
+def _read_barcodes_zxing(image: "Image.Image") -> list[tuple[str, str]]:
+    import zxingcpp
+
+    result = []
+    for barcode in zxingcpp.read_barcodes(image):
+        if barcode.text:
+            result.append((str(barcode.format), barcode.text))
+    return result
+
+
+def _read_barcodes_pyzbar(image: "Image.Image") -> list[tuple[str, str]]:
+    from pyzbar.pyzbar import ZBarSymbol, decode
+
+    result = []
+    for barcode in decode(image, symbols=[ZBarSymbol.QRCODE, ZBarSymbol.CODE128]):
+        if barcode.data:
+            result.append(
+                (barcode.type, barcode.data.decode("utf-8", errors="ignore"))
+            )
+    return result
+
+
+def _reader() -> tuple[str, Callable[["Image.Image"], list[tuple[str, str]]]]:
+    scanner = _scanner()
+    if scanner == "PYZBAR":
+        return "PYZBAR", _read_barcodes_pyzbar
+    return "ZXING", _read_barcodes_zxing
+
+
+def _page_numbers(pdf_path: str, page_filter: list[int] | None) -> list[int] | None:
+    if page_filter is not None:
+        return [idx + 1 for idx in page_filter if idx >= 0]
+
+    max_pages = _max_pages()
+    if max_pages == 0:
+        return None
+
+    try:
+        from pikepdf import Pdf
+
+        with Pdf.open(pdf_path) as pdf:
+            count = len(pdf.pages)
+    except Exception:
+        return list(range(1, max_pages + 1))
+
+    return list(range(1, min(count, max_pages) + 1))
 
 
 def scan_pdf_for_asn(pdf_path: str) -> int | None:
@@ -80,15 +155,6 @@ def scan_pdf_for_asn(pdf_path: str) -> int | None:
         return None
 
     try:
-        from pyzbar.pyzbar import ZBarSymbol, decode as pyzbar_decode
-    except Exception:
-        logger.warning(
-            "pyzbar nicht verfügbar – ASN-Barcode-Erkennung deaktiviert. "
-            "Bitte libzbar0 + pyzbar installieren."
-        )
-        return None
-
-    try:
         from pdf2image import convert_from_path
     except Exception:
         logger.warning("pdf2image nicht verfügbar – ASN-Barcode-Erkennung übersprungen.")
@@ -96,42 +162,62 @@ def scan_pdf_for_asn(pdf_path: str) -> int | None:
 
     prefix = _prefix()
     page_filter = _page_filter()
+    pages = _page_numbers(pdf_path, page_filter)
     dpi = _dpi()
+    upscale = _upscale()
 
     try:
-        images = convert_from_path(pdf_path, dpi=dpi, fmt="ppm")
+        scanner_name, reader = _reader()
+    except Exception as exc:
+        logger.warning("Barcode-Scanner nicht verfügbar: %s", exc)
+        return None
+
+    logger.debug(
+        "ASN-Barcode-Scan: scanner=%s dpi=%s upscale=%s pages=%s",
+        scanner_name,
+        dpi,
+        upscale,
+        pages or "all",
+    )
+
+    try:
+        if pages is None:
+            images = convert_from_path(pdf_path, dpi=dpi, fmt="ppm")
+        else:
+            images = []
+            for page_no in pages:
+                images.extend(
+                    convert_from_path(
+                        pdf_path,
+                        dpi=dpi,
+                        fmt="ppm",
+                        first_page=page_no,
+                        last_page=page_no,
+                    )
+                )
     except Exception as exc:
         logger.warning("pdf2image Fehler für %s: %s", pdf_path, exc)
         return None
 
     for idx, image in enumerate(images):
-        if page_filter is not None and idx not in page_filter:
-            continue
+        page_no = (pages[idx] if pages is not None and idx < len(pages) else idx + 1)
+        if upscale > 1.0:
+            width, height = image.size
+            image = image.resize((round(width * upscale), round(height * upscale)))
         try:
-            # ZBar decodiert sonst alle unterstützten Symbologien. Auf normalen
-            # Dokumentseiten kann der DataBar-Decoder dabei noisy C-Assertions
-            # auf stderr schreiben. Für ASN brauchen wir ausschließlich QR und
-            # Code128, also scannen wir nur diese beiden Typen.
-            barcodes = pyzbar_decode(
-                image,
-                symbols=[ZBarSymbol.QRCODE, ZBarSymbol.CODE128],
-            )
+            barcodes = reader(image)
         except Exception as exc:
-            logger.warning("pyzbar decode Fehler Seite %d: %s", idx + 1, exc)
+            logger.warning("%s decode Fehler Seite %d: %s", scanner_name, page_no, exc)
             continue
 
-        for barcode in barcodes:
-            try:
-                payload = barcode.data.decode("utf-8", errors="ignore")
-            except Exception:
-                continue
+        for barcode_type, payload in barcodes:
             asn = _extract_asn_from_payload(payload, prefix)
             if asn is not None:
                 logger.debug(
                     "ASN %d per Barcode (%s) auf Seite %d erkannt.",
                     asn,
-                    barcode.type,
-                    idx + 1,
+                    barcode_type,
+                    page_no,
                 )
                 return asn
 

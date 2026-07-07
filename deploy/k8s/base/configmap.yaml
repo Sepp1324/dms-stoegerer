@@ -37,6 +37,10 @@ data:
   # Fehlt libzbar0 im Image → WARN + Fallback auf OCR-Text, kein Pipeline-Crash.
   ASN_BARCODE_ENABLED: "true"
   ASN_BARCODE_PREFIX: "ASN"
+  ASN_BARCODE_SCANNER: "ZXING"
   ASN_BARCODE_DPI: "300"
+  ASN_BARCODE_UPSCALE: "2.0"
+  # 0 = alle Seiten; Paperless-kompatibler Sicherheitshebel für große PDFs.
+  ASN_BARCODE_MAX_PAGES: "0"
   # Leer = alle Seiten; komma-getrennte 1-basierte Seitenzahlen z. B. "1,2"
   ASN_BARCODE_PAGES: ""

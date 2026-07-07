@@ -25,7 +25,9 @@ Pillow==11.0.0
 pillow-heif==0.18.0
 # QR-Codes für die Archivnummer (ASN, STOAA-284/285); rendert als PNG via Pillow
 qrcode==7.4.2
-# ASN-Barcode-Erkennung (Code128 + QR) – braucht libzbar0 als System-Lib (STOAA-515)
+# ASN-Barcode-Erkennung nach paperless-ngx-Vorbild: ZXing bevorzugt, pyzbar als
+# Fallback. pyzbar braucht libzbar0 als System-Lib (STOAA-515).
+zxing-cpp==2.3.0
 pyzbar==0.1.9
 
 # AI-Anbindung (optional je nach Provider)

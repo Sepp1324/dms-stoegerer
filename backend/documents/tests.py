@@ -4450,6 +4450,10 @@ class AsnBarcodeExtractTests(unittest.TestCase):
     def test_case_insensitive(self):
         self.assertEqual(self._extract("asn000123"), 123)
 
+    def test_paperless_style_suffix_cleanup(self):
+        self.assertEqual(self._extract("ASN: 000-123"), 123)
+        self.assertEqual(self._extract("ASN 000 123"), 123)
+
     def test_wrong_prefix(self):
         self.assertIsNone(self._extract("DOC000123"))
 
@@ -4531,11 +4535,11 @@ class AsnMatchAndReconcileBarcodeTests(TestCase):
         self.assertIsNone(asn_mod.parse_asn(""))
         self.assertIsNone(asn_mod.parse_asn(None))
 
-    def test_scan_pdf_graceful_without_pyzbar(self):
-        """Fehlt pyzbar → None zurück, kein Crash."""
+    def test_scan_pdf_graceful_without_scanner(self):
+        """Fehlt der konfigurierte Scanner → None zurück, kein Crash."""
         import sys
         from unittest.mock import patch
-        with patch.dict(sys.modules, {"pyzbar": None, "pyzbar.pyzbar": None}):
+        with patch.dict(sys.modules, {"zxingcpp": None}):
             from importlib import reload
             import documents.services.asn_barcode as mod
             reload(mod)
@@ -4554,33 +4558,75 @@ class AsnMatchAndReconcileBarcodeTests(TestCase):
         finally:
             django.conf.settings.ASN_BARCODE_ENABLED = original
 
-    def test_scan_pdf_limits_zbar_symbols_to_qr_and_code128(self):
-        """ASN-Scan beschränkt ZBar auf QR/Code128 und meidet noisy DataBar."""
+    def test_scan_pdf_uses_zxing_by_default(self):
+        """Paperless-like Default: ZXing liest Payloads seitenweise."""
         from types import SimpleNamespace
         from unittest.mock import MagicMock, patch
 
         import documents.services.asn_barcode as mod
 
+        class FakeImage:
+            size = (100, 100)
+
+            def resize(self, size):
+                self.size = size
+                return self
+
+        read_barcodes = MagicMock(
+            return_value=[SimpleNamespace(text="ASN: 000123", format="QRCode")]
+        )
+        convert_from_path = MagicMock(return_value=[FakeImage()])
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "zxingcpp": SimpleNamespace(read_barcodes=read_barcodes),
+                "pdf2image": SimpleNamespace(convert_from_path=convert_from_path),
+            },
+        ):
+            self.assertEqual(mod.scan_pdf_for_asn("/tmp/doc.pdf"), 123)
+
+        convert_from_path.assert_called_once_with("/tmp/doc.pdf", dpi=300, fmt="ppm")
+        read_barcodes.assert_called_once()
+
+    def test_scan_pdf_limits_zbar_symbols_to_qr_and_code128(self):
+        """ASN-Scan beschränkt ZBar auf QR/Code128 und meidet noisy DataBar."""
+        import django.conf
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock, patch
+
+        import documents.services.asn_barcode as mod
+
+        class FakeImage:
+            size = (100, 100)
+
+            def resize(self, size):
+                self.size = size
+                return self
+
+        original = getattr(django.conf.settings, "ASN_BARCODE_SCANNER", "ZXING")
         fake_symbols = SimpleNamespace(QRCODE="QRCODE", CODE128="CODE128")
         decode = MagicMock(return_value=[])
-        convert_from_path = MagicMock(return_value=[object()])
+        convert_from_path = MagicMock(return_value=[FakeImage()])
 
-        with (
-            patch.dict(
-                "sys.modules",
-                {
-                    "pyzbar": MagicMock(),
-                    "pyzbar.pyzbar": SimpleNamespace(
-                        decode=decode,
-                        ZBarSymbol=fake_symbols,
-                    ),
-                    "pdf2image": SimpleNamespace(
-                        convert_from_path=convert_from_path,
-                    ),
-                },
-            ),
-        ):
-            self.assertIsNone(mod.scan_pdf_for_asn("/tmp/doc.pdf"))
+        try:
+            django.conf.settings.ASN_BARCODE_SCANNER = "PYZBAR"
+            with patch.dict(
+                    "sys.modules",
+                    {
+                        "pyzbar": MagicMock(),
+                        "pyzbar.pyzbar": SimpleNamespace(
+                            decode=decode,
+                            ZBarSymbol=fake_symbols,
+                        ),
+                        "pdf2image": SimpleNamespace(
+                            convert_from_path=convert_from_path,
+                        ),
+                    },
+                ):
+                self.assertIsNone(mod.scan_pdf_for_asn("/tmp/doc.pdf"))
+        finally:
+            django.conf.settings.ASN_BARCODE_SCANNER = original
 
         convert_from_path.assert_called_once_with("/tmp/doc.pdf", dpi=300, fmt="ppm")
         decode.assert_called_once()
