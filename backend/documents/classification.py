@@ -14,7 +14,8 @@ Regel-Schema (``ClassificationRule``):
            an ``Document.mail_subject``/``mail_sender`` hinterlegt); leer/fehlend
            bedeutet keine Bedingung (rückwärtskompatibel zu reinen Text-Regeln).
   then:  {"document_type": "Rechnung", "correspondent": "Stadtwerke",
-          "tags": ["Finanzen"], "storage_path": "Rechnungen"}
+          "tags": ["Finanzen"], "storage_path": "Rechnungen",
+          "folder": "Versicherungen / Wüstenrot"}
          – Einzelwerte (Typ/Korrespondent/Ablagepfad) werden nur gesetzt, wenn
            noch nicht belegt; Tags werden ergänzt.
 """
@@ -76,6 +77,23 @@ def rule_matches(rule, text: str, *, subject: str = "", sender: str = "") -> boo
     return bool(checks) and all(checks)
 
 
+def _get_or_create_folder(path: str):
+    """Legt einen fachlichen Ordnerpfad wie ``Akte / Unterordner`` an.
+
+    Regeln speichern bewusst Namen statt IDs: So bleiben sie lesbar, exportierbar
+    und über Umgebungen hinweg stabil. Leere Pfadsegmente werden ignoriert.
+    """
+    from .models import DocumentFolder
+
+    parts = [part.strip() for part in path.split("/") if part.strip()]
+    parent = None
+    folder = None
+    for name in parts:
+        folder, _ = DocumentFolder.objects.get_or_create(name=name, parent=parent)
+        parent = folder
+    return folder
+
+
 def apply_rules(document) -> dict:
     """Wendet alle passenden Regeln (nach Priorität) auf ein Dokument an."""
     from .models import (
@@ -116,6 +134,13 @@ def apply_rules(document) -> dict:
                 defaults={"path_template": "archive/{jahr}/{korrespondent}/{titel}"},
             )
             applied["storage_path"] = sp
+
+        folder_path = str(then.get("folder", "")).strip()
+        if folder_path and document.folder is None:
+            folder = _get_or_create_folder(folder_path)
+            if folder is not None:
+                document.folder = folder
+                applied["folder"] = folder.full_path
 
         for tname in then.get("tags") or []:
             name = str(tname).strip()
