@@ -141,6 +141,11 @@ class ASNParseTests(TestCase):
     def test_parse_asn_strict(self):
         self.assertEqual(asn_service.parse_asn("ASN123"), 123)
         self.assertEqual(asn_service.parse_asn("asn 123"), 123)
+        self.assertEqual(asn_service.parse_asn("ASN: 8062"), 8062)
+        self.assertEqual(asn_service.parse_asn("A S N\n8062"), 8062)
+        self.assertEqual(asn_service.parse_asn("A5N 8062"), 8062)
+        self.assertEqual(asn_service.parse_asn("ASN 8O62"), 8062)
+        self.assertEqual(asn_service.parse_asn("ASN 8I62"), 8162)
         self.assertEqual(asn_service.parse_asn("Rechnung ASN000045 vom 1.1."), 45)
         self.assertEqual(asn_service.parse_asn("erste ASN12 dann ASN34"), 12)
         self.assertIsNone(asn_service.parse_asn("keine Nummer hier"))

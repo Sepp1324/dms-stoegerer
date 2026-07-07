@@ -40,6 +40,19 @@ def _page_filter() -> list[int] | None:
     return result or None
 
 
+def _dpi() -> int:
+    """Rendering-Auflösung fürs Barcode-Scanning.
+
+    Kleine Etiketten brauchen mehr als 150 DPI. 300 ist ein guter Default für
+    Scanner-PDFs; per Env konfigurierbar, falls Backfill deutlich zu langsam ist.
+    """
+    raw = getattr(settings, "ASN_BARCODE_DPI", 300)
+    try:
+        return max(150, int(raw))
+    except (TypeError, ValueError):
+        return 300
+
+
 def _extract_asn_from_payload(payload: str, prefix: str) -> int | None:
     """Extrahiert die ASN-Zahl aus einem Barcode-Payload.
 
@@ -83,9 +96,10 @@ def scan_pdf_for_asn(pdf_path: str) -> int | None:
 
     prefix = _prefix()
     page_filter = _page_filter()
+    dpi = _dpi()
 
     try:
-        images = convert_from_path(pdf_path, dpi=150, fmt="ppm")
+        images = convert_from_path(pdf_path, dpi=dpi, fmt="ppm")
     except Exception as exc:
         logger.warning("pdf2image Fehler für %s: %s", pdf_path, exc)
         return None

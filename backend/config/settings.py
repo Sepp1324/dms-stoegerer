@@ -230,5 +230,6 @@ OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 # pyzbar + libzbar0 müssen installiert sein; fehlen sie → WARN + Fallback auf OCR-Text.
 ASN_BARCODE_ENABLED = os.getenv("ASN_BARCODE_ENABLED", "true").lower() in ("1", "true", "yes")
 ASN_BARCODE_PREFIX = os.getenv("ASN_BARCODE_PREFIX", "ASN")
+ASN_BARCODE_DPI = int(os.getenv("ASN_BARCODE_DPI", "300"))
 # Komma-getrennte Seitenzahlen (1-basiert) oder leer = alle Seiten scannen.
 ASN_BARCODE_PAGES = os.getenv("ASN_BARCODE_PAGES", "")
