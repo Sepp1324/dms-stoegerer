@@ -35,11 +35,13 @@ import WorkflowsPage from "./WorkflowsPage";
 import CustomFieldsAdmin from "./CustomFieldsAdmin";
 import MailAccountsAdmin from "./MailAccountsAdmin";
 import SystemStatusPage from "./SystemStatusPage";
+import InboxPage from "./InboxPage";
 
 // Von-/Bis-Eingaben eines CURRENCY-Zusatzfeld-Filters (STOAA-113).
 type CurrencyRange = { gte: string; lte: string };
 type MainView =
   | "docs"
+  | "inbox"
   | "capture"
   | "rules"
   | "workflows"
@@ -466,6 +468,8 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
           <h1 className="content-title">
             {view === "capture"
               ? "Erfassen"
+              : view === "inbox"
+                ? "Inbox"
               : view === "rules"
                 ? "Regeln"
                 : view === "workflows"
@@ -529,6 +533,11 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
         <div className="content-body">
           {view === "rules" ? (
             <RulesPage canEdit={!!me?.can_write} />
+          ) : view === "inbox" ? (
+            <InboxPage
+              canEdit={!!me?.can_write}
+              onOpenDocument={(docId) => setSelectedId(docId)}
+            />
           ) : view === "workflows" ? (
             <WorkflowsPage canEdit={!!me?.can_write} />
           ) : view === "fields" ? (
@@ -771,6 +780,12 @@ function Sidebar({
           onClick={() => onNavigate("docs")}
           label="Dokumente"
           icon="M6 2h7l5 5v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2m7 1.5V8h4.5z"
+        />
+        <NavItem
+          active={view === "inbox"}
+          onClick={() => onNavigate("inbox")}
+          label="Inbox"
+          icon="M4 4h16v14H7l-3 3V4m4 5h8V7H8zm0 4h5v-2H8z"
         />
         {/* Mobil-Erfassung (STOAA-514): Kamera-Foto → PDF → DMS. Prominent
             direkt unter „Dokumente", damit es am Handy schnell erreichbar ist. */}

@@ -52,8 +52,16 @@ class ASNScanInline(admin.TabularInline):
 @admin.register(Document)
 class DocumentAdmin(admin.ModelAdmin):
     # ASN (STOAA-284/285): read-only anzeigen, filter-/suchbar und sortierbar.
-    list_display = ("asn", "title", "correspondent", "document_type", "added_at", "owner")
-    list_filter = ("document_type", "correspondent", "tags")
+    list_display = (
+        "asn",
+        "title",
+        "correspondent",
+        "document_type",
+        "review_status",
+        "added_at",
+        "owner",
+    )
+    list_filter = ("review_status", "document_type", "correspondent", "tags")
     search_fields = ("title", "asn")
     ordering = ("-added_at",)
     readonly_fields = ("asn",)

@@ -763,6 +763,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
                             oder ``title``/``-title`` (A–Z). Ohne Angabe gilt die
                             Standard-Sortierung (bei ``q`` nach FTS-Relevanz,
                             sonst ``-added_at`` aus ``Document.Meta.ordering``).
+      * ``review_status`` – Fachlicher Inbox-Status: ``needs_review``/``reviewed``.
     """
 
     serializer_class = DocumentSerializer
@@ -882,6 +883,9 @@ class DocumentViewSet(viewsets.ModelViewSet):
             qs = qs.filter(document_type_id=params["document_type"])
         if params.get("storage_path"):
             qs = qs.filter(storage_path_id=params["storage_path"])
+        review_status = params.get("review_status")
+        if review_status in {choice for choice, _label in Document.ReviewStatus.choices}:
+            qs = qs.filter(review_status=review_status)
         # Verarbeitungsstatus-Filter (STOAA-248): grobe UI-Buckets auf den
         # ``processing_state`` der aktuellen Version. Bewusst manuell (kein
         # django-filter). ``processing`` fasst alle In-Flight-States zusammen;
@@ -1465,6 +1469,35 @@ class DocumentViewSet(viewsets.ModelViewSet):
             DocumentVersionSerializer(version).data,
             status=status.HTTP_202_ACCEPTED,
         )
+
+    @action(detail=True, methods=["post"], url_path="mark_reviewed")
+    def mark_reviewed(self, request, pk=None):
+        """Dokument aus der Review-Inbox nehmen.
+
+        Das ist absichtlich eine eigene Action statt freiem PATCH auf
+        ``review_status``: die fachliche Bestätigung ist ein Nutzerereignis und
+        bleibt damit später leicht auditierbar/erweiterbar.
+        """
+        if not request.user.can_write:
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        document = self.get_object()
+        if document.review_status != Document.ReviewStatus.REVIEWED:
+            document.review_status = Document.ReviewStatus.REVIEWED
+            document.save(update_fields=["review_status"])
+            AuditLogEntry.objects.create(
+                actor=request.user,
+                action="mark_reviewed",
+                object_type="Document",
+                object_id=str(document.id),
+                detail={"review_status": Document.ReviewStatus.REVIEWED},
+            )
+
+        serializer = self.get_serializer(document)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
     def _resolve_version_no(self, document, version_no):
         """Löst eine ``version_no`` gegen die DB auf (kein Nutzerpfad).

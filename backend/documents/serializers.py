@@ -272,6 +272,7 @@ class DocumentSerializer(serializers.ModelSerializer):
             "ai_suggested_at",
             "classification",
             "status",
+            "review_status",
             "custom_field_values",
             "versions",
         )
@@ -284,6 +285,7 @@ class DocumentSerializer(serializers.ModelSerializer):
             "ai_suggested_at",
             "classification",
             "status",  # Statuswechsel NUR über submit/approve/reject – nie per PATCH (STOAA-63)
+            "review_status",  # Review-Wechsel nur über mark_reviewed (Inbox-Workflow).
         )
 
     def get_asn_label(self, obj) -> str | None:
