@@ -236,6 +236,7 @@ export interface Classification {
     document_type?: string;
     correspondent?: string;
     storage_path?: string;
+    folder?: string;
     tags?: string[];
   };
 }
@@ -249,6 +250,7 @@ export interface ClassificationRule {
     document_type?: string;
     correspondent?: string;
     storage_path?: string;
+    folder?: string;
     tags?: string[];
   };
 }

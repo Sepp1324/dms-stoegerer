@@ -666,6 +666,39 @@ class MailClassificationRuleTests(TestCase):
         doc.refresh_from_db()
         self.assertEqual(doc.document_type.name, "Rechnung")
 
+    def test_regel_setzt_ordnerpfad_und_legt_hierarchie_an(self):
+        ClassificationRule.objects.create(
+            name="Wuestenrot-Akte",
+            match={"text_contains": ["wüstenrot"]},
+            then={"folder": "Versicherungen / Wüstenrot"},
+        )
+        doc = self._doc(title="Wüstenrot Polizze")
+
+        result = apply_rules(doc)
+
+        self.assertEqual(result["rules"], ["Wuestenrot-Akte"])
+        self.assertEqual(result["applied"]["folder"], "Versicherungen / Wüstenrot")
+        doc.refresh_from_db()
+        self.assertEqual(doc.folder.full_path, "Versicherungen / Wüstenrot")
+
+    def test_regel_ueberschreibt_bestehenden_ordner_nicht(self):
+        existing = DocumentFolder.objects.create(name="Manuell")
+        ClassificationRule.objects.create(
+            name="Auto-Akte",
+            match={"text_contains": ["rechnung"]},
+            then={"folder": "Finanzen / Rechnungen"},
+        )
+        doc = self._doc(title="Rechnung")
+        doc.folder = existing
+        doc.save(update_fields=["folder"])
+
+        result = apply_rules(doc)
+
+        self.assertEqual(result["rules"], ["Auto-Akte"])
+        self.assertNotIn("folder", result["applied"])
+        doc.refresh_from_db()
+        self.assertEqual(doc.folder, existing)
+
     def test_mail_bedingung_feuert_nicht_ohne_mail_metadaten(self):
         ClassificationRule.objects.create(
             name="Nur-Betreff",

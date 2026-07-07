@@ -2,8 +2,10 @@ import { useEffect, useState } from "react";
 import {
   createRule,
   deleteRule,
+  getFolders,
   getRules,
   type ClassificationRule,
+  type FolderRef,
 } from "../api";
 
 function splitList(value: string): string[] {
@@ -15,6 +17,7 @@ function splitList(value: string): string[] {
 
 export default function RulesPage({ canEdit }: { canEdit: boolean }) {
   const [rules, setRules] = useState<ClassificationRule[]>([]);
+  const [folders, setFolders] = useState<FolderRef[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -26,14 +29,18 @@ export default function RulesPage({ canEdit }: { canEdit: boolean }) {
   const [thenType, setThenType] = useState("");
   const [thenCorr, setThenCorr] = useState("");
   const [thenPath, setThenPath] = useState("");
+  const [thenFolder, setThenFolder] = useState("");
   const [thenTags, setThenTags] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
   function load() {
     setLoading(true);
-    getRules()
-      .then(setRules)
+    Promise.all([getRules(), getFolders()])
+      .then(([ruleItems, folderItems]) => {
+        setRules(ruleItems);
+        setFolders(folderItems);
+      })
       .catch((e) => setError(e instanceof Error ? e.message : String(e)))
       .finally(() => setLoading(false));
   }
@@ -42,7 +49,11 @@ export default function RulesPage({ canEdit }: { canEdit: boolean }) {
   const canSave =
     name.trim() &&
     (contains.trim() || regex.trim()) &&
-    (thenType.trim() || thenCorr.trim() || thenPath.trim() || thenTags.trim());
+    (thenType.trim() ||
+      thenCorr.trim() ||
+      thenPath.trim() ||
+      thenFolder.trim() ||
+      thenTags.trim());
 
   async function create() {
     setSaving(true);
@@ -55,6 +66,7 @@ export default function RulesPage({ canEdit }: { canEdit: boolean }) {
       if (thenType.trim()) then.document_type = thenType.trim();
       if (thenCorr.trim()) then.correspondent = thenCorr.trim();
       if (thenPath.trim()) then.storage_path = thenPath.trim();
+      if (thenFolder.trim()) then.folder = thenFolder.trim();
       if (thenTags.trim()) then.tags = splitList(thenTags);
 
       await createRule({ name: name.trim(), priority, enabled: true, match, then });
@@ -64,6 +76,7 @@ export default function RulesPage({ canEdit }: { canEdit: boolean }) {
       setThenType("");
       setThenCorr("");
       setThenPath("");
+      setThenFolder("");
       setThenTags("");
       setPriority(100);
       load();
@@ -136,6 +149,20 @@ export default function RulesPage({ canEdit }: { canEdit: boolean }) {
               <input value={thenPath} onChange={(e) => setThenPath(e.target.value)} placeholder="Rechnungen" />
             </label>
             <label>
+              Ordner
+              <input
+                value={thenFolder}
+                onChange={(e) => setThenFolder(e.target.value)}
+                placeholder="Versicherungen / Wüstenrot"
+                list="rule-folder-options"
+              />
+              <datalist id="rule-folder-options">
+                {folders.map((folder) => (
+                  <option key={folder.id} value={folder.full_path} />
+                ))}
+              </datalist>
+            </label>
+            <label>
               Tags (Komma-getrennt)
               <input value={thenTags} onChange={(e) => setThenTags(e.target.value)} placeholder="Finanzen" />
             </label>
@@ -180,6 +207,7 @@ export default function RulesPage({ canEdit }: { canEdit: boolean }) {
               r.then.document_type && `Typ = ${r.then.document_type}`,
               r.then.correspondent && `Korrespondent = ${r.then.correspondent}`,
               r.then.storage_path && `Ablage = ${r.then.storage_path}`,
+              r.then.folder && `Ordner = ${r.then.folder}`,
               r.then.tags?.length && `Tags = ${r.then.tags.join(", ")}`,
             ]
               .filter(Boolean)
