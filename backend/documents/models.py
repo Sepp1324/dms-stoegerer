@@ -630,6 +630,30 @@ class DocumentVersion(models.Model):
         super().delete(*args, **kwargs)
 
 
+class DocumentPageText(models.Model):
+    """Seitengenauer OCR-/Text-Index einer Dokumentversion.
+
+    ``DocumentVersion.ocr_text`` bleibt der vollständige Text für bestehende
+    Suche/Kompatibilität; dieses Modell macht Quellen im Copilot prüfbar bis
+    auf Seitenebene.
+    """
+
+    version = models.ForeignKey(
+        DocumentVersion, on_delete=models.CASCADE, related_name="page_texts"
+    )
+    page_no = models.PositiveIntegerField()
+    text = models.TextField(blank=True)
+
+    class Meta:
+        verbose_name = "Seitentext"
+        verbose_name_plural = "Seitentexte"
+        ordering = ["version_id", "page_no"]
+        unique_together = ("version", "page_no")
+
+    def __str__(self) -> str:
+        return f"{self.version} Seite {self.page_no}"
+
+
 # ---------------------------------------------------------------------------
 # Regelbasierte Klassifizierung (ecoDMS-artige Vorlage – deterministisch)
 # ---------------------------------------------------------------------------

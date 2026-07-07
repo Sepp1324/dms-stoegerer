@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from html import escape
 
 from .providers import get_provider
 
@@ -194,6 +195,21 @@ def _snippet(text: str, terms: list[str], *, radius: int = 380) -> str:
     return f"{prefix}{cleaned[start:end]}{suffix}"
 
 
+def _highlight(text: str, terms: list[str]) -> str:
+    """Escaped Snippet mit <mark>-Treffern."""
+    safe = escape(text)
+    for term in sorted(terms, key=len, reverse=True):
+        if not term:
+            continue
+        safe = re.sub(
+            re.escape(escape(term)),
+            lambda match: f"<mark>{match.group(0)}</mark>",
+            safe,
+            flags=re.IGNORECASE,
+        )
+    return safe
+
+
 def _score_document(document, terms: list[str]) -> int:
     version = document.current_version
     text = " ".join(
@@ -215,6 +231,18 @@ def _score_document(document, terms: list[str]) -> int:
     return score
 
 
+def _score_text(text: str, terms: list[str]) -> int:
+    lower = (text or "").lower()
+    if not terms:
+        return 1 if lower.strip() else 0
+    score = 0
+    for term in terms:
+        if term in lower:
+            score += 3
+        score += min(lower.count(term), 5)
+    return score
+
+
 def retrieve_sources(question: str, documents_qs, *, limit: int = 6) -> list[dict]:
     """Findet zitierbare OCR-Quellen innerhalb eines bereits rechtlich gescopten QS."""
     terms = _query_terms(question)
@@ -223,25 +251,51 @@ def retrieve_sources(question: str, documents_qs, *, limit: int = 6) -> list[dic
         version = document.current_version
         if not version or not (version.ocr_text or "").strip():
             continue
-        score = _score_document(document, terms)
-        if score <= 0:
+        page_texts = list(version.page_texts.all())
+        if page_texts:
+            for page in page_texts:
+                score = _score_text(
+                    " ".join(
+                        [
+                            document.title or "",
+                            document.correspondent.name if document.correspondent_id else "",
+                            document.document_type.name if document.document_type_id else "",
+                            document.folder.full_path if document.folder_id else "",
+                            page.text,
+                        ]
+                    ),
+                    terms,
+                )
+                if score > 0:
+                    candidates.append((score, document, page.page_no, page.text))
             continue
-        candidates.append((score, document))
+
+        score = _score_document(document, terms)
+        if score > 0:
+            candidates.append((score, document, None, version.ocr_text))
 
     candidates.sort(key=lambda item: (item[0], item[1].added_at), reverse=True)
     sources = []
-    for idx, (_score, document) in enumerate(candidates[:limit], start=1):
-        version = document.current_version
+    seen: set[tuple[int, int | None]] = set()
+    for _score, document, page_no, text in candidates:
+        key = (document.id, page_no)
+        if key in seen:
+            continue
+        seen.add(key)
+        snippet = _snippet(text, terms)
         sources.append(
             {
-                "id": f"S{idx}",
+                "id": f"S{len(sources) + 1}",
                 "document": document.id,
                 "document_title": document.title,
                 "folder_path": document.folder.full_path if document.folder_id else None,
-                "page": None,
-                "snippet": _snippet(version.ocr_text, terms),
+                "page": page_no,
+                "snippet": snippet,
+                "snippet_html": _highlight(snippet, terms),
             }
         )
+        if len(sources) >= limit:
+            break
     return sources
 
 
@@ -275,6 +329,7 @@ def answer_question(question: str, documents_qs) -> dict:
         (
             f"[{source['id']}] Dokument: {source['document_title']}\n"
             f"Ordner: {source['folder_path'] or '-'}\n"
+            f"Seite: {source['page'] or '-'}\n"
             f"Ausschnitt: {source['snippet']}"
         )
         for source in sources

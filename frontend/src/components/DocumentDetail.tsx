@@ -40,6 +40,7 @@ import { formatIsoDate } from "./documentDetail/format";
 
 interface Props {
   id: number;
+  initialPage?: number | null;
   onBack: () => void;
   correspondents: NamedRef[];
   documentTypes: NamedRef[];
@@ -64,6 +65,7 @@ interface Props {
 // Panels/Helfer liegen als eigene Dateien in diesem Unterordner.
 export default function DocumentDetail({
   id,
+  initialPage,
   onBack,
   correspondents,
   documentTypes,
@@ -170,14 +172,14 @@ export default function DocumentDetail({
       .then((blob) => {
         if (!active) return;
         url = URL.createObjectURL(blob);
-        setPdfUrl(url);
+        setPdfUrl(initialPage ? `${url}#page=${initialPage}` : url);
       })
       .catch((e) => active && setPdfError(e instanceof Error ? e.message : String(e)));
     return () => {
       active = false;
       if (url) URL.revokeObjectURL(url);
     };
-  }, [id, selectedVersionNo]);
+  }, [id, initialPage, selectedVersionNo]);
 
   async function onAddVersion(file: File) {
     setAddBusy(true);

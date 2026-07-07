@@ -11,6 +11,7 @@ from .models import (
     CustomFieldValue,
     Document,
     DocumentFolder,
+    DocumentPageText,
     DocumentType,
     DocumentVersion,
     MailAccount,
@@ -99,6 +100,18 @@ class DocumentVersionAdmin(admin.ModelAdmin):
         "processing_failed_at",
         "processing_attempts",
     )
+
+
+@admin.register(DocumentPageText)
+class DocumentPageTextAdmin(admin.ModelAdmin):
+    list_display = ("version", "page_no", "text_preview")
+    list_filter = ("page_no",)
+    search_fields = ("version__document__title", "text")
+
+    @admin.display(description="Text")
+    def text_preview(self, obj):
+        text = (obj.text or "").strip()
+        return text[:120] + ("…" if len(text) > 120 else "")
 
 
 @admin.register(ClassificationRule)

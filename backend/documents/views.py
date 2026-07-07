@@ -553,6 +553,7 @@ class AskView(APIView):
             Document.objects.select_related(
                 "correspondent", "document_type", "folder", "current_version"
             )
+            .prefetch_related("current_version__page_texts")
             .filter(current_version__ocr_text__gt="")
             .order_by("-added_at")
         )
