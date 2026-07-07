@@ -11,7 +11,7 @@ import img2pdf
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.db import connection
+from django.db import connection, transaction
 from django.db.models import Case, DecimalField, Q, Value, When
 from django.db.models import Count
 from django.db.models.functions import Cast
@@ -1645,6 +1645,243 @@ class DocumentViewSet(viewsets.ModelViewSet):
             )
 
         return Response(result)
+
+    @action(detail=False, methods=["post"], url_path="bulk-update")
+    def bulk_update(self, request):
+        """Metadaten mehrerer Dokumente in einem Schritt ändern.
+
+        Body::
+
+            {
+              "ids": [1, 2, 3],
+              "set": {
+                "folder": 5,
+                "document_type": 2,
+                "correspondent": null,
+                "review_status": "reviewed"
+              },
+              "add_tags": [1, 2],
+              "remove_tags": [3]
+            }
+
+        Nur eigene bzw. für Admins sichtbare Dokumente werden geändert. Fremde
+        oder unbekannte IDs erscheinen als Teilfehler, damit die UI große
+        Auswahlen robust verarbeiten kann, ohne Objekt-Existenz zu leaken.
+        """
+        if not getattr(request.user, "can_write", False):
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        raw_ids = request.data.get("ids")
+        if not isinstance(raw_ids, list) or not raw_ids:
+            return Response(
+                {"detail": "Feld 'ids' muss eine nicht-leere Liste sein."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        requested_ids = []
+        for rid in raw_ids:
+            try:
+                requested_ids.append(int(rid))
+            except (TypeError, ValueError):
+                return Response(
+                    {"detail": f"Ungültige Dokument-ID: {rid!r}."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        requested_ids = list(dict.fromkeys(requested_ids))
+
+        set_values = request.data.get("set") or {}
+        if not isinstance(set_values, dict):
+            return Response(
+                {"detail": "Feld 'set' muss ein Objekt sein."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        def _int_or_none(value, field_name):
+            if value in ("", None):
+                return None
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                raise ValueError(f"Ungültiger Wert für {field_name}: {value!r}.")
+
+        unset = object()
+
+        try:
+            folder_id = (
+                _int_or_none(set_values["folder"], "folder")
+                if "folder" in set_values
+                else unset
+            )
+            document_type_id = (
+                _int_or_none(set_values["document_type"], "document_type")
+                if "document_type" in set_values
+                else unset
+            )
+            correspondent_id = (
+                _int_or_none(set_values["correspondent"], "correspondent")
+                if "correspondent" in set_values
+                else unset
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        review_status = set_values.get("review_status", unset)
+        if review_status is not unset and review_status not in {
+            choice for choice, _label in Document.ReviewStatus.choices
+        }:
+            return Response(
+                {"detail": f"Ungültiger review_status: {review_status!r}."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        def _ids_list(name):
+            raw = request.data.get(name, [])
+            if raw in (None, ""):
+                return []
+            if not isinstance(raw, list):
+                raise ValueError(f"Feld '{name}' muss eine Liste sein.")
+            try:
+                return list(dict.fromkeys(int(value) for value in raw))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Ungültige Tag-ID in '{name}'.") from exc
+
+        try:
+            add_tag_ids = _ids_list("add_tags")
+            remove_tag_ids = _ids_list("remove_tags")
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        if (
+            folder_id is unset
+            and document_type_id is unset
+            and correspondent_id is unset
+            and review_status is unset
+            and not add_tag_ids
+            and not remove_tag_ids
+        ):
+            return Response(
+                {"detail": "Keine Massenänderung angegeben."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        errors = []
+        if (
+            folder_id is not unset
+            and folder_id is not None
+            and not DocumentFolder.objects.filter(id=folder_id).exists()
+        ):
+            errors.append({"field": "folder", "error": "Ordner nicht gefunden."})
+        if (
+            document_type_id is not unset
+            and document_type_id is not None
+            and not DocumentType.objects.filter(id=document_type_id).exists()
+        ):
+            errors.append(
+                {"field": "document_type", "error": "Dokumenttyp nicht gefunden."}
+            )
+        if (
+            correspondent_id is not unset
+            and correspondent_id is not None
+            and not Correspondent.objects.filter(id=correspondent_id).exists()
+        ):
+            errors.append(
+                {"field": "correspondent", "error": "Korrespondent nicht gefunden."}
+            )
+
+        known_tag_ids = set(
+            Tag.objects.filter(id__in=add_tag_ids + remove_tag_ids).values_list(
+                "id", flat=True
+            )
+        )
+        for tag_id in sorted((set(add_tag_ids) | set(remove_tag_ids)) - known_tag_ids):
+            errors.append(
+                {"field": "tags", "id": tag_id, "error": "Tag nicht gefunden."}
+            )
+        if errors:
+            return Response(
+                {"detail": "Ungültige Massenänderung.", "errors": errors},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        owned_ids = list(
+            self.get_queryset().filter(id__in=requested_ids).values_list("id", flat=True)
+        )
+        skipped = [rid for rid in requested_ids if rid not in set(owned_ids)]
+        item_errors = [
+            {"id": rid, "error": "nicht gefunden oder keine Berechtigung"}
+            for rid in skipped
+        ]
+
+        update_fields = []
+        if folder_id is not unset:
+            update_fields.append("folder")
+        if document_type_id is not unset:
+            update_fields.append("document_type")
+        if correspondent_id is not unset:
+            update_fields.append("correspondent")
+        if review_status is not unset:
+            update_fields.append("review_status")
+
+        updated = 0
+        with transaction.atomic():
+            documents = list(self.get_queryset().filter(id__in=owned_ids))
+            for document in documents:
+                if folder_id is not unset:
+                    document.folder_id = folder_id
+                if document_type_id is not unset:
+                    document.document_type_id = document_type_id
+                if correspondent_id is not unset:
+                    document.correspondent_id = correspondent_id
+                if review_status is not unset:
+                    document.review_status = review_status
+                if update_fields:
+                    document.save(update_fields=update_fields)
+                if add_tag_ids:
+                    document.tags.add(*add_tag_ids)
+                if remove_tag_ids:
+                    document.tags.remove(*remove_tag_ids)
+                updated += 1
+
+            if documents:
+                AuditLogEntry.objects.create(
+                    actor=request.user,
+                    action="bulk_update",
+                    object_type="Document",
+                    object_id=f"{len(documents)} Dokumente",
+                    detail={
+                        "ids": sorted(owned_ids),
+                        "set": {
+                            key: value
+                            for key, value in {
+                                "folder": None if folder_id is unset else folder_id,
+                                "document_type": None
+                                if document_type_id is unset
+                                else document_type_id,
+                                "correspondent": None
+                                if correspondent_id is unset
+                                else correspondent_id,
+                                "review_status": None
+                                if review_status is unset
+                                else review_status,
+                            }.items()
+                            if value is not None or key in set_values
+                        },
+                        "add_tags": add_tag_ids,
+                        "remove_tags": remove_tag_ids,
+                        "errors": item_errors,
+                    },
+                )
+
+        return Response(
+            {
+                "updated": updated,
+                "errors": item_errors,
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class TagViewSet(viewsets.ModelViewSet):

@@ -628,6 +628,15 @@ button.link:hover:not(:disabled) {
   color: var(--text);
   background: var(--hover-tint);
 }
+button.secondary {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+button.secondary:hover:not(:disabled) {
+  background: var(--hover-tint);
+  border-color: var(--border-strong);
+}
 
 input,
 select,
@@ -808,6 +817,44 @@ textarea:focus-visible {
   min-width: 8rem;
   text-align: center;
 }
+.bulk-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+  padding: 0.85rem;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.bulk-bar__head,
+.bulk-bar__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+.bulk-bar__actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.bulk-bar__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0.65rem;
+}
+.bulk-bar__grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+.bulk-bar__grid select {
+  width: 100%;
+}
 /* --- Dokument-Karten (Grid) --- */
 .doc-grid {
   display: grid;
@@ -815,6 +862,7 @@ textarea:focus-visible {
   gap: 1rem;
 }
 .doc-card {
+  position: relative;
   display: flex;
   flex-direction: column;
   text-align: left;
@@ -831,11 +879,48 @@ textarea:focus-visible {
   transform: translateY(-2px);
   background: var(--card);
 }
+.doc-card--selected {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
 .doc-card[draggable="true"] {
   cursor: grab;
 }
 .doc-card[draggable="true"]:active {
   cursor: grabbing;
+}
+.doc-card__open {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  width: 100%;
+  min-height: 100%;
+  padding: 0;
+  color: inherit;
+  text-align: left;
+  background: transparent;
+  border-radius: 0;
+}
+.doc-card__open:hover:not(:disabled) {
+  background: transparent;
+}
+.doc-card__select {
+  position: absolute;
+  z-index: 2;
+  top: 0.5rem;
+  left: 0.5rem;
+  display: grid;
+  place-items: center;
+  width: 1.7rem;
+  height: 1.7rem;
+  border-radius: 7px;
+  background: rgba(15, 23, 42, 0.72);
+  border: 1px solid rgba(226, 232, 240, 0.28);
+}
+.doc-card__select input {
+  width: 1rem;
+  height: 1rem;
+  margin: 0;
 }
 .doc-card__preview {
   position: relative;

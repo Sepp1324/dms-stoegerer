@@ -2456,6 +2456,119 @@ class BulkClassifyEndpointTests(APITestCase):
         )
 
 
+class BulkUpdateEndpointTests(APITestCase):
+    """Bulk-Metadatenänderungen für die Dokumentliste."""
+
+    URL = "/api/documents/bulk-update/"
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(username="bulk-u", password="pw", role="user")
+        cls.other = User.objects.create_user(username="bulk-o", password="pw", role="user")
+        cls.guest = User.objects.create_user(username="bulk-g", password="pw", role="guest")
+        cls.folder = DocumentFolder.objects.create(name="Versicherungen")
+        cls.dtype = DocumentType.objects.create(name="Polizze")
+        cls.corr = Correspondent.objects.create(name="Wüstenrot")
+        cls.tag_add = Tag.objects.create(name="Wichtig")
+        cls.tag_remove = Tag.objects.create(name="Alt")
+
+    def _doc(self, title, owner=None):
+        return Document.objects.create(title=title, owner=owner or self.user)
+
+    def test_bulk_update_setzt_metadaten_und_tags(self):
+        doc_a = self._doc("A")
+        doc_b = self._doc("B")
+        doc_a.tags.add(self.tag_remove)
+        doc_b.tags.add(self.tag_remove)
+        self.client.force_authenticate(self.user)
+
+        resp = self.client.post(
+            self.URL,
+            {
+                "ids": [doc_a.id, doc_b.id],
+                "set": {
+                    "folder": self.folder.id,
+                    "document_type": self.dtype.id,
+                    "correspondent": self.corr.id,
+                    "review_status": Document.ReviewStatus.REVIEWED,
+                },
+                "add_tags": [self.tag_add.id],
+                "remove_tags": [self.tag_remove.id],
+            },
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["updated"], 2)
+        self.assertEqual(resp.data["errors"], [])
+        for doc in (doc_a, doc_b):
+            doc.refresh_from_db()
+            self.assertEqual(doc.folder, self.folder)
+            self.assertEqual(doc.document_type, self.dtype)
+            self.assertEqual(doc.correspondent, self.corr)
+            self.assertEqual(doc.review_status, Document.ReviewStatus.REVIEWED)
+            self.assertTrue(doc.tags.filter(id=self.tag_add.id).exists())
+            self.assertFalse(doc.tags.filter(id=self.tag_remove.id).exists())
+        self.assertTrue(AuditLogEntry.objects.filter(action="bulk_update").exists())
+
+    def test_bulk_update_kann_ordner_leeren(self):
+        doc = self._doc("A")
+        doc.folder = self.folder
+        doc.save(update_fields=["folder"])
+        self.client.force_authenticate(self.user)
+
+        resp = self.client.post(
+            self.URL,
+            {"ids": [doc.id], "set": {"folder": None}},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        doc.refresh_from_db()
+        self.assertIsNone(doc.folder)
+
+    def test_bulk_update_fremde_ids_als_errors(self):
+        mine = self._doc("Mine")
+        foreign = self._doc("Foreign", owner=self.other)
+        self.client.force_authenticate(self.user)
+
+        resp = self.client.post(
+            self.URL,
+            {"ids": [mine.id, foreign.id], "set": {"folder": self.folder.id}},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["updated"], 1)
+        self.assertEqual(resp.data["errors"][0]["id"], foreign.id)
+        foreign.refresh_from_db()
+        self.assertIsNone(foreign.folder)
+
+    def test_bulk_update_gast_bekommt_403(self):
+        doc = self._doc("Guest", owner=self.guest)
+        self.client.force_authenticate(self.guest)
+
+        resp = self.client.post(
+            self.URL,
+            {"ids": [doc.id], "set": {"folder": self.folder.id}},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 403)
+
+    def test_bulk_update_unbekannter_tag_400(self):
+        doc = self._doc("A")
+        self.client.force_authenticate(self.user)
+
+        resp = self.client.post(
+            self.URL,
+            {"ids": [doc.id], "add_tags": [999999]},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 400)
+
+
 class DocumentProcessingStateMachineTests(TestCase):
     """Regressionstests für die fachliche Dokumentverarbeitungs-State-Machine."""
 

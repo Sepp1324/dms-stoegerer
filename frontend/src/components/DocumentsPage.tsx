@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState, type DragEvent, type ReactNode } from "react";
 import {
+  bulkClassifyDocuments,
+  bulkUpdateDocuments,
   createCorrespondent,
   createDocumentType,
   createFolder,
@@ -24,6 +26,7 @@ import {
   type Me,
   type NamedRef,
   type ProcessingStateFilter,
+  type ReviewStatus,
   type TagRef,
   type User,
 } from "../api";
@@ -136,6 +139,16 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   const [draggingDocumentId, setDraggingDocumentId] = useState<number | null>(null);
   const [folderDropBusy, setFolderDropBusy] = useState<number | null>(null);
   const [folderDropError, setFolderDropError] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [bulkFolder, setBulkFolder] = useState("");
+  const [bulkDocumentType, setBulkDocumentType] = useState("");
+  const [bulkCorrespondent, setBulkCorrespondent] = useState("");
+  const [bulkReviewStatus, setBulkReviewStatus] = useState("");
+  const [bulkAddTag, setBulkAddTag] = useState("");
+  const [bulkRemoveTag, setBulkRemoveTag] = useState("");
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkError, setBulkError] = useState<string | null>(null);
+  const [bulkMessage, setBulkMessage] = useState<string | null>(null);
   // Zusatzfeld-Definitionen (STOAA-113) für Anzeige (DocumentDetail) + Filter.
   const [customFields, setCustomFields] = useState<CustomField[]>([]);
   // CURRENCY-Filter: pro Feld-ID Von-/Bis-Eingaben (roh, deutsches Format).
@@ -443,6 +456,114 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     }
   }
 
+  function toggleSelected(documentId: number, selected: boolean) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (selected) next.add(documentId);
+      else next.delete(documentId);
+      return next;
+    });
+    setBulkError(null);
+    setBulkMessage(null);
+  }
+
+  function selectCurrentPage() {
+    setSelectedIds(new Set(docs.map((doc) => doc.id)));
+    setBulkError(null);
+    setBulkMessage(null);
+  }
+
+  function clearSelection() {
+    setSelectedIds(new Set());
+    setBulkError(null);
+    setBulkMessage(null);
+  }
+
+  function _bulkNumber(value: string): number | null | undefined {
+    if (!value) return undefined;
+    if (value === "__none") return null;
+    return Number(value);
+  }
+
+  async function applyBulkUpdate() {
+    const ids = Array.from(selectedIds);
+    const set: {
+      folder?: number | null;
+      document_type?: number | null;
+      correspondent?: number | null;
+      review_status?: ReviewStatus;
+    } = {};
+    const folderValue = _bulkNumber(bulkFolder);
+    const documentTypeValue = _bulkNumber(bulkDocumentType);
+    const correspondentValue = _bulkNumber(bulkCorrespondent);
+    if (folderValue !== undefined) set.folder = folderValue;
+    if (documentTypeValue !== undefined) set.document_type = documentTypeValue;
+    if (correspondentValue !== undefined) set.correspondent = correspondentValue;
+    if (bulkReviewStatus) set.review_status = bulkReviewStatus as ReviewStatus;
+
+    const add_tags = bulkAddTag ? [Number(bulkAddTag)] : [];
+    const remove_tags = bulkRemoveTag ? [Number(bulkRemoveTag)] : [];
+    if (
+      Object.keys(set).length === 0 &&
+      add_tags.length === 0 &&
+      remove_tags.length === 0
+    ) {
+      setBulkError("Wähle mindestens eine Änderung aus.");
+      return;
+    }
+
+    setBulkBusy(true);
+    setBulkError(null);
+    setBulkMessage(null);
+    try {
+      const result = await bulkUpdateDocuments(ids, { set, add_tags, remove_tags });
+      setBulkMessage(
+        `${result.updated} Dokument${result.updated === 1 ? "" : "e"} aktualisiert${
+          result.errors.length ? `, ${result.errors.length} übersprungen` : ""
+        }.`,
+      );
+      setSelectedIds(new Set());
+      setBulkFolder("");
+      setBulkDocumentType("");
+      setBulkCorrespondent("");
+      setBulkReviewStatus("");
+      setBulkAddTag("");
+      setBulkRemoveTag("");
+      setFolders(await getFolders());
+      setReloadKey((k) => k + 1);
+    } catch (err) {
+      setBulkError(err instanceof Error ? err.message : "Massenänderung fehlgeschlagen.");
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  async function applyBulkClassify() {
+    const ids = Array.from(selectedIds);
+    setBulkBusy(true);
+    setBulkError(null);
+    setBulkMessage(null);
+    try {
+      const result = await bulkClassifyDocuments(ids);
+      if (result.task_id) {
+        setBulkMessage(`Reklassifizierung läuft im Hintergrund (${ids.length} Dokumente).`);
+      } else {
+        setBulkMessage(
+          `${result.updated} aktualisiert, ${result.unchanged ?? 0} unverändert${
+            result.errors.length ? `, ${result.errors.length} übersprungen` : ""
+          }.`,
+        );
+      }
+      setSelectedIds(new Set());
+      setFolders(await getFolders());
+      setReloadKey((k) => k + 1);
+    } catch (err) {
+      setBulkError(err instanceof Error ? err.message : "Reklassifizierung fehlgeschlagen.");
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
   function handleLogout() {
     logout();
     onLogout();
@@ -686,6 +807,34 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
                   />
                 ) : (
                   <>
+                    {selectedIds.size > 0 && (
+                      <BulkActionBar
+                        selectedCount={selectedIds.size}
+                        correspondents={correspondents}
+                        documentTypes={documentTypes}
+                        folders={folders}
+                        tags={tags}
+                        folder={bulkFolder}
+                        documentType={bulkDocumentType}
+                        correspondent={bulkCorrespondent}
+                        reviewStatus={bulkReviewStatus}
+                        addTag={bulkAddTag}
+                        removeTag={bulkRemoveTag}
+                        busy={bulkBusy}
+                        error={bulkError}
+                        message={bulkMessage}
+                        onFolderChange={setBulkFolder}
+                        onDocumentTypeChange={setBulkDocumentType}
+                        onCorrespondentChange={setBulkCorrespondent}
+                        onReviewStatusChange={setBulkReviewStatus}
+                        onAddTagChange={setBulkAddTag}
+                        onRemoveTagChange={setBulkRemoveTag}
+                        onSelectPage={selectCurrentPage}
+                        onClear={clearSelection}
+                        onApply={applyBulkUpdate}
+                        onClassify={applyBulkClassify}
+                      />
+                    )}
                     <p className="muted result-count">
                       {count} {count === 1 ? "Dokument" : "Dokumente"}
                     </p>
@@ -703,7 +852,9 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
                           <DocumentCard
                             key={d.id}
                             doc={d}
+                            selected={selectedIds.has(d.id)}
                             onOpen={() => setSelectedId(d.id)}
+                            onSelectedChange={(checked) => toggleSelected(d.id, checked)}
                             onDragStart={() => {
                               setDraggingDocumentId(d.id);
                               setFolderDropError(null);
@@ -733,6 +884,168 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
         <div className="nav-backdrop" onClick={() => setNavOpen(false)} />
       )}
     </div>
+  );
+}
+
+function BulkActionBar({
+  selectedCount,
+  correspondents,
+  documentTypes,
+  folders,
+  tags,
+  folder,
+  documentType,
+  correspondent,
+  reviewStatus,
+  addTag,
+  removeTag,
+  busy,
+  error,
+  message,
+  onFolderChange,
+  onDocumentTypeChange,
+  onCorrespondentChange,
+  onReviewStatusChange,
+  onAddTagChange,
+  onRemoveTagChange,
+  onSelectPage,
+  onClear,
+  onApply,
+  onClassify,
+}: {
+  selectedCount: number;
+  correspondents: NamedRef[];
+  documentTypes: NamedRef[];
+  folders: FolderRef[];
+  tags: TagRef[];
+  folder: string;
+  documentType: string;
+  correspondent: string;
+  reviewStatus: string;
+  addTag: string;
+  removeTag: string;
+  busy: boolean;
+  error: string | null;
+  message: string | null;
+  onFolderChange: (value: string) => void;
+  onDocumentTypeChange: (value: string) => void;
+  onCorrespondentChange: (value: string) => void;
+  onReviewStatusChange: (value: string) => void;
+  onAddTagChange: (value: string) => void;
+  onRemoveTagChange: (value: string) => void;
+  onSelectPage: () => void;
+  onClear: () => void;
+  onApply: () => void;
+  onClassify: () => void;
+}) {
+  return (
+    <section className="bulk-bar" aria-label="Massenaktionen">
+      <div className="bulk-bar__head">
+        <strong>
+          {selectedCount} Dokument{selectedCount === 1 ? "" : "e"} ausgewählt
+        </strong>
+        <div className="bulk-bar__actions">
+          <button className="link" onClick={onSelectPage} disabled={busy}>
+            Seite auswählen
+          </button>
+          <button className="link" onClick={onClear} disabled={busy}>
+            Auswahl aufheben
+          </button>
+        </div>
+      </div>
+
+      <div className="bulk-bar__grid">
+        <label>
+          Ordner
+          <select value={folder} onChange={(e) => onFolderChange(e.target.value)}>
+            <option value="">Nicht ändern</option>
+            <option value="__none">Ohne Ordner</option>
+            {folders.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.full_path}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Typ
+          <select
+            value={documentType}
+            onChange={(e) => onDocumentTypeChange(e.target.value)}
+          >
+            <option value="">Nicht ändern</option>
+            <option value="__none">Leeren</option>
+            {documentTypes.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Korrespondent
+          <select
+            value={correspondent}
+            onChange={(e) => onCorrespondentChange(e.target.value)}
+          >
+            <option value="">Nicht ändern</option>
+            <option value="__none">Leeren</option>
+            {correspondents.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Review
+          <select
+            value={reviewStatus}
+            onChange={(e) => onReviewStatusChange(e.target.value)}
+          >
+            <option value="">Nicht ändern</option>
+            <option value="needs_review">Needs Review</option>
+            <option value="reviewed">Reviewed</option>
+          </select>
+        </label>
+        <label>
+          Tag hinzufügen
+          <select value={addTag} onChange={(e) => onAddTagChange(e.target.value)}>
+            <option value="">Keinen</option>
+            {tags.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Tag entfernen
+          <select
+            value={removeTag}
+            onChange={(e) => onRemoveTagChange(e.target.value)}
+          >
+            <option value="">Keinen</option>
+            {tags.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+
+      {error && <p className="status status--error">{error}</p>}
+      {message && <p className="status status--ok">{message}</p>}
+      <div className="bulk-bar__footer">
+        <button onClick={onApply} disabled={busy}>
+          {busy ? "Wende an …" : "Änderungen anwenden"}
+        </button>
+        <button className="secondary" onClick={onClassify} disabled={busy}>
+          Regeln anwenden
+        </button>
+      </div>
+    </section>
   );
 }
 
@@ -1476,12 +1789,16 @@ function Pagination({
 
 function DocumentCard({
   doc,
+  selected,
   onOpen,
+  onSelectedChange,
   onDragStart,
   onDragEnd,
 }: {
   doc: DocumentItem;
+  selected: boolean;
   onOpen: () => void;
+  onSelectedChange: (checked: boolean) => void;
   onDragStart: () => void;
   onDragEnd: () => void;
 }) {
@@ -1506,10 +1823,9 @@ function DocumentCard({
   }, [doc.id]);
 
   return (
-    <button
-      className="doc-card"
+    <article
+      className={`doc-card${selected ? " doc-card--selected" : ""}`}
       draggable
-      onClick={onOpen}
       onDragStart={(event) => {
         event.dataTransfer.effectAllowed = "move";
         event.dataTransfer.setData("application/x-dms-document-id", String(doc.id));
@@ -1519,56 +1835,65 @@ function DocumentCard({
       onDragEnd={onDragEnd}
       title={`${doc.title} ziehen, um es in einen Ordner zu verschieben`}
     >
-      <div className="doc-card__preview">
-        {thumb ? (
-          <img className="doc-card__thumb" src={thumb} alt="" />
-        ) : (
-          <svg viewBox="0 0 24 24" width="38" height="38" aria-hidden="true">
-            <path
-              fill="currentColor"
-              d="M6 2h7l5 5v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2m7 1.5V8h4.5z"
+      <label className="doc-card__select" title="Dokument auswählen">
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={(event) => onSelectedChange(event.target.checked)}
+        />
+      </label>
+      <button className="doc-card__open" onClick={onOpen} type="button">
+        <div className="doc-card__preview">
+          {thumb ? (
+            <img className="doc-card__thumb" src={thumb} alt="" />
+          ) : (
+            <svg viewBox="0 0 24 24" width="38" height="38" aria-hidden="true">
+              <path
+                fill="currentColor"
+                d="M6 2h7l5 5v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2m7 1.5V8h4.5z"
+              />
+            </svg>
+          )}
+          {doc.page_count != null && (
+            <span className="doc-card__pages">
+              {doc.page_count} {doc.page_count === 1 ? "Seite" : "Seiten"}
+            </span>
+          )}
+        </div>
+        <div className="doc-card__body">
+          <h3 className="doc-card__title">{doc.title}</h3>
+          <p className="doc-card__meta">
+            {doc.correspondent_name ?? "Unbekannt"}
+            {doc.document_type_name ? ` · ${doc.document_type_name}` : ""}
+            {doc.folder_path ? ` · ${doc.folder_path}` : ""}
+          </p>
+          {/* Suchergebnis-Snippet (STOAA-368/370): nur bei aktiver Suche gefüllt.
+              Backend liefert bereits sicheres HTML (nur <mark>); sanitizeSnippet
+              ist Defense-in-Depth vor dangerouslySetInnerHTML. */}
+          {doc.snippet && (
+            <p
+              className="doc-card__snippet"
+              dangerouslySetInnerHTML={{ __html: sanitizeSnippet(doc.snippet) }}
             />
-          </svg>
-        )}
-        {doc.page_count != null && (
-          <span className="doc-card__pages">
-            {doc.page_count} {doc.page_count === 1 ? "Seite" : "Seiten"}
-          </span>
-        )}
-      </div>
-      <div className="doc-card__body">
-        <h3 className="doc-card__title">{doc.title}</h3>
-        <p className="doc-card__meta">
-          {doc.correspondent_name ?? "Unbekannt"}
-          {doc.document_type_name ? ` · ${doc.document_type_name}` : ""}
-          {doc.folder_path ? ` · ${doc.folder_path}` : ""}
-        </p>
-        {/* Suchergebnis-Snippet (STOAA-368/370): nur bei aktiver Suche gefüllt.
-            Backend liefert bereits sicheres HTML (nur <mark>); sanitizeSnippet
-            ist Defense-in-Depth vor dangerouslySetInnerHTML. */}
-        {doc.snippet && (
-          <p
-            className="doc-card__snippet"
-            dangerouslySetInnerHTML={{ __html: sanitizeSnippet(doc.snippet) }}
-          />
-        )}
-        {doc.tags.length > 0 && (
-          <div className="doc-card__tags">
-            {doc.tags.map((t) => (
-              <span key={t.id} className="tag" style={{ borderColor: t.color, color: t.color }}>
-                {t.name}
-              </span>
-            ))}
-          </div>
-        )}
-        <p className="doc-card__footer">
-          <span className="doc-card__date">
-            {new Date(doc.added_at).toLocaleDateString("de-DE")}
-          </span>
-          <ProcessingBadge state={doc.processing_state} />
-        </p>
-      </div>
-    </button>
+          )}
+          {doc.tags.length > 0 && (
+            <div className="doc-card__tags">
+              {doc.tags.map((t) => (
+                <span key={t.id} className="tag" style={{ borderColor: t.color, color: t.color }}>
+                  {t.name}
+                </span>
+              ))}
+            </div>
+          )}
+          <p className="doc-card__footer">
+            <span className="doc-card__date">
+              {new Date(doc.added_at).toLocaleDateString("de-DE")}
+            </span>
+            <ProcessingBadge state={doc.processing_state} />
+          </p>
+        </div>
+      </button>
+    </article>
   );
 }
 

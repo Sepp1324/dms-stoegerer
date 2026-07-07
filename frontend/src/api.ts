@@ -807,6 +807,35 @@ export async function updateDocument(
   return res.json();
 }
 
+export interface BulkUpdatePatch {
+  set?: {
+    folder?: number | null;
+    document_type?: number | null;
+    correspondent?: number | null;
+    review_status?: ReviewStatus;
+  };
+  add_tags?: number[];
+  remove_tags?: number[];
+}
+export interface BulkActionResult {
+  updated: number;
+  unchanged?: number;
+  errors: { id?: number; error: string; field?: string }[];
+  task_id?: string;
+  status?: string;
+}
+
+export async function bulkUpdateDocuments(
+  ids: number[],
+  patch: BulkUpdatePatch,
+): Promise<BulkActionResult> {
+  return postJson<BulkActionResult>("/documents/bulk-update/", { ids, ...patch });
+}
+
+export async function bulkClassifyDocuments(ids: number[]): Promise<BulkActionResult> {
+  return postJson<BulkActionResult>("/documents/bulk-classify/", { ids });
+}
+
 export async function applySuggestions(
   id: number,
   fields?: string[],
