@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type DragEvent, type ReactNode } from "react";
 import {
   createCorrespondent,
   createDocumentType,
@@ -17,6 +17,7 @@ import {
   getUsers,
   logout,
   setDocumentOwner,
+  updateDocument,
   type CustomField,
   type DocumentItem,
   type FolderRef,
@@ -132,6 +133,9 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   const [tags, setTags] = useState<TagRef[]>([]);
   const [storagePaths, setStoragePaths] = useState<NamedRef[]>([]);
   const [folders, setFolders] = useState<FolderRef[]>([]);
+  const [draggingDocumentId, setDraggingDocumentId] = useState<number | null>(null);
+  const [folderDropBusy, setFolderDropBusy] = useState<number | null>(null);
+  const [folderDropError, setFolderDropError] = useState<string | null>(null);
   // Zusatzfeld-Definitionen (STOAA-113) für Anzeige (DocumentDetail) + Filter.
   const [customFields, setCustomFields] = useState<CustomField[]>([]);
   // CURRENCY-Filter: pro Feld-ID Von-/Bis-Eingaben (roh, deutsches Format).
@@ -404,6 +408,41 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     setPage(1);
   }
 
+  async function moveDocumentToFolder(documentId: number, targetFolder: number | null) {
+    const current = docs.find((doc) => doc.id === documentId);
+    if (current?.folder === targetFolder) return;
+
+    setFolderDropError(null);
+    setFolderDropBusy(documentId);
+    try {
+      const updated = await updateDocument(documentId, { folder: targetFolder });
+      setDocs((prev) =>
+        prev.map((doc) =>
+          doc.id === documentId
+            ? {
+                ...doc,
+                folder: updated.folder,
+                folder_name: updated.folder_name,
+                folder_path: updated.folder_path,
+              }
+            : doc,
+        ),
+      );
+      setFolders(await getFolders());
+      // Wenn gerade ein Ordnerfilter aktiv ist, muss die Karte beim Verschieben
+      // ggf. aus der aktuellen Ansicht verschwinden. Die lokale Aktualisierung
+      // gibt sofort Feedback, der Reload bringt Count/Pagination wieder exakt.
+      setReloadKey((k) => k + 1);
+    } catch (err) {
+      setFolderDropError(
+        err instanceof Error ? err.message : "Dokument konnte nicht verschoben werden.",
+      );
+    } finally {
+      setFolderDropBusy(null);
+      setDraggingDocumentId(null);
+    }
+  }
+
   function handleLogout() {
     logout();
     onLogout();
@@ -474,6 +513,10 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
         onDocumentTypeChange={onDocumentTypeChange}
         onStoragePathChange={onStoragePathChange}
         onFolderChange={onFolderChange}
+        draggingDocumentId={draggingDocumentId}
+        folderDropBusy={folderDropBusy}
+        folderDropError={folderDropError}
+        onDocumentDropToFolder={moveDocumentToFolder}
         onProcessingStateChange={onProcessingStateChange}
         storagePathEnabled={STORAGE_PATH_FILTER_ENABLED}
         currencyFields={currencyFields}
@@ -661,6 +704,11 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
                             key={d.id}
                             doc={d}
                             onOpen={() => setSelectedId(d.id)}
+                            onDragStart={() => {
+                              setDraggingDocumentId(d.id);
+                              setFolderDropError(null);
+                            }}
+                            onDragEnd={() => setDraggingDocumentId(null)}
                           />
                         ),
                       )}
@@ -718,6 +766,10 @@ function Sidebar({
   onDocumentTypeChange,
   onStoragePathChange,
   onFolderChange,
+  draggingDocumentId,
+  folderDropBusy,
+  folderDropError,
+  onDocumentDropToFolder,
   onProcessingStateChange,
   storagePathEnabled,
   currencyFields,
@@ -749,6 +801,10 @@ function Sidebar({
   onDocumentTypeChange: (v: number | "") => void;
   onStoragePathChange: (v: number | "") => void;
   onFolderChange: (v: FolderFilterValue) => void;
+  draggingDocumentId: number | null;
+  folderDropBusy: number | null;
+  folderDropError: string | null;
+  onDocumentDropToFolder: (documentId: number, folderId: number | null) => void;
   onProcessingStateChange: (v: ProcessingStateFilter | "") => void;
   storagePathEnabled: boolean;
   currencyFields: CustomField[];
@@ -887,10 +943,14 @@ function Sidebar({
           <FolderSection
             folders={folders}
             active={folder}
+            draggingDocumentId={draggingDocumentId}
+            folderDropBusy={folderDropBusy}
+            error={folderDropError}
             onSelect={(v) => {
               onFolderChange(v);
               onClose();
             }}
+            onDropDocument={onDocumentDropToFolder}
           />
           <FilterSection
             title="Korrespondenten"
@@ -945,21 +1005,60 @@ const SECTION_SEARCH_THRESHOLD = 10;
 function FolderSection({
   folders,
   active,
+  draggingDocumentId,
+  folderDropBusy,
+  error,
   onSelect,
+  onDropDocument,
 }: {
   folders: FolderRef[];
   active: FolderFilterValue;
+  draggingDocumentId: number | null;
+  folderDropBusy: number | null;
+  error: string | null;
   onSelect: (v: FolderFilterValue) => void;
+  onDropDocument: (documentId: number, folderId: number | null) => void;
 }) {
   const [expanded, setExpanded] = useState(active !== "");
+  const [dropTarget, setDropTarget] = useState<FolderFilterValue | null>(null);
   const items = [
-    { id: "none" as const, label: "Ohne Ordner", count: 0 },
+    { id: "none" as const, label: "Ohne Ordner", count: 0, folderId: null },
     ...folders.map((folder) => ({
       id: folder.id,
       label: folder.full_path,
       count: folder.document_count,
+      folderId: folder.id,
     })),
   ];
+
+  useEffect(() => {
+    if (draggingDocumentId != null) {
+      setExpanded(true);
+      return;
+    }
+    setDropTarget(null);
+  }, [draggingDocumentId]);
+
+  function handleDragOver(event: DragEvent<HTMLButtonElement>, itemId: FolderFilterValue) {
+    if (draggingDocumentId == null) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    setDropTarget(itemId);
+  }
+
+  function handleDrop(
+    event: DragEvent<HTMLButtonElement>,
+    item: (typeof items)[number],
+  ) {
+    event.preventDefault();
+    setDropTarget(null);
+    const raw =
+      event.dataTransfer.getData("application/x-dms-document-id") ||
+      (draggingDocumentId != null ? String(draggingDocumentId) : "");
+    const documentId = Number(raw);
+    if (!Number.isInteger(documentId)) return;
+    onDropDocument(documentId, item.folderId);
+  }
 
   return (
     <div className="nav-section">
@@ -984,12 +1083,24 @@ function FolderSection({
         <ul className="nav-section__list">
           {items.map((item) => {
             const isActive = active === item.id;
+            const isDropTarget = dropTarget === item.id;
             return (
               <li key={String(item.id)}>
                 <button
-                  className={`nav-filter${isActive ? " nav-filter--active" : ""}`}
+                  className={[
+                    "nav-filter",
+                    isActive ? "nav-filter--active" : "",
+                    draggingDocumentId != null ? "nav-filter--drop-enabled" : "",
+                    isDropTarget ? "nav-filter--drop-target" : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
                   onClick={() => onSelect(isActive ? "" : item.id)}
+                  onDragOver={(event) => handleDragOver(event, item.id)}
+                  onDragLeave={() => setDropTarget(null)}
+                  onDrop={(event) => handleDrop(event, item)}
                   aria-current={isActive ? "true" : undefined}
+                  aria-busy={folderDropBusy != null ? "true" : undefined}
                   title={item.label}
                 >
                   <span className="nav-filter__label">{item.label}</span>
@@ -1002,6 +1113,7 @@ function FolderSection({
           })}
         </ul>
       )}
+      {error && <p className="nav-section__error">{error}</p>}
     </div>
   );
 }
@@ -1362,7 +1474,17 @@ function Pagination({
   );
 }
 
-function DocumentCard({ doc, onOpen }: { doc: DocumentItem; onOpen: () => void }) {
+function DocumentCard({
+  doc,
+  onOpen,
+  onDragStart,
+  onDragEnd,
+}: {
+  doc: DocumentItem;
+  onOpen: () => void;
+  onDragStart: () => void;
+  onDragEnd: () => void;
+}) {
   const [thumb, setThumb] = useState<string | null>(null);
 
   useEffect(() => {
@@ -1384,7 +1506,19 @@ function DocumentCard({ doc, onOpen }: { doc: DocumentItem; onOpen: () => void }
   }, [doc.id]);
 
   return (
-    <button className="doc-card" onClick={onOpen} title={doc.title}>
+    <button
+      className="doc-card"
+      draggable
+      onClick={onOpen}
+      onDragStart={(event) => {
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("application/x-dms-document-id", String(doc.id));
+        event.dataTransfer.setData("text/plain", doc.title);
+        onDragStart();
+      }}
+      onDragEnd={onDragEnd}
+      title={`${doc.title} ziehen, um es in einen Ordner zu verschieben`}
+    >
       <div className="doc-card__preview">
         {thumb ? (
           <img className="doc-card__thumb" src={thumb} alt="" />
