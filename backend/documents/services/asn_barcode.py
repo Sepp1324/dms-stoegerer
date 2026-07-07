@@ -67,7 +67,7 @@ def scan_pdf_for_asn(pdf_path: str) -> int | None:
         return None
 
     try:
-        from pyzbar.pyzbar import decode as pyzbar_decode
+        from pyzbar.pyzbar import ZBarSymbol, decode as pyzbar_decode
     except Exception:
         logger.warning(
             "pyzbar nicht verfügbar – ASN-Barcode-Erkennung deaktiviert. "
@@ -94,7 +94,14 @@ def scan_pdf_for_asn(pdf_path: str) -> int | None:
         if page_filter is not None and idx not in page_filter:
             continue
         try:
-            barcodes = pyzbar_decode(image)
+            # ZBar decodiert sonst alle unterstützten Symbologien. Auf normalen
+            # Dokumentseiten kann der DataBar-Decoder dabei noisy C-Assertions
+            # auf stderr schreiben. Für ASN brauchen wir ausschließlich QR und
+            # Code128, also scannen wir nur diese beiden Typen.
+            barcodes = pyzbar_decode(
+                image,
+                symbols=[ZBarSymbol.QRCODE, ZBarSymbol.CODE128],
+            )
         except Exception as exc:
             logger.warning("pyzbar decode Fehler Seite %d: %s", idx + 1, exc)
             continue
