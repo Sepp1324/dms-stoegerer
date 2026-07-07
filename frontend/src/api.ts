@@ -353,6 +353,56 @@ export interface BackupStatus {
   restore_drill: BackupMonitorEntry;
 }
 
+export interface OCRHealthIssue {
+  document_id: number;
+  document_title: string;
+  version_id: number;
+  version_no: number;
+  processing_state: ProcessingState;
+  processing_error: string;
+  processing_failed_step: string;
+  processing_failed_at: string | null;
+  processing_attempts: number;
+  ocr_status: OcrStatus;
+  ocr_error: string;
+  ocr_started_at: string | null;
+  ocr_finished_at: string | null;
+  ocr_text_length: number;
+  created_at: string | null;
+  can_retry: boolean;
+}
+
+export interface OCRHealthStatus {
+  status: BackupHealthStatus;
+  generated_at: string;
+  thresholds: {
+    ocr_success_rate: number;
+    processing_stuck_after_minutes: number;
+  };
+  summary: {
+    total_current_versions: number;
+    ocr_success: number;
+    ocr_failed: number;
+    ocr_running: number;
+    ocr_pending: number;
+    ocr_skipped: number;
+    empty_ocr_text: number;
+    ocr_success_rate: number;
+    processing_ready: number;
+    processing_failed: number;
+    retry_pending: number;
+    stuck_processing: number;
+  };
+  oldest_stuck: OCRHealthIssue | null;
+  issues: OCRHealthIssue[];
+}
+
+export interface OCRRetryResult {
+  queued: number;
+  limit: number;
+  version_ids: number[];
+}
+
 // --- Freigabelinks (Share-Links, STOAA-190/192) ---
 // Verwaltungs-Sicht eines Freigabelinks. Enthält bewusst KEINEN Klartext-Token
 // (der kommt einmalig nur aus der Create-Response, siehe ShareLinkCreated).
@@ -844,6 +894,22 @@ export async function getMe(): Promise<Me> {
 export async function getBackupStatus(): Promise<BackupStatus> {
   const res = await apiFetch("/system/backup-status/");
   if (!res.ok) throw new Error(`Backup-Status laden fehlgeschlagen: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function getOCRHealth(): Promise<OCRHealthStatus> {
+  const res = await apiFetch("/system/ocr-health/");
+  if (!res.ok) throw new Error(`OCR-Status laden fehlgeschlagen: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function retryFailedOCRProcessing(limit = 25): Promise<OCRRetryResult> {
+  const res = await apiFetch("/system/ocr-health/retry-failed/", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ limit }),
+  });
+  if (!res.ok) throw new Error(`Retry fehlgeschlagen: HTTP ${res.status}`);
   return res.json();
 }
 
