@@ -19,7 +19,7 @@ Design-Vorgaben (STOAA-284/285, Vorbild paperless-ngx):
 
 * :func:`generate_asn` – weist einem Dokument atomar die nächste ASN zu.
 * :func:`render_qr`    – rendert den QR-Code des Dokuments als PNG-Bytes.
-* :func:`parse_asn`    – liest die ASN aus (OCR-)Text (Regex ``ASN\\s*([0-9]+)``).
+* :func:`parse_asn`    – liest die ASN aus (OCR-)Text.
 
 Zusätzlich (Pipeline/API): :func:`allocate_asn`, :func:`assign_asn`,
 :func:`coerce_asn`, :func:`format_asn`, :func:`qr_payload`,
@@ -35,12 +35,25 @@ from django.db import transaction
 # Breite der Null-Auffüllung in der Anzeige-/QR-Form: ``ASN000123``.
 ASN_PAD_WIDTH = 6
 
-# Spec-Regex zur ASN-Erkennung in (OCR-)Text: ``ASN`` gefolgt von optionalem
-# Whitespace und mindestens einer Ziffer. Bewusst case-insensitive, damit auch
-# ``asn`` erkannt wird. Führende Nullen normalisiert ``int()``.
-_ASN_RE = re.compile(r"ASN\s*([0-9]+)", re.IGNORECASE)
+# ASN-Erkennung in OCR-Text: bewusst strenger als reine Zahlensuche, aber
+# toleranter als ein einzelnes Regex. OCR sieht Labels gern als ``A S N``,
+# ``A5N`` oder trennt Label/Zahl über Zeilen. Reine Ziffern bleiben verboten.
+_ASN_RE = re.compile(r"\bA\s*S\s*N\s*[:#.\-/]?\s*([0-9OIl|]{1,12})", re.IGNORECASE)
+_ASN_FUZZY_RE = re.compile(
+    r"\b[A4]\s*[S5$]\s*N\s*[:#.\-/]?\s*([0-9OIl|]{1,12})",
+    re.IGNORECASE,
+)
 # Reine Ziffernfolge (für die lenient API-/Such-Eingabe ``12345``).
 _DIGITS_RE = re.compile(r"^[0-9]+$")
+_OCR_DIGIT_TRANSLATION = str.maketrans(
+    {
+        "O": "0",
+        "o": "0",
+        "I": "1",
+        "l": "1",
+        "|": "1",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
@@ -51,18 +64,29 @@ def format_asn(asn: int, *, width: int = ASN_PAD_WIDTH) -> str:
     return f"ASN{int(asn):0{width}d}"
 
 
+def _coerce_ocr_digits(raw: str) -> int | None:
+    """Normalisiert OCR-Ziffern direkt hinter einem ASN-Label."""
+    normalized = raw.translate(_OCR_DIGIT_TRANSLATION)
+    normalized = re.sub(r"[^0-9]", "", normalized)
+    return int(normalized) if normalized else None
+
+
 def parse_asn(text: str | None) -> int | None:
-    """Extrahiert die ASN aus **Text** – strikt nach Spec-Regex ``ASN\\s*([0-9]+)``.
+    """Extrahiert die ASN aus **Text**.
 
     Wird von der OCR-Pipeline genutzt: nur eine ausdrücklich mit ``ASN`` markierte
-    Zahl gilt als ASN – beliebige Zahlen im Dokumenttext lösen **keine** Zuordnung
-    aus. Gibt die erste gefundene ASN als ``int`` zurück (führende Nullen
-    normalisiert), sonst ``None``.
+    oder OCR-typisch leicht verschriebene Marke gilt als ASN. Beliebige Zahlen im
+    Dokumenttext lösen **keine** Zuordnung aus. Gibt die erste gefundene ASN als
+    ``int`` zurück (führende Nullen normalisiert), sonst ``None``.
     """
     if not text:
         return None
-    match = _ASN_RE.search(str(text))
-    return int(match.group(1)) if match else None
+    value = str(text)
+    for pattern in (_ASN_RE, _ASN_FUZZY_RE):
+        match = pattern.search(value)
+        if match:
+            return _coerce_ocr_digits(match.group(1))
+    return None
 
 
 def coerce_asn(value: object) -> int | None:

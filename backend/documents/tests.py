@@ -4582,7 +4582,7 @@ class AsnMatchAndReconcileBarcodeTests(TestCase):
         ):
             self.assertIsNone(mod.scan_pdf_for_asn("/tmp/doc.pdf"))
 
-        convert_from_path.assert_called_once_with("/tmp/doc.pdf", dpi=150, fmt="ppm")
+        convert_from_path.assert_called_once_with("/tmp/doc.pdf", dpi=300, fmt="ppm")
         decode.assert_called_once()
         self.assertEqual(
             decode.call_args.kwargs["symbols"],

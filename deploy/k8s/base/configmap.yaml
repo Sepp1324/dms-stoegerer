@@ -37,5 +37,6 @@ data:
   # Fehlt libzbar0 im Image → WARN + Fallback auf OCR-Text, kein Pipeline-Crash.
   ASN_BARCODE_ENABLED: "true"
   ASN_BARCODE_PREFIX: "ASN"
+  ASN_BARCODE_DPI: "300"
   # Leer = alle Seiten; komma-getrennte 1-basierte Seitenzahlen z. B. "1,2"
   ASN_BARCODE_PAGES: ""
