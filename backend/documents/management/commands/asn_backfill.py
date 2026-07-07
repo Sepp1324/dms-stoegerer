@@ -31,7 +31,7 @@ class Command(BaseCommand):
         self.stdout.write(f"Scanne {total} Versionen …")
 
         for version in qs.iterator():
-            pdf_path = getattr(getattr(version, "file", None), "path", None)
+            pdf_path = asn_service.version_pdf_path(version)
             if not pdf_path:
                 uebersprungen += 1
                 continue

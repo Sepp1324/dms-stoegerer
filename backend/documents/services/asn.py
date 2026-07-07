@@ -200,6 +200,87 @@ def record_scan(document, version, *, matched_by: str = "OCR", confidence: float
     )
 
 
+def version_pdf_path(version) -> str | None:
+    """Liefert den lokalen PDF-Pfad einer Version für Barcode/QR-Scanning.
+
+    Historisch wurde hier nur auf ``version.file.path`` geschaut. Das echte
+    Persistenzmodell speichert Dateien aber als ``DocumentVersion.file_path``;
+    dadurch lief die Barcode-Erkennung bei normalen Uploads nie an. Der
+    ``file``-Fallback bleibt für Tests/kompatible FileField-Objekte erhalten.
+    """
+    file_obj = getattr(version, "file", None)
+    file_path = getattr(file_obj, "path", None)
+    if file_path:
+        return file_path
+
+    file_path = getattr(version, "file_path", None)
+    return str(file_path) if file_path else None
+
+
+def _claim_detected_asn(
+    document,
+    version,
+    asn: int,
+    *,
+    matched_by: str,
+    actor=None,
+) -> bool:
+    """Übernimmt eine aufgeklebte/freie ASN für das frisch importierte Dokument.
+
+    Neue Dokumente erhalten beim Erstellen zuerst eine provisorische fortlaufende
+    ASN, damit die Datenbank-Invariante immer gilt. Wird später im Scan eine
+    bisher freie ASN erkannt, hat das physische Label Vorrang: das Dokument wird
+    auf diese ASN umgehängt und der Zähler mindestens bis dorthin hochgezogen,
+    damit die Nummer nie erneut automatisch vergeben wird.
+
+    Gibt ``False`` zurück, falls die ASN zwischenzeitlich doch von einem anderen
+    Dokument belegt wurde.
+    """
+    from documents.models import ASNCounter, AuditLogEntry, Document
+
+    with transaction.atomic():
+        counter = ASNCounter.objects.select_for_update().filter(pk=1).first()
+        if counter is None:
+            ASNCounter.objects.get_or_create(pk=1, defaults={"last_value": 0})
+            counter = ASNCounter.objects.select_for_update().get(pk=1)
+
+        conflict = (
+            Document.objects.select_for_update()
+            .filter(asn=asn)
+            .exclude(pk=document.pk)
+            .exists()
+        )
+        if conflict:
+            return False
+
+        locked = Document.objects.select_for_update().get(pk=document.pk)
+        previous_asn = locked.asn
+        if previous_asn != asn:
+            Document.objects.filter(pk=locked.pk).update(asn=asn)
+            locked.asn = asn
+            document.asn = asn
+
+            AuditLogEntry.objects.create(
+                actor=actor,
+                action="asn_claim",
+                object_type="Document",
+                object_id=str(locked.pk),
+                detail={
+                    "from": previous_asn,
+                    "to": asn,
+                    "matched_by": matched_by,
+                    "version_id": getattr(version, "id", None),
+                },
+            )
+
+        if counter.last_value < asn:
+            counter.last_value = asn
+            counter.save(update_fields=["last_value"])
+
+    record_scan(document, version, matched_by=matched_by)
+    return True
+
+
 def _attach_version_to(document, version, *, actor=None) -> int:
     """Hängt eine bestehende Version an ein anderes Dokument (Re-Scan-Merge).
 
@@ -272,7 +353,7 @@ def match_and_reconcile(version, *, actor=None) -> dict:
     # Barcode/QR hat Vorrang – nur wenn die Version eine lokale PDF-Datei hat.
     matched_by = "OCR"
     asn = None
-    pdf_path = getattr(getattr(version, "file", None), "path", None)
+    pdf_path = version_pdf_path(version)
     if pdf_path:
         try:
             asn = scan_pdf_for_asn(pdf_path)
@@ -290,9 +371,27 @@ def match_and_reconcile(version, *, actor=None) -> dict:
 
     existing = find_document_by_asn(asn)
     if existing is None:
-        # ASN unbekannt → normale Dokumenterstellung (das neue Dokument behält
-        # seine eigene, frisch vergebene ASN).
-        return {"matched": False, "asn": asn, "reason": "unknown"}
+        # ASN unbekannt, aber eindeutig auf dem Papier/Scan erkannt: Das Label
+        # hat Vorrang vor der beim Create provisorisch vergebenen fortlaufenden
+        # ASN. Das vermeidet genau den Fall, dass ein aufgeklebter QR-Code
+        # ignoriert wird und das Dokument eine neue, abweichende Nummer bekommt.
+        current = version.document
+        claimed = _claim_detected_asn(
+            current,
+            version,
+            asn,
+            matched_by=matched_by,
+            actor=actor,
+        )
+        if claimed:
+            return {
+                "matched": True,
+                "asn": asn,
+                "moved": False,
+                "assigned": True,
+                "document_id": current.pk,
+            }
+        return {"matched": False, "asn": asn, "reason": "conflict"}
 
     current = version.document
     if existing.pk == current.pk:

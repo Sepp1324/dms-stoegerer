@@ -14,7 +14,7 @@ from django.db import connection
 from django.test import TestCase, TransactionTestCase
 from rest_framework.test import APITestCase
 
-from .models import ASNScan, Document, DocumentVersion
+from .models import ASNCounter, ASNScan, Document, DocumentVersion
 from .services import asn as asn_service
 
 User = get_user_model()
@@ -219,17 +219,32 @@ class ASNReconcileTests(TestCase):
             ASNScan.objects.filter(document=existing, matched_by="OCR").exists()
         )
 
-    def test_unknown_asn_is_noop(self):
-        """Unbekannte ASN → keine Zuordnung, normale Dokumenterstellung bleibt."""
+    def test_unknown_asn_is_claimed_by_current_document(self):
+        """Freie erkannte ASN → frisch importiertes Dokument übernimmt das Label."""
         rescan = Document.objects.create(title="Scan")
-        v_new = _make_version(rescan, version_no=1, ocr_text="ASN99999999 unbekannt")
+        detected_asn = rescan.asn + 50
+        v_new = _make_version(
+            rescan,
+            version_no=1,
+            ocr_text=f"{asn_service.format_asn(detected_asn)} unbekannt",
+        )
 
         result = asn_service.match_and_reconcile(v_new)
 
-        self.assertFalse(result["matched"])
+        self.assertTrue(result["matched"])
+        self.assertFalse(result["moved"])
+        self.assertTrue(result["assigned"])
         v_new.refresh_from_db()
+        rescan.refresh_from_db()
         self.assertEqual(v_new.document_id, rescan.pk)
-        self.assertFalse(ASNScan.objects.exists())
+        self.assertEqual(rescan.asn, detected_asn)
+        self.assertTrue(
+            ASNScan.objects.filter(document=rescan, matched_by="OCR").exists()
+        )
+        self.assertGreaterEqual(
+            ASNCounter.objects.get(pk=1).last_value,
+            detected_asn,
+        )
 
     def test_no_asn_in_text_is_noop(self):
         rescan = Document.objects.create(title="Scan")
@@ -240,6 +255,35 @@ class ASNReconcileTests(TestCase):
         self.assertFalse(result["matched"])
         self.assertIsNone(result["asn"])
         self.assertEqual(v_new.document_id, rescan.pk)
+
+    def test_barcode_scanner_uses_documentversion_file_path_and_claims_free_asn(self):
+        """QR/Barcode-Scan nutzt file_path und hat Vorrang vor OCR-Text."""
+        from unittest import mock
+
+        rescan = Document.objects.create(title="Scan mit QR")
+        detected_asn = rescan.asn + 100
+        v_new = _make_version(
+            rescan,
+            version_no=1,
+            ocr_text="OCR wuerde ASN000001 liefern",
+        )
+        v_new.file_path = "/data/originals/scan-mit-qr.pdf"
+        v_new.save(update_fields=["file_path"])
+
+        with mock.patch(
+            "documents.services.asn_barcode.scan_pdf_for_asn",
+            return_value=detected_asn,
+        ) as scan_pdf:
+            result = asn_service.match_and_reconcile(v_new)
+
+        scan_pdf.assert_called_once_with("/data/originals/scan-mit-qr.pdf")
+        self.assertTrue(result["matched"])
+        self.assertEqual(result["asn"], detected_asn)
+        rescan.refresh_from_db()
+        self.assertEqual(rescan.asn, detected_asn)
+        self.assertTrue(
+            ASNScan.objects.filter(document=rescan, matched_by="BARCODE").exists()
+        )
 
 
 # ---------------------------------------------------------------------------
