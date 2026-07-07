@@ -10,6 +10,7 @@ from .models import (
     CustomField,
     CustomFieldValue,
     Document,
+    DocumentFolder,
     DocumentType,
     DocumentVersion,
     MailAccount,
@@ -57,11 +58,12 @@ class DocumentAdmin(admin.ModelAdmin):
         "title",
         "correspondent",
         "document_type",
+        "folder",
         "review_status",
         "added_at",
         "owner",
     )
-    list_filter = ("review_status", "document_type", "correspondent", "tags")
+    list_filter = ("review_status", "folder", "document_type", "correspondent", "tags")
     search_fields = ("title", "asn")
     ordering = ("-added_at",)
     readonly_fields = ("asn",)
@@ -116,6 +118,7 @@ admin.site.register(Correspondent)
 admin.site.register(DocumentType)
 admin.site.register(Tag)
 admin.site.register(StoragePath)
+admin.site.register(DocumentFolder)
 admin.site.register(CustomField)
 
 

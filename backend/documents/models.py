@@ -12,6 +12,7 @@ import os
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.db.models import Q
 from django.utils import timezone
 
 
@@ -111,6 +112,52 @@ class StoragePath(models.Model):
         return self.name
 
 
+class DocumentFolder(models.Model):
+    """Fachlicher Akten-/Ordnerbaum nach ecoDMS-Vorbild.
+
+    Anders als ``StoragePath`` steuert dieser Ordner nicht den physischen
+    Archivpfad auf der Platte, sondern die Nutzer-Navigation: ein Dokument kann
+    optional in genau einem Ordner liegen, Ordner können verschachtelt werden.
+    """
+
+    name = models.CharField(max_length=255)
+    parent = models.ForeignKey(
+        "self",
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="children",
+    )
+
+    class Meta:
+        verbose_name = "Ordner"
+        verbose_name_plural = "Ordner"
+        ordering = ["parent__name", "name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["parent", "name"],
+                name="documents_folder_unique_sibling_name",
+            ),
+            models.UniqueConstraint(
+                fields=["name"],
+                condition=Q(parent__isnull=True),
+                name="documents_folder_unique_root_name",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return self.full_path
+
+    @property
+    def full_path(self) -> str:
+        parts = [self.name]
+        parent = self.parent
+        while parent is not None:
+            parts.append(parent.name)
+            parent = parent.parent
+        return " / ".join(reversed(parts))
+
+
 # ---------------------------------------------------------------------------
 # Custom Fields (typisierte Zusatzattribute – ecoDMS-Stärke)
 # ---------------------------------------------------------------------------
@@ -199,6 +246,14 @@ class Document(models.Model):
     )
     storage_path = models.ForeignKey(
         StoragePath, null=True, blank=True, on_delete=models.SET_NULL
+    )
+    folder = models.ForeignKey(
+        DocumentFolder,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="documents",
+        help_text="Fachlicher Ordner/Akte für die UI-Navigation.",
     )
     tags = models.ManyToManyField(Tag, blank=True, related_name="documents")
     owner = models.ForeignKey(

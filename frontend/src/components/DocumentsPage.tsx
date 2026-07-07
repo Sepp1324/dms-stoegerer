@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   createCorrespondent,
   createDocumentType,
+  createFolder,
   createStoragePath,
   createTag,
   getCorrespondents,
@@ -9,6 +10,7 @@ import {
   getDocuments,
   getDocumentThumbnail,
   getDocumentTypes,
+  getFolders,
   getMe,
   getStoragePaths,
   getTags,
@@ -17,6 +19,7 @@ import {
   setDocumentOwner,
   type CustomField,
   type DocumentItem,
+  type FolderRef,
   type Me,
   type NamedRef,
   type ProcessingStateFilter,
@@ -39,6 +42,7 @@ import InboxPage from "./InboxPage";
 
 // Von-/Bis-Eingaben eines CURRENCY-Zusatzfeld-Filters (STOAA-113).
 type CurrencyRange = { gte: string; lte: string };
+type FolderFilterValue = number | "none" | "";
 type MainView =
   | "docs"
   | "inbox"
@@ -113,6 +117,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   // Speicherpfad-Filter (STOAA-50). Bis der Backend-Query-Param gemergt ist,
   // bleibt der Speicherpfad-Abschnitt in der Sidebar ausgegraut (no-op).
   const [storagePath, setStoragePath] = useState<number | "">("");
+  const [folder, setFolder] = useState<FolderFilterValue>("");
   // Verarbeitungsstatus-Filter (STOAA-249): leer = kein Filter, sonst UI-Bucket.
   const [processingState, setProcessingState] = useState<ProcessingStateFilter | "">("");
   // Sortierung; "" = Backend-Standard (FTS-Relevanz bei Suche, sonst Datum neu→alt).
@@ -126,6 +131,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   const [documentTypes, setDocumentTypes] = useState<NamedRef[]>([]);
   const [tags, setTags] = useState<TagRef[]>([]);
   const [storagePaths, setStoragePaths] = useState<NamedRef[]>([]);
+  const [folders, setFolders] = useState<FolderRef[]>([]);
   // Zusatzfeld-Definitionen (STOAA-113) für Anzeige (DocumentDetail) + Filter.
   const [customFields, setCustomFields] = useState<CustomField[]>([]);
   // CURRENCY-Filter: pro Feld-ID Von-/Bis-Eingaben (roh, deutsches Format).
@@ -187,12 +193,14 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
       getDocumentTypes(),
       getTags(),
       getStoragePaths(),
+      getFolders(),
     ])
-      .then(([c, d, t, s]) => {
+      .then(([c, d, t, s, f]) => {
         setCorrespondents(c);
         setDocumentTypes(d);
         setTags(t);
         setStoragePaths(s);
+        setFolders(f);
       })
       .catch(() => {
         /* Stammdaten sind optional – Fehler hier nicht blockierend */
@@ -228,6 +236,13 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     const item = await createStoragePath(name);
     setStoragePaths((prev) => [...prev, item].sort(byName));
     return item;
+  }
+  async function addFolder(name: string) {
+    const item = await createFolder(name);
+    setFolders((prev) =>
+      [...prev, item].sort((a, b) => a.full_path.localeCompare(b.full_path)),
+    );
+    return { id: item.id, name: item.full_path };
   }
   async function addTag(name: string) {
     const item = await createTag(name);
@@ -288,6 +303,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
       document_type: documentType,
       tag,
       storage_path: storagePath,
+      folder,
       processing_state: processingState,
       // Triage nur für Admins anfordern; das Backend ignoriert den Param für
       // Normalnutzer ohnehin, aber so bleibt die FE-Absicht eindeutig.
@@ -310,7 +326,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     };
     // customFilterKey serialisiert customFilters für einen stabilen Dep-Vergleich.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [debouncedQ, correspondent, documentType, tag, storagePath, processingState, triage, me?.is_dms_admin, ordering, page, reloadKey, customFilterKey]);
+  }, [debouncedQ, correspondent, documentType, tag, storagePath, folder, processingState, triage, me?.is_dms_admin, ordering, page, reloadKey, customFilterKey]);
 
   // Sichtbarkeit von „Zurücksetzen" & Empty-State-Text: alle roh getippten Filter.
   const hasCurrencyInput = useMemo(
@@ -321,8 +337,9 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   const hasFilters = useMemo(
     () =>
       !!(debouncedQ || correspondent || documentType || tag || storagePath || processingState) ||
+      !!folder ||
       hasCurrencyInput,
-    [debouncedQ, correspondent, documentType, tag, storagePath, processingState, hasCurrencyInput],
+    [debouncedQ, correspondent, documentType, tag, storagePath, folder, processingState, hasCurrencyInput],
   );
 
   // Jede Filter-/Suchänderung springt zurück auf Seite 1 – sonst zeigt eine
@@ -345,6 +362,10 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   }
   function onStoragePathChange(v: number | "") {
     setStoragePath(v);
+    setPage(1);
+  }
+  function onFolderChange(v: FolderFilterValue) {
+    setFolder(v);
     setPage(1);
   }
   function onProcessingStateChange(v: ProcessingStateFilter | "") {
@@ -376,6 +397,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     setDocumentType("");
     setTag("");
     setStoragePath("");
+    setFolder("");
     setProcessingState("");
     setOrdering("");
     setCurrencyFilters({});
@@ -398,12 +420,14 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
         correspondents={correspondents}
         documentTypes={documentTypes}
         storagePaths={storagePaths}
+        folders={folders.map((f) => ({ id: f.id, name: f.full_path }))}
         allTags={tags}
         customFields={customFields}
         canEdit={!!me?.can_write}
         onCreateCorrespondent={addCorrespondent}
         onCreateDocumentType={addDocumentType}
         onCreateStoragePath={addStoragePath}
+        onCreateFolder={addFolder}
         onCreateTag={addTag}
         onManageFields={
           me?.is_dms_admin
@@ -438,15 +462,18 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
         tags={tags}
         documentTypes={documentTypes}
         storagePaths={storagePaths}
+        folders={folders}
         correspondent={correspondent}
         tag={tag}
         documentType={documentType}
         storagePath={storagePath}
+        folder={folder}
         processingState={processingState}
         onCorrespondentChange={onCorrespondentChange}
         onTagChange={onTagChange}
         onDocumentTypeChange={onDocumentTypeChange}
         onStoragePathChange={onStoragePathChange}
+        onFolderChange={onFolderChange}
         onProcessingStateChange={onProcessingStateChange}
         storagePathEnabled={STORAGE_PATH_FILTER_ENABLED}
         currencyFields={currencyFields}
@@ -679,15 +706,18 @@ function Sidebar({
   tags,
   documentTypes,
   storagePaths,
+  folders,
   correspondent,
   tag,
   documentType,
   storagePath,
+  folder,
   processingState,
   onCorrespondentChange,
   onTagChange,
   onDocumentTypeChange,
   onStoragePathChange,
+  onFolderChange,
   onProcessingStateChange,
   storagePathEnabled,
   currencyFields,
@@ -707,15 +737,18 @@ function Sidebar({
   tags: TagRef[];
   documentTypes: NamedRef[];
   storagePaths: NamedRef[];
+  folders: FolderRef[];
   correspondent: number | "";
   tag: number | "";
   documentType: number | "";
   storagePath: number | "";
+  folder: FolderFilterValue;
   processingState: ProcessingStateFilter | "";
   onCorrespondentChange: (v: number | "") => void;
   onTagChange: (v: number | "") => void;
   onDocumentTypeChange: (v: number | "") => void;
   onStoragePathChange: (v: number | "") => void;
+  onFolderChange: (v: FolderFilterValue) => void;
   onProcessingStateChange: (v: ProcessingStateFilter | "") => void;
   storagePathEnabled: boolean;
   currencyFields: CustomField[];
@@ -851,6 +884,14 @@ function Sidebar({
               onClose();
             }}
           />
+          <FolderSection
+            folders={folders}
+            active={folder}
+            onSelect={(v) => {
+              onFolderChange(v);
+              onClose();
+            }}
+          />
           <FilterSection
             title="Korrespondenten"
             items={correspondents}
@@ -900,6 +941,70 @@ function Sidebar({
 // den Rest einblendet; ab dieser Länge erscheint zudem ein kleines Suchfeld.
 const SECTION_TOP_N = 8;
 const SECTION_SEARCH_THRESHOLD = 10;
+
+function FolderSection({
+  folders,
+  active,
+  onSelect,
+}: {
+  folders: FolderRef[];
+  active: FolderFilterValue;
+  onSelect: (v: FolderFilterValue) => void;
+}) {
+  const [expanded, setExpanded] = useState(active !== "");
+  const items = [
+    { id: "none" as const, label: "Ohne Ordner", count: 0 },
+    ...folders.map((folder) => ({
+      id: folder.id,
+      label: folder.full_path,
+      count: folder.document_count,
+    })),
+  ];
+
+  return (
+    <div className="nav-section">
+      <button
+        className="nav-section__head"
+        onClick={() => setExpanded((e) => !e)}
+        aria-expanded={expanded}
+      >
+        <svg
+          className={`nav-section__chevron${expanded ? " nav-section__chevron--open" : ""}`}
+          viewBox="0 0 24 24"
+          width="14"
+          height="14"
+          aria-hidden="true"
+        >
+          <path fill="currentColor" d="M8 5l8 7-8 7z" />
+        </svg>
+        <span className="nav-section__title">Ordner</span>
+        <span className="nav-section__count">{folders.length}</span>
+      </button>
+      {expanded && (
+        <ul className="nav-section__list">
+          {items.map((item) => {
+            const isActive = active === item.id;
+            return (
+              <li key={String(item.id)}>
+                <button
+                  className={`nav-filter${isActive ? " nav-filter--active" : ""}`}
+                  onClick={() => onSelect(isActive ? "" : item.id)}
+                  aria-current={isActive ? "true" : undefined}
+                  title={item.label}
+                >
+                  <span className="nav-filter__label">{item.label}</span>
+                  {typeof item.id === "number" && (
+                    <span className="nav-section__count">{item.count}</span>
+                  )}
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
 
 // Ausklappbarer Stammdaten-Abschnitt der Sidebar: Titel + Anzahl, darunter eine
 // Liste klickbarer Filter. Klick auf den aktiven Eintrag hebt den Filter wieder
@@ -1302,6 +1407,7 @@ function DocumentCard({ doc, onOpen }: { doc: DocumentItem; onOpen: () => void }
         <p className="doc-card__meta">
           {doc.correspondent_name ?? "Unbekannt"}
           {doc.document_type_name ? ` · ${doc.document_type_name}` : ""}
+          {doc.folder_path ? ` · ${doc.folder_path}` : ""}
         </p>
         {/* Suchergebnis-Snippet (STOAA-368/370): nur bei aktiver Suche gefüllt.
             Backend liefert bereits sicheres HTML (nur <mark>); sanitizeSnippet

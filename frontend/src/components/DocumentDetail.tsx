@@ -44,6 +44,7 @@ interface Props {
   correspondents: NamedRef[];
   documentTypes: NamedRef[];
   storagePaths: NamedRef[];
+  folders: NamedRef[];
   allTags: NamedRef[];
   // Globale Zusatzfeld-Definitionen (STOAA-113) – werden in DocumentsPage einmal
   // geladen und hier zur Anzeige aller Felder (auch ohne Wert) durchgereicht.
@@ -52,6 +53,7 @@ interface Props {
   onCreateCorrespondent: (name: string) => Promise<NamedRef>;
   onCreateDocumentType: (name: string) => Promise<NamedRef>;
   onCreateStoragePath: (name: string) => Promise<NamedRef>;
+  onCreateFolder: (name: string) => Promise<NamedRef>;
   onCreateTag: (name: string) => Promise<NamedRef>;
   // Navigation zur SPA-Verwaltung der Zusatzfelder (Empty-State-Link).
   onManageFields?: () => void;
@@ -66,12 +68,14 @@ export default function DocumentDetail({
   correspondents,
   documentTypes,
   storagePaths,
+  folders,
   allTags,
   customFields,
   canEdit,
   onCreateCorrespondent,
   onCreateDocumentType,
   onCreateStoragePath,
+  onCreateFolder,
   onCreateTag,
   onManageFields,
 }: Props) {
@@ -120,6 +124,7 @@ export default function DocumentDetail({
     correspondent: "" as number | "",
     document_type: "" as number | "",
     storage_path: "" as number | "",
+    folder: "" as number | "",
     tagIds: new Set<number>(),
   });
 
@@ -250,6 +255,7 @@ export default function DocumentDetail({
       correspondent: doc.correspondent ?? "",
       document_type: doc.document_type ?? "",
       storage_path: doc.storage_path ?? "",
+      folder: doc.folder ?? "",
       tagIds: new Set(doc.tags.map((t) => t.id)),
     });
     setSaveError(null);
@@ -274,6 +280,7 @@ export default function DocumentDetail({
         correspondent: form.correspondent === "" ? null : form.correspondent,
         document_type: form.document_type === "" ? null : form.document_type,
         storage_path: form.storage_path === "" ? null : form.storage_path,
+        folder: form.folder === "" ? null : form.folder,
         tag_ids: Array.from(form.tagIds),
       });
       setDoc(updated);
@@ -424,10 +431,12 @@ export default function DocumentDetail({
                   correspondents={correspondents}
                   documentTypes={documentTypes}
                   storagePaths={storagePaths}
+                  folders={folders}
                   allTags={allTags}
                   onCreateCorrespondent={onCreateCorrespondent}
                   onCreateDocumentType={onCreateDocumentType}
                   onCreateStoragePath={onCreateStoragePath}
+                  onCreateFolder={onCreateFolder}
                   onCreateTag={onCreateTag}
                   toggleTag={toggleTag}
                   saving={saving}

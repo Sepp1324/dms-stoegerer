@@ -10,6 +10,7 @@ export interface EditFormState {
   correspondent: number | "";
   document_type: number | "";
   storage_path: number | "";
+  folder: number | "";
   tagIds: Set<number>;
 }
 
@@ -22,10 +23,12 @@ export function EditForm({
   correspondents,
   documentTypes,
   storagePaths,
+  folders,
   allTags,
   onCreateCorrespondent,
   onCreateDocumentType,
   onCreateStoragePath,
+  onCreateFolder,
   onCreateTag,
   toggleTag,
   saving,
@@ -38,10 +41,12 @@ export function EditForm({
   correspondents: NamedRef[];
   documentTypes: NamedRef[];
   storagePaths: NamedRef[];
+  folders: NamedRef[];
   allTags: NamedRef[];
   onCreateCorrespondent: (name: string) => Promise<NamedRef>;
   onCreateDocumentType: (name: string) => Promise<NamedRef>;
   onCreateStoragePath: (name: string) => Promise<NamedRef>;
+  onCreateFolder: (name: string) => Promise<NamedRef>;
   onCreateTag: (name: string) => Promise<NamedRef>;
   toggleTag: (tagId: number) => void;
   saving: boolean;
@@ -72,6 +77,13 @@ export function EditForm({
         onChange={(v) => setForm((f) => ({ ...f, document_type: v }))}
         options={documentTypes}
         onCreate={onCreateDocumentType}
+      />
+      <CreatableSelect
+        label="Ordner"
+        value={form.folder}
+        onChange={(v) => setForm((f) => ({ ...f, folder: v }))}
+        options={folders}
+        onCreate={onCreateFolder}
       />
       <CreatableSelect
         label="Ablagepfad"
