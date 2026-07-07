@@ -91,6 +91,10 @@ export type ProcessingState =
 // Technischer OCR-Detailstatus des aktuellen Verarbeitungsschritts (STOAA-225).
 export type OcrStatus = "pending" | "running" | "success" | "failed" | "skipped";
 
+// Fachlicher Review-Status: getrennt vom technischen processing_state.
+// ``needs_review`` landet in der Inbox; ``reviewed`` wurde menschlich bestätigt.
+export type ReviewStatus = "needs_review" | "reviewed";
+
 // UI-Buckets für den Listen-Filter ``?processing_state=`` (STOAA-248). ``processing``
 // fasst alle In-Flight-States (uploaded…sealed) zusammen; failed/retry_pending/ready
 // sind eigene Buckets. Unbekannte Werte ignoriert das Backend (kein Filter).
@@ -153,6 +157,7 @@ export interface DocumentItem {
   // Verarbeitungs-Rollup der aktuellen Version (STOAA-248): spart der Liste den
   // Durchgriff auf ``versions``. Altdaten ohne current_version liefern ``null``.
   processing_state: ProcessingState | null;
+  review_status: ReviewStatus;
   ocr_status: OcrStatus | null;
   // Suchergebnis-Snippet (STOAA-368/370): sicheres HTML mit ``<mark>`` rund um den
   // Treffer. Nur bei aktiver Volltextsuche (``?q=``) gefüllt; sonst / kein Treffer
@@ -491,6 +496,8 @@ export interface DocumentQuery {
   storage_path?: number | "";
   // Verarbeitungsstatus-Filter (STOAA-248): grober UI-Bucket, leer = kein Filter.
   processing_state?: ProcessingStateFilter | "";
+  // Fachlicher Inbox-Filter: offene oder bereits geprüfte Dokumente.
+  review_status?: ReviewStatus | "";
   // Triage-Ansicht (STOAA-296): nur ``"none"`` ist wirksam und lädt die
   // owner-losen Dokumente. Ausschließlich für Admins ausgewertet – für
   // Nicht-Admins ignoriert das Backend den Param (Queryset ist ohnehin auf den
@@ -544,6 +551,25 @@ export async function retryProcessing(id: number): Promise<DocumentVersion> {
   });
   if (!res.ok) {
     let detail = `Neustart fehlgeschlagen: HTTP ${res.status}`;
+    try {
+      const data = await res.json();
+      if (data && typeof data.detail === "string") detail = data.detail;
+    } catch {
+      /* keine JSON-Fehlermeldung – Fallback bleibt */
+    }
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+// Markiert ein Dokument fachlich als geprüft. Das Backend hält review_status
+// bewusst read-only für PATCH; die Review-Bestätigung ist eine eigene Action.
+export async function markDocumentReviewed(id: number): Promise<DocumentDetail> {
+  const res = await apiFetch(`/documents/${id}/mark_reviewed/`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    let detail = `Prüfung konnte nicht gespeichert werden: HTTP ${res.status}`;
     try {
       const data = await res.json();
       if (data && typeof data.detail === "string") detail = data.detail;

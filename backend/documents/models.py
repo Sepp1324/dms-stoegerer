@@ -171,6 +171,18 @@ class Document(models.Model):
         FREIGEGEBEN = "freigegeben", "Freigegeben"
         ABGELEHNT = "abgelehnt", "Abgelehnt"
 
+    class ReviewStatus(models.TextChoices):
+        """Fachliche Inbox-Prüfung nach erfolgreicher Verarbeitung.
+
+        ``processing_state`` sagt, ob die Pipeline technisch fertig ist.
+        ``review_status`` sagt, ob ein Mensch die Metadaten/Einordnung schon
+        bestätigt hat. Bewusst getrennt, damit Reprocessing kein Review
+        implizit simuliert.
+        """
+
+        NEEDS_REVIEW = "needs_review", "Zu prüfen"
+        REVIEWED = "reviewed", "Geprüft"
+
     title = models.CharField(max_length=512)
     created_at = models.DateTimeField(
         help_text="Datum des Dokuments selbst (z. B. Rechnungsdatum)",
@@ -234,6 +246,13 @@ class Document(models.Model):
         max_length=16,
         choices=ApprovalStatus.choices,
         default=ApprovalStatus.ENTWURF,
+    )
+    review_status = models.CharField(
+        max_length=16,
+        choices=ReviewStatus.choices,
+        default=ReviewStatus.NEEDS_REVIEW,
+        db_index=True,
+        help_text="Fachlicher Inbox-Status: Metadaten/Einordnung geprüft oder offen.",
     )
 
     # Archive Serial Number (STOAA-284/285): dauerhafte, unveränderliche Identität
