@@ -836,6 +836,28 @@ export async function bulkClassifyDocuments(ids: number[]): Promise<BulkActionRe
   return postJson<BulkActionResult>("/documents/bulk-classify/", { ids });
 }
 
+export interface AskSource {
+  id: string;
+  document: number;
+  document_title: string;
+  folder_path: string | null;
+  page: number | null;
+  snippet: string;
+}
+export interface AskResult {
+  source: "ai" | "unavailable" | "error" | "retrieval";
+  provider?: string;
+  answer: string;
+  sources: AskSource[];
+  error?: string;
+}
+export async function askDocuments(
+  question: string,
+  folder?: number | "none" | "",
+): Promise<AskResult> {
+  return postJson<AskResult>("/ask/", { question, folder: folder || undefined });
+}
+
 export async function applySuggestions(
   id: number,
   fields?: string[],

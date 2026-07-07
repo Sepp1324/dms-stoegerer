@@ -536,6 +536,61 @@ class OCRRetryFailedView(APIView):
         )
 
 
+class AskView(APIView):
+    """Dokumenten-Copilot: beantwortet Fragen anhand sichtbarer OCR-Quellen."""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        question = str(request.data.get("question", "")).strip()
+        if len(question) < 3:
+            return Response(
+                {"detail": "Feld 'question' muss mindestens 3 Zeichen enthalten."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        qs = (
+            Document.objects.select_related(
+                "correspondent", "document_type", "folder", "current_version"
+            )
+            .filter(current_version__ocr_text__gt="")
+            .order_by("-added_at")
+        )
+        if not getattr(request.user, "is_dms_admin", False):
+            qs = qs.filter(owner=request.user)
+
+        folder = request.data.get("folder")
+        if folder in ("", None):
+            pass
+        elif folder == "none":
+            qs = qs.filter(folder__isnull=True)
+        else:
+            try:
+                qs = qs.filter(folder_id=int(folder))
+            except (TypeError, ValueError):
+                return Response(
+                    {"detail": "Ungültiger Ordnerfilter."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        from ai.services import answer_question
+
+        result = answer_question(question, qs[:200])
+        AuditLogEntry.objects.create(
+            actor=request.user,
+            action="ask",
+            object_type="Document",
+            object_id="Copilot",
+            detail={
+                "question": question[:500],
+                "folder": folder,
+                "source": result.get("source"),
+                "sources": [s.get("document") for s in result.get("sources", [])],
+            },
+        )
+        return Response(result, status=status.HTTP_200_OK)
+
+
 class DocumentUploadView(APIView):
     """Nimmt eine Datei per multipart/form-data auf und stößt die Pipeline an.
 

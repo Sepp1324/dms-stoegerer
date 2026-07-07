@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 
 from .providers import get_provider
 
@@ -117,3 +118,190 @@ def _parse_json(raw: str) -> dict:
         return json.loads(raw[start : end + 1])
     except json.JSONDecodeError:
         return {}
+
+
+_ASK_SYSTEM = (
+    "Du bist der Dokumenten-Copilot eines privaten DMS. "
+    "Beantworte Fragen ausschließlich anhand der gelieferten Quellen. "
+    "Wenn die Quellen keine belastbare Antwort enthalten, sage das klar. "
+    "Nenne relevante Quellen im Text mit [S1], [S2] usw. "
+    "Erfinde keine Fakten, Beträge, Fristen oder Namen."
+)
+
+
+def _query_terms(question: str) -> list[str]:
+    """Extrahiert einfache Suchterme für ein robustes erstes Retrieval."""
+    stopwords = {
+        "aber",
+        "alle",
+        "auch",
+        "auf",
+        "aus",
+        "bei",
+        "bin",
+        "bis",
+        "das",
+        "dem",
+        "den",
+        "der",
+        "die",
+        "ein",
+        "eine",
+        "einem",
+        "einen",
+        "für",
+        "hat",
+        "ich",
+        "ist",
+        "mit",
+        "nach",
+        "oder",
+        "sich",
+        "und",
+        "von",
+        "wann",
+        "war",
+        "was",
+        "welche",
+        "welchen",
+        "wer",
+        "wie",
+        "wir",
+        "zu",
+        "zum",
+        "zur",
+    }
+    terms = []
+    for term in re.findall(r"[\wÄÖÜäöüß-]{3,}", question.lower()):
+        if term not in stopwords and term not in terms:
+            terms.append(term)
+    return terms[:12]
+
+
+def _snippet(text: str, terms: list[str], *, radius: int = 380) -> str:
+    """Schneidet einen kompakten OCR-Ausschnitt um den besten Treffer."""
+    cleaned = re.sub(r"\s+", " ", text or "").strip()
+    if not cleaned:
+        return ""
+    lower = cleaned.lower()
+    positions = [lower.find(term) for term in terms if lower.find(term) >= 0]
+    pos = min(positions) if positions else 0
+    start = max(0, pos - radius // 2)
+    end = min(len(cleaned), start + radius)
+    start = max(0, end - radius)
+    prefix = "…" if start > 0 else ""
+    suffix = "…" if end < len(cleaned) else ""
+    return f"{prefix}{cleaned[start:end]}{suffix}"
+
+
+def _score_document(document, terms: list[str]) -> int:
+    version = document.current_version
+    text = " ".join(
+        [
+            document.title or "",
+            document.correspondent.name if document.correspondent_id else "",
+            document.document_type.name if document.document_type_id else "",
+            document.folder.full_path if document.folder_id else "",
+            version.ocr_text if version else "",
+        ]
+    ).lower()
+    if not terms:
+        return 1 if text.strip() else 0
+    score = 0
+    for term in terms:
+        if term in text:
+            score += 3
+        score += min(text.count(term), 5)
+    return score
+
+
+def retrieve_sources(question: str, documents_qs, *, limit: int = 6) -> list[dict]:
+    """Findet zitierbare OCR-Quellen innerhalb eines bereits rechtlich gescopten QS."""
+    terms = _query_terms(question)
+    candidates = []
+    for document in documents_qs:
+        version = document.current_version
+        if not version or not (version.ocr_text or "").strip():
+            continue
+        score = _score_document(document, terms)
+        if score <= 0:
+            continue
+        candidates.append((score, document))
+
+    candidates.sort(key=lambda item: (item[0], item[1].added_at), reverse=True)
+    sources = []
+    for idx, (_score, document) in enumerate(candidates[:limit], start=1):
+        version = document.current_version
+        sources.append(
+            {
+                "id": f"S{idx}",
+                "document": document.id,
+                "document_title": document.title,
+                "folder_path": document.folder.full_path if document.folder_id else None,
+                "page": None,
+                "snippet": _snippet(version.ocr_text, terms),
+            }
+        )
+    return sources
+
+
+def answer_question(question: str, documents_qs) -> dict:
+    """Beantwortet eine Frage anhand sichtbarer Dokumentquellen.
+
+    Der Service ist absichtlich RAG-minimalistisch: Retrieval bleibt lokal und
+    zitierbar, das Modell bekommt nur kurze Quellen. So ist der MVP nützlich,
+    ohne eine Embedding-Infrastruktur vorauszusetzen.
+    """
+    sources = retrieve_sources(question, documents_qs)
+    if not sources:
+        return {
+            "source": "retrieval",
+            "answer": "Ich habe in den sichtbaren OCR-Texten keine passenden Quellen gefunden.",
+            "sources": [],
+        }
+
+    provider = get_provider()
+    if not provider.available:
+        return {
+            "source": "unavailable",
+            "answer": (
+                "KI ist derzeit nicht verfügbar. Ich habe aber passende Quellen "
+                "gefunden; öffne die Treffer unten für die manuelle Prüfung."
+            ),
+            "sources": sources,
+        }
+
+    source_block = "\n\n".join(
+        (
+            f"[{source['id']}] Dokument: {source['document_title']}\n"
+            f"Ordner: {source['folder_path'] or '-'}\n"
+            f"Ausschnitt: {source['snippet']}"
+        )
+        for source in sources
+    )
+    prompt = (
+        f"Frage:\n{question.strip()}\n\n"
+        f"Quellen:\n{source_block}\n\n"
+        "Antworte kurz und konkret auf Deutsch. Verwende Quellenmarker wie [S1]."
+    )
+    try:
+        answer = provider.complete(prompt, system=_ASK_SYSTEM).strip()
+    except Exception as exc:  # noqa: BLE001 – Providerfehler UI-freundlich abfangen
+        logger.warning("Copilot-Antwort fehlgeschlagen (Provider %s): %s", provider.name, exc)
+        return {
+            "source": "error",
+            "provider": provider.name,
+            "answer": (
+                "Die KI-Antwort konnte nicht erzeugt werden. Die gefundenen "
+                "Quellen stehen unten zur manuellen Prüfung bereit."
+            ),
+            "sources": sources,
+            "error": str(exc),
+        }
+
+    return {
+        "source": "ai",
+        "provider": provider.name,
+        "answer": answer,
+        "sources": sources,
+    }
