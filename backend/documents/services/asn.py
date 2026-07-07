@@ -281,6 +281,31 @@ def _claim_detected_asn(
     return True
 
 
+def detect_asn(version) -> tuple[int | None, str | None]:
+    """Erkennt eine ASN in einer Version, ohne Datenbankzustand zu verändern.
+
+    Reihenfolge entspricht der produktiven Pipeline: Barcode/QR hat Vorrang,
+    danach OCR-Text via ``parse_asn``. Das ist bewusst als eigene Funktion
+    gekapselt, damit Backfill/Dry-Run und ``match_and_reconcile`` dieselbe
+    Erkennungslogik nutzen.
+    """
+    from documents.services.asn_barcode import scan_pdf_for_asn
+
+    pdf_path = version_pdf_path(version)
+    if pdf_path:
+        try:
+            asn = scan_pdf_for_asn(pdf_path)
+            if asn is not None:
+                return asn, "BARCODE"
+        except Exception:
+            pass  # Barcode-Fehler darf Pipeline/Backfill nie abbrechen
+
+    asn = parse_asn(getattr(version, "ocr_text", "") or "")
+    if asn is not None:
+        return asn, "OCR"
+    return None, None
+
+
 def _attach_version_to(document, version, *, actor=None) -> int:
     """Hängt eine bestehende Version an ein anderes Dokument (Re-Scan-Merge).
 
@@ -348,23 +373,8 @@ def match_and_reconcile(version, *, actor=None) -> dict:
     (ein Fehler hier darf die restliche Verarbeitung nicht abbrechen).
     """
     from documents.models import Document
-    from documents.services.asn_barcode import scan_pdf_for_asn
 
-    # Barcode/QR hat Vorrang – nur wenn die Version eine lokale PDF-Datei hat.
-    matched_by = "OCR"
-    asn = None
-    pdf_path = version_pdf_path(version)
-    if pdf_path:
-        try:
-            asn = scan_pdf_for_asn(pdf_path)
-            if asn is not None:
-                matched_by = "BARCODE"
-        except Exception:
-            pass  # Barcode-Fehler darf Pipeline nie abbrechen
-
-    # Fallback: Text-Regex
-    if asn is None:
-        asn = parse_asn(version.ocr_text or "")
+    asn, matched_by = detect_asn(version)
 
     if asn is None:
         return {"matched": False, "asn": None}

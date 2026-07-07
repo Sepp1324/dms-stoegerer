@@ -1,6 +1,7 @@
-"""Scannt bestehende Archiv-PDFs nach ASN-Barcodes/QR-Codes und reconciled.
+"""Scannt bestehende Versionen nach ASN und reconciled.
 
-Nutzt nur Barcode-Erkennung (pyzbar) – kein Re-OCR. Idempotent.
+Nutzt dieselbe Erkennung wie die Pipeline: Barcode/QR zuerst, dann vorhandener
+OCR-Text. Es wird kein Re-OCR ausgeführt. Idempotent.
 
     python manage.py asn_backfill           # tatsächlich reconcilen
     python manage.py asn_backfill --dry-run # nur ausgeben, was erkannt würde
@@ -9,11 +10,10 @@ from django.core.management.base import BaseCommand
 
 from documents.models import DocumentVersion
 from documents.services import asn as asn_service
-from documents.services.asn_barcode import scan_pdf_for_asn
 
 
 class Command(BaseCommand):
-    help = "ASN-Backfill: Barcode/QR-Erkennung auf bestehenden Archiv-PDFs (kein Re-OCR)."
+    help = "ASN-Backfill: QR/Barcode + vorhandenen OCR-Text auswerten (kein Re-OCR)."
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -31,13 +31,8 @@ class Command(BaseCommand):
         self.stdout.write(f"Scanne {total} Versionen …")
 
         for version in qs.iterator():
-            pdf_path = asn_service.version_pdf_path(version)
-            if not pdf_path:
-                uebersprungen += 1
-                continue
-
             try:
-                asn = scan_pdf_for_asn(pdf_path)
+                asn, matched_by = asn_service.detect_asn(version)
             except Exception as exc:
                 self.stderr.write(f"  WARN Version {version.pk}: {exc}")
                 uebersprungen += 1
@@ -49,7 +44,8 @@ class Command(BaseCommand):
 
             erkannt += 1
             self.stdout.write(
-                f"  Version {version.pk} (Doc {version.document_id}): ASN {asn} per Barcode"
+                f"  Version {version.pk} (Doc {version.document_id}): "
+                f"ASN {asn} per {matched_by}"
             )
 
             if dry_run:

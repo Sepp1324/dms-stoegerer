@@ -285,6 +285,20 @@ class ASNReconcileTests(TestCase):
             ASNScan.objects.filter(document=rescan, matched_by="BARCODE").exists()
         )
 
+    def test_detect_asn_falls_back_to_existing_ocr_text(self):
+        """Backfill/Pipeline erkennen ASN auch ohne Barcode über vorhandenes OCR."""
+        rescan = Document.objects.create(title="Scan mit OCR-ASN")
+        v_new = _make_version(
+            rescan,
+            version_no=1,
+            ocr_text="Deckblatt\nASN\n8062\nRest",
+        )
+
+        asn, matched_by = asn_service.detect_asn(v_new)
+
+        self.assertEqual(asn, 8062)
+        self.assertEqual(matched_by, "OCR")
+
 
 # ---------------------------------------------------------------------------
 # API
