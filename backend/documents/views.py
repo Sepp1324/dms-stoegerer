@@ -1948,6 +1948,35 @@ class DocumentViewSet(viewsets.ModelViewSet):
             )
         return Response({"document": document.id, **manifest})
 
+    @action(
+        detail=True,
+        methods=["get"],
+        url_path=r"pdf-workbench/pages/(?P<page_no>[0-9]+)/thumbnail",
+    )
+    def pdf_workbench_page_thumbnail(self, request, pk=None, page_no=None):
+        """JPEG-Miniatur einer einzelnen PDF-Seite für die visuelle Werkbank."""
+        document = self.get_object()
+        if document.current_version is None:
+            return Response(
+                {"detail": "Dokument hat keine aktuelle Version."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        from .services import pdf_workbench
+
+        try:
+            data = pdf_workbench.render_page_thumbnail(
+                document.current_version,
+                int(page_no),
+            )
+        except DjangoValidationError as exc:
+            return Response({"detail": "; ".join(exc.messages)}, status=400)
+        except Exception as exc:  # noqa: BLE001
+            return Response(
+                {"detail": f"Miniatur konnte nicht erzeugt werden: {exc}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return HttpResponse(data, content_type="image/jpeg")
+
     @action(detail=True, methods=["post"], url_path="pdf-workbench/rewrite")
     def pdf_workbench_rewrite(self, request, pk=None):
         """Reorder/Delete/Rotate als neue Version desselben Dokuments."""

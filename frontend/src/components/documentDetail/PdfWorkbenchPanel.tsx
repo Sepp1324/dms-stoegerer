@@ -1,13 +1,31 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  getDocuments,
+  getPdfWorkbenchPageThumbnail,
   getPdfWorkbenchPages,
   mergePdfDocuments,
   rewritePdfDocument,
   splitPdfDocument,
+  type DocumentItem,
   type PdfWorkbenchManifest,
+  type PdfWorkbenchPage,
   type PdfWorkbenchPageSpec,
   type PdfWorkbenchSplitPart,
 } from "../../api";
+
+type PageItem = PdfWorkbenchPage & {
+  key: string;
+  rotationDelta: 0 | 90 | 180 | 270;
+};
+
+function toItems(manifest: PdfWorkbenchManifest | null): PageItem[] {
+  if (!manifest) return [];
+  return manifest.pages.map((page) => ({
+    ...page,
+    key: `${manifest.version_id}-${page.page}`,
+    rotationDelta: 0,
+  }));
+}
 
 function parsePages(value: string): number[] {
   const pages: number[] = [];
@@ -29,22 +47,6 @@ function parsePages(value: string): number[] {
   return pages;
 }
 
-function parseRewritePlan(value: string): PdfWorkbenchPageSpec[] {
-  const specs: PdfWorkbenchPageSpec[] = [];
-  for (const raw of value.split(",")) {
-    const item = raw.trim();
-    if (!item) continue;
-    const match = item.match(/^(\d+)(?:r(90|180|270))?$/i);
-    if (!match) throw new Error(`Ungültiger Eintrag: ${item}`);
-    specs.push({
-      page: Number(match[1]),
-      rotation: match[2] ? (Number(match[2]) as 90 | 180 | 270) : 0,
-    });
-  }
-  if (!specs.length) throw new Error("Mindestens eine Seite ist erforderlich.");
-  return specs;
-}
-
 function parseSplitPlan(value: string): PdfWorkbenchSplitPart[] {
   const parts = value
     .split("\n")
@@ -63,9 +65,66 @@ function parseSplitPlan(value: string): PdfWorkbenchSplitPart[] {
   return parts;
 }
 
-function defaultPlan(manifest: PdfWorkbenchManifest | null): string {
-  if (!manifest) return "";
-  return manifest.pages.map((page) => String(page.page)).join(",");
+function specsFromItems(items: PageItem[]): PdfWorkbenchPageSpec[] {
+  return items.map((item) => ({
+    page: item.page,
+    rotation: item.rotationDelta,
+  }));
+}
+
+function selectedPages(items: PageItem[], selected: Set<string>): number[] {
+  return items.filter((item) => selected.has(item.key)).map((item) => item.page);
+}
+
+function rotateDelta(delta: PageItem["rotationDelta"]): PageItem["rotationDelta"] {
+  return ((delta + 90) % 360) as PageItem["rotationDelta"];
+}
+
+function totalRotation(item: PageItem): number {
+  return (item.rotation + item.rotationDelta) % 360;
+}
+
+function PageThumb({
+  documentId,
+  item,
+}: {
+  documentId: number;
+  item: PageItem;
+}) {
+  const [src, setSrc] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    let url: string | null = null;
+    setSrc(null);
+    getPdfWorkbenchPageThumbnail(documentId, item.page)
+      .then((blob) => {
+        if (!active) return;
+        url = URL.createObjectURL(blob);
+        setSrc(url);
+      })
+      .catch(() => {
+        /* Fallback unten rendert Seitenzahl; Miniatur ist Komfort. */
+      });
+    return () => {
+      active = false;
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [documentId, item.page]);
+
+  return (
+    <div className="pdf-page-card__thumb">
+      {src ? (
+        <img
+          src={src}
+          alt=""
+          style={{ transform: `rotate(${totalRotation(item)}deg)` }}
+        />
+      ) : (
+        <span>{item.page}</span>
+      )}
+    </div>
+  );
 }
 
 export function PdfWorkbenchPanel({
@@ -78,18 +137,34 @@ export function PdfWorkbenchPanel({
   onChanged: () => void;
 }) {
   const [manifest, setManifest] = useState<PdfWorkbenchManifest | null>(null);
+  const [items, setItems] = useState<PageItem[]>([]);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [dragKey, setDragKey] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [rewritePlan, setRewritePlan] = useState("");
+  const [splitTitle, setSplitTitle] = useState("");
   const [splitPlan, setSplitPlan] = useState("");
-  const [mergeIds, setMergeIds] = useState("");
+  const [mergeQuery, setMergeQuery] = useState("");
+  const [mergeResults, setMergeResults] = useState<DocumentItem[]>([]);
+  const [mergeIds, setMergeIds] = useState<number[]>([]);
   const [message, setMessage] = useState<string | null>(null);
 
   const pageLabel = useMemo(() => {
     if (!manifest) return "Keine Seiten geladen";
-    return `${manifest.page_count} Seiten · Version ${manifest.version_no}`;
-  }, [manifest]);
+    return `${items.length} von ${manifest.page_count} Seiten · Version ${manifest.version_no}`;
+  }, [items.length, manifest]);
+  const selectedCount = selected.size;
+  const changed =
+    manifest !== null &&
+    (items.length !== manifest.pages.length ||
+      items.some((item, idx) => {
+        const original = manifest.pages[idx];
+        return (
+          original?.page !== item.page ||
+          item.rotationDelta !== 0
+        );
+      }));
 
   function load() {
     setLoading(true);
@@ -97,7 +172,8 @@ export function PdfWorkbenchPanel({
     getPdfWorkbenchPages(documentId)
       .then((data) => {
         setManifest(data);
-        setRewritePlan(defaultPlan(data));
+        setItems(toItems(data));
+        setSelected(new Set());
       })
       .catch((err) => setError(err instanceof Error ? err.message : String(err)))
       .finally(() => setLoading(false));
@@ -105,13 +181,85 @@ export function PdfWorkbenchPanel({
 
   useEffect(load, [documentId]);
 
+  useEffect(() => {
+    if (!mergeQuery.trim()) {
+      setMergeResults([]);
+      return;
+    }
+    let active = true;
+    getDocuments({ q: mergeQuery.trim(), page: 1 })
+      .then((res) => {
+        if (!active) return;
+        setMergeResults(
+          res.results
+            .filter((doc) => doc.id !== documentId && !mergeIds.includes(doc.id))
+            .slice(0, 6),
+        );
+      })
+      .catch(() => active && setMergeResults([]));
+    return () => {
+      active = false;
+    };
+  }, [documentId, mergeIds, mergeQuery]);
+
+  function toggleSelected(key: string) {
+    setSelected((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  function rotatePage(key: string) {
+    setItems((current) =>
+      current.map((item) =>
+        item.key === key ? { ...item, rotationDelta: rotateDelta(item.rotationDelta) } : item,
+      ),
+    );
+  }
+
+  function deletePage(key: string) {
+    setItems((current) => current.filter((item) => item.key !== key));
+    setSelected((current) => {
+      const next = new Set(current);
+      next.delete(key);
+      return next;
+    });
+  }
+
+  function deleteSelected() {
+    setItems((current) => current.filter((item) => !selected.has(item.key)));
+    setSelected(new Set());
+  }
+
+  function resetPlan() {
+    setItems(toItems(manifest));
+    setSelected(new Set());
+    setMessage(null);
+  }
+
+  function onDrop(targetKey: string) {
+    if (!dragKey || dragKey === targetKey) return;
+    setItems((current) => {
+      const from = current.findIndex((item) => item.key === dragKey);
+      const to = current.findIndex((item) => item.key === targetKey);
+      if (from < 0 || to < 0) return current;
+      const next = [...current];
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved);
+      return next;
+    });
+    setDragKey(null);
+  }
+
   async function runRewrite() {
     setBusy("rewrite");
     setError(null);
     setMessage(null);
     try {
-      const specs = parseRewritePlan(rewritePlan);
-      await rewritePdfDocument(documentId, specs, "PDF-Werkbank");
+      if (!items.length) throw new Error("Mindestens eine Seite ist erforderlich.");
+      await rewritePdfDocument(documentId, specsFromItems(items), "PDF-Werkbank");
       setMessage("Neue Version wurde erstellt und zur Verarbeitung eingereiht.");
       onChanged();
       load();
@@ -122,14 +270,35 @@ export function PdfWorkbenchPanel({
     }
   }
 
-  async function runSplit() {
-    setBusy("split");
+  async function runSplitSelected() {
+    setBusy("split-selected");
+    setError(null);
+    setMessage(null);
+    try {
+      const pages = selectedPages(items, selected);
+      if (!pages.length) throw new Error("Bitte zuerst Seiten auswählen.");
+      const title = splitTitle.trim() || `Auszug ${pages.join(",")}`;
+      const result = await splitPdfDocument(documentId, [{ title, pages }]);
+      setMessage(`${result.documents.length} neues Dokument wurde erstellt.`);
+      setSplitTitle("");
+      setSelected(new Set());
+      onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function runSplitPlan() {
+    setBusy("split-plan");
     setError(null);
     setMessage(null);
     try {
       const parts = parseSplitPlan(splitPlan);
       const result = await splitPdfDocument(documentId, parts);
       setMessage(`${result.documents.length} neue Dokumente wurden erstellt.`);
+      setSplitPlan("");
       onChanged();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -143,14 +312,11 @@ export function PdfWorkbenchPanel({
     setError(null);
     setMessage(null);
     try {
-      const ids = mergeIds
-        .split(",")
-        .map((item) => Number(item.trim()))
-        .filter((id) => Number.isInteger(id) && id > 0);
-      if (!ids.length) throw new Error("Mindestens eine Dokument-ID ist erforderlich.");
-      await mergePdfDocuments(documentId, ids, "PDF-Werkbank");
+      if (!mergeIds.length) throw new Error("Mindestens ein Dokument auswählen.");
+      await mergePdfDocuments(documentId, mergeIds, "PDF-Werkbank");
       setMessage("Zusammenführung wurde als neue Version erstellt.");
-      setMergeIds("");
+      setMergeIds([]);
+      setMergeQuery("");
       onChanged();
       load();
     } catch (err) {
@@ -185,37 +351,71 @@ export function PdfWorkbenchPanel({
         </div>
       )}
 
-      {manifest && (
-        <div className="pdf-page-strip" aria-label="PDF-Seiten">
-          {manifest.pages.map((page) => (
-            <span key={page.page}>
-              {page.page}
-              {page.rotation ? ` · ${page.rotation}°` : ""}
-            </span>
-          ))}
-        </div>
-      )}
+      <div className="pdf-workbench-toolbar">
+        <button type="button" onClick={runRewrite} disabled={!canEdit || !changed || busy === "rewrite"}>
+          {busy === "rewrite" ? "Speichere ..." : "Aus Plan neue Version"}
+        </button>
+        <button type="button" className="link" onClick={resetPlan} disabled={!canEdit || !changed}>
+          Zurücksetzen
+        </button>
+        <button type="button" className="link" onClick={deleteSelected} disabled={!canEdit || selectedCount === 0}>
+          Auswahl entfernen
+        </button>
+        <span className="muted">{selectedCount} ausgewählt</span>
+      </div>
+
+      <div className="pdf-page-grid" aria-label="PDF-Seiten">
+        {items.map((item, index) => (
+          <article
+            key={item.key}
+            className={`pdf-page-card${selected.has(item.key) ? " pdf-page-card--selected" : ""}`}
+            draggable={canEdit}
+            onDragStart={() => setDragKey(item.key)}
+            onDragOver={(event) => event.preventDefault()}
+            onDrop={() => onDrop(item.key)}
+          >
+            <label className="pdf-page-card__select">
+              <input
+                type="checkbox"
+                checked={selected.has(item.key)}
+                onChange={() => toggleSelected(item.key)}
+                disabled={!canEdit}
+              />
+              Seite {item.page}
+            </label>
+            <PageThumb documentId={documentId} item={item} />
+            <div className="pdf-page-card__meta">
+              <span>#{index + 1}</span>
+              <span>{totalRotation(item)}°</span>
+            </div>
+            <div className="pdf-page-card__actions">
+              <button type="button" className="link" onClick={() => rotatePage(item.key)} disabled={!canEdit}>
+                Drehen
+              </button>
+              <button type="button" className="link link--danger" onClick={() => deletePage(item.key)} disabled={!canEdit || items.length <= 1}>
+                Löschen
+              </button>
+            </div>
+          </article>
+        ))}
+      </div>
 
       <section className="pdf-workbench__tool">
-        <h4>Seiten neu schreiben</h4>
-        <p className="muted">
-          Reihenfolge per Komma. Weggelassene Seiten werden entfernt, Rotation mit
-          r90/r180/r270.
-        </p>
-        <textarea
-          value={rewritePlan}
-          onChange={(event) => setRewritePlan(event.target.value)}
+        <h4>Aus Auswahl neues Dokument erstellen</h4>
+        <p className="muted">Die ausgewählten Seiten werden in aktueller Reihenfolge kopiert.</p>
+        <input
+          value={splitTitle}
+          onChange={(event) => setSplitTitle(event.target.value)}
           disabled={!canEdit}
-          rows={3}
-          placeholder="1,2,3 oder 3,1r90,2"
+          placeholder="Titel des neuen Dokuments"
         />
-        <button type="button" onClick={runRewrite} disabled={!canEdit || busy === "rewrite"}>
-          {busy === "rewrite" ? "Erstelle Version ..." : "Als neue Version speichern"}
+        <button type="button" onClick={runSplitSelected} disabled={!canEdit || selectedCount === 0 || busy === "split-selected"}>
+          {busy === "split-selected" ? "Erstelle ..." : "Auswahl als Dokument"}
         </button>
       </section>
 
       <section className="pdf-workbench__tool">
-        <h4>Dokument splitten</h4>
+        <h4>Stapel manuell splitten</h4>
         <p className="muted">Eine Zeile pro neues Dokument: Titel: Seiten oder Bereiche.</p>
         <textarea
           value={splitPlan}
@@ -224,23 +424,54 @@ export function PdfWorkbenchPanel({
           rows={4}
           placeholder={"Anschreiben: 1-2\nBeilage: 3,4"}
         />
-        <button type="button" onClick={runSplit} disabled={!canEdit || busy === "split"}>
-          {busy === "split" ? "Splitte ..." : "Neue Dokumente erzeugen"}
+        <button type="button" onClick={runSplitPlan} disabled={!canEdit || busy === "split-plan"}>
+          {busy === "split-plan" ? "Splitte ..." : "Neue Dokumente erzeugen"}
         </button>
       </section>
 
       <section className="pdf-workbench__tool">
         <h4>Dokumente zusammenführen</h4>
-        <p className="muted">
-          Kommagetrennte Dokument-IDs werden hinter dieses Dokument gehängt.
-        </p>
+        <p className="muted">Suche Dokumente und hänge sie hinter dieses PDF.</p>
         <input
-          value={mergeIds}
-          onChange={(event) => setMergeIds(event.target.value)}
+          value={mergeQuery}
+          onChange={(event) => setMergeQuery(event.target.value)}
           disabled={!canEdit}
-          placeholder="123,124"
+          placeholder="Dokument suchen"
         />
-        <button type="button" onClick={runMerge} disabled={!canEdit || busy === "merge"}>
+        {mergeResults.length > 0 && (
+          <div className="pdf-merge-results">
+            {mergeResults.map((doc) => (
+              <button
+                type="button"
+                className="link"
+                key={doc.id}
+                onClick={() => {
+                  setMergeIds((current) => [...current, doc.id]);
+                  setMergeQuery("");
+                }}
+              >
+                {doc.title}
+              </button>
+            ))}
+          </div>
+        )}
+        {mergeIds.length > 0 && (
+          <div className="pdf-merge-selected">
+            {mergeIds.map((id) => (
+              <span key={id}>
+                #{id}
+                <button
+                  type="button"
+                  className="link"
+                  onClick={() => setMergeIds((current) => current.filter((item) => item !== id))}
+                >
+                  entfernen
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+        <button type="button" onClick={runMerge} disabled={!canEdit || mergeIds.length === 0 || busy === "merge"}>
           {busy === "merge" ? "Führe zusammen ..." : "Als neue Version zusammenführen"}
         </button>
       </section>
