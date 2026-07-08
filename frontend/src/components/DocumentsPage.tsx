@@ -42,7 +42,7 @@ import RulesPage from "./RulesPage";
 import DuePage from "./DuePage";
 import WorkflowsPage from "./WorkflowsPage";
 import CustomFieldsAdmin from "./CustomFieldsAdmin";
-import MailAccountsAdmin from "./MailAccountsAdmin";
+import MailCenterPage from "./MailCenterPage";
 import SystemStatusPage from "./SystemStatusPage";
 import InboxPage from "./InboxPage";
 
@@ -680,7 +680,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
                   : view === "fields"
                     ? "Zusatzfelder"
                     : view === "mail"
-                      ? "Mailkonten"
+                      ? "E-Mail"
                       : view === "system"
                         ? "Systemstatus"
                         : view === "faellig"
@@ -765,7 +765,10 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
               onChanged={loadCustomFields}
             />
           ) : view === "mail" ? (
-            <MailAccountsAdmin canEdit={!!me?.can_write} />
+            <MailCenterPage
+              canEdit={!!me?.can_write}
+              onOpenDocument={(docId) => setSelectedId(docId)}
+            />
           ) : view === "system" ? (
             <SystemStatusPage />
           ) : view === "capture" ? (
@@ -1267,7 +1270,7 @@ function Sidebar({
           <NavItem
             active={view === "mail"}
             onClick={() => onNavigate("mail")}
-            label="Mailkonten"
+            label="E-Mail"
             icon="M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2m0 2v.5l8 5 8-5V6H4m0 2.8V18h16V8.8l-8 5z"
           />
         )}

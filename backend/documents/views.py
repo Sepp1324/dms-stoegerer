@@ -77,6 +77,7 @@ from .models import (
     ExtractionCandidate,
     MailAccount,
     OCRStatus,
+    ProcessedMail,
     StoragePath,
     Tag,
     Workflow,
@@ -96,6 +97,7 @@ from .serializers import (
     DocumentVersionSerializer,
     ExtractionCandidateSerializer,
     MailAccountSerializer,
+    ProcessedMailSerializer,
     StoragePathSerializer,
     TagSerializer,
     WorkflowSerializer,
@@ -2996,6 +2998,87 @@ class ShareDownloadView(_ShareAccessView):
         if version is None:
             raise Http404("Keine Version vorhanden.")
         return _serve_version_download(link.document, version)
+
+
+class ProcessedMailViewSet(viewsets.ReadOnlyModelViewSet):
+    """Mail-Center: verarbeitete IMAP-Mails ohne Zugangsdaten anzeigen.
+
+    V1 ist bewusst read-mostly: Die eigentliche Ingestion bleibt in ``mail.py``.
+    Hier werden Importstatus, Anhänge, verknüpfte Dokumente und einfache
+    Bearbeitungsaktionen für die menschliche Nacharbeit sichtbar.
+    """
+
+    serializer_class = ProcessedMailSerializer
+    permission_classes = [IsDmsAdmin]
+
+    def get_queryset(self):
+        qs = (
+            ProcessedMail.objects.select_related("account")
+            .prefetch_related(
+                "documents__correspondent",
+                "documents__document_type",
+                "documents__folder",
+                "documents__current_version",
+            )
+            .order_by("-processed_at", "-id")
+        )
+
+        status_value = self.request.query_params.get("status")
+        if status_value in {choice for choice, _label in ProcessedMail.Status.choices}:
+            qs = qs.filter(status=status_value)
+
+        account = self.request.query_params.get("account")
+        if account:
+            qs = qs.filter(account_id=account)
+
+        q = self.request.query_params.get("q", "").strip()
+        if q:
+            qs = qs.filter(
+                Q(subject__icontains=q)
+                | Q(sender__icontains=q)
+                | Q(message_id__icontains=q)
+            )
+
+        return qs
+
+    @action(detail=False, methods=["get"], url_path="summary")
+    def summary(self, request):
+        """Kompakte Zähler für Statuskacheln im Mail-Center."""
+        qs = self.get_queryset()
+        by_status = {
+            row["status"]: row["count"]
+            for row in qs.values("status").annotate(count=Count("id"))
+        }
+        return Response(
+            {
+                "total": qs.count(),
+                "imported": by_status.get(ProcessedMail.Status.IMPORTED, 0),
+                "partial": by_status.get(ProcessedMail.Status.PARTIAL, 0),
+                "ignored": by_status.get(ProcessedMail.Status.IGNORED, 0),
+                "failed": by_status.get(ProcessedMail.Status.FAILED, 0),
+                "attachments": qs.aggregate(total=Count("documents", distinct=True))[
+                    "total"
+                ],
+            }
+        )
+
+    @action(detail=True, methods=["post"], url_path="mark-ignored")
+    def mark_ignored(self, request, pk=None):
+        """Markiert eine Mail als fachlich erledigt/ignoriert."""
+        item = self.get_object()
+        note = str(request.data.get("note", "") or "").strip()
+        item.status = ProcessedMail.Status.IGNORED
+        if note:
+            item.note = note[:4000]
+        item.save(update_fields=["status", "note"])
+        AuditLogEntry.objects.create(
+            actor=request.user,
+            action="processed_mail_ignored",
+            object_type="ProcessedMail",
+            object_id=str(item.id),
+            detail={"note": item.note},
+        )
+        return Response(self.get_serializer(item).data)
 
 
 class MailAccountViewSet(viewsets.ModelViewSet):

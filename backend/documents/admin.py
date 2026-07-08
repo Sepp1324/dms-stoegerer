@@ -316,18 +316,35 @@ class MailAccountAdmin(admin.ModelAdmin):
 
 @admin.register(ProcessedMail)
 class ProcessedMailAdmin(admin.ModelAdmin):
-    list_display = ("subject", "sender", "account", "imported_count", "processed_at")
-    list_filter = ("account",)
+    list_display = (
+        "subject",
+        "sender",
+        "account",
+        "status",
+        "imported_count",
+        "processed_at",
+    )
+    list_filter = ("account", "status")
     search_fields = ("subject", "sender", "message_id")
     readonly_fields = (
         "account",
         "message_id",
         "subject",
         "sender",
+        "received_at",
+        "status",
         "attachment_count",
         "imported_count",
+        "attachment_names",
+        "linked_documents",
+        "note",
+        "error",
         "processed_at",
     )
+
+    @admin.display(description="Importierte Dokumente")
+    def linked_documents(self, obj):
+        return ", ".join(str(document) for document in obj.documents.all()) or "—"
 
 
 class WorkflowTriggerInline(admin.StackedInline):

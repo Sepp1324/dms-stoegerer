@@ -22,7 +22,7 @@ import imaplib
 import logging
 from email.header import decode_header, make_header
 from email.message import Message
-from email.utils import parseaddr
+from email.utils import parsedate_to_datetime, parseaddr
 
 from django.conf import settings
 from django.db import connection
@@ -82,6 +82,20 @@ def sender_of(msg: Message) -> tuple[str, str]:
     """(Anzeigename, E-Mail-Adresse) des Absenders."""
     name, addr = parseaddr(_decode(msg.get("From", "")))
     return _decode(name) or addr, addr
+
+
+def received_at_of(msg: Message):
+    """Date-Header als aware datetime, falls die Mail einen verwertbaren Wert trägt."""
+    raw = msg.get("Date")
+    if not raw:
+        return None
+    try:
+        value = parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return None
+    if timezone.is_naive(value):
+        return timezone.make_aware(value, timezone.get_default_timezone())
+    return value
 
 
 def _ext_of(filename: str) -> str:
@@ -168,11 +182,21 @@ def ingest_message(account, raw_bytes: bytes) -> int | None:
 
     subject = _decode(msg.get("Subject"))
     sender_name, sender_addr = sender_of(msg)
+    received_at = received_at_of(msg)
+    display_sender = (
+        (sender_name and sender_addr and f"{sender_name} <{sender_addr}>")
+        or sender_addr
+        or sender_name
+        or ""
+    )
 
     attachment_count = 0
     imported = 0
+    attachment_names: list[str] = []
+    imported_documents = []
     for filename, payload, ctype in iter_attachments(msg):
         attachment_count += 1
+        attachment_names.append(filename)
         sha = hashlib.sha256(payload).hexdigest()
         if pipeline.find_duplicate_version(sha):
             logger.info("Anhang %s bereits vorhanden (Hash-Dedup) – übersprungen", filename)
@@ -215,21 +239,33 @@ def ingest_message(account, raw_bytes: bytes) -> int | None:
         # matchen kann. Vor dem Enqueue setzen, sonst läuft die Klassifizierung
         # ggf. bevor die Felder persistiert sind.
         document.mail_subject = (subject or "")[:512]
-        document.mail_sender = ((sender_name and sender_addr and f"{sender_name} <{sender_addr}>")
-                                or sender_addr or sender_name or "")[:512]
+        document.mail_sender = display_sender[:512]
         document.save(update_fields=["mail_subject", "mail_sender"])
         _apply_sender_hint(document, sender_name, sender_addr)
         process_document_version.delay(version.id)
+        imported_documents.append(document)
         imported += 1
 
-    ProcessedMail.objects.create(
+    if imported == 0:
+        mail_status = ProcessedMail.Status.IGNORED
+    elif imported < attachment_count:
+        mail_status = ProcessedMail.Status.PARTIAL
+    else:
+        mail_status = ProcessedMail.Status.IMPORTED
+
+    processed_mail = ProcessedMail.objects.create(
         account=account,
         message_id=message_id,
         subject=subject[:512],
-        sender=(sender_name or sender_addr)[:512],
+        sender=display_sender[:512],
+        received_at=received_at,
+        status=mail_status,
         attachment_count=attachment_count,
         imported_count=imported,
+        attachment_names=attachment_names,
     )
+    if imported_documents:
+        processed_mail.documents.add(*imported_documents)
     return imported
 
 
