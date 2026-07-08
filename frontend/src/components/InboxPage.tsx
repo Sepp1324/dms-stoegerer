@@ -1,11 +1,17 @@
 import { useEffect, useState } from "react";
 import {
+  applyExtractionCandidate,
+  dismissExtractionCandidate,
+  generateExtractionCandidates,
   getDocuments,
   getDocumentThumbnail,
+  getExtractionCandidates,
   markDocumentReviewed,
   type DocumentItem,
+  type ExtractionCandidate,
 } from "../api";
 import { ProcessingBadge } from "./ProcessingStatus";
+import { sanitizeSnippet } from "../sanitize";
 
 function Thumb({ doc }: { doc: DocumentItem }) {
   const [src, setSrc] = useState<string | null>(null);
@@ -56,6 +62,10 @@ export default function InboxPage({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [savingId, setSavingId] = useState<number | null>(null);
+  const [candidatesByDoc, setCandidatesByDoc] = useState<
+    Record<number, ExtractionCandidate[]>
+  >({});
+  const [candidateBusy, setCandidateBusy] = useState<string | null>(null);
 
   function load() {
     setLoading(true);
@@ -68,6 +78,7 @@ export default function InboxPage({
       .then((res) => {
         setDocs(res.results);
         setCount(res.count);
+        void loadCandidates(res.results);
       })
       .catch((err) => setError(err instanceof Error ? err.message : String(err)))
       .finally(() => setLoading(false));
@@ -76,6 +87,20 @@ export default function InboxPage({
   useEffect(() => {
     load();
   }, []);
+
+  async function loadCandidates(items: DocumentItem[]) {
+    const next: Record<number, ExtractionCandidate[]> = {};
+    await Promise.all(
+      items.map(async (doc) => {
+        try {
+          next[doc.id] = await getExtractionCandidates(doc.id);
+        } catch {
+          next[doc.id] = [];
+        }
+      }),
+    );
+    setCandidatesByDoc(next);
+  }
 
   async function markReviewed(docId: number) {
     setSavingId(docId);
@@ -88,6 +113,53 @@ export default function InboxPage({
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setSavingId(null);
+    }
+  }
+
+  async function refreshDocCandidates(docId: number) {
+    const list = await getExtractionCandidates(docId);
+    setCandidatesByDoc((current) => ({ ...current, [docId]: list }));
+  }
+
+  async function generateForDoc(docId: number) {
+    const key = `generate:${docId}`;
+    setCandidateBusy(key);
+    setError(null);
+    try {
+      const list = await generateExtractionCandidates(docId);
+      setCandidatesByDoc((current) => ({ ...current, [docId]: list }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCandidateBusy(null);
+    }
+  }
+
+  async function applyCandidate(docId: number, candidateId: number) {
+    const key = `apply:${candidateId}`;
+    setCandidateBusy(key);
+    setError(null);
+    try {
+      await applyExtractionCandidate(docId, candidateId);
+      await refreshDocCandidates(docId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCandidateBusy(null);
+    }
+  }
+
+  async function dismissCandidate(docId: number, candidateId: number) {
+    const key = `dismiss:${candidateId}`;
+    setCandidateBusy(key);
+    setError(null);
+    try {
+      await dismissExtractionCandidate(docId, candidateId);
+      await refreshDocCandidates(docId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCandidateBusy(null);
     }
   }
 
@@ -162,6 +234,75 @@ export default function InboxPage({
                     ))}
                   </div>
                 )}
+                <div className="smart-candidates">
+                  {(candidatesByDoc[doc.id] ?? [])
+                    .filter((candidate) => candidate.status === "pending")
+                    .map((candidate) => (
+                      <div className="smart-candidate" key={candidate.id}>
+                        <div className="smart-candidate__head">
+                          <span className="smart-candidate__field">
+                            {candidate.field_label}
+                          </span>
+                          <strong>{candidate.normalized_value || candidate.value}</strong>
+                          <span className="smart-candidate__confidence">
+                            {candidate.confidence}%
+                          </span>
+                        </div>
+                        <p className="smart-candidate__reason">
+                          {candidate.reason}
+                          {candidate.source_page
+                            ? ` · Seite ${candidate.source_page}`
+                            : ""}
+                        </p>
+                        {(candidate.source_snippet_html ||
+                          candidate.source_snippet) && (
+                          <p
+                            className="smart-candidate__snippet"
+                            dangerouslySetInnerHTML={{
+                              __html: sanitizeSnippet(
+                                candidate.source_snippet_html ||
+                                  candidate.source_snippet,
+                              ),
+                            }}
+                          />
+                        )}
+                        {canEdit && (
+                          <div className="smart-candidate__actions">
+                            <button
+                              type="button"
+                              onClick={() => applyCandidate(doc.id, candidate.id)}
+                              disabled={candidateBusy === `apply:${candidate.id}`}
+                            >
+                              Übernehmen
+                            </button>
+                            <button
+                              type="button"
+                              className="link"
+                              onClick={() => dismissCandidate(doc.id, candidate.id)}
+                              disabled={candidateBusy === `dismiss:${candidate.id}`}
+                            >
+                              Verwerfen
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  {canEdit &&
+                    (candidatesByDoc[doc.id] ?? []).filter(
+                      (candidate) => candidate.status === "pending",
+                    ).length === 0 && (
+                      <button
+                        type="button"
+                        className="link smart-candidates__generate"
+                        onClick={() => generateForDoc(doc.id)}
+                        disabled={candidateBusy === `generate:${doc.id}`}
+                      >
+                        {candidateBusy === `generate:${doc.id}`
+                          ? "Erkenne …"
+                          : "Strukturdaten erkennen"}
+                      </button>
+                    )}
+                </div>
               </div>
               <div className="inbox-row__side">
                 <ProcessingBadge state={doc.processing_state} />

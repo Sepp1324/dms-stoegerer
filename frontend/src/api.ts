@@ -176,6 +176,32 @@ export interface AiSuggestions {
   // Belegdatum als ISO-String (YYYY-MM-DD); beim Übernehmen auf created_at gemappt.
   date?: string;
 }
+
+export type ExtractionCandidateField =
+  | "document_date"
+  | "amount"
+  | "iban"
+  | "contract_number"
+  | "policy_number";
+export type ExtractionCandidateStatus = "pending" | "applied" | "dismissed";
+export interface ExtractionCandidate {
+  id: number;
+  document: number;
+  field: ExtractionCandidateField;
+  field_label: string;
+  value: string;
+  normalized_value: string;
+  confidence: number;
+  reason: string;
+  source: string;
+  source_page: number | null;
+  source_snippet: string;
+  source_snippet_html: string;
+  status: ExtractionCandidateStatus;
+  created_at: string;
+  applied_at: string | null;
+  dismissed_at: string | null;
+}
 // Freigabe-Status (Stufe 4, STOAA-57/63). Bestandsdaten ohne Feld gelten als
 // "entwurf"; das Backend liefert das Feld ab STOAA-63 verbindlich mit.
 export type DocumentStatus =
@@ -586,6 +612,55 @@ export async function markDocumentReviewed(id: number): Promise<DocumentDetail> 
     throw new Error(detail);
   }
   return res.json();
+}
+
+export async function getExtractionCandidates(
+  id: number,
+): Promise<ExtractionCandidate[]> {
+  const res = await apiFetch(`/documents/${id}/extraction-candidates/`);
+  if (!res.ok) {
+    throw new Error(`Vorschläge laden fehlgeschlagen: HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function generateExtractionCandidates(
+  id: number,
+): Promise<ExtractionCandidate[]> {
+  const res = await apiFetch(`/documents/${id}/extraction-candidates/`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    let detail = `Vorschläge konnten nicht erzeugt werden: HTTP ${res.status}`;
+    try {
+      const data = await res.json();
+      if (data && typeof data.detail === "string") detail = data.detail;
+    } catch {
+      /* keine JSON-Fehlermeldung – Fallback bleibt */
+    }
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+export function applyExtractionCandidate(
+  documentId: number,
+  candidateId: number,
+): Promise<ExtractionCandidate> {
+  return postJson<ExtractionCandidate>(
+    `/documents/${documentId}/extraction-candidates/${candidateId}/apply/`,
+    {},
+  );
+}
+
+export function dismissExtractionCandidate(
+  documentId: number,
+  candidateId: number,
+): Promise<ExtractionCandidate> {
+  return postJson<ExtractionCandidate>(
+    `/documents/${documentId}/extraction-candidates/${candidateId}/dismiss/`,
+    {},
+  );
 }
 
 // Verlauf/Audit-Trail eines Dokuments (paginiert, neueste zuerst).

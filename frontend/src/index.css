@@ -1234,6 +1234,67 @@ textarea:focus-visible {
   gap: 0.25rem;
   margin-top: 0.5rem;
 }
+.smart-candidates {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  margin-top: 0.65rem;
+}
+.smart-candidate {
+  border: 1px solid rgba(59, 130, 246, 0.28);
+  border-radius: 8px;
+  background: rgba(59, 130, 246, 0.07);
+  padding: 0.55rem 0.65rem;
+}
+.smart-candidate__head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  font-size: 0.82rem;
+}
+.smart-candidate__field {
+  color: #93c5fd;
+  font-weight: 650;
+}
+.smart-candidate__confidence {
+  margin-left: auto;
+  border: 1px solid rgba(147, 197, 253, 0.35);
+  border-radius: 999px;
+  padding: 0.05rem 0.45rem;
+  color: #bfdbfe;
+  font-size: 0.72rem;
+}
+.smart-candidate__reason,
+.smart-candidate__snippet {
+  margin: 0.25rem 0 0;
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+.smart-candidate__snippet {
+  color: var(--text);
+  opacity: 0.86;
+}
+.smart-candidate__snippet mark {
+  color: #0f172a;
+  background: #fde68a;
+  border-radius: 3px;
+  padding: 0 0.12rem;
+}
+.smart-candidate__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-top: 0.45rem;
+}
+.smart-candidate__actions button,
+.smart-candidates__generate {
+  font-size: 0.78rem;
+}
+.smart-candidates__generate {
+  align-self: flex-start;
+}
 .inbox-row__side {
   display: flex;
   flex-direction: column;

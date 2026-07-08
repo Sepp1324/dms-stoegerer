@@ -14,6 +14,7 @@ from .models import (
     DocumentPageText,
     DocumentType,
     DocumentVersion,
+    ExtractionCandidate,
     MailAccount,
     ProcessedMail,
     StoragePath,
@@ -112,6 +113,37 @@ class DocumentPageTextAdmin(admin.ModelAdmin):
     def text_preview(self, obj):
         text = (obj.text or "").strip()
         return text[:120] + ("…" if len(text) > 120 else "")
+
+
+@admin.register(ExtractionCandidate)
+class ExtractionCandidateAdmin(admin.ModelAdmin):
+    list_display = (
+        "document",
+        "field",
+        "value",
+        "confidence",
+        "status",
+        "source_page",
+        "created_at",
+    )
+    list_filter = ("field", "status", "source")
+    search_fields = ("document__title", "value", "normalized_value", "source_snippet")
+    readonly_fields = (
+        "document",
+        "field",
+        "value",
+        "normalized_value",
+        "confidence",
+        "reason",
+        "source",
+        "source_page",
+        "source_snippet",
+        "source_snippet_html",
+        "status",
+        "created_at",
+        "applied_at",
+        "dismissed_at",
+    )
 
 
 @admin.register(ClassificationRule)
