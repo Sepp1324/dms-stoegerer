@@ -62,6 +62,7 @@ from .models import (
     BackupMonitor,
     BackupRun,
     CaseFile,
+    CaseFileCandidate,
     ClassificationRule,
     Correspondent,
     CustomField,
@@ -81,6 +82,7 @@ from .models import (
 )
 from .serializers import (
     AuditLogEntrySerializer,
+    CaseFileCandidateSerializer,
     CaseFileSerializer,
     ClassificationRuleSerializer,
     CorrespondentSerializer,
@@ -1337,6 +1339,151 @@ class DocumentViewSet(viewsets.ModelViewSet):
             },
         )
         return Response(ExtractionCandidateSerializer(candidate).data)
+
+    @action(detail=True, methods=["get", "post"], url_path="case-candidates")
+    def case_candidates(self, request, pk=None):
+        """Akten-Autopilot-Kandidaten listen oder neu erzeugen."""
+        document = self.get_object()
+        if request.method == "POST":
+            if not request.user.can_write:
+                return Response(
+                    {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            from .services import case_matching
+
+            created = case_matching.generate_candidates(document)
+            AuditLogEntry.objects.create(
+                actor=request.user,
+                action="generate_case_file_candidates",
+                object_type="Document",
+                object_id=str(document.id),
+                detail={"created": created},
+            )
+
+        candidates = document.case_file_candidates.select_related("case_file").order_by(
+            "status", "-score", "-created_at"
+        )
+        return Response(CaseFileCandidateSerializer(candidates, many=True).data)
+
+    def _get_case_candidate(self, document, candidate_id):
+        candidate = (
+            document.case_file_candidates.select_related("case_file")
+            .filter(pk=candidate_id)
+            .first()
+        )
+        if candidate is None:
+            raise Http404("Aktenvorschlag nicht vorhanden.")
+        return candidate
+
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path=r"case-candidates/(?P<candidate_id>[0-9]+)/apply",
+    )
+    def apply_case_candidate(self, request, pk=None, candidate_id=None):
+        """Übernimmt genau einen Aktenvorschlag."""
+        if not request.user.can_write:
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        document = self.get_object()
+        candidate = self._get_case_candidate(document, candidate_id)
+        if candidate.status != CaseFileCandidate.Status.PENDING:
+            return Response(
+                {"detail": "Dieser Aktenvorschlag ist nicht mehr offen."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        with transaction.atomic():
+            if candidate.kind == CaseFileCandidate.Kind.EXISTING_CASE:
+                case_file = candidate.case_file
+                if case_file is None:
+                    return Response(
+                        {"detail": "Bestehende Zielakte fehlt."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                if (
+                    not getattr(request.user, "is_dms_admin", False)
+                    and case_file.owner_id != request.user.id
+                ):
+                    return Response(
+                        {"detail": "Zielakte ist nicht sichtbar."},
+                        status=status.HTTP_404_NOT_FOUND,
+                    )
+            else:
+                case_file = CaseFile.objects.create(
+                    title=candidate.suggested_title or document.title,
+                    description=f"Aus Dokument #{document.id} vorgeschlagen.",
+                    owner=document.owner or request.user,
+                )
+                candidate.case_file = case_file
+
+            document.case_file = case_file
+            document.save(update_fields=["case_file"])
+            now = timezone.now()
+            candidate.status = CaseFileCandidate.Status.APPLIED
+            candidate.applied_at = now
+            candidate.save(update_fields=["case_file", "status", "applied_at"])
+            document.case_file_candidates.filter(
+                status=CaseFileCandidate.Status.PENDING
+            ).exclude(pk=candidate.pk).update(
+                status=CaseFileCandidate.Status.DISMISSED,
+                dismissed_at=now,
+            )
+            AuditLogEntry.objects.create(
+                actor=request.user,
+                action="apply_case_file_candidate",
+                object_type="Document",
+                object_id=str(document.id),
+                detail={
+                    "candidate": candidate.id,
+                    "kind": candidate.kind,
+                    "case_file": case_file.id,
+                    "case_file_title": case_file.title,
+                    "score": candidate.score,
+                },
+            )
+
+        return Response(CaseFileCandidateSerializer(candidate).data)
+
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path=r"case-candidates/(?P<candidate_id>[0-9]+)/dismiss",
+    )
+    def dismiss_case_candidate(self, request, pk=None, candidate_id=None):
+        """Verwirft genau einen Aktenvorschlag ohne Dokumentänderung."""
+        if not request.user.can_write:
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        document = self.get_object()
+        candidate = self._get_case_candidate(document, candidate_id)
+        if candidate.status != CaseFileCandidate.Status.PENDING:
+            return Response(
+                {"detail": "Dieser Aktenvorschlag ist nicht mehr offen."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        candidate.status = CaseFileCandidate.Status.DISMISSED
+        candidate.dismissed_at = timezone.now()
+        candidate.save(update_fields=["status", "dismissed_at"])
+        AuditLogEntry.objects.create(
+            actor=request.user,
+            action="dismiss_case_file_candidate",
+            object_type="Document",
+            object_id=str(document.id),
+            detail={
+                "candidate": candidate.id,
+                "kind": candidate.kind,
+                "case_file": candidate.case_file_id,
+                "suggested_title": candidate.suggested_title,
+                "score": candidate.score,
+            },
+        )
+        return Response(CaseFileCandidateSerializer(candidate).data)
 
     def _metadata_snapshot(self, document) -> dict:
         """Menschlich lesbarer Schnappschuss der Metadaten für den Audit-Diff."""

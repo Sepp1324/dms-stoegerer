@@ -3,6 +3,7 @@ from rest_framework import serializers
 from .models import (
     AuditLogEntry,
     CaseFile,
+    CaseFileCandidate,
     ClassificationRule,
     Correspondent,
     CustomField,
@@ -363,6 +364,48 @@ class CaseFileSerializer(serializers.ModelSerializer):
     def get_documents(self, obj):
         docs = obj.documents.all().order_by("-created_at", "-added_at", "-id")
         return CaseFileDocumentSerializer(docs, many=True).data
+
+
+class CaseFileCandidateSerializer(serializers.ModelSerializer):
+    """Akten-Autopilot-Vorschlag für die Review-Queue."""
+
+    kind_label = serializers.SerializerMethodField()
+    status_label = serializers.SerializerMethodField()
+    case_file_title = serializers.CharField(
+        source="case_file.title", read_only=True, default=None
+    )
+    case_file_status = serializers.CharField(
+        source="case_file.status", read_only=True, default=None
+    )
+
+    class Meta:
+        model = CaseFileCandidate
+        fields = (
+            "id",
+            "document",
+            "case_file",
+            "case_file_title",
+            "case_file_status",
+            "kind",
+            "kind_label",
+            "suggested_title",
+            "score",
+            "reason",
+            "signals",
+            "source",
+            "status",
+            "status_label",
+            "created_at",
+            "applied_at",
+            "dismissed_at",
+        )
+        read_only_fields = fields
+
+    def get_kind_label(self, obj) -> str:
+        return obj.get_kind_display()
+
+    def get_status_label(self, obj) -> str:
+        return obj.get_status_display()
 
 
 class DocumentSerializer(serializers.ModelSerializer):

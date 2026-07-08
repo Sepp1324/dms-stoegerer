@@ -328,7 +328,7 @@ def ocr_version(version: DocumentVersion) -> dict:
 def classify_version(version: DocumentVersion) -> dict:
     """Regelbasierte Klassifizierung + Workflow-Engine ausführen."""
     from . import classification, workflows
-    from .services import extraction
+    from .services import case_matching, extraction
 
     version.refresh_from_db(fields=["processing_state", "ingest_source"])
     version.transition_to(
@@ -359,6 +359,20 @@ def classify_version(version: DocumentVersion) -> dict:
             version.document_id,
         )
         result["extraction_candidates"] = 0
+
+    # Akten-Autopilot: nach den Strukturvorschlägen können Vertrags-/Polizzen-
+    # nummern als starkes Signal dienen. Auch hier gilt: Vorschläge dürfen die
+    # technische Verarbeitung nicht blockieren.
+    try:
+        result["case_file_candidates"] = case_matching.generate_candidates(
+            version.document
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Aktenvorschläge für Dokument %s fehlgeschlagen",
+            version.document_id,
+        )
+        result["case_file_candidates"] = 0
 
     version.document.refresh_from_db(fields=["classification"])
     version.transition_to(
