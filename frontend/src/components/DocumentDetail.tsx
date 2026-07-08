@@ -35,6 +35,7 @@ import { ReminderPanel } from "./documentDetail/ReminderPanel";
 import { FreigabePanel } from "./documentDetail/FreigabePanel";
 import { ShareLinksPanel } from "./documentDetail/ShareLinksPanel";
 import { CustomFieldsPanel } from "./documentDetail/CustomFieldsPanel";
+import { PdfWorkbenchPanel } from "./documentDetail/PdfWorkbenchPanel";
 import { AuditTrail } from "./documentDetail/AuditPanel";
 import { formatIsoDate } from "./documentDetail/format";
 
@@ -479,6 +480,15 @@ export default function DocumentDetail({
                 documentId={id}
                 versions={versions}
                 onDownload={downloadVersion}
+              />
+            </TabPanel>
+
+            {/* PDF-Werkbank: Seiten neu schreiben, splitten, zusammenführen. */}
+            <TabPanel id="workbench" active={activeTab}>
+              <PdfWorkbenchPanel
+                documentId={id}
+                canEdit={canEdit}
+                onChanged={() => setRefresh((r) => r + 1)}
               />
             </TabPanel>
 

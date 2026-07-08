@@ -10,6 +10,7 @@ from decimal import Decimal, InvalidOperation
 import img2pdf
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import connection, transaction
 from django.db.models import Case, DecimalField, Q, Value, When
@@ -1926,6 +1927,142 @@ class DocumentViewSet(viewsets.ModelViewSet):
         new = self._resolve_version_no(document, int(to_version))
         result = version_compare.compare_versions(document, old, new)
         return Response(result.to_dict())
+
+    @action(detail=True, methods=["get"], url_path="pdf-workbench/pages")
+    def pdf_workbench_pages(self, request, pk=None):
+        """Seitenmanifest der aktuellen PDF-Version für die Werkbank."""
+        document = self.get_object()
+        if document.current_version is None:
+            return Response(
+                {"detail": "Dokument hat keine aktuelle Version."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        from .services import pdf_workbench
+
+        try:
+            manifest = pdf_workbench.page_manifest(document.current_version)
+        except Exception as exc:  # noqa: BLE001
+            return Response(
+                {"detail": f"PDF konnte nicht gelesen werden: {exc}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response({"document": document.id, **manifest})
+
+    @action(detail=True, methods=["post"], url_path="pdf-workbench/rewrite")
+    def pdf_workbench_rewrite(self, request, pk=None):
+        """Reorder/Delete/Rotate als neue Version desselben Dokuments."""
+        if not request.user.can_write:
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        document = self.get_object()
+        from .services import pdf_workbench
+
+        try:
+            specs = pdf_workbench.parse_page_specs(request.data.get("pages"))
+            version = pdf_workbench.rewrite_as_new_version(
+                document,
+                specs,
+                actor=request.user,
+                reason=str(request.data.get("reason", "")),
+            )
+        except DjangoValidationError as exc:
+            return Response({"detail": "; ".join(exc.messages)}, status=400)
+        except Exception as exc:  # noqa: BLE001
+            return Response({"detail": str(exc)}, status=400)
+
+        process_document_version.delay(version.id)
+        document.refresh_from_db()
+        return Response(self.get_serializer(document).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"], url_path="pdf-workbench/merge")
+    def pdf_workbench_merge(self, request, pk=None):
+        """Merged weitere sichtbare Dokumente in eine neue Version dieses Dokuments."""
+        if not request.user.can_write:
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        document = self.get_object()
+        raw_ids = request.data.get("document_ids")
+        if not isinstance(raw_ids, list) or not raw_ids:
+            return Response(
+                {"detail": "Feld 'document_ids' muss eine nicht-leere Liste sein."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            ids = [int(raw) for raw in raw_ids if int(raw) != document.id]
+        except (TypeError, ValueError):
+            return Response(
+                {"detail": "Alle document_ids müssen Zahlen sein."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        ids = list(dict.fromkeys(ids))
+        qs = Document.objects.filter(id__in=ids).select_related("current_version")
+        if not getattr(request.user, "is_dms_admin", False):
+            qs = qs.filter(owner=request.user)
+        visible = list(qs)
+        if len(visible) != len(ids):
+            return Response(
+                {"detail": "Mindestens ein Merge-Dokument ist nicht sichtbar."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        ordered = sorted(visible, key=lambda item: ids.index(item.id))
+        from .services import pdf_workbench
+
+        try:
+            version = pdf_workbench.merge_as_new_version(
+                document,
+                ordered,
+                actor=request.user,
+                reason=str(request.data.get("reason", "")),
+            )
+        except DjangoValidationError as exc:
+            return Response({"detail": "; ".join(exc.messages)}, status=400)
+        except Exception as exc:  # noqa: BLE001
+            return Response({"detail": str(exc)}, status=400)
+
+        process_document_version.delay(version.id)
+        document.refresh_from_db()
+        return Response(self.get_serializer(document).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"], url_path="pdf-workbench/split")
+    def pdf_workbench_split(self, request, pk=None):
+        """Splittet Seitenbereiche in neue Dokumente."""
+        if not request.user.can_write:
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        document = self.get_object()
+        parts = request.data.get("parts")
+        if not isinstance(parts, list) or not parts:
+            return Response(
+                {"detail": "Feld 'parts' muss eine nicht-leere Liste sein."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        for idx, part in enumerate(parts, start=1):
+            if not isinstance(part, dict) or not isinstance(part.get("pages"), list):
+                return Response(
+                    {"detail": f"Teil {idx} braucht eine pages-Liste."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        from .services import pdf_workbench
+
+        try:
+            created = pdf_workbench.split_into_documents(document, parts, actor=request.user)
+        except DjangoValidationError as exc:
+            return Response({"detail": "; ".join(exc.messages)}, status=400)
+        except Exception as exc:  # noqa: BLE001
+            return Response({"detail": str(exc)}, status=400)
+
+        for _created_document, version in created:
+            process_document_version.delay(version.id)
+        serializer = self.get_serializer([item[0] for item in created], many=True)
+        return Response({"documents": serializer.data}, status=status.HTTP_201_CREATED)
 
     # Bis zu so vielen Dokumenten wird synchron im Request klassifiziert;
     # größere Batches wandern in einen Celery-Task (Timeout-/Lastschutz).

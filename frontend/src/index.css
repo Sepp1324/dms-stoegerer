@@ -2103,6 +2103,64 @@ textarea:focus-visible {
   }
 }
 
+/* --- PDF-Werkbank --- */
+.pdf-workbench {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+.pdf-workbench__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+.pdf-workbench__head > div {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.pdf-page-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(54px, 1fr));
+  gap: 0.4rem;
+}
+.pdf-page-strip span {
+  display: grid;
+  place-items: center;
+  min-height: 46px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface-sunken);
+  color: var(--text);
+  font-size: 0.78rem;
+}
+.pdf-workbench__tool {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.28);
+  padding: 0.75rem;
+}
+.pdf-workbench__tool h4 {
+  margin: 0;
+  font-size: 0.9rem;
+}
+.pdf-workbench__tool p {
+  margin: 0;
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+.pdf-workbench__tool textarea {
+  min-height: 82px;
+  resize: vertical;
+}
+.pdf-workbench__tool button {
+  align-self: flex-start;
+}
+
 /* --- KI-Vorschläge --- */
 .ai-panel {
   border: 1px solid rgba(139, 92, 246, 0.4);

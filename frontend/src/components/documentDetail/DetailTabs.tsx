@@ -6,6 +6,7 @@ import type { KeyboardEvent, ReactNode } from "react";
 export type TabId =
   | "overview"
   | "versions"
+  | "workbench"
   | "ai"
   | "reminder"
   | "freigabe"
@@ -15,6 +16,7 @@ export type TabId =
 export const DETAIL_TABS: { id: TabId; label: string }[] = [
   { id: "overview", label: "Übersicht" },
   { id: "versions", label: "Versionen & Verlauf" },
+  { id: "workbench", label: "Werkbank" },
   { id: "ai", label: "KI-Vorschläge" },
   { id: "reminder", label: "Wiedervorlage" },
   { id: "freigabe", label: "Freigabe" },

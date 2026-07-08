@@ -143,6 +143,25 @@ export interface DocumentIntegrity {
   chain_ok: boolean;
   versions: VersionIntegrity[];
 }
+export interface PdfWorkbenchPage {
+  page: number;
+  rotation: number;
+}
+export interface PdfWorkbenchManifest {
+  document: number;
+  version_id: number;
+  version_no: number;
+  page_count: number;
+  pages: PdfWorkbenchPage[];
+}
+export interface PdfWorkbenchPageSpec {
+  page: number;
+  rotation?: 0 | 90 | 180 | 270;
+}
+export interface PdfWorkbenchSplitPart {
+  title: string;
+  pages: number[];
+}
 export interface DocumentItem {
   id: number;
   title: string;
@@ -807,6 +826,55 @@ export async function getDocumentIntegrity(id: number): Promise<DocumentIntegrit
   const res = await apiFetch(`/documents/${id}/integrity/`);
   if (!res.ok) throw new Error(`Integritätsprüfung fehlgeschlagen (HTTP ${res.status})`);
   return res.json();
+}
+
+export async function getPdfWorkbenchPages(
+  id: number,
+): Promise<PdfWorkbenchManifest> {
+  const res = await apiFetch(`/documents/${id}/pdf-workbench/pages/`);
+  if (!res.ok) {
+    let detail = `PDF-Seiten laden fehlgeschlagen (HTTP ${res.status})`;
+    try {
+      const data = await res.json();
+      if (data && typeof data.detail === "string") detail = data.detail;
+    } catch {
+      /* keine JSON-Fehlermeldung */
+    }
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+export function rewritePdfDocument(
+  id: number,
+  pages: PdfWorkbenchPageSpec[],
+  reason = "",
+): Promise<DocumentDetail> {
+  return postJson<DocumentDetail>(`/documents/${id}/pdf-workbench/rewrite/`, {
+    pages,
+    reason,
+  });
+}
+
+export function mergePdfDocuments(
+  id: number,
+  documentIds: number[],
+  reason = "",
+): Promise<DocumentDetail> {
+  return postJson<DocumentDetail>(`/documents/${id}/pdf-workbench/merge/`, {
+    document_ids: documentIds,
+    reason,
+  });
+}
+
+export function splitPdfDocument(
+  id: number,
+  parts: PdfWorkbenchSplitPart[],
+): Promise<{ documents: DocumentDetail[] }> {
+  return postJson<{ documents: DocumentDetail[] }>(
+    `/documents/${id}/pdf-workbench/split/`,
+    { parts },
+  );
 }
 
 // Lädt den QR-Code des Dokuments als PNG-Blob (STOAA-284/286). Der Code enthält
