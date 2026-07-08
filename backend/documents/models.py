@@ -201,6 +201,54 @@ class CustomFieldValue(models.Model):
         return f"{self.field.name}={self.value}"
 
 
+class CaseFile(models.Model):
+    """Fachlicher Vorgang, der mehrere Dokumente zu einer Akte bündelt.
+
+    Ordner beantworten „wo liegt es?", ein Vorgang beantwortet „worum geht es?".
+    Die Zuordnung ist bewusst fachlich und unabhängig von Ablagepfad/Ordnerbaum:
+    Eine Akte kann Dokumente aus unterschiedlichen Ordnern enthalten und eine
+    KI-/Heuristik-Zusammenfassung als Arbeitsgedächtnis tragen.
+    """
+
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Aktiv"
+        WAITING = "waiting", "Wartet"
+        DONE = "done", "Erledigt"
+        ARCHIVED = "archived", "Archiviert"
+
+    title = models.CharField(max_length=255)
+    description = models.TextField(blank=True, default="")
+    status = models.CharField(
+        max_length=16,
+        choices=Status.choices,
+        default=Status.ACTIVE,
+        db_index=True,
+    )
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="case_files",
+    )
+    ai_summary = models.TextField(blank=True, default="")
+    ai_summary_source = models.CharField(max_length=32, blank=True, default="")
+    ai_summary_generated_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Vorgang"
+        verbose_name_plural = "Vorgänge"
+        ordering = ["status", "-updated_at", "title"]
+        indexes = [
+            models.Index(fields=["owner", "status"], name="documents_case_owner_status_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return self.title
+
+
 # ---------------------------------------------------------------------------
 # Dokument + Versionen (Kern)
 # ---------------------------------------------------------------------------
@@ -254,6 +302,14 @@ class Document(models.Model):
         on_delete=models.SET_NULL,
         related_name="documents",
         help_text="Fachlicher Ordner/Akte für die UI-Navigation.",
+    )
+    case_file = models.ForeignKey(
+        CaseFile,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="documents",
+        help_text="Fachlicher Vorgang/Akte, dem das Dokument zugeordnet ist.",
     )
     tags = models.ManyToManyField(Tag, blank=True, related_name="documents")
     owner = models.ForeignKey(

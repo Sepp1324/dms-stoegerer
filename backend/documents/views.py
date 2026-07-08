@@ -13,7 +13,7 @@ from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import connection, transaction
 from django.db.models import Case, DecimalField, Q, Value, When
-from django.db.models import Count
+from django.db.models import Count, Max
 from django.db.models.functions import Cast
 from django.http import FileResponse, Http404, HttpResponse
 from django.utils import timezone
@@ -61,6 +61,7 @@ from .models import (
     AuditLogEntry,
     BackupMonitor,
     BackupRun,
+    CaseFile,
     ClassificationRule,
     Correspondent,
     CustomField,
@@ -80,6 +81,7 @@ from .models import (
 )
 from .serializers import (
     AuditLogEntrySerializer,
+    CaseFileSerializer,
     ClassificationRuleSerializer,
     CorrespondentSerializer,
     CustomFieldSerializer,
@@ -858,6 +860,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 "document_type",
                 "storage_path",
                 "folder",
+                "case_file",
                 "current_version",
             )
             .prefetch_related(
@@ -961,6 +964,8 @@ class DocumentViewSet(viewsets.ModelViewSet):
             qs = qs.filter(document_type_id=params["document_type"])
         if params.get("storage_path"):
             qs = qs.filter(storage_path_id=params["storage_path"])
+        if params.get("case_file"):
+            qs = qs.filter(case_file_id=params["case_file"])
         folder = params.get("folder")
         if folder == "none":
             qs = qs.filter(folder__isnull=True)
@@ -2140,6 +2145,190 @@ class DocumentFolderViewSet(viewsets.ModelViewSet):
             DocumentFolder.objects.select_related("parent")
             .annotate(document_count=Count("documents", filter=count_filter))
             .order_by("parent__name", "name")
+        )
+
+
+class CaseFileViewSet(viewsets.ModelViewSet):
+    """Vorgangsakten: bündeln Dokumente zu einem fachlichen Vorgang."""
+
+    serializer_class = CaseFileSerializer
+    permission_classes = [ReadOnlyOrCanWrite]
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = (
+            CaseFile.objects.select_related("owner")
+            .prefetch_related(
+                "documents__correspondent",
+                "documents__document_type",
+                "documents__folder",
+                "documents__current_version",
+            )
+            .annotate(
+                document_count=Count("documents", distinct=True),
+                latest_document_at=Max("documents__added_at"),
+            )
+        )
+        if not getattr(user, "is_dms_admin", False):
+            qs = qs.filter(owner=user)
+
+        status_value = self.request.query_params.get("status")
+        if status_value in {choice for choice, _label in CaseFile.Status.choices}:
+            qs = qs.filter(status=status_value)
+
+        q = self.request.query_params.get("q", "").strip()
+        if q:
+            qs = qs.filter(
+                Q(title__icontains=q)
+                | Q(description__icontains=q)
+                | Q(documents__title__icontains=q)
+                | Q(documents__current_version__ocr_text__icontains=q)
+            )
+        return qs.distinct().order_by("status", "-updated_at", "title")
+
+    def perform_create(self, serializer):
+        case_file = serializer.save(owner=self.request.user)
+        AuditLogEntry.objects.create(
+            actor=self.request.user,
+            action="case_file_create",
+            object_type="CaseFile",
+            object_id=str(case_file.id),
+            detail={"title": case_file.title},
+        )
+
+    def perform_update(self, serializer):
+        before = {
+            "title": serializer.instance.title,
+            "description": serializer.instance.description,
+            "status": serializer.instance.status,
+        }
+        super().perform_update(serializer)
+        case_file = serializer.instance
+        after = {
+            "title": case_file.title,
+            "description": case_file.description,
+            "status": case_file.status,
+        }
+        changes = {
+            key: {"from": before[key], "to": after[key]}
+            for key in before
+            if before[key] != after[key]
+        }
+        if changes:
+            AuditLogEntry.objects.create(
+                actor=self.request.user,
+                action="case_file_update",
+                object_type="CaseFile",
+                object_id=str(case_file.id),
+                detail={"changes": changes},
+            )
+
+    def _parse_document_ids(self, request):
+        raw_ids = request.data.get("ids")
+        if not isinstance(raw_ids, list) or not raw_ids:
+            return None, Response(
+                {"detail": "Feld 'ids' muss eine nicht-leere Liste sein."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        ids = []
+        for raw in raw_ids:
+            try:
+                ids.append(int(raw))
+            except (TypeError, ValueError):
+                return None, Response(
+                    {"detail": f"Ungültige Dokument-ID: {raw!r}."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        return list(dict.fromkeys(ids)), None
+
+    def _visible_documents(self, ids):
+        qs = Document.objects.filter(id__in=ids)
+        if not getattr(self.request.user, "is_dms_admin", False):
+            qs = qs.filter(owner=self.request.user)
+        return qs
+
+    def _serialized(self, case_file):
+        fresh = self.get_queryset().get(pk=case_file.pk)
+        return self.get_serializer(fresh).data
+
+    @action(detail=True, methods=["post"], url_path="add-documents")
+    def add_documents(self, request, pk=None):
+        """Ordnet sichtbare Dokumente dieser Akte zu."""
+        if not getattr(request.user, "can_write", False):
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        case_file = self.get_object()
+        ids, error = self._parse_document_ids(request)
+        if error is not None:
+            return error
+        documents = self._visible_documents(ids)
+        assigned_ids = list(documents.values_list("id", flat=True))
+        documents.update(case_file=case_file)
+        AuditLogEntry.objects.create(
+            actor=request.user,
+            action="case_file_add_documents",
+            object_type="CaseFile",
+            object_id=str(case_file.id),
+            detail={"document_ids": sorted(assigned_ids)},
+        )
+        return Response(self._serialized(case_file), status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["post"], url_path="remove-documents")
+    def remove_documents(self, request, pk=None):
+        """Entfernt sichtbare Dokumente aus dieser Akte."""
+        if not getattr(request.user, "can_write", False):
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        case_file = self.get_object()
+        ids, error = self._parse_document_ids(request)
+        if error is not None:
+            return error
+        documents = self._visible_documents(ids).filter(case_file=case_file)
+        removed_ids = list(documents.values_list("id", flat=True))
+        documents.update(case_file=None)
+        AuditLogEntry.objects.create(
+            actor=request.user,
+            action="case_file_remove_documents",
+            object_type="CaseFile",
+            object_id=str(case_file.id),
+            detail={"document_ids": sorted(removed_ids)},
+        )
+        return Response(self._serialized(case_file), status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["post"], url_path="summarize")
+    def summarize(self, request, pk=None):
+        """Erzeugt eine quellengebundene Zusammenfassung für die Akte."""
+        if not getattr(request.user, "can_write", False):
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        case_file = self.get_object()
+        from .services import case_files
+
+        result = case_files.summarize_case_file(case_file)
+        AuditLogEntry.objects.create(
+            actor=request.user,
+            action="case_file_summarize",
+            object_type="CaseFile",
+            object_id=str(case_file.id),
+            detail={
+                "source": result["source"],
+                "sources": [source["document"] for source in result["sources"]],
+            },
+        )
+        return Response(
+            {
+                "case_file": self._serialized(case_file),
+                "summary": result["summary"],
+                "source": result["source"],
+                "sources": result["sources"],
+            },
+            status=status.HTTP_200_OK,
         )
 
 
