@@ -72,6 +72,22 @@ class PdfWorkbenchTests(APITestCase):
         self.assertEqual(resp.data["page_count"], 3)
         self.assertEqual([page["page"] for page in resp.data["pages"]], [1, 2, 3])
 
+    def test_page_thumbnail_endpoint_returns_jpeg(self):
+        doc = self._doc("thumb", self.user, pages=2)
+        self.client.force_authenticate(self.user)
+
+        with mock.patch(
+            "documents.services.pdf_workbench.render_page_thumbnail",
+            return_value=b"jpeg-bytes",
+        ):
+            resp = self.client.get(
+                f"/api/documents/{doc.id}/pdf-workbench/pages/1/thumbnail/"
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp["Content-Type"], "image/jpeg")
+        self.assertEqual(resp.content, b"jpeg-bytes")
+
     def test_rewrite_creates_new_version_with_reordered_rotated_pages(self):
         doc = self._doc("rewrite", self.user, pages=3)
         self.client.force_authenticate(self.user)

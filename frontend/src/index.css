@@ -2120,20 +2120,78 @@ textarea:focus-visible {
   flex-direction: column;
   gap: 0.15rem;
 }
-.pdf-page-strip {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(54px, 1fr));
-  gap: 0.4rem;
+.pdf-workbench-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
 }
-.pdf-page-strip span {
+.pdf-page-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  gap: 0.65rem;
+}
+.pdf-page-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 0.55rem;
+  cursor: grab;
+}
+.pdf-page-card:active {
+  cursor: grabbing;
+}
+.pdf-page-card--selected {
+  border-color: rgba(59, 130, 246, 0.75);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.18);
+}
+.pdf-page-card__select {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.pdf-page-card__select input {
+  width: auto;
+}
+.pdf-page-card__thumb {
   display: grid;
   place-items: center;
-  min-height: 46px;
+  width: 100%;
+  aspect-ratio: 3 / 4;
+  overflow: hidden;
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: 6px;
   background: var(--surface-sunken);
-  color: var(--text);
-  font-size: 0.78rem;
+  color: var(--muted);
+}
+.pdf-page-card__thumb img {
+  max-width: 92%;
+  max-height: 92%;
+  object-fit: contain;
+  transform-origin: center;
+}
+.pdf-page-card__thumb span {
+  font-weight: 700;
+}
+.pdf-page-card__meta {
+  display: flex;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+.pdf-page-card__actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.35rem;
+}
+.pdf-page-card__actions button {
+  font-size: 0.72rem;
 }
 .pdf-workbench__tool {
   display: flex;
@@ -2159,6 +2217,26 @@ textarea:focus-visible {
 }
 .pdf-workbench__tool button {
   align-self: flex-start;
+}
+.pdf-merge-results,
+.pdf-merge-selected {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.pdf-merge-results button,
+.pdf-merge-selected span {
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 999px;
+  padding: 0.22rem 0.55rem;
+  background: rgba(148, 163, 184, 0.08);
+  color: var(--text);
+  font-size: 0.76rem;
+}
+.pdf-merge-selected span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
 }
 
 /* --- KI-Vorschläge --- */

@@ -44,6 +44,30 @@ def page_manifest(version: DocumentVersion) -> dict:
     }
 
 
+def render_page_thumbnail(version: DocumentVersion, page_no: int, *, dpi: int = 110) -> bytes:
+    """Rendert eine einzelne PDF-Seite als kompaktes JPEG für die Werkbank."""
+    count = _page_count(version)
+    if page_no < 1 or page_no > count:
+        raise ValidationError(f"Seite {page_no} liegt außerhalb von 1..{count}.")
+
+    from pdf2image import convert_from_path
+
+    images = convert_from_path(
+        version.file_path,
+        dpi=dpi,
+        first_page=page_no,
+        last_page=page_no,
+        fmt="jpeg",
+    )
+    if not images:
+        raise ValidationError(f"Seite {page_no} konnte nicht gerendert werden.")
+    image = images[0]
+    image.thumbnail((360, 480))
+    buffer = io.BytesIO()
+    image.convert("RGB").save(buffer, format="JPEG", quality=82, optimize=True)
+    return buffer.getvalue()
+
+
 def rewrite_as_new_version(
     document: Document,
     specs: list[PageSpec],

@@ -845,6 +845,19 @@ export async function getPdfWorkbenchPages(
   return res.json();
 }
 
+export async function getPdfWorkbenchPageThumbnail(
+  id: number,
+  pageNo: number,
+): Promise<Blob> {
+  const res = await apiFetch(
+    `/documents/${id}/pdf-workbench/pages/${pageNo}/thumbnail/`,
+  );
+  if (!res.ok) {
+    throw new Error(`Seitenminiatur nicht verfügbar (HTTP ${res.status})`);
+  }
+  return res.blob();
+}
+
 export function rewritePdfDocument(
   id: number,
   pages: PdfWorkbenchPageSpec[],
