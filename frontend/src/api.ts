@@ -223,6 +223,27 @@ export interface ExtractionCandidate {
   applied_at: string | null;
   dismissed_at: string | null;
 }
+export interface InboxSummary {
+  total_needs_review: number;
+  ready: number;
+  processing: number;
+  failed: number;
+  retry_pending: number;
+  with_ai_suggestions: number;
+  pending_extraction_candidates: number;
+  pending_case_candidates: number;
+  oldest_added_at: string | null;
+}
+export interface InboxGenerateCandidatesResult {
+  documents: number;
+  extraction_created: number;
+  case_created: number;
+  errors: { id?: number; error: string }[];
+}
+export interface ReviewLearningOptions {
+  create_rule?: boolean;
+  match_text?: string;
+}
 // Freigabe-Status (Stufe 4, STOAA-57/63). Bestandsdaten ohne Feld gelten als
 // "entwurf"; das Backend liefert das Feld ab STOAA-63 verbindlich mit.
 export type DocumentStatus =
@@ -681,23 +702,32 @@ export async function retryProcessing(id: number): Promise<DocumentVersion> {
   return res.json();
 }
 
+export async function getInboxSummary(): Promise<InboxSummary> {
+  const res = await apiFetch("/documents/inbox-summary/");
+  if (!res.ok) throw new Error(`Inbox-Status laden fehlgeschlagen: HTTP ${res.status}`);
+  return res.json();
+}
+
 // Markiert ein Dokument fachlich als geprüft. Das Backend hält review_status
 // bewusst read-only für PATCH; die Review-Bestätigung ist eine eigene Action.
-export async function markDocumentReviewed(id: number): Promise<DocumentDetail> {
-  const res = await apiFetch(`/documents/${id}/mark_reviewed/`, {
-    method: "POST",
-  });
-  if (!res.ok) {
-    let detail = `Prüfung konnte nicht gespeichert werden: HTTP ${res.status}`;
-    try {
-      const data = await res.json();
-      if (data && typeof data.detail === "string") detail = data.detail;
-    } catch {
-      /* keine JSON-Fehlermeldung – Fallback bleibt */
-    }
-    throw new Error(detail);
-  }
-  return res.json();
+export function markDocumentReviewed(
+  id: number,
+  options: ReviewLearningOptions = {},
+): Promise<DocumentDetail> {
+  return postJson<DocumentDetail>(`/documents/${id}/mark_reviewed/`, options);
+}
+
+export function markDocumentsReviewed(ids: number[]): Promise<BulkActionResult> {
+  return postJson<BulkActionResult>("/documents/mark-reviewed-bulk/", { ids });
+}
+
+export function generateInboxCandidates(
+  ids: number[],
+): Promise<InboxGenerateCandidatesResult> {
+  return postJson<InboxGenerateCandidatesResult>(
+    "/documents/inbox-generate-candidates/",
+    { ids },
+  );
 }
 
 export async function getExtractionCandidates(
