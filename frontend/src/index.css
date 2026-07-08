@@ -3056,6 +3056,180 @@ button.due-item:hover {
   margin-top: 0.1rem;
 }
 
+/* --- Vorgangsakten --- */
+.case-files {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+.case-files__layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 340px) minmax(0, 1fr);
+  gap: var(--space-4);
+  align-items: start;
+}
+.case-files__list,
+.case-detail {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--card);
+}
+.case-files__list {
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  position: sticky;
+  top: var(--space-4);
+}
+.case-files__head,
+.case-detail__top,
+.case-section-head,
+.case-source__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+.case-files__head h2,
+.case-detail__top h2,
+.case-section-head h3 {
+  margin: 0.1rem 0 0;
+}
+.case-create {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.case-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.case-list__item {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--text);
+  padding: 0.75rem 0.85rem;
+  text-align: left;
+}
+.case-list__item:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+.case-list__item--active {
+  border-color: var(--accent);
+  background: var(--accent-tint);
+}
+.case-list__item span {
+  display: block;
+  color: var(--muted);
+  font-size: 0.78rem;
+  margin-top: 0.2rem;
+}
+.case-detail {
+  padding: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+.case-detail__top label {
+  min-width: 10rem;
+}
+.case-summary {
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, var(--border));
+  border-radius: var(--radius-md);
+  background: var(--surface-sunken);
+  padding: var(--space-4);
+}
+.case-summary__text {
+  white-space: pre-wrap;
+  line-height: 1.55;
+}
+.case-sources {
+  display: grid;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+.case-source {
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-3);
+}
+.case-source p {
+  margin: 0.35rem 0 0;
+  color: var(--muted);
+  font-size: 0.83rem;
+  line-height: 1.45;
+}
+.case-add-doc {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}
+.case-timeline {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+.case-timeline::before {
+  content: "";
+  position: absolute;
+  left: 0.43rem;
+  top: 0.4rem;
+  bottom: 0.4rem;
+  width: 1px;
+  background: var(--border);
+}
+.case-timeline__item {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1rem minmax(0, 1fr);
+  gap: var(--space-3);
+}
+.case-timeline__dot {
+  width: 0.85rem;
+  height: 0.85rem;
+  margin-top: 0.35rem;
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 0 4px var(--card);
+  z-index: 1;
+}
+.case-timeline__body {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  background: var(--surface);
+}
+.case-timeline__title {
+  display: block;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  font-weight: 700;
+}
+.case-timeline__title:hover {
+  color: var(--accent);
+}
+@media (max-width: 900px) {
+  .case-files__layout {
+    grid-template-columns: 1fr;
+  }
+  .case-files__list {
+    position: static;
+  }
+  .case-detail__top,
+  .case-section-head,
+  .case-add-doc {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
 /* --- Bewegung reduzieren (Barrierefreiheit, STOAA-417) ---
    Wer im OS „Bewegung reduzieren" wählt, bekommt keine Transitions/Animationen. */
 @media (prefers-reduced-motion: reduce) {

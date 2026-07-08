@@ -5,6 +5,7 @@ from .models import (
     ASNScan,
     AuditLogEntry,
     BackupMonitor,
+    CaseFile,
     ClassificationRule,
     Correspondent,
     CustomField,
@@ -61,11 +62,19 @@ class DocumentAdmin(admin.ModelAdmin):
         "correspondent",
         "document_type",
         "folder",
+        "case_file",
         "review_status",
         "added_at",
         "owner",
     )
-    list_filter = ("review_status", "folder", "document_type", "correspondent", "tags")
+    list_filter = (
+        "review_status",
+        "folder",
+        "case_file",
+        "document_type",
+        "correspondent",
+        "tags",
+    )
     search_fields = ("title", "asn")
     ordering = ("-added_at",)
     readonly_fields = ("asn",)
@@ -113,6 +122,31 @@ class DocumentPageTextAdmin(admin.ModelAdmin):
     def text_preview(self, obj):
         text = (obj.text or "").strip()
         return text[:120] + ("…" if len(text) > 120 else "")
+
+
+@admin.register(CaseFile)
+class CaseFileAdmin(admin.ModelAdmin):
+    list_display = (
+        "title",
+        "status",
+        "owner",
+        "document_count",
+        "ai_summary_source",
+        "updated_at",
+    )
+    list_filter = ("status", "owner")
+    search_fields = ("title", "description", "ai_summary", "documents__title")
+    readonly_fields = (
+        "ai_summary",
+        "ai_summary_source",
+        "ai_summary_generated_at",
+        "created_at",
+        "updated_at",
+    )
+
+    @admin.display(description="Dokumente")
+    def document_count(self, obj):
+        return obj.documents.count()
 
 
 @admin.register(ExtractionCandidate)

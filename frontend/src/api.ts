@@ -155,6 +155,8 @@ export interface DocumentItem {
   folder: number | null;
   folder_name: string | null;
   folder_path: string | null;
+  case_file: number | null;
+  case_file_title: string | null;
   tags: { id: number; name: string; color: string }[];
   page_count: number | null;
   // Verarbeitungs-Rollup der aktuellen Version (STOAA-248): spart der Liste den
@@ -279,6 +281,42 @@ export interface ClassificationRule {
     folder?: string;
     tags?: string[];
   };
+}
+
+export type CaseFileStatus = "active" | "waiting" | "done" | "archived";
+export interface CaseFileDocument {
+  id: number;
+  title: string;
+  created_at: string | null;
+  added_at: string;
+  correspondent_name: string | null;
+  document_type_name: string | null;
+  folder_path: string | null;
+  asn: number | null;
+  asn_label: string | null;
+  page_count: number | null;
+}
+export interface CaseFile {
+  id: number;
+  title: string;
+  description: string;
+  status: CaseFileStatus;
+  status_label: string;
+  owner: number | null;
+  document_count: number;
+  latest_document_at: string | null;
+  ai_summary: string;
+  ai_summary_source: string;
+  ai_summary_generated_at: string | null;
+  created_at: string;
+  updated_at: string;
+  documents: CaseFileDocument[];
+}
+export interface CaseFileSummaryResult {
+  case_file: CaseFile;
+  summary: string;
+  source: string;
+  sources: AskSource[];
 }
 
 // --- Workflow-Engine (STOAA-263) ---
@@ -527,6 +565,7 @@ export interface DocumentQuery {
   storage_path?: number | "";
   // Fachlicher ecoDMS-artiger Ordnerfilter. ``"none"`` zeigt Dokumente ohne Ordner.
   folder?: number | "none" | "";
+  case_file?: number | "";
   // Verarbeitungsstatus-Filter (STOAA-248): grober UI-Bucket, leer = kein Filter.
   processing_state?: ProcessingStateFilter | "";
   // Fachlicher Inbox-Filter: offene oder bereits geprüfte Dokumente.
@@ -1141,6 +1180,49 @@ export interface FolderRef extends NamedRef {
 }
 export async function getFolders(): Promise<FolderRef[]> {
   return listAll<FolderRef>("/folders/");
+}
+
+export async function getCaseFiles(): Promise<CaseFile[]> {
+  return listAllPages<CaseFile>("/case-files/");
+}
+
+export function createCaseFile(payload: {
+  title: string;
+  description?: string;
+  status?: CaseFileStatus;
+}): Promise<CaseFile> {
+  return postJson<CaseFile>("/case-files/", payload);
+}
+
+export async function updateCaseFile(
+  id: number,
+  payload: Partial<Pick<CaseFile, "title" | "description" | "status">>,
+): Promise<CaseFile> {
+  const res = await apiFetch(`/case-files/${id}/`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(`Akte speichern fehlgeschlagen: HTTP ${res.status}`);
+  return res.json();
+}
+
+export function addDocumentsToCaseFile(
+  id: number,
+  ids: number[],
+): Promise<CaseFile> {
+  return postJson<CaseFile>(`/case-files/${id}/add-documents/`, { ids });
+}
+
+export function removeDocumentsFromCaseFile(
+  id: number,
+  ids: number[],
+): Promise<CaseFile> {
+  return postJson<CaseFile>(`/case-files/${id}/remove-documents/`, { ids });
+}
+
+export function summarizeCaseFile(id: number): Promise<CaseFileSummaryResult> {
+  return postJson<CaseFileSummaryResult>(`/case-files/${id}/summarize/`, {});
 }
 
 // --- Zusatzfelder (Custom Fields) ---

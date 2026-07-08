@@ -2,6 +2,7 @@ from rest_framework import serializers
 
 from .models import (
     AuditLogEntry,
+    CaseFile,
     ClassificationRule,
     Correspondent,
     CustomField,
@@ -269,6 +270,101 @@ class AuditLogEntrySerializer(serializers.ModelSerializer):
         return obj.actor.get_full_name() or obj.actor.username
 
 
+class CaseFileDocumentSerializer(serializers.ModelSerializer):
+    """Schmale Dokumentzeile innerhalb einer Vorgangsakte."""
+
+    correspondent_name = serializers.CharField(
+        source="correspondent.name", read_only=True, default=None
+    )
+    document_type_name = serializers.CharField(
+        source="document_type.name", read_only=True, default=None
+    )
+    folder_path = serializers.CharField(
+        source="folder.full_path", read_only=True, default=None
+    )
+    asn_label = serializers.SerializerMethodField()
+    page_count = serializers.IntegerField(
+        source="current_version.page_count", read_only=True, default=None
+    )
+
+    class Meta:
+        model = Document
+        fields = (
+            "id",
+            "title",
+            "created_at",
+            "added_at",
+            "correspondent_name",
+            "document_type_name",
+            "folder_path",
+            "asn",
+            "asn_label",
+            "page_count",
+        )
+
+    def get_asn_label(self, obj) -> str | None:
+        if not obj.asn:
+            return None
+        from .services.asn import format_asn
+
+        return format_asn(obj.asn)
+
+
+class CaseFileSerializer(serializers.ModelSerializer):
+    """Vorgangsakte mit Dokument-Timeline und KI-/Heuristik-Zusammenfassung."""
+
+    document_count = serializers.SerializerMethodField()
+    latest_document_at = serializers.SerializerMethodField()
+    status_label = serializers.SerializerMethodField()
+    documents = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CaseFile
+        fields = (
+            "id",
+            "title",
+            "description",
+            "status",
+            "status_label",
+            "owner",
+            "document_count",
+            "latest_document_at",
+            "ai_summary",
+            "ai_summary_source",
+            "ai_summary_generated_at",
+            "created_at",
+            "updated_at",
+            "documents",
+        )
+        read_only_fields = (
+            "owner",
+            "document_count",
+            "latest_document_at",
+            "ai_summary",
+            "ai_summary_source",
+            "ai_summary_generated_at",
+            "created_at",
+            "updated_at",
+            "documents",
+        )
+
+    def get_status_label(self, obj) -> str:
+        return obj.get_status_display()
+
+    def get_document_count(self, obj) -> int:
+        return getattr(obj, "document_count", None) or obj.documents.count()
+
+    def get_latest_document_at(self, obj):
+        annotated = getattr(obj, "latest_document_at", None)
+        if annotated is not None:
+            return annotated
+        return obj.documents.order_by("-added_at").values_list("added_at", flat=True).first()
+
+    def get_documents(self, obj):
+        docs = obj.documents.all().order_by("-created_at", "-added_at", "-id")
+        return CaseFileDocumentSerializer(docs, many=True).data
+
+
 class DocumentSerializer(serializers.ModelSerializer):
     versions = DocumentVersionSerializer(many=True, read_only=True)
     tags = TagSerializer(many=True, read_only=True)
@@ -310,6 +406,9 @@ class DocumentSerializer(serializers.ModelSerializer):
     folder_path = serializers.CharField(
         source="folder.full_path", read_only=True, default=None
     )
+    case_file_title = serializers.CharField(
+        source="case_file.title", read_only=True, default=None
+    )
     # Archivnummer (STOAA-284/285): read-only – die ASN ist unveränderlich und
     # wird serverseitig vergeben. ``asn_label`` liefert die kanonische Anzeigeform
     # ``ASN000123`` fürs Frontend (Detailansicht/QR-Download).
@@ -340,6 +439,8 @@ class DocumentSerializer(serializers.ModelSerializer):
             "folder",
             "folder_name",
             "folder_path",
+            "case_file",
+            "case_file_title",
             "tags",
             "tag_ids",
             "owner",
@@ -362,6 +463,7 @@ class DocumentSerializer(serializers.ModelSerializer):
             "added_at",
             "current_version",
             "owner",  # Eigentümer serverseitig gesetzt – nicht per Request änderbar (STOAA-7)
+            "case_file",  # Zuordnung nur über CaseFileViewSet-Actions (Owner-Scope).
             "asn",  # unveränderlich, serverseitig vergeben (STOAA-284/285)
             "ai_suggestions",
             "ai_suggested_at",

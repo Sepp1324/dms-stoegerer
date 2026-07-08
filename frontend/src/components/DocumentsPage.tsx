@@ -35,6 +35,7 @@ import { sanitizeSnippet } from "../sanitize";
 import { ProcessingBadge } from "./ProcessingStatus";
 import UploadZone from "./UploadZone";
 import MobileCapture from "./MobileCapture";
+import CaseFilesPage from "./CaseFilesPage";
 import CopilotPage from "./CopilotPage";
 import DocumentDetail from "./DocumentDetail";
 import RulesPage from "./RulesPage";
@@ -50,6 +51,7 @@ type CurrencyRange = { gte: string; lte: string };
 type FolderFilterValue = number | "none" | "";
 type MainView =
   | "docs"
+  | "cases"
   | "copilot"
   | "inbox"
   | "capture"
@@ -665,6 +667,8 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
           <h1 className="content-title">
             {view === "capture"
               ? "Erfassen"
+              : view === "cases"
+                ? "Akten"
               : view === "copilot"
                 ? "Copilot"
               : view === "inbox"
@@ -733,6 +737,14 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
           {view === "copilot" ? (
             <CopilotPage
               folders={folders}
+              onOpenDocument={(docId, pageNo) => {
+                setSelectedId(docId);
+                setSelectedPage(pageNo ?? null);
+              }}
+            />
+          ) : view === "cases" ? (
+            <CaseFilesPage
+              canEdit={!!me?.can_write}
               onOpenDocument={(docId, pageNo) => {
                 setSelectedId(docId);
                 setSelectedPage(pageNo ?? null);
@@ -1204,6 +1216,12 @@ function Sidebar({
           onClick={() => onNavigate("copilot")}
           label="Copilot"
           icon="M12 2a7 7 0 0 1 7 7v1h1a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2h-1v1a4 4 0 0 1-4 4H9a4 4 0 0 1-4-4v-1H4a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h1V9a7 7 0 0 1 7-7m-3 10a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3m6 0a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3M9 18h6v-2H9z"
+        />
+        <NavItem
+          active={view === "cases"}
+          onClick={() => onNavigate("cases")}
+          label="Akten"
+          icon="M3 5a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v2H3zm0 6h18v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"
         />
         <NavItem
           active={view === "inbox"}
@@ -1888,6 +1906,7 @@ function DocumentCard({
             {doc.correspondent_name ?? "Unbekannt"}
             {doc.document_type_name ? ` · ${doc.document_type_name}` : ""}
             {doc.folder_path ? ` · ${doc.folder_path}` : ""}
+            {doc.case_file_title ? ` · Akte: ${doc.case_file_title}` : ""}
           </p>
           {/* Suchergebnis-Snippet (STOAA-368/370): nur bei aktiver Suche gefüllt.
               Backend liefert bereits sicheres HTML (nur <mark>); sanitizeSnippet
