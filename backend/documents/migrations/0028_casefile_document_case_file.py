@@ -77,7 +77,7 @@ class Migration(migrations.Migration):
             model_name="casefile",
             index=models.Index(
                 fields=["owner", "status"],
-                name="documents_case_owner_status_idx",
+                name="docs_case_owner_status_idx",
             ),
         ),
     ]

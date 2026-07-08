@@ -242,7 +242,7 @@ class CaseFile(models.Model):
         verbose_name_plural = "Vorgänge"
         ordering = ["status", "-updated_at", "title"]
         indexes = [
-            models.Index(fields=["owner", "status"], name="documents_case_owner_status_idx"),
+            models.Index(fields=["owner", "status"], name="docs_case_owner_status_idx"),
         ]
 
     def __str__(self) -> str:
