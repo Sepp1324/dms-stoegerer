@@ -4,16 +4,21 @@ import {
   applyExtractionCandidate,
   dismissCaseFileCandidate,
   dismissExtractionCandidate,
+  generateInboxCandidates,
   generateCaseFileCandidates,
   generateExtractionCandidates,
   getCaseFileCandidates,
   getDocuments,
   getDocumentThumbnail,
   getExtractionCandidates,
+  getInboxSummary,
   markDocumentReviewed,
+  markDocumentsReviewed,
   type CaseFileCandidate,
   type DocumentItem,
   type ExtractionCandidate,
+  type InboxSummary,
+  type ReviewLearningOptions,
 } from "../api";
 import { ProcessingBadge } from "./ProcessingStatus";
 import { sanitizeSnippet } from "../sanitize";
@@ -55,6 +60,31 @@ function Thumb({ doc }: { doc: DocumentItem }) {
   );
 }
 
+function formatOldest(value: string | null): string {
+  if (!value) return "—";
+  const ageMs = Date.now() - new Date(value).getTime();
+  const hours = Math.max(0, Math.round(ageMs / 36e5));
+  if (hours < 24) return `${hours || 1}h`;
+  return `${Math.round(hours / 24)}d`;
+}
+
+function SummaryCard({
+  label,
+  value,
+  tone = "default",
+}: {
+  label: string;
+  value: number | string;
+  tone?: "default" | "warn" | "error" | "ok";
+}) {
+  return (
+    <div className={`inbox-metric inbox-metric--${tone}`}>
+      <strong>{value}</strong>
+      <span>{label}</span>
+    </div>
+  );
+}
+
 export default function InboxPage({
   canEdit,
   onOpenDocument,
@@ -64,9 +94,14 @@ export default function InboxPage({
 }) {
   const [docs, setDocs] = useState<DocumentItem[]>([]);
   const [count, setCount] = useState(0);
+  const [summary, setSummary] = useState<InboxSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [savingId, setSavingId] = useState<number | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState<string | null>(null);
+  const [bulkMessage, setBulkMessage] = useState<string | null>(null);
+  const [learnTextByDoc, setLearnTextByDoc] = useState<Record<number, string>>({});
   const [candidatesByDoc, setCandidatesByDoc] = useState<
     Record<number, ExtractionCandidate[]>
   >({});
@@ -76,17 +111,34 @@ export default function InboxPage({
   >({});
   const [caseCandidateBusy, setCaseCandidateBusy] = useState<string | null>(null);
 
+  async function refreshSummary() {
+    try {
+      setSummary(await getInboxSummary());
+    } catch {
+      /* Die Dokumentliste ist wichtiger; Summary bleibt beim letzten Stand. */
+    }
+  }
+
   function load() {
     setLoading(true);
     setError(null);
-    getDocuments({
-      review_status: "needs_review",
-      processing_state: "ready",
-      ordering: "-added_at",
-    })
-      .then((res) => {
+    setBulkMessage(null);
+    Promise.all([
+      getDocuments({
+        review_status: "needs_review",
+        processing_state: "ready",
+        ordering: "-added_at",
+      }),
+      getInboxSummary(),
+    ])
+      .then(([res, nextSummary]) => {
         setDocs(res.results);
         setCount(res.count);
+        setSummary(nextSummary);
+        setSelectedIds((current) => {
+          const visible = new Set(res.results.map((doc) => doc.id));
+          return new Set([...current].filter((id) => visible.has(id)));
+        });
         void loadCandidates(res.results);
       })
       .catch((err) => setError(err instanceof Error ? err.message : String(err)))
@@ -96,6 +148,35 @@ export default function InboxPage({
   useEffect(() => {
     load();
   }, []);
+
+  const visibleIds = docs.map((doc) => doc.id);
+  const selectedVisibleIds = visibleIds.filter((id) => selectedIds.has(id));
+  const allVisibleSelected =
+    docs.length > 0 && visibleIds.every((id) => selectedIds.has(id));
+
+  function toggleDocument(docId: number) {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(docId)) {
+        next.delete(docId);
+      } else {
+        next.add(docId);
+      }
+      return next;
+    });
+  }
+
+  function toggleAllVisible() {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (allVisibleSelected) {
+        visibleIds.forEach((id) => next.delete(id));
+      } else {
+        visibleIds.forEach((id) => next.add(id));
+      }
+      return next;
+    });
+  }
 
   async function loadCandidates(items: DocumentItem[]) {
     const next: Record<number, ExtractionCandidate[]> = {};
@@ -118,13 +199,20 @@ export default function InboxPage({
     setCaseCandidatesByDoc(nextCases);
   }
 
-  async function markReviewed(docId: number) {
+  async function markReviewed(docId: number, options: ReviewLearningOptions = {}) {
     setSavingId(docId);
     setError(null);
+    setBulkMessage(null);
     try {
-      await markDocumentReviewed(docId);
+      await markDocumentReviewed(docId, options);
       setDocs((current) => current.filter((doc) => doc.id !== docId));
+      setSelectedIds((current) => {
+        const next = new Set(current);
+        next.delete(docId);
+        return next;
+      });
       setCount((current) => Math.max(0, current - 1));
+      await refreshSummary();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -144,6 +232,7 @@ export default function InboxPage({
     try {
       const list = await generateExtractionCandidates(docId);
       setCandidatesByDoc((current) => ({ ...current, [docId]: list }));
+      await refreshSummary();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -158,6 +247,7 @@ export default function InboxPage({
     try {
       await applyExtractionCandidate(docId, candidateId);
       await refreshDocCandidates(docId);
+      await refreshSummary();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -172,6 +262,7 @@ export default function InboxPage({
     try {
       await dismissExtractionCandidate(docId, candidateId);
       await refreshDocCandidates(docId);
+      await refreshSummary();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -191,6 +282,7 @@ export default function InboxPage({
     try {
       const list = await generateCaseFileCandidates(docId);
       setCaseCandidatesByDoc((current) => ({ ...current, [docId]: list }));
+      await refreshSummary();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -217,6 +309,7 @@ export default function InboxPage({
             : doc,
         ),
       );
+      await refreshSummary();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -231,10 +324,53 @@ export default function InboxPage({
     try {
       await dismissCaseFileCandidate(docId, candidateId);
       await refreshCaseCandidates(docId);
+      await refreshSummary();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setCaseCandidateBusy(null);
+    }
+  }
+
+  async function bulkGenerateCandidates(useAllVisible = false) {
+    const ids = useAllVisible ? visibleIds : selectedVisibleIds;
+    if (ids.length === 0) return;
+    setBulkBusy("generate");
+    setError(null);
+    setBulkMessage(null);
+    try {
+      const result = await generateInboxCandidates(ids);
+      await loadCandidates(docs);
+      await refreshSummary();
+      const created = result.extraction_created + result.case_created;
+      setBulkMessage(
+        `${created} Vorschläge für ${result.documents} Dokumente erzeugt.`,
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBulkBusy(null);
+    }
+  }
+
+  async function bulkMarkReviewed() {
+    if (selectedVisibleIds.length === 0) return;
+    setBulkBusy("review");
+    setError(null);
+    setBulkMessage(null);
+    try {
+      const result = await markDocumentsReviewed(selectedVisibleIds);
+      setDocs((current) =>
+        current.filter((doc) => !selectedVisibleIds.includes(doc.id)),
+      );
+      setSelectedIds(new Set());
+      setCount((current) => Math.max(0, current - result.updated));
+      await refreshSummary();
+      setBulkMessage(`${result.updated} Dokumente als geprüft markiert.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBulkBusy(null);
     }
   }
 
@@ -258,7 +394,7 @@ export default function InboxPage({
     <section className="inbox">
       <div className="inbox-head">
         <div>
-          <p className="eyebrow">Review-Queue</p>
+          <p className="eyebrow">Mailroom</p>
           <h2>{count} offene {count === 1 ? "Prüfung" : "Prüfungen"}</h2>
         </div>
         <button type="button" className="link" onClick={load}>
@@ -266,10 +402,33 @@ export default function InboxPage({
         </button>
       </div>
 
+      {summary && (
+        <div className="inbox-metrics" aria-label="Inbox-Status">
+          <SummaryCard label="bereit" value={summary.ready} tone="ok" />
+          <SummaryCard label="in Arbeit" value={summary.processing} />
+          <SummaryCard label="fehlerhaft" value={summary.failed} tone="error" />
+          <SummaryCard
+            label="Vorschläge"
+            value={
+              summary.pending_extraction_candidates +
+              summary.pending_case_candidates +
+              summary.with_ai_suggestions
+            }
+            tone="warn"
+          />
+          <SummaryCard label="ältester Eingang" value={formatOldest(summary.oldest_added_at)} />
+        </div>
+      )}
+
       {error && (
         <div className="state state--error">
           <strong>Inbox konnte nicht aktualisiert werden.</strong>
           <span>{error}</span>
+        </div>
+      )}
+      {bulkMessage && (
+        <div className="status status--ok" role="status">
+          {bulkMessage}
         </div>
       )}
 
@@ -279,9 +438,60 @@ export default function InboxPage({
           <span>Neue fertige Dokumente erscheinen hier automatisch.</span>
         </div>
       ) : (
-        <div className="inbox-list">
-          {docs.map((doc) => (
-            <article className="inbox-row" key={doc.id}>
+        <>
+          {canEdit && (
+            <div className="inbox-toolbar">
+              <label className="inbox-toolbar__select">
+                <input
+                  type="checkbox"
+                  checked={allVisibleSelected}
+                  onChange={toggleAllVisible}
+                />
+                <span>{selectedVisibleIds.length} ausgewählt</span>
+              </label>
+              <div className="inbox-toolbar__actions">
+                <button
+                  type="button"
+                  onClick={() => bulkGenerateCandidates(false)}
+                  disabled={selectedVisibleIds.length === 0 || bulkBusy === "generate"}
+                >
+                  {bulkBusy === "generate" ? "Erzeuge …" : "Vorschläge erzeugen"}
+                </button>
+                <button
+                  type="button"
+                  className="link"
+                  onClick={() => bulkGenerateCandidates(true)}
+                  disabled={docs.length === 0 || bulkBusy === "generate"}
+                >
+                  Für sichtbare erzeugen
+                </button>
+                <button
+                  type="button"
+                  onClick={bulkMarkReviewed}
+                  disabled={selectedVisibleIds.length === 0 || bulkBusy === "review"}
+                >
+                  {bulkBusy === "review" ? "Speichere …" : "Auswahl geprüft"}
+                </button>
+              </div>
+            </div>
+          )}
+          <div className="inbox-list">
+            {docs.map((doc) => {
+              const learnText = learnTextByDoc[doc.id] ?? "";
+              return (
+                <article
+                  className={`inbox-row ${canEdit ? "inbox-row--selectable" : ""}`}
+                  key={doc.id}
+                >
+              {canEdit && (
+                <label className="inbox-row__check" title="Dokument auswählen">
+                  <input
+                    type="checkbox"
+                    checked={selectedIds.has(doc.id)}
+                    onChange={() => toggleDocument(doc.id)}
+                  />
+                </label>
+              )}
               <Thumb doc={doc} />
               <div className="inbox-row__main">
                 <button
@@ -481,10 +691,39 @@ export default function InboxPage({
                     </button>
                   )}
                 </div>
+                {canEdit && (
+                  <div className="inbox-learn">
+                    <input
+                      value={learnText}
+                      onChange={(event) =>
+                        setLearnTextByDoc((current) => ({
+                          ...current,
+                          [doc.id]: event.target.value,
+                        }))
+                      }
+                      placeholder="Match-Text für Regel"
+                    />
+                    <button
+                      type="button"
+                      className="link"
+                      onClick={() =>
+                        markReviewed(doc.id, {
+                          create_rule: true,
+                          match_text: learnText,
+                        })
+                      }
+                      disabled={savingId === doc.id || learnText.trim().length < 3}
+                    >
+                      Prüfen + Regel
+                    </button>
+                  </div>
+                )}
               </div>
             </article>
-          ))}
-        </div>
+              );
+            })}
+          </div>
+        </>
       )}
     </section>
   );

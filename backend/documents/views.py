@@ -1571,6 +1571,92 @@ class DocumentViewSet(viewsets.ModelViewSet):
         )
         super().perform_destroy(instance)
 
+    def _parse_document_ids(self, raw_ids):
+        """Normalisiert eine ID-Liste für Mailroom-/Bulk-Actions.
+
+        Akzeptiert ausschließlich nicht-leere Listen. Duplikate werden stabil
+        entfernt, damit die API-Antworten für Batch-Aktionen vorhersehbar
+        bleiben und ein Dokument nicht doppelt auditierbar geändert wird.
+        """
+        if not isinstance(raw_ids, list) or not raw_ids:
+            raise DjangoValidationError("Feld 'ids' muss eine nicht-leere Liste sein.")
+        document_ids = []
+        for raw_id in raw_ids:
+            try:
+                document_ids.append(int(raw_id))
+            except (TypeError, ValueError) as exc:
+                raise DjangoValidationError(
+                    f"Ungültige Dokument-ID: {raw_id!r}."
+                ) from exc
+        return list(dict.fromkeys(document_ids))
+
+    def _resolve_scoped_documents(self, requested_ids):
+        """Liefert sichtbare Dokumente plus Teilfehler ohne Existenz-Leak."""
+        scoped = list(self.get_queryset().filter(id__in=requested_ids))
+        scoped_ids = {document.id for document in scoped}
+        errors = [
+            {"id": document_id, "error": "nicht gefunden oder keine Berechtigung"}
+            for document_id in requested_ids
+            if document_id not in scoped_ids
+        ]
+        return scoped, errors
+
+    def _create_review_rule(self, document, match_text: str):
+        """Erzeugt eine erklärbare Klassifizierungsregel aus bestätigten Metadaten.
+
+        Das ist der Lernmodus der Inbox: Eine Nutzerkorrektur wird nur dann zu
+        einer zukünftigen Automatik, wenn ein konkreter Match-Text angegeben ist.
+        Gespeichert werden Namen statt IDs, damit Regeln lesbar, exportierbar und
+        zwischen Umgebungen portabel bleiben.
+        """
+        needle = str(match_text or "").strip()
+        if len(needle) < 3:
+            raise DjangoValidationError(
+                "Für eine Lernregel ist ein Match-Text mit mindestens 3 Zeichen nötig."
+            )
+
+        then = {}
+        if document.correspondent_id:
+            then["correspondent"] = document.correspondent.name
+        if document.document_type_id:
+            then["document_type"] = document.document_type.name
+        if document.storage_path_id:
+            then["storage_path"] = document.storage_path.name
+        if document.folder_id:
+            then["folder"] = document.folder.full_path
+        tag_names = list(document.tags.order_by("name").values_list("name", flat=True))
+        if tag_names:
+            then["tags"] = tag_names
+
+        if not then:
+            raise DjangoValidationError(
+                "Für eine Lernregel muss mindestens ein Metadatum gesetzt sein."
+            )
+
+        match = {"text_contains": [needle]}
+        existing = ClassificationRule.objects.filter(match=match, then=then).first()
+        if existing is not None:
+            return existing, False
+
+        parts = [
+            value
+            for value in (
+                document.correspondent.name if document.correspondent_id else "",
+                document.document_type.name if document.document_type_id else "",
+                document.folder.full_path if document.folder_id else "",
+            )
+            if value
+        ]
+        label = " · ".join(parts) or document.title
+        rule = ClassificationRule.objects.create(
+            name=f"Inbox · {label[:220]}",
+            priority=90,
+            enabled=True,
+            match=match,
+            then=then,
+        )
+        return rule, True
+
     @action(detail=True, methods=["post"])
     def apply_suggestions(self, request, pk=None):
         """Übernimmt KI-Vorschläge ans Dokument (legt Stammdaten bei Bedarf an).
@@ -1863,6 +1949,14 @@ class DocumentViewSet(viewsets.ModelViewSet):
         Das ist absichtlich eine eigene Action statt freiem PATCH auf
         ``review_status``: die fachliche Bestätigung ist ein Nutzerereignis und
         bleibt damit später leicht auditierbar/erweiterbar.
+
+        Optionaler Lernmodus::
+
+            {"create_rule": true, "match_text": "Wüstenrot Gruppe"}
+
+        Dann wird aus den bestätigten Metadaten eine deterministische
+        Klassifizierungsregel erzeugt. Ohne expliziten Match-Text gibt es keine
+        Regel - bewusst kein stilles Lernen.
         """
         if not request.user.can_write:
             return Response(
@@ -1871,19 +1965,207 @@ class DocumentViewSet(viewsets.ModelViewSet):
             )
 
         document = self.get_object()
-        if document.review_status != Document.ReviewStatus.REVIEWED:
-            document.review_status = Document.ReviewStatus.REVIEWED
-            document.save(update_fields=["review_status"])
-            AuditLogEntry.objects.create(
-                actor=request.user,
-                action="mark_reviewed",
-                object_type="Document",
-                object_id=str(document.id),
-                detail={"review_status": Document.ReviewStatus.REVIEWED},
-            )
+        learned_rule = None
+        learned_created = False
+        learn_payload = request.data.get("learn")
+        learn_payload = learn_payload if isinstance(learn_payload, dict) else {}
+        create_rule = bool(request.data.get("create_rule") or learn_payload)
+        match_text = (
+            request.data.get("match_text")
+            or learn_payload.get("text_contains")
+            or learn_payload.get("match_text")
+            or ""
+        )
+
+        with transaction.atomic():
+            if create_rule:
+                try:
+                    learned_rule, learned_created = self._create_review_rule(
+                        document, match_text
+                    )
+                except DjangoValidationError as exc:
+                    return Response(
+                        {"detail": "; ".join(exc.messages)},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                AuditLogEntry.objects.create(
+                    actor=request.user,
+                    action="create_classification_rule_from_review",
+                    object_type="Document",
+                    object_id=str(document.id),
+                    detail={
+                        "rule": learned_rule.id,
+                        "created": learned_created,
+                        "match_text": match_text,
+                    },
+                )
+
+            if document.review_status != Document.ReviewStatus.REVIEWED:
+                document.review_status = Document.ReviewStatus.REVIEWED
+                document.save(update_fields=["review_status"])
+                AuditLogEntry.objects.create(
+                    actor=request.user,
+                    action="mark_reviewed",
+                    object_type="Document",
+                    object_id=str(document.id),
+                    detail={"review_status": Document.ReviewStatus.REVIEWED},
+                )
 
         serializer = self.get_serializer(document)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        data = dict(serializer.data)
+        if learned_rule is not None:
+            data["learned_rule"] = ClassificationRuleSerializer(learned_rule).data
+            data["learned_rule_created"] = learned_created
+        return Response(data, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=["get"], url_path="inbox-summary")
+    def inbox_summary(self, request):
+        """Kompakter Mailroom-Rollup für Queue-Kacheln im Frontend."""
+        inbox = self.get_queryset().filter(
+            review_status=Document.ReviewStatus.NEEDS_REVIEW
+        )
+        PS = DocumentVersion.ProcessingState
+        processing_states = [
+            PS.UPLOADED,
+            PS.HASHED,
+            PS.OCR_RUNNING,
+            PS.OCR_DONE,
+            PS.CLASSIFICATION_RUNNING,
+            PS.CLASSIFIED,
+            PS.THUMBNAIL_DONE,
+            PS.SEALED,
+        ]
+        oldest = inbox.order_by("added_at").values_list("added_at", flat=True).first()
+        return Response(
+            {
+                "total_needs_review": inbox.count(),
+                "ready": inbox.filter(current_version__processing_state=PS.READY).count(),
+                "processing": inbox.filter(
+                    current_version__processing_state__in=processing_states
+                ).count(),
+                "failed": inbox.filter(
+                    current_version__processing_state=PS.FAILED
+                ).count(),
+                "retry_pending": inbox.filter(
+                    current_version__processing_state=PS.RETRY_PENDING
+                ).count(),
+                "with_ai_suggestions": inbox.exclude(ai_suggestions={}).count(),
+                "pending_extraction_candidates": ExtractionCandidate.objects.filter(
+                    document__in=inbox,
+                    status=ExtractionCandidate.Status.PENDING,
+                ).count(),
+                "pending_case_candidates": CaseFileCandidate.objects.filter(
+                    document__in=inbox,
+                    status=CaseFileCandidate.Status.PENDING,
+                ).count(),
+                "oldest_added_at": oldest,
+            }
+        )
+
+    @action(detail=False, methods=["post"], url_path="inbox-generate-candidates")
+    def inbox_generate_candidates(self, request):
+        """Erzeugt Smart-Inbox- und Aktenvorschläge für mehrere Dokumente."""
+        if not request.user.can_write:
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        try:
+            requested_ids = self._parse_document_ids(request.data.get("ids"))
+        except DjangoValidationError as exc:
+            return Response(
+                {"detail": "; ".join(exc.messages)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        documents, errors = self._resolve_scoped_documents(requested_ids)
+        from .services import case_matching, extraction
+
+        extraction_created = 0
+        case_created = 0
+        item_errors = list(errors)
+        for document in documents:
+            try:
+                extraction_created += extraction.generate_candidates(document)
+                case_created += case_matching.generate_candidates(document)
+            except Exception as exc:  # noqa: BLE001
+                item_errors.append({"id": document.id, "error": str(exc)})
+
+        if documents:
+            AuditLogEntry.objects.create(
+                actor=request.user,
+                action="inbox_generate_candidates",
+                object_type="Document",
+                object_id=f"{len(documents)} Dokumente",
+                detail={
+                    "ids": sorted(document.id for document in documents),
+                    "extraction_created": extraction_created,
+                    "case_created": case_created,
+                    "errors": item_errors,
+                },
+            )
+
+        return Response(
+            {
+                "documents": len(documents),
+                "extraction_created": extraction_created,
+                "case_created": case_created,
+                "errors": item_errors,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=False, methods=["post"], url_path="mark-reviewed-bulk")
+    def mark_reviewed_bulk(self, request):
+        """Schließt mehrere Mailroom-Einträge in einem Schritt ab."""
+        if not request.user.can_write:
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        try:
+            requested_ids = self._parse_document_ids(request.data.get("ids"))
+        except DjangoValidationError as exc:
+            return Response(
+                {"detail": "; ".join(exc.messages)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        documents, errors = self._resolve_scoped_documents(requested_ids)
+        updated_ids = []
+        unchanged = 0
+        with transaction.atomic():
+            for document in documents:
+                if document.review_status == Document.ReviewStatus.REVIEWED:
+                    unchanged += 1
+                    continue
+                document.review_status = Document.ReviewStatus.REVIEWED
+                document.save(update_fields=["review_status"])
+                updated_ids.append(document.id)
+                AuditLogEntry.objects.create(
+                    actor=request.user,
+                    action="mark_reviewed",
+                    object_type="Document",
+                    object_id=str(document.id),
+                    detail={
+                        "review_status": Document.ReviewStatus.REVIEWED,
+                        "mode": "bulk",
+                    },
+                )
+
+            if updated_ids:
+                AuditLogEntry.objects.create(
+                    actor=request.user,
+                    action="mark_reviewed_bulk",
+                    object_type="Document",
+                    object_id=f"{len(updated_ids)} Dokumente",
+                    detail={"ids": sorted(updated_ids), "errors": errors},
+                )
+
+        return Response(
+            {"updated": len(updated_ids), "unchanged": unchanged, "errors": errors},
+            status=status.HTTP_200_OK,
+        )
 
     def _resolve_version_no(self, document, version_no):
         """Löst eine ``version_no`` gegen die DB auf (kein Nutzerpfad).
