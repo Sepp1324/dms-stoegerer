@@ -6,6 +6,7 @@ from .models import (
     AuditLogEntry,
     BackupMonitor,
     CaseFile,
+    CaseFileCandidate,
     ClassificationRule,
     Correspondent,
     CustomField,
@@ -173,6 +174,36 @@ class ExtractionCandidateAdmin(admin.ModelAdmin):
         "source_page",
         "source_snippet",
         "source_snippet_html",
+        "status",
+        "created_at",
+        "applied_at",
+        "dismissed_at",
+    )
+
+
+@admin.register(CaseFileCandidate)
+class CaseFileCandidateAdmin(admin.ModelAdmin):
+    list_display = (
+        "document",
+        "kind",
+        "case_file",
+        "suggested_title",
+        "score",
+        "status",
+        "created_at",
+    )
+    list_filter = ("kind", "status", "source")
+    search_fields = ("document__title", "case_file__title", "suggested_title", "reason")
+    readonly_fields = (
+        "document",
+        "case_file",
+        "kind",
+        "suggested_title",
+        "signature",
+        "score",
+        "reason",
+        "signals",
+        "source",
         "status",
         "created_at",
         "applied_at",

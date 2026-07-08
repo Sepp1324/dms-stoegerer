@@ -1,12 +1,17 @@
 import { useEffect, useState } from "react";
 import {
+  applyCaseFileCandidate,
   applyExtractionCandidate,
+  dismissCaseFileCandidate,
   dismissExtractionCandidate,
+  generateCaseFileCandidates,
   generateExtractionCandidates,
+  getCaseFileCandidates,
   getDocuments,
   getDocumentThumbnail,
   getExtractionCandidates,
   markDocumentReviewed,
+  type CaseFileCandidate,
   type DocumentItem,
   type ExtractionCandidate,
 } from "../api";
@@ -66,6 +71,10 @@ export default function InboxPage({
     Record<number, ExtractionCandidate[]>
   >({});
   const [candidateBusy, setCandidateBusy] = useState<string | null>(null);
+  const [caseCandidatesByDoc, setCaseCandidatesByDoc] = useState<
+    Record<number, CaseFileCandidate[]>
+  >({});
+  const [caseCandidateBusy, setCaseCandidateBusy] = useState<string | null>(null);
 
   function load() {
     setLoading(true);
@@ -90,6 +99,7 @@ export default function InboxPage({
 
   async function loadCandidates(items: DocumentItem[]) {
     const next: Record<number, ExtractionCandidate[]> = {};
+    const nextCases: Record<number, CaseFileCandidate[]> = {};
     await Promise.all(
       items.map(async (doc) => {
         try {
@@ -97,9 +107,15 @@ export default function InboxPage({
         } catch {
           next[doc.id] = [];
         }
+        try {
+          nextCases[doc.id] = await getCaseFileCandidates(doc.id);
+        } catch {
+          nextCases[doc.id] = [];
+        }
       }),
     );
     setCandidatesByDoc(next);
+    setCaseCandidatesByDoc(nextCases);
   }
 
   async function markReviewed(docId: number) {
@@ -163,6 +179,65 @@ export default function InboxPage({
     }
   }
 
+  async function refreshCaseCandidates(docId: number) {
+    const list = await getCaseFileCandidates(docId);
+    setCaseCandidatesByDoc((current) => ({ ...current, [docId]: list }));
+  }
+
+  async function generateCaseCandidatesForDoc(docId: number) {
+    const key = `generate-case:${docId}`;
+    setCaseCandidateBusy(key);
+    setError(null);
+    try {
+      const list = await generateCaseFileCandidates(docId);
+      setCaseCandidatesByDoc((current) => ({ ...current, [docId]: list }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCaseCandidateBusy(null);
+    }
+  }
+
+  async function applyCaseCandidate(docId: number, candidateId: number) {
+    const key = `apply-case:${candidateId}`;
+    setCaseCandidateBusy(key);
+    setError(null);
+    try {
+      const candidate = await applyCaseFileCandidate(docId, candidateId);
+      await refreshCaseCandidates(docId);
+      setDocs((current) =>
+        current.map((doc) =>
+          doc.id === docId
+            ? {
+                ...doc,
+                case_file: candidate.case_file,
+                case_file_title:
+                  candidate.case_file_title || candidate.suggested_title || null,
+              }
+            : doc,
+        ),
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCaseCandidateBusy(null);
+    }
+  }
+
+  async function dismissCaseCandidate(docId: number, candidateId: number) {
+    const key = `dismiss-case:${candidateId}`;
+    setCaseCandidateBusy(key);
+    setError(null);
+    try {
+      await dismissCaseFileCandidate(docId, candidateId);
+      await refreshCaseCandidates(docId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCaseCandidateBusy(null);
+    }
+  }
+
   if (loading) {
     return (
       <section className="inbox">
@@ -220,6 +295,7 @@ export default function InboxPage({
                 <p className="inbox-row__meta">
                   {doc.correspondent_name ?? "Unbekannter Korrespondent"}
                   {doc.document_type_name ? ` · ${doc.document_type_name}` : ""}
+                  {doc.case_file_title ? ` · Akte: ${doc.case_file_title}` : ""}
                 </p>
                 {doc.tags.length > 0 && (
                   <div className="inbox-row__tags">
@@ -300,6 +376,88 @@ export default function InboxPage({
                         {candidateBusy === `generate:${doc.id}`
                           ? "Erkenne …"
                           : "Strukturdaten erkennen"}
+                      </button>
+                    )}
+                </div>
+                <div className="smart-candidates smart-candidates--case">
+                  {(caseCandidatesByDoc[doc.id] ?? [])
+                    .filter((candidate) => candidate.status === "pending")
+                    .map((candidate) => (
+                      <div
+                        className="smart-candidate smart-candidate--case"
+                        key={candidate.id}
+                      >
+                        <div className="smart-candidate__head">
+                          <span className="smart-candidate__field">
+                            {candidate.kind_label}
+                          </span>
+                          <strong>
+                            {candidate.case_file_title ||
+                              candidate.suggested_title ||
+                              "Neue Akte"}
+                          </strong>
+                          <span className="smart-candidate__confidence">
+                            {candidate.score}%
+                          </span>
+                        </div>
+                        <p className="smart-candidate__reason">
+                          {candidate.reason}
+                        </p>
+                        {candidate.signals.length > 0 && (
+                          <div className="case-signals">
+                            {candidate.signals.slice(0, 4).map((signal, idx) => (
+                              <span key={`${candidate.id}-${signal.type}-${idx}`}>
+                                {signal.label || signal.type}
+                                {signal.value ? `: ${signal.value}` : ""}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                        {canEdit && (
+                          <div className="smart-candidate__actions">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                applyCaseCandidate(doc.id, candidate.id)
+                              }
+                              disabled={
+                                caseCandidateBusy === `apply-case:${candidate.id}`
+                              }
+                            >
+                              Zur Akte
+                            </button>
+                            <button
+                              type="button"
+                              className="link"
+                              onClick={() =>
+                                dismissCaseCandidate(doc.id, candidate.id)
+                              }
+                              disabled={
+                                caseCandidateBusy === `dismiss-case:${candidate.id}`
+                              }
+                            >
+                              Verwerfen
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  {canEdit &&
+                    !doc.case_file &&
+                    (caseCandidatesByDoc[doc.id] ?? []).filter(
+                      (candidate) => candidate.status === "pending",
+                    ).length === 0 && (
+                      <button
+                        type="button"
+                        className="link smart-candidates__generate"
+                        onClick={() => generateCaseCandidatesForDoc(doc.id)}
+                        disabled={
+                          caseCandidateBusy === `generate-case:${doc.id}`
+                        }
+                      >
+                        {caseCandidateBusy === `generate-case:${doc.id}`
+                          ? "Suche Akten …"
+                          : "Aktenvorschläge erzeugen"}
                       </button>
                     )}
                 </div>

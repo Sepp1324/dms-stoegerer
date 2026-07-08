@@ -763,6 +763,71 @@ class ExtractionCandidate(models.Model):
         return f"{self.get_field_display()}: {self.value}"
 
 
+class CaseFileCandidate(models.Model):
+    """Vorschlag, ein Dokument einer Vorgangsakte zuzuordnen.
+
+    Der Akten-Autopilot arbeitet wie die Smart Inbox: Er schreibt keine
+    fachliche Änderung still ins Dokument, sondern legt erklärbare Kandidaten
+    mit Score und Signalen an. Erst die explizite Nutzeraktion übernimmt oder
+    verwirft den Vorschlag.
+    """
+
+    class Kind(models.TextChoices):
+        EXISTING_CASE = "existing_case", "Bestehende Akte"
+        NEW_CASE = "new_case", "Neue Akte"
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Offen"
+        APPLIED = "applied", "Übernommen"
+        DISMISSED = "dismissed", "Verworfen"
+
+    document = models.ForeignKey(
+        Document, on_delete=models.CASCADE, related_name="case_file_candidates"
+    )
+    case_file = models.ForeignKey(
+        CaseFile,
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="candidates",
+        help_text="Zielakte bei Vorschlägen auf eine bestehende Akte.",
+    )
+    kind = models.CharField(max_length=24, choices=Kind.choices)
+    suggested_title = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="Titelvorschlag, wenn kind=new_case ist.",
+    )
+    signature = models.CharField(
+        max_length=128,
+        help_text="Idempotenz-Schlüssel pro Dokument; verhindert wiederkehrende Duplikate.",
+    )
+    score = models.PositiveSmallIntegerField(default=50)
+    reason = models.CharField(max_length=255, blank=True)
+    signals = models.JSONField(default=list, blank=True)
+    source = models.CharField(max_length=32, default="heuristic")
+    status = models.CharField(
+        max_length=16, choices=Status.choices, default=Status.PENDING, db_index=True
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    applied_at = models.DateTimeField(null=True, blank=True)
+    dismissed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = "Aktenvorschlag"
+        verbose_name_plural = "Aktenvorschläge"
+        ordering = ["document_id", "status", "-score", "-created_at"]
+        unique_together = ("document", "signature")
+        indexes = [
+            models.Index(fields=["document", "status"], name="docs_casecand_doc_status"),
+            models.Index(fields=["case_file", "status"], name="docs_casecand_case_stat"),
+        ]
+
+    def __str__(self) -> str:
+        target = self.case_file.title if self.case_file_id else self.suggested_title
+        return f"{self.document_id} → {target} ({self.score}%)"
+
+
 # ---------------------------------------------------------------------------
 # Regelbasierte Klassifizierung (ecoDMS-artige Vorlage – deterministisch)
 # ---------------------------------------------------------------------------

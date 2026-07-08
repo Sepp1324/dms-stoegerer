@@ -319,6 +319,34 @@ export interface CaseFileSummaryResult {
   sources: AskSource[];
 }
 
+export type CaseFileCandidateKind = "existing_case" | "new_case";
+export type CaseFileCandidateStatus = "pending" | "applied" | "dismissed";
+export interface CaseFileCandidateSignal {
+  type: string;
+  label?: string;
+  value?: string;
+  weight?: number;
+}
+export interface CaseFileCandidate {
+  id: number;
+  document: number;
+  case_file: number | null;
+  case_file_title: string | null;
+  case_file_status: CaseFileStatus | null;
+  kind: CaseFileCandidateKind;
+  kind_label: string;
+  suggested_title: string;
+  score: number;
+  reason: string;
+  signals: CaseFileCandidateSignal[];
+  source: string;
+  status: CaseFileCandidateStatus;
+  status_label: string;
+  created_at: string;
+  applied_at: string | null;
+  dismissed_at: string | null;
+}
+
 // --- Workflow-Engine (STOAA-263) ---
 export type WorkflowTriggerType = "document_added" | "document_updated";
 export type WorkflowActionType = "assign" | "remove";
@@ -698,6 +726,55 @@ export function dismissExtractionCandidate(
 ): Promise<ExtractionCandidate> {
   return postJson<ExtractionCandidate>(
     `/documents/${documentId}/extraction-candidates/${candidateId}/dismiss/`,
+    {},
+  );
+}
+
+export async function getCaseFileCandidates(
+  id: number,
+): Promise<CaseFileCandidate[]> {
+  const res = await apiFetch(`/documents/${id}/case-candidates/`);
+  if (!res.ok) {
+    throw new Error(`Aktenvorschläge laden fehlgeschlagen: HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function generateCaseFileCandidates(
+  id: number,
+): Promise<CaseFileCandidate[]> {
+  const res = await apiFetch(`/documents/${id}/case-candidates/`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    let detail = `Aktenvorschläge konnten nicht erzeugt werden: HTTP ${res.status}`;
+    try {
+      const data = await res.json();
+      if (data && typeof data.detail === "string") detail = data.detail;
+    } catch {
+      /* keine JSON-Fehlermeldung – Fallback bleibt */
+    }
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+export function applyCaseFileCandidate(
+  documentId: number,
+  candidateId: number,
+): Promise<CaseFileCandidate> {
+  return postJson<CaseFileCandidate>(
+    `/documents/${documentId}/case-candidates/${candidateId}/apply/`,
+    {},
+  );
+}
+
+export function dismissCaseFileCandidate(
+  documentId: number,
+  candidateId: number,
+): Promise<CaseFileCandidate> {
+  return postJson<CaseFileCandidate>(
+    `/documents/${documentId}/case-candidates/${candidateId}/dismiss/`,
     {},
   );
 }
