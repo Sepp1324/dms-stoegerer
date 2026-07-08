@@ -71,6 +71,7 @@ from .models import (
     DocumentShareLink,
     DocumentType,
     DocumentVersion,
+    ExtractionCandidate,
     MailAccount,
     OCRStatus,
     StoragePath,
@@ -88,6 +89,7 @@ from .serializers import (
     DocumentShareLinkSerializer,
     DocumentTypeSerializer,
     DocumentVersionSerializer,
+    ExtractionCandidateSerializer,
     MailAccountSerializer,
     StoragePathSerializer,
     TagSerializer,
@@ -111,6 +113,18 @@ _ASN_QUERY_RE = re.compile(r"(?i)^\s*(?:asn)?\s*[0-9]+\s*$")
 # und fallen aus dem Vergleich – kein Postgres-500 beim Cast.
 _NUMERIC_VALUE_RE = r"^-?[0-9]+(\.[0-9]+)?$"
 _DECIMAL_OUTPUT = DecimalField(max_digits=30, decimal_places=10)
+_EXTRACTION_CUSTOM_FIELD_TARGETS = {
+    ExtractionCandidate.Field.AMOUNT: ("Betrag", CustomField.DataType.CURRENCY),
+    ExtractionCandidate.Field.IBAN: ("IBAN", CustomField.DataType.TEXT),
+    ExtractionCandidate.Field.CONTRACT_NUMBER: (
+        "Vertragsnummer",
+        CustomField.DataType.TEXT,
+    ),
+    ExtractionCandidate.Field.POLICY_NUMBER: (
+        "Versicherungsnummer",
+        CustomField.DataType.TEXT,
+    ),
+}
 
 
 def _apply_custom_field_filters(qs, params):
@@ -1169,6 +1183,155 @@ class DocumentViewSet(viewsets.ModelViewSet):
         page = self.paginate_queryset(entries)
         serializer = AuditLogEntrySerializer(page, many=True)
         return self.get_paginated_response(serializer.data)
+
+    @action(detail=True, methods=["get", "post"], url_path="extraction-candidates")
+    def extraction_candidates(self, request, pk=None):
+        """Smart-Inbox-Kandidaten listen oder für ein Dokument neu erzeugen.
+
+        GET ist lesend und owner-gescoped. POST ist ein Schreibvorgang, weil
+        neue Kandidaten persistiert werden; Gäste erhalten 403 über Permission
+        + expliziten Guard.
+        """
+        document = self.get_object()
+        if request.method == "POST":
+            if not request.user.can_write:
+                return Response(
+                    {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            from .services import extraction
+
+            created = extraction.generate_candidates(document)
+            AuditLogEntry.objects.create(
+                actor=request.user,
+                action="generate_extraction_candidates",
+                object_type="Document",
+                object_id=str(document.id),
+                detail={"created": created},
+            )
+
+        candidates = document.extraction_candidates.order_by(
+            "status", "field", "-confidence", "source_page"
+        )
+        return Response(ExtractionCandidateSerializer(candidates, many=True).data)
+
+    def _get_candidate(self, document, candidate_id):
+        candidate = document.extraction_candidates.filter(pk=candidate_id).first()
+        if candidate is None:
+            raise Http404("Extraktionsvorschlag nicht vorhanden.")
+        return candidate
+
+    def _apply_candidate_value(self, document, candidate):
+        """Schreibt einen übernommenen Kandidaten auf das passende Zielfeld."""
+        value = candidate.normalized_value or candidate.value
+        if candidate.field == ExtractionCandidate.Field.DOCUMENT_DATE:
+            parsed = _parse_iso_date(value)
+            if parsed is None:
+                return None
+            document.created_at = parsed
+            document.save(update_fields=["created_at"])
+            return {"document_field": "created_at", "value": value}
+
+        target = _EXTRACTION_CUSTOM_FIELD_TARGETS.get(candidate.field)
+        if target is None:
+            return None
+        name, data_type = target
+        custom_field, _created = CustomField.objects.get_or_create(
+            name=name,
+            defaults={"data_type": data_type},
+        )
+        CustomFieldValue.objects.update_or_create(
+            document=document,
+            field=custom_field,
+            defaults={"value": value},
+        )
+        return {
+            "custom_field": custom_field.name,
+            "custom_field_id": custom_field.id,
+            "value": value,
+        }
+
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path=r"extraction-candidates/(?P<candidate_id>[0-9]+)/apply",
+    )
+    def apply_extraction_candidate(self, request, pk=None, candidate_id=None):
+        """Übernimmt genau einen Smart-Inbox-Kandidaten."""
+        if not request.user.can_write:
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        document = self.get_object()
+        candidate = self._get_candidate(document, candidate_id)
+        if candidate.status != ExtractionCandidate.Status.PENDING:
+            return Response(
+                {"detail": "Dieser Vorschlag ist nicht mehr offen."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        with transaction.atomic():
+            target = self._apply_candidate_value(document, candidate)
+            if target is None:
+                return Response(
+                    {"detail": "Vorschlag konnte nicht übernommen werden."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            candidate.status = ExtractionCandidate.Status.APPLIED
+            candidate.applied_at = timezone.now()
+            candidate.save(update_fields=["status", "applied_at"])
+            AuditLogEntry.objects.create(
+                actor=request.user,
+                action="apply_extraction_candidate",
+                object_type="Document",
+                object_id=str(document.id),
+                detail={
+                    "candidate": candidate.id,
+                    "field": candidate.field,
+                    "value": candidate.value,
+                    "normalized_value": candidate.normalized_value,
+                    "target": target,
+                },
+            )
+
+        return Response(ExtractionCandidateSerializer(candidate).data)
+
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path=r"extraction-candidates/(?P<candidate_id>[0-9]+)/dismiss",
+    )
+    def dismiss_extraction_candidate(self, request, pk=None, candidate_id=None):
+        """Verwirft genau einen Smart-Inbox-Kandidaten ohne Dokumentänderung."""
+        if not request.user.can_write:
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        document = self.get_object()
+        candidate = self._get_candidate(document, candidate_id)
+        if candidate.status != ExtractionCandidate.Status.PENDING:
+            return Response(
+                {"detail": "Dieser Vorschlag ist nicht mehr offen."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        candidate.status = ExtractionCandidate.Status.DISMISSED
+        candidate.dismissed_at = timezone.now()
+        candidate.save(update_fields=["status", "dismissed_at"])
+        AuditLogEntry.objects.create(
+            actor=request.user,
+            action="dismiss_extraction_candidate",
+            object_type="Document",
+            object_id=str(document.id),
+            detail={
+                "candidate": candidate.id,
+                "field": candidate.field,
+                "value": candidate.value,
+                "normalized_value": candidate.normalized_value,
+            },
+        )
+        return Response(ExtractionCandidateSerializer(candidate).data)
 
     def _metadata_snapshot(self, document) -> dict:
         """Menschlich lesbarer Schnappschuss der Metadaten für den Audit-Diff."""

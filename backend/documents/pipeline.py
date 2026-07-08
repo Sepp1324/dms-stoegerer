@@ -328,6 +328,7 @@ def ocr_version(version: DocumentVersion) -> dict:
 def classify_version(version: DocumentVersion) -> dict:
     """Regelbasierte Klassifizierung + Workflow-Engine ausführen."""
     from . import classification, workflows
+    from .services import extraction
 
     version.refresh_from_db(fields=["processing_state", "ingest_source"])
     version.transition_to(
@@ -344,6 +345,20 @@ def classify_version(version: DocumentVersion) -> dict:
         source=source,
     )
     result["workflows"] = wf_result.get("workflows", [])
+
+    # Smart Inbox: Strukturvorschläge nach OCR/Klassifizierung vorbereiten.
+    # Best effort – Extraktion darf die technische Dokumentverarbeitung nie
+    # blockieren; der Nutzer kann die Kandidaten später in der Inbox neu erzeugen.
+    try:
+        result["extraction_candidates"] = extraction.generate_candidates(
+            version.document
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Extraktionskandidaten für Dokument %s fehlgeschlagen",
+            version.document_id,
+        )
+        result["extraction_candidates"] = 0
 
     version.document.refresh_from_db(fields=["classification"])
     version.transition_to(

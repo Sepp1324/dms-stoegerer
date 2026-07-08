@@ -654,6 +654,59 @@ class DocumentPageText(models.Model):
         return f"{self.version} Seite {self.page_no}"
 
 
+class ExtractionCandidate(models.Model):
+    """Smart-Inbox-Vorschlag für ein extrahiertes Strukturdatum."""
+
+    class Field(models.TextChoices):
+        DOCUMENT_DATE = "document_date", "Belegdatum"
+        AMOUNT = "amount", "Betrag"
+        IBAN = "iban", "IBAN"
+        CONTRACT_NUMBER = "contract_number", "Vertragsnummer"
+        POLICY_NUMBER = "policy_number", "Versicherungsnummer"
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Offen"
+        APPLIED = "applied", "Übernommen"
+        DISMISSED = "dismissed", "Verworfen"
+
+    document = models.ForeignKey(
+        Document, on_delete=models.CASCADE, related_name="extraction_candidates"
+    )
+    field = models.CharField(max_length=40, choices=Field.choices)
+    value = models.CharField(max_length=512)
+    normalized_value = models.CharField(max_length=512, blank=True)
+    confidence = models.PositiveSmallIntegerField(default=50)
+    reason = models.CharField(max_length=255, blank=True)
+    source = models.CharField(max_length=32, default="heuristic")
+    source_page = models.PositiveIntegerField(null=True, blank=True)
+    source_snippet = models.TextField(blank=True)
+    source_snippet_html = models.TextField(blank=True)
+    status = models.CharField(
+        max_length=16, choices=Status.choices, default=Status.PENDING, db_index=True
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    applied_at = models.DateTimeField(null=True, blank=True)
+    dismissed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = "Extraktionsvorschlag"
+        verbose_name_plural = "Extraktionsvorschläge"
+        ordering = ["document_id", "field", "-confidence", "source_page"]
+        indexes = [
+            models.Index(
+                fields=["document", "status"],
+                name="documents_e_documen_9deba9_idx",
+            ),
+            models.Index(
+                fields=["field", "status"],
+                name="documents_e_field_e2f4ab_idx",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.get_field_display()}: {self.value}"
+
+
 # ---------------------------------------------------------------------------
 # Regelbasierte Klassifizierung (ecoDMS-artige Vorlage – deterministisch)
 # ---------------------------------------------------------------------------

@@ -29,6 +29,7 @@ from .models import (
     DocumentShareLink,
     DocumentType,
     DocumentVersion,
+    ExtractionCandidate,
     MailAccount,
     StoragePath,
     Tag,
@@ -698,6 +699,143 @@ class AskEndpointTests(APITestCase):
         self.client.force_authenticate(self.user)
         resp = self.client.post(self.URL, {"question": "hi"}, format="json")
         self.assertEqual(resp.status_code, 400)
+
+
+class SmartInboxExtractionTests(APITestCase):
+    """Smart Inbox: strukturierte Vorschläge erzeugen, übernehmen, verwerfen."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(username="smart-u", password="pw", role="user")
+        cls.guest = User.objects.create_user(username="smart-g", password="pw", role="guest")
+
+    def _doc(self, text=""):
+        doc = Document.objects.create(
+            title="Wüstenrot Beleg",
+            owner=self.user,
+            review_status=Document.ReviewStatus.NEEDS_REVIEW,
+        )
+        version = DocumentVersion.objects.create(
+            document=doc,
+            version_no=1,
+            file_path="/tmp/smart.pdf",
+            ocr_text=text,
+            processing_state=DocumentVersion.ProcessingState.READY,
+        )
+        doc.current_version = version
+        doc.save(update_fields=["current_version"])
+        if text:
+            DocumentPageText.objects.create(version=version, page_no=1, text=text)
+        return doc
+
+    def test_generate_extraction_candidates_findet_strukturdaten(self):
+        doc = self._doc(
+            "Datum: 28.05.2026\n"
+            "SEPA Mandat AT271700000485051414\n"
+            "Vertragsnummer 510/839294-2\n"
+            "Gesamtbetrag EUR 225,74"
+        )
+        self.client.force_authenticate(self.user)
+
+        resp = self.client.post(f"/api/documents/{doc.id}/extraction-candidates/")
+
+        self.assertEqual(resp.status_code, 200)
+        fields = {row["field"] for row in resp.data}
+        self.assertIn(ExtractionCandidate.Field.DOCUMENT_DATE, fields)
+        self.assertIn(ExtractionCandidate.Field.IBAN, fields)
+        self.assertIn(ExtractionCandidate.Field.CONTRACT_NUMBER, fields)
+        self.assertIn(ExtractionCandidate.Field.AMOUNT, fields)
+        self.assertTrue(any("<mark>" in row["source_snippet_html"] for row in resp.data))
+        self.assertTrue(
+            AuditLogEntry.objects.filter(
+                action="generate_extraction_candidates",
+                object_id=str(doc.id),
+            ).exists()
+        )
+
+    def test_apply_document_date_candidate_setzt_belegdatum(self):
+        doc = self._doc()
+        candidate = ExtractionCandidate.objects.create(
+            document=doc,
+            field=ExtractionCandidate.Field.DOCUMENT_DATE,
+            value="28.05.2026",
+            normalized_value="2026-05-28",
+            confidence=80,
+        )
+        self.client.force_authenticate(self.user)
+
+        resp = self.client.post(
+            f"/api/documents/{doc.id}/extraction-candidates/{candidate.id}/apply/"
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        doc.refresh_from_db()
+        candidate.refresh_from_db()
+        self.assertEqual(doc.created_at.date().isoformat(), "2026-05-28")
+        self.assertEqual(candidate.status, ExtractionCandidate.Status.APPLIED)
+        self.assertTrue(
+            AuditLogEntry.objects.filter(
+                action="apply_extraction_candidate",
+                object_id=str(doc.id),
+            ).exists()
+        )
+
+    def test_apply_amount_candidate_schreibt_zusatzfeld(self):
+        doc = self._doc()
+        candidate = ExtractionCandidate.objects.create(
+            document=doc,
+            field=ExtractionCandidate.Field.AMOUNT,
+            value="EUR 225,74",
+            normalized_value="225.74",
+            confidence=82,
+        )
+        self.client.force_authenticate(self.user)
+
+        resp = self.client.post(
+            f"/api/documents/{doc.id}/extraction-candidates/{candidate.id}/apply/"
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        field = CustomField.objects.get(name="Betrag")
+        value = CustomFieldValue.objects.get(document=doc, field=field)
+        self.assertEqual(field.data_type, CustomField.DataType.CURRENCY)
+        self.assertEqual(value.value, "225.74")
+
+    def test_dismiss_candidate_markiert_verworfen(self):
+        doc = self._doc()
+        candidate = ExtractionCandidate.objects.create(
+            document=doc,
+            field=ExtractionCandidate.Field.IBAN,
+            value="AT271700000485051414",
+            normalized_value="AT271700000485051414",
+        )
+        self.client.force_authenticate(self.user)
+
+        resp = self.client.post(
+            f"/api/documents/{doc.id}/extraction-candidates/{candidate.id}/dismiss/"
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        candidate.refresh_from_db()
+        self.assertEqual(candidate.status, ExtractionCandidate.Status.DISMISSED)
+        self.assertIsNotNone(candidate.dismissed_at)
+
+    def test_guest_darf_kandidaten_nicht_schreiben(self):
+        doc = self._doc()
+        candidate = ExtractionCandidate.objects.create(
+            document=doc,
+            field=ExtractionCandidate.Field.IBAN,
+            value="AT271700000485051414",
+        )
+        self.client.force_authenticate(self.guest)
+
+        generate = self.client.post(f"/api/documents/{doc.id}/extraction-candidates/")
+        apply = self.client.post(
+            f"/api/documents/{doc.id}/extraction-candidates/{candidate.id}/apply/"
+        )
+
+        self.assertEqual(generate.status_code, 403)
+        self.assertEqual(apply.status_code, 403)
 
 
 class MailClassificationRuleTests(TestCase):

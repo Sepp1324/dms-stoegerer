@@ -7,6 +7,7 @@ from .models import (
     CustomField,
     CustomFieldValue,
     Document,
+    ExtractionCandidate,
     DocumentFolder,
     DocumentReminder,
     DocumentShareLink,
@@ -144,6 +145,42 @@ class CustomFieldValueSerializer(serializers.ModelSerializer):
     class Meta:
         model = CustomFieldValue
         fields = ("field", "value", "field_name", "data_type")
+
+
+class ExtractionCandidateSerializer(serializers.ModelSerializer):
+    """Smart-Inbox-Vorschlag für strukturierte Metadaten.
+
+    Der Vorschlag ist bewusst ein eigenes Objekt statt direktes PATCH am
+    Dokument: Extraktion bleibt prüfbar, kann einzeln übernommen/verworfen
+    werden und ist im Audit-Trail nachvollziehbar.
+    """
+
+    field_label = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ExtractionCandidate
+        fields = (
+            "id",
+            "document",
+            "field",
+            "field_label",
+            "value",
+            "normalized_value",
+            "confidence",
+            "reason",
+            "source",
+            "source_page",
+            "source_snippet",
+            "source_snippet_html",
+            "status",
+            "created_at",
+            "applied_at",
+            "dismissed_at",
+        )
+        read_only_fields = fields
+
+    def get_field_label(self, obj) -> str:
+        return obj.get_field_display()
 
 
 class DocumentVersionSerializer(serializers.ModelSerializer):
