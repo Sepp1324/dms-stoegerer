@@ -216,11 +216,11 @@ def _write_pdf_from_specs(sources: list[tuple[DocumentVersion, list[PageSpec]]])
             pdf = pikepdf.open(version.file_path)
             opened.append(pdf)
             for spec in specs:
-                page = out.copy_foreign(pdf.pages[spec.page - 1])
+                out.pages.append(pdf.pages[spec.page - 1])
+                page = out.pages[-1]
                 if spec.rotation:
                     current = int(page.obj.get(ROTATE_NAME, 0) or 0)
                     page.obj[ROTATE_NAME] = (current + spec.rotation) % 360
-                out.pages.append(page)
 
         buffer = io.BytesIO()
         out.save(buffer)
