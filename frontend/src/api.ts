@@ -843,6 +843,7 @@ export interface AskSource {
   folder_path: string | null;
   page: number | null;
   snippet: string;
+  snippet_html: string;
 }
 export interface AskResult {
   source: "ai" | "unavailable" | "error" | "retrieval";

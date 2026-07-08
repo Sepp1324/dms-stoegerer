@@ -5,13 +5,14 @@ import {
   type AskSource,
   type FolderRef,
 } from "../api";
+import { sanitizeSnippet } from "../sanitize";
 
 export default function CopilotPage({
   folders,
   onOpenDocument,
 }: {
   folders: FolderRef[];
-  onOpenDocument: (documentId: number) => void;
+  onOpenDocument: (documentId: number, page?: number | null) => void;
 }) {
   const [question, setQuestion] = useState("");
   const [folder, setFolder] = useState<number | "none" | "">("");
@@ -93,7 +94,7 @@ export default function CopilotPage({
               <SourceCard
                 key={source.id}
                 source={source}
-                onOpen={() => onOpenDocument(source.document)}
+                onOpen={() => onOpenDocument(source.document, source.page)}
               />
             ))}
           </div>
@@ -115,11 +116,19 @@ function SourceCard({
       <div className="copilot-source__head">
         <strong>[{source.id}] {source.document_title}</strong>
         <button className="link" onClick={onOpen}>
-          Öffnen
+          {source.page ? `Seite ${source.page} öffnen` : "Öffnen"}
         </button>
       </div>
-      {source.folder_path && <p className="muted">{source.folder_path}</p>}
-      <p className="copilot-source__snippet">{source.snippet}</p>
+      <p className="muted">
+        {source.folder_path ?? "Kein Ordner"}
+        {source.page ? ` · Seite ${source.page}` : ""}
+      </p>
+      <p
+        className="copilot-source__snippet"
+        dangerouslySetInnerHTML={{
+          __html: sanitizeSnippet(source.snippet_html || source.snippet),
+        }}
+      />
     </article>
   );
 }

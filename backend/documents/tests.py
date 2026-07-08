@@ -24,6 +24,7 @@ from .models import (
     CustomFieldValue,
     Document,
     DocumentFolder,
+    DocumentPageText,
     DocumentReminder,
     DocumentShareLink,
     DocumentType,
@@ -622,6 +623,11 @@ class AskEndpointTests(APITestCase):
         doc.save(update_fields=["current_version"])
         return doc
 
+    def _page(self, doc, page_no, text):
+        return DocumentPageText.objects.create(
+            version=doc.current_version, page_no=page_no, text=text
+        )
+
     def test_ask_liefert_quellen_und_ai_antwort(self):
         from unittest import mock
 
@@ -673,6 +679,7 @@ class AskEndpointTests(APITestCase):
 
     def test_ask_filtert_ordner(self):
         doc = self._doc(self.user, "Helvetia", "Helvetia Versicherung", folder=self.folder)
+        self._page(doc, 2, "Helvetia Versicherung")
         self._doc(self.user, "Bank", "Helvetia Banktext ohne Ordner")
         self.client.force_authenticate(self.user)
 
@@ -684,6 +691,8 @@ class AskEndpointTests(APITestCase):
 
         self.assertEqual(resp.status_code, 200)
         self.assertEqual([s["document"] for s in resp.data["sources"]], [doc.id])
+        self.assertEqual(resp.data["sources"][0]["page"], 2)
+        self.assertIn("<mark>Helvetia</mark>", resp.data["sources"][0]["snippet_html"])
 
     def test_ask_zu_kurze_frage_400(self):
         self.client.force_authenticate(self.user)

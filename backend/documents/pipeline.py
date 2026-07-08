@@ -18,6 +18,7 @@ from pathlib import Path
 
 from . import storage
 from .models import AuditLogEntry, Document, DocumentVersion
+from .services import page_text
 from documents.services.ocr.engine import run_ocr
 
 logger = logging.getLogger(__name__)
@@ -300,6 +301,11 @@ def ocr_version(version: DocumentVersion) -> dict:
             "ocr_finished_at",
         ]
     )
+    page_source = archive_path or version.file_path
+    page_indexed = page_text.write_page_texts(
+        version,
+        page_text.extract_page_texts(page_source, fallback_text=result.text),
+    )
     version.transition_to(
         DocumentVersion.ProcessingState.OCR_DONE,
         actor=version.created_by,
@@ -308,6 +314,7 @@ def ocr_version(version: DocumentVersion) -> dict:
             "ocr_status": result.status.value,
             "archive_path": archive_path,
             "chars": len(result.text),
+            "page_texts": page_indexed,
         },
     )
     return {

@@ -175,6 +175,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   const [reloadKey, setReloadKey] = useState(0);
   // Aktuell geöffnetes Dokument (Detailansicht) oder null (Liste).
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [selectedPage, setSelectedPage] = useState<number | null>(null);
   // Aktive Hauptansicht (persistente linke Navigation).
   const [view, setView] = useState<MainView>("docs");
   // Sidebar auf schmalen Screens ein-/ausklappbar.
@@ -575,8 +576,10 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     return (
       <DocumentDetail
         id={selectedId}
+        initialPage={selectedPage}
         onBack={() => {
           setSelectedId(null);
+          setSelectedPage(null);
           setReloadKey((k) => k + 1); // ggf. geänderte Metadaten in der Liste zeigen
         }}
         correspondents={correspondents}
@@ -594,9 +597,10 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
         onManageFields={
           me?.is_dms_admin
             ? () => {
-                setSelectedId(null);
-                setView("fields");
-              }
+              setSelectedId(null);
+              setSelectedPage(null);
+              setView("fields");
+            }
             : undefined
         }
       />
@@ -727,7 +731,13 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
 
         <div className="content-body">
           {view === "copilot" ? (
-            <CopilotPage folders={folders} onOpenDocument={(docId) => setSelectedId(docId)} />
+            <CopilotPage
+              folders={folders}
+              onOpenDocument={(docId, pageNo) => {
+                setSelectedId(docId);
+                setSelectedPage(pageNo ?? null);
+              }}
+            />
           ) : view === "rules" ? (
             <RulesPage canEdit={!!me?.can_write} />
           ) : view === "inbox" ? (
