@@ -13,6 +13,7 @@ from .models import (
     CustomField,
     CustomFieldValue,
     Document,
+    DocumentEmbedding,
     DocumentEntity,
     DocumentFolder,
     DocumentPageText,
@@ -129,6 +130,37 @@ class DocumentPageTextAdmin(admin.ModelAdmin):
     def text_preview(self, obj):
         text = (obj.text or "").strip()
         return text[:120] + ("…" if len(text) > 120 else "")
+
+
+@admin.register(DocumentEmbedding)
+class DocumentEmbeddingAdmin(admin.ModelAdmin):
+    list_display = (
+        "document",
+        "version",
+        "page_no",
+        "chunk_index",
+        "source",
+        "embedding_model",
+        "token_count",
+        "generated_at",
+    )
+    list_filter = ("source", "embedding_model", "generated_at")
+    search_fields = ("document__title", "text")
+    readonly_fields = (
+        "document",
+        "version",
+        "page_no",
+        "chunk_index",
+        "source",
+        "text",
+        "text_hash",
+        "embedding_model",
+        "dimension",
+        "vector",
+        "magnitude",
+        "token_count",
+        "generated_at",
+    )
 
 
 @admin.register(CaseFile)

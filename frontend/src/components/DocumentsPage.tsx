@@ -600,6 +600,10 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
         onCreateStoragePath={addStoragePath}
         onCreateFolder={addFolder}
         onCreateTag={addTag}
+        onOpenDocument={(docId, pageNo) => {
+          setSelectedId(docId);
+          setSelectedPage(pageNo ?? null);
+        }}
         onManageFields={
           me?.is_dms_admin
             ? () => {

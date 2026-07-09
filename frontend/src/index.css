@@ -959,6 +959,55 @@ textarea:focus-visible {
   line-height: 1.5;
 }
 
+/* --- Semantische Ähnlichkeit im Dokumentdetail --- */
+.similar-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+}
+.similar-panel__head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  align-items: flex-start;
+}
+.similar-panel__head h3 {
+  margin: 0;
+}
+.similar-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+.similar-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.75rem;
+  background: rgba(15, 23, 42, 0.42);
+}
+.similar-card__head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  align-items: flex-start;
+}
+.similar-card__reason {
+  display: inline-flex;
+  width: fit-content;
+  border: 1px solid rgba(59, 130, 246, 0.35);
+  border-radius: 999px;
+  padding: 0.16rem 0.48rem;
+  background: rgba(59, 130, 246, 0.08);
+  color: #bfdbfe;
+  font-size: 0.76rem;
+}
+.similar-card__snippet {
+  margin: 0.55rem 0 0;
+  color: var(--text);
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
 @media (max-width: 760px) {
   .copilot__query {
     grid-template-columns: 1fr;
