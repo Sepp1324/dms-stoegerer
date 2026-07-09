@@ -2730,6 +2730,190 @@ textarea:focus-visible {
   border-bottom-color: var(--accent);
 }
 
+.briefing {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+.briefing-hero {
+  border: 1px solid var(--border);
+  border-left-width: 4px;
+  border-radius: var(--radius-sm);
+  padding: var(--space-4);
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  background: rgba(15, 23, 42, 0.55);
+}
+.briefing-hero--high {
+  border-left-color: var(--error);
+}
+.briefing-hero--medium {
+  border-left-color: var(--warn);
+}
+.briefing-hero--low {
+  border-left-color: var(--accent);
+}
+.briefing-hero--clear {
+  border-left-color: var(--ok);
+}
+.briefing-eyebrow {
+  color: var(--muted);
+  display: block;
+  font-size: 0.78rem;
+  margin-bottom: var(--space-1);
+  text-transform: uppercase;
+}
+.briefing-hero h3,
+.briefing-panel h3,
+.briefing-timeline h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+.briefing-hero p {
+  margin: var(--space-2) 0 0;
+  color: var(--text);
+  line-height: 1.5;
+}
+.briefing-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+.briefing-metric,
+.briefing-signal {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+  background: rgba(11, 18, 32, 0.55);
+  min-width: 0;
+}
+.briefing-metric span,
+.briefing-signal span {
+  color: var(--muted);
+  display: block;
+  font-size: 0.78rem;
+}
+.briefing-metric strong,
+.briefing-signal strong {
+  display: block;
+  margin-top: var(--space-1);
+  overflow-wrap: anywhere;
+}
+.briefing-metric--danger strong {
+  color: #fecaca;
+}
+.briefing-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+.briefing-panel {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-4);
+  background: rgba(15, 23, 42, 0.35);
+  min-width: 0;
+}
+.briefing-panel h3 {
+  margin-bottom: var(--space-3);
+}
+.briefing-actions,
+.briefing-risk-list,
+.briefing-signal-list,
+.briefing-chip-list,
+.briefing-related {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.briefing-action,
+.briefing-risk {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  background: rgba(11, 18, 32, 0.45);
+}
+.briefing-action strong,
+.briefing-action span,
+.briefing-risk strong,
+.briefing-risk span {
+  display: block;
+}
+.briefing-action span,
+.briefing-risk span {
+  color: var(--muted);
+  margin-top: var(--space-1);
+  line-height: 1.4;
+}
+.briefing-risk--high {
+  border-color: rgba(239, 68, 68, 0.45);
+}
+.briefing-risk--medium {
+  border-color: rgba(245, 158, 11, 0.45);
+}
+.briefing-chip {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  padding: 0.38rem 0.65rem;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: fit-content;
+  max-width: 100%;
+  background: rgba(59, 130, 246, 0.12);
+}
+.briefing-chip small {
+  color: var(--muted);
+}
+.briefing-related {
+  margin-top: var(--space-3);
+  align-items: flex-start;
+}
+.briefing-timeline {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-4);
+  background: rgba(15, 23, 42, 0.35);
+}
+.briefing-timeline > div {
+  display: grid;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+.briefing-timeline span {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: var(--space-2);
+  color: var(--muted);
+}
+.briefing-timeline span:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+.briefing-timeline strong {
+  color: var(--text);
+}
+
+@media (max-width: 780px) {
+  .briefing-hero,
+  .briefing-action,
+  .briefing-risk,
+  .briefing-timeline span {
+    flex-direction: column;
+  }
+  .briefing-metrics,
+  .briefing-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .audit h3 {
   margin: 0 0 12px;
   font-size: 1rem;
