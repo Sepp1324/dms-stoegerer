@@ -496,6 +496,7 @@ def _run_from(version: DocumentVersion, start_index: int) -> dict:
 def process_version(version: DocumentVersion) -> dict:
     """Vollständige Verarbeitung einer Version entlang der State Machine."""
     result = _run_from(version, 0)
+    _sync_contract_center(version, result, actor=version.created_by)
     try:
         from documents.services import review_tasks
 
@@ -539,6 +540,7 @@ def retry_version(version: DocumentVersion, actor=None) -> dict:
     )
 
     result = _run_from(version, start_index)
+    _sync_contract_center(version, result, actor=actor or version.created_by)
     try:
         from documents.services import review_tasks
 
@@ -548,6 +550,21 @@ def retry_version(version: DocumentVersion, actor=None) -> dict:
     except Exception:  # noqa: BLE001 - Review-Tasks dürfen Retry nicht kippen
         logger.exception("Review-Task-Sync für Retry-Version %s fehlgeschlagen", version.id)
     return result
+
+
+def _sync_contract_center(version: DocumentVersion, result: dict, *, actor=None) -> None:
+    """Best-effort-Vertragserkennung nach erfolgreicher Verarbeitung."""
+    if result.get("status") != "done":
+        return
+    try:
+        from documents.services import contracts
+
+        result["contract"] = contracts.sync_contract_record(
+            version.document, actor=actor
+        )
+    except Exception:  # noqa: BLE001 - Vertrags-Cockpit darf Pipeline nie kippen
+        logger.exception("Contract-Center-Sync für Version %s fehlgeschlagen", version.id)
+        result["contract"] = {"status": "failed"}
 
 
 def _add_months(d, months: int):

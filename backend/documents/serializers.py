@@ -6,6 +6,7 @@ from .models import (
     CaseFileCandidate,
     ClassificationRule,
     Correspondent,
+    ContractRecord,
     CustomField,
     CustomFieldValue,
     Document,
@@ -452,6 +453,91 @@ class DocumentReviewTaskSerializer(serializers.ModelSerializer):
         from .services.asn import format_asn
 
         return format_asn(obj.document.asn)
+
+
+class ContractRecordSerializer(serializers.ModelSerializer):
+    """Vertragsdatensatz für Contract Center."""
+
+    document_title = serializers.CharField(source="document.title", read_only=True)
+    case_file_title = serializers.CharField(
+        source="case_file.title", read_only=True, default=None
+    )
+    contract_type_label = serializers.SerializerMethodField()
+    billing_cycle_label = serializers.SerializerMethodField()
+    status_label = serializers.SerializerMethodField()
+    source_label = serializers.SerializerMethodField()
+    provider_display = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ContractRecord
+        fields = (
+            "id",
+            "document",
+            "document_title",
+            "case_file",
+            "case_file_title",
+            "contract_type",
+            "contract_type_label",
+            "provider",
+            "provider_display",
+            "contract_number",
+            "amount",
+            "currency",
+            "billing_cycle",
+            "billing_cycle_label",
+            "starts_on",
+            "ends_on",
+            "notice_period_days",
+            "cancel_until",
+            "next_due_on",
+            "status",
+            "status_label",
+            "confidence",
+            "source",
+            "source_label",
+            "needs_review",
+            "extracted_from_version",
+            "notes",
+            "reviewed_at",
+            "reviewed_by",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = (
+            "document_title",
+            "case_file_title",
+            "contract_type_label",
+            "billing_cycle_label",
+            "status_label",
+            "source_label",
+            "provider_display",
+            "confidence",
+            "source",
+            "extracted_from_version",
+            "reviewed_at",
+            "reviewed_by",
+            "created_at",
+            "updated_at",
+        )
+
+    def get_contract_type_label(self, obj) -> str:
+        return obj.get_contract_type_display()
+
+    def get_billing_cycle_label(self, obj) -> str:
+        return obj.get_billing_cycle_display()
+
+    def get_status_label(self, obj) -> str:
+        return obj.get_status_display()
+
+    def get_source_label(self, obj) -> str:
+        return obj.get_source_display()
+
+    def get_provider_display(self, obj) -> str:
+        return obj.provider or (
+            obj.document.correspondent.name
+            if obj.document and obj.document.correspondent_id
+            else ""
+        )
 
 
 class DocumentSerializer(serializers.ModelSerializer):

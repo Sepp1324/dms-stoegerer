@@ -19,6 +19,7 @@ router.register("mail-accounts", views.MailAccountViewSet)
 router.register("workflows", views.WorkflowViewSet)
 router.register("reminders", views.DocumentReminderViewSet)
 router.register("review-tasks", views.DocumentReviewTaskViewSet, basename="review-task")
+router.register("contracts", views.ContractRecordViewSet, basename="contract")
 
 urlpatterns = [
     # Explizit vor dem Router, sonst würde "upload" als Dokument-PK gelesen.

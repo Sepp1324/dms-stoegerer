@@ -105,7 +105,8 @@ export type ReviewTaskKind =
   | "case_file_pending"
   | "duplicate_suspected"
   | "asn_missing"
-  | "email_needs_review";
+  | "email_needs_review"
+  | "contract_review";
 
 // UI-Buckets für den Listen-Filter ``?processing_state=`` (STOAA-248). ``processing``
 // fasst alle In-Flight-States (uploaded…sealed) zusammen; failed/retry_pending/ready
@@ -391,6 +392,80 @@ export interface CaseFileSummaryResult {
   summary: string;
   source: string;
   sources: AskSource[];
+}
+
+export type ContractType =
+  | "insurance"
+  | "energy"
+  | "telecom"
+  | "rent"
+  | "loan"
+  | "subscription"
+  | "public"
+  | "other";
+export type ContractBillingCycle =
+  | "monthly"
+  | "quarterly"
+  | "yearly"
+  | "one_time"
+  | "unknown";
+export type ContractStatus = "active" | "canceled" | "expired" | "unclear";
+export type ContractSource = "heuristic" | "ai" | "manual" | "rule";
+export interface ContractRecord {
+  id: number;
+  document: number;
+  document_title: string;
+  case_file: number | null;
+  case_file_title: string | null;
+  contract_type: ContractType;
+  contract_type_label: string;
+  provider: string;
+  provider_display: string;
+  contract_number: string;
+  amount: string | null;
+  currency: string;
+  billing_cycle: ContractBillingCycle;
+  billing_cycle_label: string;
+  starts_on: string | null;
+  ends_on: string | null;
+  notice_period_days: number | null;
+  cancel_until: string | null;
+  next_due_on: string | null;
+  status: ContractStatus;
+  status_label: string;
+  confidence: number;
+  source: ContractSource;
+  source_label: string;
+  needs_review: boolean;
+  extracted_from_version: number | null;
+  notes: string;
+  reviewed_at: string | null;
+  reviewed_by: number | null;
+  created_at: string;
+  updated_at: string;
+}
+export interface ContractSummary {
+  total: number;
+  active: number;
+  needs_review: number;
+  cancel_soon: number;
+  due_soon: number;
+  expired: number;
+}
+export interface ContractScanResult {
+  scanned: number;
+  created: number;
+  updated: number;
+  unchanged: number;
+  no_contract: number;
+  missing: number;
+  failed: number;
+  errors: { document?: number; error: string }[];
+}
+export interface ContractQuery {
+  status?: ContractStatus | "";
+  contract_type?: ContractType | "";
+  needs_review?: boolean | "";
 }
 
 export type CaseFileCandidateKind = "existing_case" | "new_case";
@@ -1452,6 +1527,65 @@ export async function getFolders(): Promise<FolderRef[]> {
 
 export async function getCaseFiles(): Promise<CaseFile[]> {
   return listAllPages<CaseFile>("/case-files/");
+}
+
+export async function getContracts(
+  query: ContractQuery = {},
+): Promise<ContractRecord[]> {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) {
+    if (value !== undefined && value !== "" && value !== null) {
+      params.set(key, String(value));
+    }
+  }
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  return listAllPages<ContractRecord>(`/contracts/${suffix}`);
+}
+
+export async function getContractSummary(): Promise<ContractSummary> {
+  const res = await apiFetch("/contracts/summary/");
+  if (!res.ok) throw new Error(`Vertragsstatus laden fehlgeschlagen: HTTP ${res.status}`);
+  return res.json();
+}
+
+export function scanContracts(ids?: number[]): Promise<ContractScanResult> {
+  return postJson<ContractScanResult>("/contracts/scan/", ids ? { ids } : {});
+}
+
+export function confirmContract(id: number): Promise<ContractRecord> {
+  return postJson<ContractRecord>(`/contracts/${id}/confirm/`, {});
+}
+
+export async function updateContract(
+  id: number,
+  payload: Partial<
+    Pick<
+      ContractRecord,
+      | "provider"
+      | "contract_number"
+      | "amount"
+      | "currency"
+      | "contract_type"
+      | "billing_cycle"
+      | "starts_on"
+      | "ends_on"
+      | "notice_period_days"
+      | "cancel_until"
+      | "next_due_on"
+      | "status"
+      | "needs_review"
+      | "notes"
+      | "case_file"
+    >
+  >,
+): Promise<ContractRecord> {
+  const res = await apiFetch(`/contracts/${id}/`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(`Vertrag speichern fehlgeschlagen: HTTP ${res.status}`);
+  return res.json();
 }
 
 export function createCaseFile(payload: {
