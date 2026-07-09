@@ -172,6 +172,7 @@ function SourceCard({
 }
 
 function sourceTypeLabel(type: NonNullable<AskSource["source_type"]>) {
+  if (type === "semantic") return "Semantik";
   if (type === "page_text") return "Seitentext";
   if (type === "ocr_text") return "OCR";
   return "Metadaten";

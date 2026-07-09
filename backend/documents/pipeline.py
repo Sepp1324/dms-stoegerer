@@ -498,6 +498,7 @@ def process_version(version: DocumentVersion) -> dict:
     result = _run_from(version, 0)
     _sync_contract_center(version, result, actor=version.created_by)
     _sync_entity_graph(version, result, actor=version.created_by)
+    _sync_semantic_index(version, result, actor=version.created_by)
     try:
         from documents.services import review_tasks
 
@@ -543,6 +544,7 @@ def retry_version(version: DocumentVersion, actor=None) -> dict:
     result = _run_from(version, start_index)
     _sync_contract_center(version, result, actor=actor or version.created_by)
     _sync_entity_graph(version, result, actor=actor or version.created_by)
+    _sync_semantic_index(version, result, actor=actor or version.created_by)
     try:
         from documents.services import review_tasks
 
@@ -582,6 +584,21 @@ def _sync_entity_graph(version: DocumentVersion, result: dict, *, actor=None) ->
     except Exception:  # noqa: BLE001 - Graph darf Pipeline nie kippen
         logger.exception("Entity-Graph-Sync für Version %s fehlgeschlagen", version.id)
         result["entity_graph"] = {"status": "failed"}
+
+
+def _sync_semantic_index(version: DocumentVersion, result: dict, *, actor=None) -> None:
+    """Best-effort-Aufbau des semantischen Index nach READY."""
+    if result.get("status") != "done":
+        return
+    try:
+        from documents.services import semantic_index
+
+        result["semantic_index"] = semantic_index.sync_document_embeddings(
+            version.document, version=version
+        )
+    except Exception:  # noqa: BLE001 - Semantik darf Pipeline nie kippen
+        logger.exception("Semantic-Index-Sync für Version %s fehlgeschlagen", version.id)
+        result["semantic_index"] = {"status": "failed"}
 
 
 def _add_months(d, months: int):

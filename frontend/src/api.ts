@@ -773,6 +773,16 @@ export interface OCRRetryResult {
   version_ids: number[];
 }
 
+export interface SemanticIndexHealth {
+  model: string;
+  dimension: number;
+  documents: number;
+  indexed_documents: number;
+  missing_documents: number;
+  chunks: number;
+  generated_at: string;
+}
+
 // --- Freigabelinks (Share-Links, STOAA-190/192) ---
 // Verwaltungs-Sicht eines Freigabelinks. Enthält bewusst KEINEN Klartext-Token
 // (der kommt einmalig nur aus der Create-Response, siehe ShareLinkCreated).
@@ -1422,7 +1432,7 @@ export interface AskSource {
   snippet_html: string;
   score?: number;
   reason?: string;
-  source_type?: "page_text" | "ocr_text" | "metadata";
+  source_type?: "page_text" | "ocr_text" | "metadata" | "semantic";
   matched_terms?: string[];
   entities?: {
     id: number;
@@ -1457,6 +1467,7 @@ export interface AskRetrievalContext {
   query_terms: string[];
   expanded_terms: string[];
   total_candidates: number;
+  semantic_candidates?: number;
   filters: {
     folder?: number | string | null;
     case_file?: number | null;
@@ -1465,6 +1476,29 @@ export interface AskRetrievalContext {
     created_from?: string | null;
     created_to?: string | null;
   };
+}
+export interface SimilarDocument {
+  document: number;
+  document_title: string;
+  folder_path: string | null;
+  page: number | null;
+  score: number;
+  reason: string;
+  snippet: string;
+  snippet_html: string;
+}
+export interface SimilarDocumentsResult {
+  document: number;
+  indexed: boolean;
+  model: string;
+  results: SimilarDocument[];
+}
+export interface SemanticReindexResult {
+  status: string;
+  created: number;
+  deleted: number;
+  version?: number;
+  model?: string;
 }
 export interface AskResult {
   source: "ai" | "unavailable" | "error" | "retrieval";
@@ -1485,6 +1519,16 @@ export async function askDocuments(
     folder: folder || undefined,
     ...filters,
   });
+}
+
+export async function getSimilarDocuments(id: number): Promise<SimilarDocumentsResult> {
+  const res = await apiFetch(`/documents/${id}/similar/`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+export function reindexDocumentEmbeddings(id: number): Promise<SemanticReindexResult> {
+  return postJson<SemanticReindexResult>(`/documents/${id}/reindex-semantic/`, {});
 }
 
 export async function applySuggestions(
@@ -1614,6 +1658,12 @@ export async function getBackupStatus(): Promise<BackupStatus> {
 export async function getOCRHealth(): Promise<OCRHealthStatus> {
   const res = await apiFetch("/system/ocr-health/");
   if (!res.ok) throw new Error(`OCR-Status laden fehlgeschlagen: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function getSemanticIndexHealth(): Promise<SemanticIndexHealth> {
+  const res = await apiFetch("/system/semantic-index/");
+  if (!res.ok) throw new Error(`Semantic-Index laden fehlgeschlagen: HTTP ${res.status}`);
   return res.json();
 }
 

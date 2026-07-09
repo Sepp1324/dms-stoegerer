@@ -1706,6 +1706,65 @@ class ContractRecord(models.Model):
 
 
 # ---------------------------------------------------------------------------
+# Semantischer Index
+# ---------------------------------------------------------------------------
+class DocumentEmbedding(models.Model):
+    """Semantischer Text-Chunk einer Dokumentversion.
+
+    V1 speichert providerfreie Hash-Embeddings in einem JSON-Feld. Das ist nicht
+    so stark wie ein externes Embedding-Modell, aber deterministisch, kostenlos
+    und ohne pgvector-/API-Abhängigkeit sofort betreibbar. Der Index ist bewusst
+    pro Version und Chunk modelliert, damit später ein echter Provider oder
+    pgvector unter derselben fachlichen API ergänzt werden kann.
+    """
+
+    class Source(models.TextChoices):
+        PAGE_TEXT = "page_text", "Seitentext"
+        OCR_TEXT = "ocr_text", "OCR-Text"
+        METADATA = "metadata", "Metadaten"
+
+    document = models.ForeignKey(
+        Document, on_delete=models.CASCADE, related_name="semantic_chunks"
+    )
+    version = models.ForeignKey(
+        DocumentVersion, on_delete=models.CASCADE, related_name="semantic_chunks"
+    )
+    page_no = models.PositiveIntegerField(null=True, blank=True)
+    chunk_index = models.PositiveIntegerField()
+    source = models.CharField(
+        max_length=16, choices=Source.choices, default=Source.PAGE_TEXT
+    )
+    text = models.TextField()
+    text_hash = models.CharField(max_length=64)
+    embedding_model = models.CharField(max_length=64, default="local-hash-v1")
+    dimension = models.PositiveSmallIntegerField(default=192)
+    vector = models.JSONField(default=list)
+    magnitude = models.FloatField(default=0.0)
+    token_count = models.PositiveIntegerField(default=0)
+    generated_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Semantischer Chunk"
+        verbose_name_plural = "Semantische Chunks"
+        ordering = ["document_id", "chunk_index"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["version", "embedding_model", "chunk_index"],
+                name="docs_emb_ver_model_chunk",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["document", "embedding_model"], name="docs_emb_doc_model"),
+            models.Index(fields=["version"], name="docs_emb_version"),
+            models.Index(fields=["embedding_model", "-generated_at"], name="docs_emb_model_time"),
+        ]
+
+    def __str__(self) -> str:
+        page = f"S. {self.page_no}" if self.page_no else self.get_source_display()
+        return f"{self.document_id} · {page} · #{self.chunk_index}"
+
+
+# ---------------------------------------------------------------------------
 # Betriebsmonitoring
 # ---------------------------------------------------------------------------
 class BackupMonitor(models.Model):

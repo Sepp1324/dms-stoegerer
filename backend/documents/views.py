@@ -116,6 +116,7 @@ from .services import asn as asn_service
 from .services import contracts as contract_service
 from .services import entity_graph as entity_graph_service
 from .services import review_tasks as review_task_service
+from .services import semantic_index as semantic_index_service
 from .tasks import (
     bulk_classify_documents,
     process_document_version,
@@ -388,6 +389,15 @@ class BackupStatusView(APIView):
             "age_hours": age_hours,
             "stale": stale,
         }
+
+
+class SemanticIndexHealthView(APIView):
+    """Admin-only Status des semantischen Dokumentindex."""
+
+    permission_classes = [IsDmsAdmin]
+
+    def get(self, request):
+        return Response(semantic_index_service.embedding_health())
 
 
 class OCRHealthView(APIView):
@@ -1165,6 +1175,54 @@ class DocumentViewSet(viewsets.ModelViewSet):
         """
         document = self.get_object()
         return Response(pipeline.verify_document_integrity(document))
+
+    @action(detail=True, methods=["get"], url_path="similar")
+    def similar(self, request, pk=None):
+        """Liefert semantisch ähnliche sichtbare Dokumente."""
+        document = self.get_object()
+        try:
+            limit = int(request.query_params.get("limit", 6))
+        except (TypeError, ValueError):
+            limit = 6
+        limit = max(1, min(limit, 20))
+        results = semantic_index_service.similar_documents(
+            document,
+            self.get_queryset(),
+            limit=limit,
+        )
+        indexed = bool(
+            document.current_version
+            and document.current_version.semantic_chunks.filter(
+                embedding_model=semantic_index_service.EMBEDDING_MODEL
+            ).exists()
+        )
+        return Response(
+            {
+                "document": document.id,
+                "indexed": indexed,
+                "model": semantic_index_service.EMBEDDING_MODEL,
+                "results": results,
+            }
+        )
+
+    @action(detail=True, methods=["post"], url_path="reindex-semantic")
+    def reindex_semantic(self, request, pk=None):
+        """Erzeugt den semantischen Index für dieses Dokument neu."""
+        if not getattr(request.user, "can_write", False):
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        document = self.get_object()
+        result = semantic_index_service.sync_document_embeddings(document)
+        AuditLogEntry.objects.create(
+            actor=request.user,
+            action="semantic_reindex",
+            object_type="Document",
+            object_id=str(document.id),
+            detail=result,
+        )
+        return Response(result)
 
     @action(detail=False, methods=["get"], url_path=r"by-asn/(?P<asn>[^/]+)")
     def by_asn(self, request, asn=None):

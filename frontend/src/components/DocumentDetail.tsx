@@ -36,6 +36,7 @@ import { FreigabePanel } from "./documentDetail/FreigabePanel";
 import { ShareLinksPanel } from "./documentDetail/ShareLinksPanel";
 import { CustomFieldsPanel } from "./documentDetail/CustomFieldsPanel";
 import { EntitiesPanel } from "./documentDetail/EntitiesPanel";
+import { SimilarDocumentsPanel } from "./documentDetail/SimilarDocumentsPanel";
 import { PdfWorkbenchPanel } from "./documentDetail/PdfWorkbenchPanel";
 import { AuditTrail } from "./documentDetail/AuditPanel";
 import { formatIsoDate } from "./documentDetail/format";
@@ -58,6 +59,7 @@ interface Props {
   onCreateStoragePath: (name: string) => Promise<NamedRef>;
   onCreateFolder: (name: string) => Promise<NamedRef>;
   onCreateTag: (name: string) => Promise<NamedRef>;
+  onOpenDocument?: (documentId: number, page?: number | null) => void;
   // Navigation zur SPA-Verwaltung der Zusatzfelder (Empty-State-Link).
   onManageFields?: () => void;
 }
@@ -81,6 +83,7 @@ export default function DocumentDetail({
   onCreateStoragePath,
   onCreateFolder,
   onCreateTag,
+  onOpenDocument,
   onManageFields,
 }: Props) {
   const [doc, setDoc] = useState<Detail | null>(null);
@@ -464,6 +467,15 @@ export default function DocumentDetail({
             {/* Entitäten: private Wissensgraph-Links dieses Dokuments. */}
             <TabPanel id="entities" active={activeTab}>
               <EntitiesPanel documentId={id} canEdit={canEdit} />
+            </TabPanel>
+
+            {/* Semantik: ähnliche Dokumente aus dem lokalen Embedding-Index. */}
+            <TabPanel id="similar" active={activeTab}>
+              <SimilarDocumentsPanel
+                documentId={id}
+                canEdit={canEdit}
+                onOpenDocument={onOpenDocument ?? (() => undefined)}
+              />
             </TabPanel>
 
             {/* Versionen & Verlauf: Versionsliste/Integrität + Vergleich. */}

@@ -28,6 +28,11 @@ urlpatterns = [
     # Explizit vor dem Router, sonst würde "upload" als Dokument-PK gelesen.
     path("documents/upload/", views.DocumentUploadView.as_view(), name="document-upload"),
     path("system/backup-status/", views.BackupStatusView.as_view(), name="backup-status"),
+    path(
+        "system/semantic-index/",
+        views.SemanticIndexHealthView.as_view(),
+        name="semantic-index-health",
+    ),
     path("system/ocr-health/", views.OCRHealthView.as_view(), name="ocr-health"),
     path("ask/", views.AskView.as_view(), name="ask"),
     path(

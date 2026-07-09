@@ -169,6 +169,7 @@ def retrieve_context(
     doc_ids = [doc.id for doc in docs]
     entity_links = _entity_links_by_document(doc_ids)
     contracts = _contracts_by_document(doc_ids)
+    semantic_sources = _semantic_sources(question, docs, limit=limit)
 
     candidates: list[_Candidate] = []
     for document in docs:
@@ -246,11 +247,16 @@ def retrieve_context(
             )
 
     candidates.sort(key=lambda item: (item.score, item.document.added_at, item.document.id), reverse=True)
-    sources = _dedupe_sources(candidates, terms_with_expansion, limit=limit)
+    sources = _merge_sources(
+        semantic_sources,
+        _dedupe_sources(candidates, terms_with_expansion, limit=limit),
+        limit=limit,
+    )
     return {
         "query_terms": terms,
         "expanded_terms": terms_with_expansion,
         "total_candidates": len(candidates),
+        "semantic_candidates": len(semantic_sources),
         "filters": (filters or RetrievalFilters()).as_dict(),
         "sources": sources,
     }
@@ -476,6 +482,36 @@ def _dedupe_sources(candidates: list[_Candidate], terms: list[str], *, limit: in
         if len(out) >= limit:
             break
     return out
+
+
+def _semantic_sources(question: str, docs: list[Document], *, limit: int) -> list[dict]:
+    try:
+        from documents.services import semantic_index
+
+        return semantic_index.search_documents(question, docs, limit=limit)
+    except Exception:
+        # Retrieval muss auch funktionieren, wenn der Index noch nicht migriert
+        # oder gerade defekt ist. Die klassische Quellenlogik bleibt Fallback.
+        return []
+
+
+def _merge_sources(primary: list[dict], fallback: list[dict], *, limit: int) -> list[dict]:
+    merged: list[dict] = []
+    seen: set[tuple[int, int | None]] = set()
+    for source in [*primary, *fallback]:
+        key = (
+            int(source["document"]),
+            source.get("page"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        copy = dict(source)
+        copy["id"] = f"S{len(merged) + 1}"
+        merged.append(copy)
+        if len(merged) >= limit:
+            break
+    return merged
 
 
 def _snippet(text: str, terms: list[str], *, radius: int = 460) -> str:

@@ -2,12 +2,14 @@ import { useEffect, useState } from "react";
 import {
   getBackupStatus,
   getOCRHealth,
+  getSemanticIndexHealth,
   retryFailedOCRProcessing,
   type BackupHealthStatus,
   type BackupMonitorEntry,
   type BackupStatus,
   type OCRHealthIssue,
   type OCRHealthStatus,
+  type SemanticIndexHealth,
 } from "../api";
 
 function formatDate(value: string | null): string {
@@ -167,6 +169,7 @@ function OCRIssueList({
 export default function SystemStatusPage() {
   const [status, setStatus] = useState<BackupStatus | null>(null);
   const [ocr, setOcr] = useState<OCRHealthStatus | null>(null);
+  const [semantic, setSemantic] = useState<SemanticIndexHealth | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
@@ -176,10 +179,11 @@ export default function SystemStatusPage() {
     setLoading(true);
     setError(null);
     setRetryNote(null);
-    Promise.all([getBackupStatus(), getOCRHealth()])
-      .then(([backupStatus, ocrStatus]) => {
+    Promise.all([getBackupStatus(), getOCRHealth(), getSemanticIndexHealth()])
+      .then(([backupStatus, ocrStatus, semanticStatus]) => {
         setStatus(backupStatus);
         setOcr(ocrStatus);
+        setSemantic(semanticStatus);
       })
       .catch((err) => setError(err instanceof Error ? err.message : String(err)))
       .finally(() => setLoading(false));
@@ -203,7 +207,7 @@ export default function SystemStatusPage() {
   const tone: BackupHealthStatus =
     status.status === "error" || ocr?.status === "error"
       ? "error"
-      : status.status === "warn" || ocr?.status === "warn"
+      : status.status === "warn" || ocr?.status === "warn" || !!semantic?.missing_documents
         ? "warn"
         : "ok";
   const headline =
@@ -219,7 +223,11 @@ export default function SystemStatusPage() {
     try {
       const result = await retryFailedOCRProcessing(25);
       setRetryNote(`${result.queued} Verarbeitung${result.queued === 1 ? "" : "en"} neu angestoßen.`);
-      await Promise.all([getBackupStatus().then(setStatus), getOCRHealth().then(setOcr)]);
+      await Promise.all([
+        getBackupStatus().then(setStatus),
+        getOCRHealth().then(setOcr),
+        getSemanticIndexHealth().then(setSemantic),
+      ]);
     } catch (err) {
       setRetryNote(err instanceof Error ? err.message : String(err));
     } finally {
@@ -299,6 +307,30 @@ export default function SystemStatusPage() {
             onRetryAll={retryAllFailed}
           />
         </>
+      )}
+
+      {semantic && (
+        <section className={`system-card system-card--${semantic.missing_documents ? "warn" : "ok"}`}>
+          <div className="system-card__head">
+            <h3>Semantischer Index</h3>
+            <span className={`system-pill system-pill--${semantic.missing_documents ? "warn" : "ok"}`}>
+              {semantic.missing_documents ? "Backfill nötig" : "OK"}
+            </span>
+          </div>
+          <div className="system-metrics">
+            <HealthMetric label="Indexiert" value={semantic.indexed_documents} />
+            <HealthMetric
+              label="Fehlend"
+              value={semantic.missing_documents}
+              tone={semantic.missing_documents ? "warn" : "ok"}
+            />
+            <HealthMetric label="Chunks" value={semantic.chunks} />
+            <HealthMetric label="Dimensionen" value={semantic.dimension} />
+          </div>
+          <p className="system-card__message">
+            Modell {semantic.model}. Backfill: <code>python manage.py reindex_embeddings</code>
+          </p>
+        </section>
       )}
     </section>
   );
