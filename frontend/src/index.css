@@ -3627,51 +3627,231 @@ button.reminders__delete {
   border-color: var(--warn);
 }
 
-/* --- Topbar-Seite „Wiedervorlage/Fällig" --- */
-.due-view__head {
+/* --- Fristen-Center --- */
+.due-view {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+.due-hero {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--card);
+  padding: var(--space-5);
+}
+.due-eyebrow {
+  display: block;
+  color: var(--muted);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  margin-bottom: var(--space-1);
+}
+.due-hero h2 {
+  margin: 0;
+  font-size: 1.25rem;
+}
+.due-hero p {
+  margin: var(--space-2) 0 0;
+  color: var(--muted);
+  max-width: 44rem;
+}
+.due-actions {
   display: flex;
   align-items: flex-end;
-  justify-content: space-between;
-  gap: 1rem;
+  justify-content: flex-end;
   flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.due-metrics {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+.due-metric {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  padding: var(--space-3);
+}
+.due-metric strong {
+  display: block;
+  font-size: 1.45rem;
+  line-height: 1.1;
+}
+.due-metric span {
+  display: block;
+  margin-top: var(--space-1);
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+.due-metric--danger {
+  border-color: color-mix(in srgb, var(--error) 45%, var(--border));
+}
+.due-metric--warn {
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+}
+.due-source-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.due-source {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--card);
+  color: var(--text);
+  padding: 0.4rem 0.75rem;
+}
+.due-source span {
+  color: var(--muted);
+}
+.due-source--active {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: var(--accent-tint);
+}
+.due-board {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
 }
 .due-group {
-  margin-top: 1.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--card);
+  padding: var(--space-4);
+  min-width: 0;
 }
 .due-group__title {
-  margin: 0 0 0.6rem;
+  margin: 0 0 var(--space-3);
   font-size: 1rem;
 }
 .due-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: var(--space-2);
 }
-button.due-item {
+button.due-card {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 5.2rem minmax(0, 1fr) auto;
+  gap: var(--space-3);
+  align-items: center;
+  text-align: left;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-left-width: 4px;
+  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+  color: var(--text);
+}
+button.due-card:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+.due-card--high {
+  border-left-color: var(--error);
+}
+.due-card--medium {
+  border-left-color: var(--warn);
+}
+.due-card--low {
+  border-left-color: var(--accent);
+}
+.due-card--info {
+  border-left-color: var(--ok);
+}
+.due-card__date {
+  display: inline-flex;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  padding: 0.18rem 0.55rem;
+  color: var(--muted);
+  white-space: nowrap;
+  font-size: 0.78rem;
+}
+.due-card__date--overdue {
+  color: #fecaca;
+  border-color: color-mix(in srgb, var(--error) 60%, var(--border));
+}
+.due-card__date--today,
+.due-card__date--soon {
+  color: #fde68a;
+  border-color: color-mix(in srgb, var(--warn) 60%, var(--border));
+}
+.due-card__body,
+.due-card__head,
+.due-card__title,
+.due-card__desc {
+  display: block;
+  min-width: 0;
+}
+.due-card__head {
   display: flex;
   align-items: center;
-  gap: 0.7rem;
-  width: 100%;
-  text-align: left;
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  padding: 0.6rem 0.9rem;
-  color: var(--text);
-  cursor: pointer;
+  justify-content: space-between;
+  gap: var(--space-2);
 }
-button.due-item:hover {
-  background: var(--hover-tint);
-}
-.due-item__title {
+.due-card__title {
+  margin-top: 0.15rem;
   font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.due-item__note {
-  margin-left: auto;
+.due-card__desc {
+  margin-top: 0.15rem;
+  color: var(--muted);
   font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+.due-card__action {
+  color: var(--accent);
+  font-size: 0.82rem;
+  white-space: nowrap;
+}
+.due-chip {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  color: var(--muted);
+  padding: 0.12rem 0.5rem;
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+.due-chip--contract {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+.due-chip--reminder {
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+}
+.due-chip--review_task,
+.due-chip--approval {
+  border-color: color-mix(in srgb, var(--error) 35%, var(--border));
+}
+.due-chip--retention {
+  border-color: color-mix(in srgb, var(--ok) 35%, var(--border));
+}
+
+@media (max-width: 900px) {
+  button.due-card {
+    grid-template-columns: 1fr;
+  }
+  .due-hero {
+    flex-direction: column;
+  }
+  .due-metrics,
+  .due-board {
+    grid-template-columns: 1fr;
+  }
+  .due-card__action {
+    white-space: normal;
+  }
 }
 
 /* --- Mobile-Erfass-Ansicht (STOAA-514) ---

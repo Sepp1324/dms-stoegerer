@@ -118,6 +118,7 @@ from .services import contracts as contract_service
 from .services import entity_graph as entity_graph_service
 from .services import review_tasks as review_task_service
 from .services import semantic_index as semantic_index_service
+from .services import timeline as timeline_service
 from .tasks import (
     bulk_classify_documents,
     process_document_version,
@@ -147,6 +148,27 @@ _EXTRACTION_CUSTOM_FIELD_TARGETS = {
         CustomField.DataType.TEXT,
     ),
 }
+
+
+def _visible_documents_for(user):
+    qs = Document.objects.select_related(
+        "correspondent",
+        "document_type",
+        "folder",
+        "case_file",
+        "current_version",
+    )
+    if not getattr(user, "is_dms_admin", False):
+        qs = qs.filter(owner=user)
+    return qs
+
+
+def _parse_days(raw_value, *, default: int) -> int:
+    try:
+        days = int(raw_value if raw_value not in ("", None) else default)
+    except (TypeError, ValueError):
+        days = default
+    return max(0, min(days, 365))
 
 
 def _apply_custom_field_filters(qs, params):
@@ -626,6 +648,37 @@ class OCRRetryFailedView(APIView):
             },
             status=status.HTTP_202_ACCEPTED,
         )
+
+
+class TimelineView(APIView):
+    """Zentrale Fristen-/Timeline-API über Erinnerungen, Verträge und Aufgaben."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        days = _parse_days(request.query_params.get("days"), default=30)
+        return Response(
+            timeline_service.build_timeline(
+                _visible_documents_for(request.user),
+                days=days,
+            )
+        )
+
+
+class TimelineICSView(APIView):
+    """All-Day-iCalendar-Export der sichtbaren Fristen."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        days = _parse_days(request.query_params.get("days"), default=90)
+        content = timeline_service.build_ics(
+            _visible_documents_for(request.user),
+            days=days,
+        )
+        response = HttpResponse(content, content_type="text/calendar; charset=utf-8")
+        response["Content-Disposition"] = 'attachment; filename="dms-fristen.ics"'
+        return response
 
 
 class AskView(APIView):

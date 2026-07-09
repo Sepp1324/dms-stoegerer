@@ -35,6 +35,8 @@ urlpatterns = [
     ),
     path("system/archive-health/", views.ArchiveHealthView.as_view(), name="archive-health"),
     path("system/ocr-health/", views.OCRHealthView.as_view(), name="ocr-health"),
+    path("timeline/", views.TimelineView.as_view(), name="timeline"),
+    path("timeline/ics/", views.TimelineICSView.as_view(), name="timeline-ics"),
     path("ask/", views.AskView.as_view(), name="ask"),
     path(
         "system/ocr-health/retry-failed/",
