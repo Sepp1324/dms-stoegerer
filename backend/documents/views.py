@@ -70,13 +70,16 @@ from .models import (
     CustomField,
     CustomFieldValue,
     Document,
+    DocumentEntity,
     DocumentFolder,
     DocumentReminder,
     DocumentReviewTask,
     DocumentShareLink,
     DocumentType,
     DocumentVersion,
+    EntityRelation,
     ExtractionCandidate,
+    KnowledgeEntity,
     MailAccount,
     OCRStatus,
     ProcessedMail,
@@ -99,7 +102,10 @@ from .serializers import (
     DocumentShareLinkSerializer,
     DocumentTypeSerializer,
     DocumentVersionSerializer,
+    DocumentEntitySerializer,
+    EntityRelationSerializer,
     ExtractionCandidateSerializer,
+    KnowledgeEntitySerializer,
     MailAccountSerializer,
     ProcessedMailSerializer,
     StoragePathSerializer,
@@ -108,6 +114,7 @@ from .serializers import (
 )
 from .services import asn as asn_service
 from .services import contracts as contract_service
+from .services import entity_graph as entity_graph_service
 from .services import review_tasks as review_task_service
 from .tasks import (
     bulk_classify_documents,
@@ -3029,6 +3036,217 @@ class ContractRecordViewSet(viewsets.ModelViewSet):
             counters[status_value] = counters.get(status_value, 0) + 1
 
         return Response({"scanned": scanned, **counters, "errors": errors})
+
+
+class KnowledgeEntityViewSet(viewsets.ModelViewSet):
+    """Privates DMS-Gedächtnis: Personen, Firmen, Behörden und Identifier."""
+
+    queryset = KnowledgeEntity.objects.all()
+    serializer_class = KnowledgeEntitySerializer
+    permission_classes = [ReadOnlyOrCanWrite]
+
+    def get_queryset(self):
+        qs = (
+            KnowledgeEntity.objects.select_related("owner")
+            .prefetch_related("identifiers")
+            .annotate(
+                document_count=Count("document_links__document", distinct=True),
+                relation_count=Count("outgoing_relations", distinct=True),
+            )
+            .order_by("kind", "name")
+        )
+        user = self.request.user
+        if not getattr(user, "is_dms_admin", False):
+            qs = qs.filter(owner=user)
+
+        params = self.request.query_params
+        kind = params.get("kind")
+        if kind in {choice for choice, _label in KnowledgeEntity.Kind.choices}:
+            qs = qs.filter(kind=kind)
+        q = params.get("q", "").strip()
+        if q:
+            qs = qs.filter(
+                Q(name__icontains=q)
+                | Q(canonical_name__icontains=q)
+                | Q(identifiers__value__icontains=q)
+                | Q(document_links__document__title__icontains=q)
+            )
+        document_id = params.get("document")
+        if document_id:
+            qs = qs.filter(document_links__document_id=document_id)
+        return qs.distinct()
+
+    def perform_create(self, serializer):
+        kind = serializer.validated_data.get("kind")
+        name = serializer.validated_data.get("name", "")
+        serializer.save(
+            owner=self.request.user,
+            canonical_name=entity_graph_service.canonicalize(kind, name),
+            source=KnowledgeEntity.Source.MANUAL,
+            confidence=100,
+        )
+
+    def perform_update(self, serializer):
+        kind = serializer.validated_data.get("kind", serializer.instance.kind)
+        name = serializer.validated_data.get("name", serializer.instance.name)
+        serializer.save(
+            canonical_name=entity_graph_service.canonicalize(kind, name),
+            source=KnowledgeEntity.Source.MANUAL,
+        )
+
+    @action(detail=True, methods=["get"])
+    def documents(self, request, pk=None):
+        entity = self.get_object()
+        qs = Document.objects.filter(entity_links__entity=entity).select_related(
+            "correspondent",
+            "document_type",
+            "folder",
+            "case_file",
+            "current_version",
+        ).prefetch_related("tags", "versions", "review_tasks").distinct()
+        if not getattr(request.user, "is_dms_admin", False):
+            qs = qs.filter(owner=request.user)
+        return Response(DocumentSerializer(qs, many=True).data)
+
+    @action(detail=True, methods=["get"])
+    def relations(self, request, pk=None):
+        entity = self.get_object()
+        qs = EntityRelation.objects.select_related(
+            "from_entity", "to_entity", "document"
+        ).filter(Q(from_entity=entity) | Q(to_entity=entity))
+        if not getattr(request.user, "is_dms_admin", False):
+            qs = qs.filter(
+                Q(from_entity__owner=request.user) | Q(to_entity__owner=request.user)
+            )
+        return Response(EntityRelationSerializer(qs.distinct(), many=True).data)
+
+    @action(detail=False, methods=["get"])
+    def summary(self, request):
+        qs = self.get_queryset()
+        by_kind = {
+            item["kind"]: item["count"]
+            for item in qs.values("kind").annotate(count=Count("id"))
+        }
+        return Response(
+            {
+                "total": qs.count(),
+                "by_kind": by_kind,
+                "documents_linked": Document.objects.filter(
+                    entity_links__entity__in=qs
+                ).distinct().count(),
+            }
+        )
+
+    @action(detail=False, methods=["post"])
+    def scan(self, request):
+        """Scannt sichtbare READY-Dokumente nach Entitäten."""
+        if not getattr(request.user, "can_write", False):
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        raw_limit = request.data.get("limit", 50) if hasattr(request, "data") else 50
+        try:
+            limit = int(raw_limit)
+        except (TypeError, ValueError):
+            limit = 50
+        limit = max(1, min(limit, 200))
+
+        qs = Document.objects.select_related(
+            "current_version",
+            "correspondent",
+            "owner",
+        ).exclude(current_version__isnull=True)
+        if not getattr(request.user, "is_dms_admin", False):
+            qs = qs.filter(owner=request.user)
+
+        raw_ids = request.data.get("ids") if hasattr(request, "data") else None
+        if raw_ids:
+            if not isinstance(raw_ids, list):
+                return Response(
+                    {"detail": "Feld 'ids' muss eine Liste sein."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            try:
+                ids = [int(raw_id) for raw_id in raw_ids]
+            except (TypeError, ValueError):
+                return Response(
+                    {"detail": "Feld 'ids' enthält ungültige Dokument-IDs."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            qs = qs.filter(id__in=ids)
+        else:
+            qs = qs.filter(
+                current_version__processing_state=DocumentVersion.ProcessingState.READY
+            ).order_by("-added_at")[:limit]
+
+        scanned = entities = links = relations = failed = 0
+        errors = []
+        for document in qs:
+            scanned += 1
+            try:
+                result = entity_graph_service.sync_document_entities(
+                    document, actor=request.user
+                )
+            except Exception as exc:  # noqa: BLE001 - Batch soll weiterlaufen
+                failed += 1
+                errors.append({"document": document.id, "error": str(exc)[:500]})
+                continue
+            entities += int(result.get("entities", 0))
+            links += int(result.get("links", 0))
+            relations += int(result.get("relations", 0))
+        return Response(
+            {
+                "scanned": scanned,
+                "entities": entities,
+                "links": links,
+                "relations": relations,
+                "failed": failed,
+                "errors": errors,
+            }
+        )
+
+
+class DocumentEntityViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = DocumentEntitySerializer
+    permission_classes = [ReadOnlyOrCanWrite]
+
+    def get_queryset(self):
+        qs = DocumentEntity.objects.select_related("document", "entity").order_by(
+            "entity__kind", "entity__name"
+        )
+        user = self.request.user
+        if not getattr(user, "is_dms_admin", False):
+            qs = qs.filter(document__owner=user, entity__owner=user)
+        document_id = self.request.query_params.get("document")
+        if document_id:
+            qs = qs.filter(document_id=document_id)
+        entity_id = self.request.query_params.get("entity")
+        if entity_id:
+            qs = qs.filter(entity_id=entity_id)
+        return qs
+
+
+class EntityRelationViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = EntityRelationSerializer
+    permission_classes = [ReadOnlyOrCanWrite]
+
+    def get_queryset(self):
+        qs = EntityRelation.objects.select_related(
+            "from_entity", "to_entity", "document"
+        ).order_by("relation_type", "from_entity__name")
+        user = self.request.user
+        if not getattr(user, "is_dms_admin", False):
+            qs = qs.filter(
+                Q(from_entity__owner=user) | Q(to_entity__owner=user)
+            )
+        entity_id = self.request.query_params.get("entity")
+        if entity_id:
+            qs = qs.filter(Q(from_entity_id=entity_id) | Q(to_entity_id=entity_id))
+        document_id = self.request.query_params.get("document")
+        if document_id:
+            qs = qs.filter(document_id=document_id)
+        return qs.distinct()
 
 
 class TagViewSet(viewsets.ModelViewSet):

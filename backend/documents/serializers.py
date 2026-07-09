@@ -17,6 +17,10 @@ from .models import (
     DocumentShareLink,
     DocumentType,
     DocumentVersion,
+    DocumentEntity,
+    EntityIdentifier,
+    EntityRelation,
+    KnowledgeEntity,
     MailAccount,
     ProcessedMail,
     StoragePath,
@@ -538,6 +542,162 @@ class ContractRecordSerializer(serializers.ModelSerializer):
             if obj.document and obj.document.correspondent_id
             else ""
         )
+
+
+class EntityIdentifierSerializer(serializers.ModelSerializer):
+    kind_label = serializers.SerializerMethodField()
+
+    class Meta:
+        model = EntityIdentifier
+        fields = (
+            "id",
+            "entity",
+            "kind",
+            "kind_label",
+            "value",
+            "normalized_value",
+            "source",
+            "confidence",
+            "created_at",
+        )
+        read_only_fields = ("normalized_value", "created_at")
+
+    def get_kind_label(self, obj) -> str:
+        return obj.get_kind_display()
+
+
+class DocumentEntitySerializer(serializers.ModelSerializer):
+    document_title = serializers.CharField(source="document.title", read_only=True)
+    entity_name = serializers.CharField(source="entity.name", read_only=True)
+    entity_kind = serializers.CharField(source="entity.kind", read_only=True)
+    entity_kind_label = serializers.CharField(
+        source="entity.get_kind_display", read_only=True
+    )
+    role_label = serializers.SerializerMethodField()
+    source_label = serializers.SerializerMethodField()
+
+    class Meta:
+        model = DocumentEntity
+        fields = (
+            "id",
+            "document",
+            "document_title",
+            "entity",
+            "entity_name",
+            "entity_kind",
+            "entity_kind_label",
+            "role",
+            "role_label",
+            "source",
+            "source_label",
+            "confidence",
+            "occurrences",
+            "source_snippet",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = fields
+
+    def get_role_label(self, obj) -> str:
+        return obj.get_role_display()
+
+    def get_source_label(self, obj) -> str:
+        return obj.get_source_display()
+
+
+class EntityRelationSerializer(serializers.ModelSerializer):
+    from_name = serializers.CharField(source="from_entity.name", read_only=True)
+    to_name = serializers.CharField(source="to_entity.name", read_only=True)
+    from_kind = serializers.CharField(source="from_entity.kind", read_only=True)
+    to_kind = serializers.CharField(source="to_entity.kind", read_only=True)
+    document_title = serializers.CharField(source="document.title", read_only=True, default=None)
+    relation_type_label = serializers.SerializerMethodField()
+    source_label = serializers.SerializerMethodField()
+
+    class Meta:
+        model = EntityRelation
+        fields = (
+            "id",
+            "from_entity",
+            "from_name",
+            "from_kind",
+            "to_entity",
+            "to_name",
+            "to_kind",
+            "relation_type",
+            "relation_type_label",
+            "document",
+            "document_title",
+            "confidence",
+            "source",
+            "source_label",
+            "metadata",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = fields
+
+    def get_relation_type_label(self, obj) -> str:
+        return obj.get_relation_type_display()
+
+    def get_source_label(self, obj) -> str:
+        return obj.get_source_display()
+
+
+class KnowledgeEntitySerializer(serializers.ModelSerializer):
+    kind_label = serializers.SerializerMethodField()
+    source_label = serializers.SerializerMethodField()
+    identifiers = EntityIdentifierSerializer(many=True, read_only=True)
+    document_count = serializers.SerializerMethodField()
+    relation_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = KnowledgeEntity
+        fields = (
+            "id",
+            "owner",
+            "kind",
+            "kind_label",
+            "name",
+            "canonical_name",
+            "confidence",
+            "source",
+            "source_label",
+            "metadata",
+            "identifiers",
+            "document_count",
+            "relation_count",
+            "first_seen_at",
+            "last_seen_at",
+        )
+        read_only_fields = (
+            "owner",
+            "canonical_name",
+            "confidence",
+            "source_label",
+            "identifiers",
+            "document_count",
+            "relation_count",
+            "first_seen_at",
+            "last_seen_at",
+        )
+
+    def get_kind_label(self, obj) -> str:
+        return obj.get_kind_display()
+
+    def get_source_label(self, obj) -> str:
+        return obj.get_source_display()
+
+    def get_document_count(self, obj) -> int:
+        return getattr(obj, "document_count", None) or obj.document_links.values(
+            "document_id"
+        ).distinct().count()
+
+    def get_relation_count(self, obj) -> int:
+        annotated = getattr(obj, "relation_count", None)
+        if annotated is not None:
+            return annotated
+        return obj.outgoing_relations.count() + obj.incoming_relations.count()
 
 
 class DocumentSerializer(serializers.ModelSerializer):

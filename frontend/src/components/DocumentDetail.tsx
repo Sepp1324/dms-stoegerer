@@ -35,6 +35,7 @@ import { ReminderPanel } from "./documentDetail/ReminderPanel";
 import { FreigabePanel } from "./documentDetail/FreigabePanel";
 import { ShareLinksPanel } from "./documentDetail/ShareLinksPanel";
 import { CustomFieldsPanel } from "./documentDetail/CustomFieldsPanel";
+import { EntitiesPanel } from "./documentDetail/EntitiesPanel";
 import { PdfWorkbenchPanel } from "./documentDetail/PdfWorkbenchPanel";
 import { AuditTrail } from "./documentDetail/AuditPanel";
 import { formatIsoDate } from "./documentDetail/format";
@@ -458,6 +459,11 @@ export default function DocumentDetail({
                   onDownloadQr={downloadQr}
                 />
               )}
+            </TabPanel>
+
+            {/* Entitäten: private Wissensgraph-Links dieses Dokuments. */}
+            <TabPanel id="entities" active={activeTab}>
+              <EntitiesPanel documentId={id} canEdit={canEdit} />
             </TabPanel>
 
             {/* Versionen & Verlauf: Versionsliste/Integrität + Vergleich. */}

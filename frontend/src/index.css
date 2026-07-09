@@ -3841,6 +3841,255 @@ button.due-item:hover {
   margin-top: 0.1rem;
 }
 
+/* --- DMS-Gedächtnis / Entitätsgraph --- */
+.knowledge-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+.knowledge-toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+.knowledge-metrics {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(7rem, 1fr));
+  gap: var(--space-3);
+  flex: 1;
+}
+.knowledge-metric {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--card);
+  padding: 0.8rem 0.9rem;
+  min-height: 4.6rem;
+}
+.knowledge-metric strong {
+  display: block;
+  font-size: 1.45rem;
+  line-height: 1.1;
+}
+.knowledge-metric span {
+  display: block;
+  margin-top: 0.25rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+.knowledge-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+.knowledge-actions .search {
+  min-width: 18rem;
+}
+.knowledge-layout {
+  display: grid;
+  grid-template-columns: minmax(17rem, 23rem) minmax(0, 1fr);
+  gap: var(--space-4);
+  align-items: start;
+}
+.knowledge-list,
+.knowledge-detail {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--card);
+}
+.knowledge-list {
+  padding: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  position: sticky;
+  top: var(--space-4);
+  max-height: calc(100vh - 8rem);
+  overflow: auto;
+}
+.knowledge-row {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  color: var(--text);
+  padding: 0.75rem 0.85rem;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.knowledge-row:hover,
+.knowledge-row--active {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+}
+.knowledge-row--active {
+  background: var(--accent-tint);
+}
+.knowledge-row small {
+  color: var(--muted);
+}
+.knowledge-row--skeleton {
+  min-height: 4.6rem;
+  animation: skeleton-shimmer 1.4s ease infinite;
+}
+.knowledge-detail {
+  padding: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+.knowledge-detail__head {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+.knowledge-detail__head h2 {
+  margin: 0.2rem 0;
+  font-size: 1.35rem;
+  letter-spacing: 0;
+}
+.knowledge-detail__head p,
+.knowledge-detail h3 {
+  margin: 0;
+}
+.knowledge-detail__head p {
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+.knowledge-detail h3 {
+  font-size: 0.95rem;
+}
+.entity-kind,
+.knowledge-chip {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  padding: 0.2rem 0.5rem;
+  font-size: 0.72rem;
+  color: var(--muted);
+  width: fit-content;
+}
+.entity-kind--person {
+  color: color-mix(in srgb, var(--ok) 80%, white);
+  border-color: color-mix(in srgb, var(--ok) 42%, var(--border));
+}
+.entity-kind--company,
+.entity-kind--authority {
+  color: color-mix(in srgb, var(--accent) 80%, white);
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+}
+.entity-kind--iban,
+.entity-kind--email,
+.entity-kind--phone,
+.entity-kind--contract_number,
+.entity-kind--policy_number,
+.entity-kind--customer_number,
+.entity-kind--tax_number {
+  color: color-mix(in srgb, var(--warn) 86%, white);
+  border-color: color-mix(in srgb, var(--warn) 42%, var(--border));
+}
+.knowledge-chips,
+.knowledge-docs,
+.knowledge-relations {
+  display: grid;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+.knowledge-doc,
+.knowledge-relation {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  color: var(--text);
+  padding: 0.75rem 0.85rem;
+  text-align: left;
+}
+.knowledge-doc:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+.knowledge-doc strong,
+.knowledge-relation strong {
+  display: block;
+}
+.knowledge-doc span,
+.knowledge-relation span {
+  display: block;
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin-top: 0.18rem;
+}
+.detail-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.detail-section__head {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  align-items: flex-start;
+}
+.detail-section__head h3,
+.detail-section__head p {
+  margin: 0;
+}
+.detail-section__head p {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin-top: 0.15rem;
+}
+.entity-link-list {
+  display: grid;
+  gap: var(--space-2);
+}
+.entity-link {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  padding: 0.75rem 0.85rem;
+}
+.entity-link strong,
+.entity-link small {
+  display: block;
+  margin-top: 0.2rem;
+}
+.entity-link small,
+.entity-link p {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+.entity-link p {
+  margin: 0.5rem 0 0;
+  line-height: 1.45;
+}
+@media (max-width: 1000px) {
+  .knowledge-toolbar {
+    flex-direction: column;
+  }
+  .knowledge-metrics {
+    width: 100%;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .knowledge-actions {
+    justify-content: flex-start;
+  }
+  .knowledge-layout {
+    grid-template-columns: 1fr;
+  }
+  .knowledge-list {
+    position: static;
+    max-height: none;
+  }
+}
+@media (max-width: 560px) {
+  .knowledge-metrics {
+    grid-template-columns: 1fr;
+  }
+  .knowledge-actions .search {
+    min-width: 100%;
+  }
+}
+
 /* --- Contract Center --- */
 .contracts-page {
   display: flex;

@@ -497,6 +497,7 @@ def process_version(version: DocumentVersion) -> dict:
     """Vollständige Verarbeitung einer Version entlang der State Machine."""
     result = _run_from(version, 0)
     _sync_contract_center(version, result, actor=version.created_by)
+    _sync_entity_graph(version, result, actor=version.created_by)
     try:
         from documents.services import review_tasks
 
@@ -541,6 +542,7 @@ def retry_version(version: DocumentVersion, actor=None) -> dict:
 
     result = _run_from(version, start_index)
     _sync_contract_center(version, result, actor=actor or version.created_by)
+    _sync_entity_graph(version, result, actor=actor or version.created_by)
     try:
         from documents.services import review_tasks
 
@@ -565,6 +567,21 @@ def _sync_contract_center(version: DocumentVersion, result: dict, *, actor=None)
     except Exception:  # noqa: BLE001 - Vertrags-Cockpit darf Pipeline nie kippen
         logger.exception("Contract-Center-Sync für Version %s fehlgeschlagen", version.id)
         result["contract"] = {"status": "failed"}
+
+
+def _sync_entity_graph(version: DocumentVersion, result: dict, *, actor=None) -> None:
+    """Best-effort-Sync des privaten DMS-Gedächtnisses nach READY."""
+    if result.get("status") != "done":
+        return
+    try:
+        from documents.services import entity_graph
+
+        result["entity_graph"] = entity_graph.sync_document_entities(
+            version.document, actor=actor
+        )
+    except Exception:  # noqa: BLE001 - Graph darf Pipeline nie kippen
+        logger.exception("Entity-Graph-Sync für Version %s fehlgeschlagen", version.id)
+        result["entity_graph"] = {"status": "failed"}
 
 
 def _add_months(d, months: int):
