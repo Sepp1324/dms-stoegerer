@@ -10,7 +10,11 @@ export function DetailMeta({
   currentVersion,
   retryBusy,
   retryError,
+  archiveBusy,
+  archiveError,
   onRetry,
+  onArchiveCheck,
+  onToggleLegalHold,
   onDownloadQr,
 }: {
   doc: Detail;
@@ -18,7 +22,11 @@ export function DetailMeta({
   currentVersion: DocumentVersion | undefined;
   retryBusy: boolean;
   retryError: string | null;
+  archiveBusy: boolean;
+  archiveError: string | null;
   onRetry: () => void;
+  onArchiveCheck: () => void;
+  onToggleLegalHold: () => void;
   onDownloadQr: () => void;
 }) {
   return (
@@ -38,6 +46,35 @@ export function DetailMeta({
           „{doc.classification.rules.join("“, „")}“
         </p>
       ) : null}
+      <section className={`archive-box archive-box--${doc.archive_status}`}>
+        <div>
+          <strong>Archiv: {doc.archive_status_label}</strong>
+          <span>
+            {doc.archive_checked_at
+              ? ` geprüft am ${new Date(doc.archive_checked_at).toLocaleString("de-DE")}`
+              : " noch nicht geprüft"}
+          </span>
+        </div>
+        <div>
+          <strong>{doc.legal_hold ? "Legal Hold aktiv" : "Kein Legal Hold"}</strong>
+          <span>
+            {doc.legal_hold
+              ? doc.legal_hold_reason || "Manuelle Löschsperre"
+              : retentionText(doc)}
+          </span>
+        </div>
+        {archiveError && <p className="status status--error">{archiveError}</p>}
+        {canEdit && (
+          <div className="archive-box__actions">
+            <button type="button" onClick={onArchiveCheck} disabled={archiveBusy}>
+              {archiveBusy ? "Prüfe …" : "Archiv prüfen"}
+            </button>
+            <button type="button" className="link" onClick={onToggleLegalHold} disabled={archiveBusy}>
+              {doc.legal_hold ? "Legal Hold entfernen" : "Legal Hold setzen"}
+            </button>
+          </div>
+        )}
+      </section>
       <dl>
         <dt>Archivnummer</dt>
         <dd className="asn">
@@ -81,4 +118,13 @@ export function DetailMeta({
       </dl>
     </>
   );
+}
+
+function retentionText(doc: Detail): string {
+  const state = doc.retention_state;
+  if (state.state === "none") return "Keine Aufbewahrungsfrist";
+  if (state.state === "expired") return `Aufbewahrung abgelaufen seit ${state.retention_until}`;
+  if (state.state === "due_soon") return `Aufbewahrung bald fällig: ${state.retention_until}`;
+  if (state.state === "active") return `Aufbewahrung bis ${state.retention_until}`;
+  return "Legal Hold";
 }

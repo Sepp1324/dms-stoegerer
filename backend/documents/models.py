@@ -255,6 +255,14 @@ class CaseFile(models.Model):
 class Document(models.Model):
     """Logisches Dokument. Die eigentlichen Dateien hängen an DocumentVersion."""
 
+    class ArchiveStatus(models.TextChoices):
+        """Letzter Integritäts-/Archivprüfstatus des logischen Dokuments."""
+
+        UNCHECKED = "unchecked", "Nicht geprüft"
+        OK = "ok", "OK"
+        WARNING = "warning", "Warnung"
+        ERROR = "error", "Fehler"
+
     class ApprovalStatus(models.TextChoices):
         """Freigabe-Workflow (Stufe 4). Stored Values = deutsche Slugs,
         Python-Konstanten englisch, Labels deutsch. Statuswechsel NUR über
@@ -333,6 +341,30 @@ class Document(models.Model):
         blank=True,
         help_text="Löschen gesperrt bis zu diesem Datum (aus DocumentType.retention_months berechnet)",
     )
+    legal_hold = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text="Manuelle Sperre: Dokument darf unabhängig von Retention nicht gelöscht werden.",
+    )
+    legal_hold_reason = models.TextField(blank=True, default="")
+    legal_hold_set_at = models.DateTimeField(null=True, blank=True)
+    legal_hold_set_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="legal_hold_documents",
+    )
+    archive_status = models.CharField(
+        max_length=16,
+        choices=ArchiveStatus.choices,
+        default=ArchiveStatus.UNCHECKED,
+        db_index=True,
+        help_text="Letzter Ergebnisstatus der Archiv-/Integritätsprüfung.",
+    )
+    archive_checked_at = models.DateTimeField(null=True, blank=True)
+    archive_error = models.TextField(blank=True, default="")
+    archive_report = models.JSONField(default=dict, blank=True)
 
     # KI-Metadatenvorschläge (nach OCR erzeugt) – zum Bestätigen durch den Nutzer,
     # nicht bindend. z. B. {"title": "...", "document_type": "Rechnung",

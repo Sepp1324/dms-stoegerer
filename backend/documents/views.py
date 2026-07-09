@@ -113,6 +113,7 @@ from .serializers import (
     WorkflowSerializer,
 )
 from .services import asn as asn_service
+from .services import archive as archive_service
 from .services import contracts as contract_service
 from .services import entity_graph as entity_graph_service
 from .services import review_tasks as review_task_service
@@ -398,6 +399,53 @@ class SemanticIndexHealthView(APIView):
 
     def get(self, request):
         return Response(semantic_index_service.embedding_health())
+
+
+class ArchiveHealthView(APIView):
+    """Admin-only Archiv-/Retention-Status aus gespeicherten Prüfresultaten."""
+
+    permission_classes = [IsDmsAdmin]
+
+    def get(self, request):
+        return Response(archive_service.archive_health())
+
+    def post(self, request):
+        raw_limit = request.data.get("limit", 50) if hasattr(request, "data") else 50
+        try:
+            limit = int(raw_limit)
+        except (TypeError, ValueError):
+            limit = 50
+        limit = max(1, min(limit, 250))
+
+        candidates = (
+            Document.objects.select_related("current_version")
+            .prefetch_related("versions")
+            .filter(
+                Q(archive_status=Document.ArchiveStatus.UNCHECKED)
+                | Q(archive_status=Document.ArchiveStatus.ERROR)
+                | Q(archive_checked_at__isnull=True)
+            )
+            .order_by("archive_checked_at", "id")[:limit]
+        )
+        checked = []
+        for document in candidates:
+            checked.append(archive_service.verify_document_archive(document))
+
+        AuditLogEntry.objects.create(
+            actor=request.user,
+            action="archive_bulk_check",
+            object_type="System",
+            object_id="archive",
+            detail={"checked": len(checked), "limit": limit},
+        )
+        return Response(
+            {
+                "checked": len(checked),
+                "limit": limit,
+                "health": archive_service.archive_health(),
+            },
+            status=status.HTTP_202_ACCEPTED,
+        )
 
 
 class OCRHealthView(APIView):
@@ -1176,6 +1224,68 @@ class DocumentViewSet(viewsets.ModelViewSet):
         document = self.get_object()
         return Response(pipeline.verify_document_integrity(document))
 
+    @action(detail=True, methods=["post"], url_path="archive-check")
+    def archive_check(self, request, pk=None):
+        """Persistente Archivprüfung: Hash-Kette + Metadaten-Siegel + WORM."""
+        if not getattr(request.user, "can_write", False):
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        document = self.get_object()
+        report = archive_service.verify_document_archive(document)
+        AuditLogEntry.objects.create(
+            actor=request.user,
+            action="archive_check",
+            object_type="Document",
+            object_id=str(document.id),
+            detail={
+                "status": report["status"],
+                "errors": report["errors"],
+                "warnings": report["warnings"],
+            },
+        )
+        return Response(report)
+
+    @action(detail=True, methods=["post"], url_path="legal-hold")
+    def legal_hold(self, request, pk=None):
+        """Setzt oder entfernt Legal Hold für ein Dokument."""
+        if not getattr(request.user, "can_write", False):
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        document = self.get_object()
+        enabled = bool(request.data.get("enabled", True))
+        reason = str(request.data.get("reason", "")).strip()
+        if enabled and not reason:
+            return Response(
+                {"detail": "Für Legal Hold ist eine Begründung erforderlich."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        old = document.legal_hold
+        document.legal_hold = enabled
+        document.legal_hold_reason = reason if enabled else ""
+        document.legal_hold_set_at = timezone.now() if enabled else None
+        document.legal_hold_set_by = request.user if enabled else None
+        document.save(
+            update_fields=[
+                "legal_hold",
+                "legal_hold_reason",
+                "legal_hold_set_at",
+                "legal_hold_set_by",
+            ]
+        )
+        AuditLogEntry.objects.create(
+            actor=request.user,
+            action="legal_hold",
+            object_type="Document",
+            object_id=str(document.id),
+            detail={"from": old, "to": enabled, "reason": reason},
+        )
+        return Response(self.get_serializer(document).data)
+
     @action(detail=True, methods=["get"], url_path="similar")
     def similar(self, request, pk=None):
         """Liefert semantisch ähnliche sichtbare Dokumente."""
@@ -1682,8 +1792,19 @@ class DocumentViewSet(viewsets.ModelViewSet):
         Audit-Einträge referenzieren die ID als String (keine FK) und überleben
         die Löschung des Dokuments – das Protokoll bleibt append-only lückenlos.
         """
-        from django.core.exceptions import ValidationError as DjValidationError
         from rest_framework.exceptions import PermissionDenied
+
+        if instance.legal_hold:
+            AuditLogEntry.objects.create(
+                actor=self.request.user,
+                action="legal_hold_block",
+                object_type="Document",
+                object_id=str(instance.id),
+                detail={"title": instance.title, "reason": instance.legal_hold_reason},
+            )
+            raise PermissionDenied(
+                "Dokument steht unter Legal Hold und kann nicht gelöscht werden."
+            )
 
         # WORM: Dokument mit unveränderlichen Versionen darf nicht gelöscht werden.
         if instance.versions.filter(is_immutable=True).exists():

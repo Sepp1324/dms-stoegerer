@@ -195,6 +195,7 @@ class ExtractionCandidateSerializer(serializers.ModelSerializer):
 class DocumentVersionSerializer(serializers.ModelSerializer):
     created_by_name = serializers.SerializerMethodField()
     has_archive = serializers.SerializerMethodField()
+    seal_ok = serializers.SerializerMethodField()
 
     class Meta:
         model = DocumentVersion
@@ -219,6 +220,10 @@ class DocumentVersionSerializer(serializers.ModelSerializer):
             "page_count",
             "is_immutable",
             "retention_until",
+            "snapshot_schema_version",
+            "snapshot_taken_at",
+            "seal_hash",
+            "seal_ok",
             "created_by",
             "created_by_name",
             "has_archive",
@@ -250,6 +255,12 @@ class DocumentVersionSerializer(serializers.ModelSerializer):
     def get_has_archive(self, obj) -> bool:
         """Ob ein OCR-Archiv-PDF existiert (bestimmt die Inline-Vorschaubarkeit)."""
         return bool(obj.archive_path)
+
+    def get_seal_ok(self, obj) -> bool:
+        """Metadaten-Siegelprüfung ohne Dateisystemzugriff."""
+        from documents.services import version_snapshot
+
+        return version_snapshot.verify_seal(obj)
 
 
 class AuditLogEntrySerializer(serializers.ModelSerializer):
@@ -759,6 +770,8 @@ class DocumentSerializer(serializers.ModelSerializer):
     custom_field_values = CustomFieldValueSerializer(many=True, required=False)
     review_tasks = serializers.SerializerMethodField()
     review_task_count = serializers.SerializerMethodField()
+    archive_status_label = serializers.SerializerMethodField()
+    retention_state = serializers.SerializerMethodField()
 
     class Meta:
         model = Document
@@ -793,6 +806,15 @@ class DocumentSerializer(serializers.ModelSerializer):
             "classification",
             "status",
             "review_status",
+            "retention_until",
+            "retention_state",
+            "legal_hold",
+            "legal_hold_reason",
+            "legal_hold_set_at",
+            "archive_status",
+            "archive_status_label",
+            "archive_checked_at",
+            "archive_error",
             "review_task_count",
             "review_tasks",
             "custom_field_values",
@@ -809,6 +831,15 @@ class DocumentSerializer(serializers.ModelSerializer):
             "classification",
             "status",  # Statuswechsel NUR über submit/approve/reject – nie per PATCH (STOAA-63)
             "review_status",  # Review-Wechsel nur über mark_reviewed (Inbox-Workflow).
+            "retention_until",
+            "retention_state",
+            "legal_hold",
+            "legal_hold_reason",
+            "legal_hold_set_at",
+            "archive_status",
+            "archive_status_label",
+            "archive_checked_at",
+            "archive_error",
         )
 
     def get_asn_label(self, obj) -> str | None:
@@ -845,6 +876,14 @@ class DocumentSerializer(serializers.ModelSerializer):
             for task in obj.review_tasks.all()
             if task.status == DocumentReviewTask.Status.OPEN
         )
+
+    def get_archive_status_label(self, obj) -> str:
+        return obj.get_archive_status_display()
+
+    def get_retention_state(self, obj) -> dict:
+        from documents.services import archive as archive_service
+
+        return archive_service.retention_state(obj)
 
     def _upsert_custom_field_values(self, document, values):
         """Upsert der Zusatzfeld-Werte per unique_together (document, field).
