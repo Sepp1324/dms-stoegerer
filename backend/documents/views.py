@@ -585,10 +585,17 @@ class AskView(APIView):
 
         qs = (
             Document.objects.select_related(
-                "correspondent", "document_type", "folder", "current_version"
+                "correspondent",
+                "document_type",
+                "folder",
+                "case_file",
+                "current_version",
             )
-            .prefetch_related("current_version__page_texts")
-            .filter(current_version__ocr_text__gt="")
+            .select_related(
+                "contract_record",
+            )
+            .prefetch_related("tags", "current_version__page_texts")
+            .exclude(current_version__isnull=True)
             .order_by("-added_at")
         )
         if not getattr(request.user, "is_dms_admin", False):
@@ -608,9 +615,71 @@ class AskView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-        from ai.services import answer_question
+        case_file = request.data.get("case_file")
+        if case_file not in ("", None):
+            try:
+                qs = qs.filter(case_file_id=int(case_file))
+            except (TypeError, ValueError):
+                return Response(
+                    {"detail": "Ungültiger Aktenfilter."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
-        result = answer_question(question, qs[:200])
+        entity = request.data.get("entity")
+        if entity not in ("", None):
+            try:
+                qs = qs.filter(entity_links__entity_id=int(entity))
+            except (TypeError, ValueError):
+                return Response(
+                    {"detail": "Ungültiger Entitätsfilter."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        contract = request.data.get("contract")
+        if contract not in ("", None):
+            try:
+                qs = qs.filter(contract_record__id=int(contract))
+            except (TypeError, ValueError):
+                return Response(
+                    {"detail": "Ungültiger Vertragsfilter."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        created_from = request.data.get("created_from")
+        created_to = request.data.get("created_to")
+        if created_from:
+            try:
+                qs = qs.filter(created_at__date__gte=date_cls.fromisoformat(created_from))
+            except (TypeError, ValueError):
+                return Response(
+                    {"detail": "Ungültiger Datumsfilter 'created_from'."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        if created_to:
+            try:
+                qs = qs.filter(created_at__date__lte=date_cls.fromisoformat(created_to))
+            except (TypeError, ValueError):
+                return Response(
+                    {"detail": "Ungültiger Datumsfilter 'created_to'."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        from ai.services import answer_question
+        from .services.retrieval import RetrievalFilters
+
+        retrieval_filters = RetrievalFilters(
+            folder=folder,
+            case_file=int(case_file) if case_file not in ("", None) else None,
+            entity=int(entity) if entity not in ("", None) else None,
+            contract=int(contract) if contract not in ("", None) else None,
+            created_from=created_from or None,
+            created_to=created_to or None,
+        )
+        result = answer_question(
+            question,
+            qs.distinct()[:300],
+            filters=retrieval_filters,
+        )
         AuditLogEntry.objects.create(
             actor=request.user,
             action="ask",
@@ -618,7 +687,7 @@ class AskView(APIView):
             object_id="Copilot",
             detail={
                 "question": question[:500],
-                "folder": folder,
+                "filters": retrieval_filters.as_dict(),
                 "source": result.get("source"),
                 "sources": [s.get("document") for s in result.get("sources", [])],
             },

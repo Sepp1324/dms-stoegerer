@@ -299,19 +299,23 @@ def retrieve_sources(question: str, documents_qs, *, limit: int = 6) -> list[dic
     return sources
 
 
-def answer_question(question: str, documents_qs) -> dict:
+def answer_question(question: str, documents_qs, *, filters=None) -> dict:
     """Beantwortet eine Frage anhand sichtbarer Dokumentquellen.
 
-    Der Service ist absichtlich RAG-minimalistisch: Retrieval bleibt lokal und
-    zitierbar, das Modell bekommt nur kurze Quellen. So ist der MVP nützlich,
-    ohne eine Embedding-Infrastruktur vorauszusetzen.
+    Retrieval passiert bewusst im DMS-Kernservice: dort werden OCR, Seitentexte,
+    Metadaten, Entitäten, Verträge und Akten owner-gescoped zu belegbaren
+    Source-Cards verdichtet. Die KI formuliert nur noch auf Basis dieser Karten.
     """
-    sources = retrieve_sources(question, documents_qs)
+    from documents.services.retrieval import format_sources_for_prompt, retrieve_context
+
+    retrieval = retrieve_context(question, documents_qs, filters=filters)
+    sources = retrieval["sources"]
     if not sources:
         return {
             "source": "retrieval",
-            "answer": "Ich habe in den sichtbaren OCR-Texten keine passenden Quellen gefunden.",
+            "answer": "Ich habe in den sichtbaren Dokumenten keine passenden Quellen gefunden.",
             "sources": [],
+            "retrieval": retrieval,
         }
 
     provider = get_provider()
@@ -323,20 +327,13 @@ def answer_question(question: str, documents_qs) -> dict:
                 "gefunden; öffne die Treffer unten für die manuelle Prüfung."
             ),
             "sources": sources,
+            "retrieval": retrieval,
         }
 
-    source_block = "\n\n".join(
-        (
-            f"[{source['id']}] Dokument: {source['document_title']}\n"
-            f"Ordner: {source['folder_path'] or '-'}\n"
-            f"Seite: {source['page'] or '-'}\n"
-            f"Ausschnitt: {source['snippet']}"
-        )
-        for source in sources
-    )
     prompt = (
         f"Frage:\n{question.strip()}\n\n"
-        f"Quellen:\n{source_block}\n\n"
+        f"Suchbegriffe: {', '.join(retrieval['query_terms']) or '-'}\n\n"
+        f"Quellen:\n{format_sources_for_prompt(sources)}\n\n"
         "Antworte kurz und konkret auf Deutsch. Verwende Quellenmarker wie [S1]."
     )
     try:
@@ -351,6 +348,7 @@ def answer_question(question: str, documents_qs) -> dict:
                 "Quellen stehen unten zur manuellen Prüfung bereit."
             ),
             "sources": sources,
+            "retrieval": retrieval,
             "error": str(exc),
         }
 
@@ -359,4 +357,5 @@ def answer_question(question: str, documents_qs) -> dict:
         "provider": provider.name,
         "answer": answer,
         "sources": sources,
+        "retrieval": retrieval,
     }

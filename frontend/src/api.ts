@@ -1420,19 +1420,71 @@ export interface AskSource {
   page: number | null;
   snippet: string;
   snippet_html: string;
+  score?: number;
+  reason?: string;
+  source_type?: "page_text" | "ocr_text" | "metadata";
+  matched_terms?: string[];
+  entities?: {
+    id: number;
+    kind: KnowledgeEntityKind;
+    name: string;
+    role: DocumentEntityRole;
+    confidence: number;
+    identifiers: { kind: KnowledgeEntityKind; value: string }[];
+  }[];
+  contract?: {
+    id: number;
+    provider: string;
+    contract_number: string;
+    contract_type: ContractType;
+    contract_type_label: string;
+    status: ContractStatus;
+    status_label: string;
+    amount: string | null;
+    currency: string;
+    cancel_until: string | null;
+    next_due_on: string | null;
+    ends_on: string | null;
+  } | null;
+  case_file?: {
+    id: number;
+    title: string;
+    status: CaseFileStatus;
+    status_label: string;
+  } | null;
+}
+export interface AskRetrievalContext {
+  query_terms: string[];
+  expanded_terms: string[];
+  total_candidates: number;
+  filters: {
+    folder?: number | string | null;
+    case_file?: number | null;
+    entity?: number | null;
+    contract?: number | null;
+    created_from?: string | null;
+    created_to?: string | null;
+  };
 }
 export interface AskResult {
   source: "ai" | "unavailable" | "error" | "retrieval";
   provider?: string;
   answer: string;
   sources: AskSource[];
+  retrieval?: AskRetrievalContext;
   error?: string;
 }
+export type AskFilters = Partial<AskRetrievalContext["filters"]>;
 export async function askDocuments(
   question: string,
   folder?: number | "none" | "",
+  filters: AskFilters = {},
 ): Promise<AskResult> {
-  return postJson<AskResult>("/ask/", { question, folder: folder || undefined });
+  return postJson<AskResult>("/ask/", {
+    question,
+    folder: folder || undefined,
+    ...filters,
+  });
 }
 
 export async function applySuggestions(

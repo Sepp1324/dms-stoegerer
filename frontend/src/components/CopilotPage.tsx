@@ -87,6 +87,15 @@ export default function CopilotPage({
                     : "Quellensuche"}
             </p>
             <p className="copilot__text">{result.answer}</p>
+            {result.retrieval && (
+              <div className="copilot__retrieval">
+                <span>{result.sources.length} Quellen</span>
+                <span>{result.retrieval.total_candidates} Kandidaten</span>
+                {result.retrieval.query_terms.slice(0, 6).map((term) => (
+                  <code key={term}>{term}</code>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="copilot__sources">
@@ -122,7 +131,36 @@ function SourceCard({
       <p className="muted">
         {source.folder_path ?? "Kein Ordner"}
         {source.page ? ` · Seite ${source.page}` : ""}
+        {source.source_type ? ` · ${sourceTypeLabel(source.source_type)}` : ""}
       </p>
+      {(source.reason || source.case_file || source.contract) && (
+        <div className="copilot-source__context">
+          {source.reason && <span>{source.reason}</span>}
+          {source.case_file && (
+            <span>
+              Akte: <strong>{source.case_file.title}</strong>
+            </span>
+          )}
+          {source.contract && (
+            <span>
+              Vertrag:{" "}
+              <strong>
+                {source.contract.provider || source.contract.contract_type_label}
+              </strong>
+              {source.contract.contract_number ? ` · ${source.contract.contract_number}` : ""}
+            </span>
+          )}
+        </div>
+      )}
+      {!!source.entities?.length && (
+        <div className="copilot-source__entities">
+          {source.entities.slice(0, 5).map((entity) => (
+            <span key={`${entity.id}-${entity.role}`}>
+              {entity.name}
+            </span>
+          ))}
+        </div>
+      )}
       <p
         className="copilot-source__snippet"
         dangerouslySetInnerHTML={{
@@ -131,4 +169,10 @@ function SourceCard({
       />
     </article>
   );
+}
+
+function sourceTypeLabel(type: NonNullable<AskSource["source_type"]>) {
+  if (type === "page_text") return "Seitentext";
+  if (type === "ocr_text") return "OCR";
+  return "Metadaten";
 }

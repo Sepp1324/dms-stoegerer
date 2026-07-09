@@ -896,6 +896,22 @@ textarea:focus-visible {
   line-height: 1.6;
   white-space: pre-wrap;
 }
+.copilot__retrieval {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.85rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+.copilot__retrieval span,
+.copilot__retrieval code {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.16rem 0.48rem;
+  background: rgba(148, 163, 184, 0.08);
+  color: var(--muted);
+}
 .copilot__sources {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
@@ -911,6 +927,30 @@ textarea:focus-visible {
   align-items: flex-start;
   justify-content: space-between;
   gap: 0.75rem;
+}
+.copilot-source__context,
+.copilot-source__entities {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+.copilot-source__context span,
+.copilot-source__entities span {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.16rem 0.48rem;
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.4;
+}
+.copilot-source__context strong {
+  color: var(--text);
+  font-weight: 650;
+}
+.copilot-source__entities span {
+  border-color: rgba(59, 130, 246, 0.35);
+  background: rgba(59, 130, 246, 0.08);
+  color: #bfdbfe;
 }
 .copilot-source__snippet {
   margin: 0;
