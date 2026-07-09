@@ -117,6 +117,7 @@ from .services import archive as archive_service
 from .services import contracts as contract_service
 from .services import entity_graph as entity_graph_service
 from .services import review_tasks as review_task_service
+from .services import revision_package as revision_package_service
 from .services import semantic_index as semantic_index_service
 from .tasks import (
     bulk_classify_documents,
@@ -1214,6 +1215,23 @@ class DocumentViewSet(viewsets.ModelViewSet):
         if version is None:
             raise Http404("Keine Version vorhanden.")
         return _serve_version_download(document, version)
+
+    @action(detail=True, methods=["get"], url_path="revision-package")
+    def revision_package(self, request, pk=None):
+        """Exportiert ein prüfbares ZIP-Paket für Steuer/Anwalt/Behörde."""
+        document = self.get_object()
+        AuditLogEntry.objects.create(
+            actor=request.user,
+            action="revision_package_export",
+            object_type="Document",
+            object_id=str(document.id),
+            detail={"format": "zip", "scope": "document"},
+        )
+        package = revision_package_service.build_document_revision_package(document)
+        response = HttpResponse(package.content, content_type="application/zip")
+        response["Content-Disposition"] = f'attachment; filename="{package.filename}"'
+        response["Content-Length"] = str(len(package.content))
+        return response
 
     @action(detail=True, methods=["get"])
     def integrity(self, request, pk=None):

@@ -1321,6 +1321,12 @@ export async function getDocumentVersionFile(
   return res.blob();
 }
 
+export async function getDocumentRevisionPackage(id: number): Promise<Blob> {
+  const res = await apiFetch(`/documents/${id}/revision-package/`);
+  if (!res.ok) throw new Error(`Revisionspaket nicht verfügbar (HTTP ${res.status})`);
+  return res.blob();
+}
+
 // --- Versionsvergleich (STOAA-288/289/290 Stufe 1 + STOAA-312/313 Stufe 2) ---
 // Contract = ``VersionComparison.to_dict()`` aus ``services/version_compare.py``;
 // der Compare-View (``DocumentViewSet.compare_versions``) gibt dieses Dict roh
