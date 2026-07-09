@@ -16,6 +16,7 @@ from .models import (
     DocumentType,
     DocumentVersion,
     MailAccount,
+    ProcessedMail,
     StoragePath,
     Tag,
     Workflow,
@@ -613,6 +614,63 @@ class MailAccountSerializer(serializers.ModelSerializer):
         if validated_data.get("password", None) == "":
             validated_data.pop("password")
         return super().update(instance, validated_data)
+
+
+class ProcessedMailSerializer(serializers.ModelSerializer):
+    """Mail-Center-Zeile für importierte/verarbeitete IMAP-Mails."""
+
+    account_name = serializers.CharField(source="account.name", read_only=True)
+    status_label = serializers.SerializerMethodField()
+    imported_documents = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ProcessedMail
+        fields = (
+            "id",
+            "account",
+            "account_name",
+            "message_id",
+            "subject",
+            "sender",
+            "received_at",
+            "status",
+            "status_label",
+            "attachment_count",
+            "imported_count",
+            "attachment_names",
+            "imported_documents",
+            "note",
+            "error",
+            "processed_at",
+        )
+        read_only_fields = (
+            "id",
+            "account",
+            "account_name",
+            "message_id",
+            "subject",
+            "sender",
+            "received_at",
+            "status_label",
+            "attachment_count",
+            "imported_count",
+            "attachment_names",
+            "imported_documents",
+            "error",
+            "processed_at",
+        )
+
+    def get_status_label(self, obj) -> str:
+        return obj.get_status_display()
+
+    def get_imported_documents(self, obj):
+        documents = obj.documents.select_related(
+            "correspondent",
+            "document_type",
+            "folder",
+            "current_version",
+        ).order_by("-added_at", "-id")
+        return CaseFileDocumentSerializer(documents, many=True).data
 
 
 # ---------------------------------------------------------------------------

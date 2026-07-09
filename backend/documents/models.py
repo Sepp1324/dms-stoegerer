@@ -970,14 +970,36 @@ class MailAccount(models.Model):
 class ProcessedMail(models.Model):
     """Idempotenz-Log bereits verarbeiteter Mails (Dedup über Message-ID)."""
 
+    class Status(models.TextChoices):
+        IMPORTED = "imported", "Importiert"
+        PARTIAL = "partial", "Teilweise importiert"
+        IGNORED = "ignored", "Ignoriert"
+        FAILED = "failed", "Fehlerhaft"
+
     account = models.ForeignKey(
         MailAccount, on_delete=models.CASCADE, related_name="processed_mails"
     )
     message_id = models.CharField(max_length=998, help_text="RFC-822 Message-ID-Header")
     subject = models.CharField(max_length=512, blank=True)
     sender = models.CharField(max_length=512, blank=True)
+    received_at = models.DateTimeField(null=True, blank=True)
+    status = models.CharField(
+        max_length=16,
+        choices=Status.choices,
+        default=Status.IMPORTED,
+        db_index=True,
+    )
     attachment_count = models.PositiveIntegerField(default=0)
     imported_count = models.PositiveIntegerField(default=0)
+    attachment_names = models.JSONField(default=list, blank=True)
+    documents = models.ManyToManyField(
+        Document,
+        blank=True,
+        related_name="source_mails",
+        help_text="Dokumente, die aus Anhängen dieser Mail entstanden sind.",
+    )
+    note = models.TextField(blank=True, default="")
+    error = models.TextField(blank=True, default="")
     processed_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -985,6 +1007,10 @@ class ProcessedMail(models.Model):
         verbose_name_plural = "Verarbeitete E-Mails"
         ordering = ["-processed_at"]
         unique_together = ("account", "message_id")
+        indexes = [
+            models.Index(fields=["account", "status"], name="docs_mail_account_status"),
+            models.Index(fields=["status", "-processed_at"], name="docs_mail_status_time"),
+        ]
 
     def __str__(self) -> str:
         return (

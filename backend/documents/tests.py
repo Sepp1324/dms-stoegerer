@@ -31,6 +31,7 @@ from .models import (
     DocumentVersion,
     ExtractionCandidate,
     MailAccount,
+    ProcessedMail,
     StoragePath,
     Tag,
 )
@@ -2569,6 +2570,101 @@ class MailAccountApiTests(APITestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, 403)
+
+
+class ProcessedMailApiTests(APITestCase):
+    """Mail-Center: importierte IMAP-Mails anzeigen und triagieren."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.admin = User.objects.create_user(
+            username="mailcenter-admin", password="pw", role="admin"
+        )
+        cls.user = User.objects.create_user(
+            username="mailcenter-user", password="pw", role="user"
+        )
+        cls.account = MailAccount.objects.create(
+            name="Rechnungen",
+            host="imap.example.org",
+            username="rechnung@example.org",
+        )
+        cls.document = Document.objects.create(
+            title="Rechnung Anhang",
+            owner=cls.admin,
+            review_status=Document.ReviewStatus.NEEDS_REVIEW,
+        )
+        version = DocumentVersion.objects.create(
+            document=cls.document,
+            version_no=1,
+            file_path="/tmp/rechnung.pdf",
+            sha256="a" * 64,
+            processing_state=DocumentVersion.ProcessingState.READY,
+        )
+        cls.document.current_version = version
+        cls.document.save(update_fields=["current_version"])
+        cls.mail = ProcessedMail.objects.create(
+            account=cls.account,
+            message_id="<rechnung-1@example.org>",
+            subject="Ihre Rechnung",
+            sender="Stadtwerke <mail@example.org>",
+            status=ProcessedMail.Status.IMPORTED,
+            attachment_count=1,
+            imported_count=1,
+            attachment_names=["rechnung.pdf"],
+        )
+        cls.mail.documents.add(cls.document)
+        ProcessedMail.objects.create(
+            account=cls.account,
+            message_id="<newsletter@example.org>",
+            subject="Newsletter",
+            sender="Info <info@example.org>",
+            status=ProcessedMail.Status.IGNORED,
+            attachment_count=0,
+            imported_count=0,
+        )
+
+    def test_non_admin_forbidden(self):
+        self.client.force_authenticate(self.user)
+        self.assertEqual(self.client.get("/api/processed-mails/").status_code, 403)
+
+    def test_admin_list_liefert_importierte_dokumente(self):
+        self.client.force_authenticate(self.admin)
+        resp = self.client.get("/api/processed-mails/?status=imported")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["count"], 1)
+        row = resp.data["results"][0]
+        self.assertEqual(row["subject"], "Ihre Rechnung")
+        self.assertEqual(row["account_name"], "Rechnungen")
+        self.assertEqual(row["attachment_names"], ["rechnung.pdf"])
+        self.assertEqual(row["imported_documents"][0]["id"], self.document.id)
+
+    def test_summary_zaehlt_status(self):
+        self.client.force_authenticate(self.admin)
+        resp = self.client.get("/api/processed-mails/summary/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["total"], 2)
+        self.assertEqual(resp.data["imported"], 1)
+        self.assertEqual(resp.data["ignored"], 1)
+        self.assertEqual(resp.data["attachments"], 1)
+
+    def test_mark_ignored_setzt_status_note_und_audit(self):
+        self.client.force_authenticate(self.admin)
+        resp = self.client.post(
+            f"/api/processed-mails/{self.mail.id}/mark-ignored/",
+            {"note": "bereits extern erledigt"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.data["status"], ProcessedMail.Status.IGNORED)
+        self.mail.refresh_from_db()
+        self.assertEqual(self.mail.note, "bereits extern erledigt")
+        self.assertTrue(
+            AuditLogEntry.objects.filter(
+                action="processed_mail_ignored",
+                object_id=str(self.mail.id),
+                actor=self.admin,
+            ).exists()
+        )
 
 
 class BulkClassifyEndpointTests(APITestCase):

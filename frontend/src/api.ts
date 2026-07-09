@@ -621,6 +621,40 @@ export interface MailTestResult {
   message: string;
 }
 
+export type ProcessedMailStatus = "imported" | "partial" | "ignored" | "failed";
+export interface ProcessedMail {
+  id: number;
+  account: number;
+  account_name: string;
+  message_id: string;
+  subject: string;
+  sender: string;
+  received_at: string | null;
+  status: ProcessedMailStatus;
+  status_label: string;
+  attachment_count: number;
+  imported_count: number;
+  attachment_names: string[];
+  imported_documents: CaseFileDocument[];
+  note: string;
+  error: string;
+  processed_at: string;
+}
+export interface ProcessedMailSummary {
+  total: number;
+  imported: number;
+  partial: number;
+  ignored: number;
+  failed: number;
+  attachments: number;
+}
+export interface ProcessedMailQuery {
+  q?: string;
+  status?: ProcessedMailStatus | "";
+  account?: number | "";
+  page?: number;
+}
+
 // --- Endpunkte ---
 export interface DocumentQuery {
   q?: string;
@@ -1670,6 +1704,34 @@ export async function testMailAccount(id: number): Promise<MailTestResult> {
     throw new Error(detail);
   }
   return res.json();
+}
+
+export async function getProcessedMails(
+  query: ProcessedMailQuery = {},
+): Promise<Paginated<ProcessedMail>> {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) {
+    if (value !== undefined && value !== "" && value !== null) {
+      params.set(key, String(value));
+    }
+  }
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  const res = await apiFetch(`/processed-mails/${suffix}`);
+  if (!res.ok) throw new Error(`Mails laden fehlgeschlagen: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function getProcessedMailSummary(): Promise<ProcessedMailSummary> {
+  const res = await apiFetch("/processed-mails/summary/");
+  if (!res.ok) throw new Error(`Mail-Status laden fehlgeschlagen: HTTP ${res.status}`);
+  return res.json();
+}
+
+export function markProcessedMailIgnored(
+  id: number,
+  note = "",
+): Promise<ProcessedMail> {
+  return postJson<ProcessedMail>(`/processed-mails/${id}/mark-ignored/`, { note });
 }
 
 // --- Freigabelinks (STOAA-192) ---
