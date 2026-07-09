@@ -3,6 +3,7 @@ import {
   addDocumentVersion,
   applySuggestions,
   approveDocument,
+  checkDocumentArchive,
   dismissSuggestions,
   getDocument,
   getDocumentIntegrity,
@@ -11,6 +12,7 @@ import {
   getDocumentVersionFile,
   rejectDocument,
   retryProcessing,
+  setDocumentLegalHold,
   submitDocument,
   suggestDocument,
   updateDocument,
@@ -121,6 +123,8 @@ export default function DocumentDetail({
   // Retry der Dokumentverarbeitung (STOAA-249): nur bei processing_state=failed.
   const [retryBusy, setRetryBusy] = useState(false);
   const [retryError, setRetryError] = useState<string | null>(null);
+  const [archiveBusy, setArchiveBusy] = useState(false);
+  const [archiveError, setArchiveError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [editing, setEditing] = useState(false);
@@ -218,6 +222,41 @@ export default function DocumentDetail({
       setRetryError(e instanceof Error ? e.message : String(e));
     } finally {
       setRetryBusy(false);
+    }
+  }
+
+  async function runArchiveCheck() {
+    setArchiveBusy(true);
+    setArchiveError(null);
+    try {
+      const report = await checkDocumentArchive(id);
+      setIntegrity(report.integrity);
+      setRefresh((r) => r + 1);
+    } catch (e) {
+      setArchiveError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setArchiveBusy(false);
+    }
+  }
+
+  async function toggleLegalHold() {
+    if (!doc) return;
+    setArchiveBusy(true);
+    setArchiveError(null);
+    try {
+      if (doc.legal_hold) {
+        const updated = await setDocumentLegalHold(id, false);
+        setDoc(updated);
+      } else {
+        const reason = window.prompt("Begründung für Legal Hold");
+        if (!reason?.trim()) return;
+        const updated = await setDocumentLegalHold(id, true, reason.trim());
+        setDoc(updated);
+      }
+    } catch (e) {
+      setArchiveError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setArchiveBusy(false);
     }
   }
 
@@ -458,7 +497,11 @@ export default function DocumentDetail({
                   currentVersion={currentVersion}
                   retryBusy={retryBusy}
                   retryError={retryError}
+                  archiveBusy={archiveBusy}
+                  archiveError={archiveError}
                   onRetry={onRetry}
+                  onArchiveCheck={runArchiveCheck}
+                  onToggleLegalHold={toggleLegalHold}
                   onDownloadQr={downloadQr}
                 />
               )}

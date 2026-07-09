@@ -94,6 +94,8 @@ export type OcrStatus = "pending" | "running" | "success" | "failed" | "skipped"
 // Fachlicher Review-Status: getrennt vom technischen processing_state.
 // ``needs_review`` landet in der Inbox; ``reviewed`` wurde menschlich bestätigt.
 export type ReviewStatus = "needs_review" | "reviewed";
+export type ArchiveStatus = "unchecked" | "ok" | "warning" | "error";
+export type RetentionState = "none" | "active" | "due_soon" | "expired" | "legal_hold";
 export type ReviewTaskStatus = "open" | "resolved" | "ignored";
 export type ReviewTaskKind =
   | "metadata_missing"
@@ -135,6 +137,11 @@ export interface DocumentVersion {
   size: number;
   page_count: number | null;
   is_immutable: boolean;
+  retention_until: string | null;
+  snapshot_schema_version: number;
+  snapshot_taken_at: string | null;
+  seal_hash: string;
+  seal_ok: boolean;
   created_by: number | null;
   created_by_name: string | null;
   has_archive: boolean;
@@ -155,6 +162,13 @@ export interface VersionIntegrity {
 export interface DocumentIntegrity {
   chain_ok: boolean;
   versions: VersionIntegrity[];
+}
+export interface DocumentArchiveReport {
+  status: ArchiveStatus;
+  checked_at: string;
+  integrity: DocumentIntegrity;
+  warnings: string[];
+  errors: string[];
 }
 export interface PdfWorkbenchPage {
   page: number;
@@ -195,6 +209,19 @@ export interface DocumentItem {
   // Durchgriff auf ``versions``. Altdaten ohne current_version liefern ``null``.
   processing_state: ProcessingState | null;
   review_status: ReviewStatus;
+  retention_until: string | null;
+  retention_state: {
+    state: RetentionState;
+    retention_until: string | null;
+    days_remaining: number | null;
+  };
+  legal_hold: boolean;
+  legal_hold_reason: string;
+  legal_hold_set_at: string | null;
+  archive_status: ArchiveStatus;
+  archive_status_label: string;
+  archive_checked_at: string | null;
+  archive_error: string;
   review_task_count: number;
   review_tasks: ReviewTask[];
   ocr_status: OcrStatus | null;
@@ -783,6 +810,48 @@ export interface SemanticIndexHealth {
   generated_at: string;
 }
 
+export interface ArchiveHealthIssue {
+  document_id: number;
+  title: string;
+  asn: number;
+  archive_status: ArchiveStatus;
+  archive_status_label: string;
+  archive_checked_at: string | null;
+  archive_error: string;
+  retention: {
+    state: RetentionState;
+    retention_until: string | null;
+    days_remaining: number | null;
+  };
+  legal_hold: boolean;
+  legal_hold_reason: string;
+  current_version: number | null;
+}
+
+export interface ArchiveHealthStatus {
+  status: BackupHealthStatus;
+  generated_at: string;
+  thresholds: { retention_due_soon_days: number };
+  summary: {
+    documents: number;
+    archive_ok: number;
+    archive_warning: number;
+    archive_error: number;
+    archive_unchecked: number;
+    legal_hold: number;
+    retention_active: number;
+    retention_due_soon: number;
+    retention_expired: number;
+  };
+  issues: ArchiveHealthIssue[];
+}
+
+export interface ArchiveBulkCheckResult {
+  checked: number;
+  limit: number;
+  health: ArchiveHealthStatus;
+}
+
 // --- Freigabelinks (Share-Links, STOAA-190/192) ---
 // Verwaltungs-Sicht eines Freigabelinks. Enthält bewusst KEINEN Klartext-Token
 // (der kommt einmalig nur aus der Create-Response, siehe ShareLinkCreated).
@@ -1139,6 +1208,35 @@ export async function getDocumentPreview(
 export async function getDocumentIntegrity(id: number): Promise<DocumentIntegrity> {
   const res = await apiFetch(`/documents/${id}/integrity/`);
   if (!res.ok) throw new Error(`Integritätsprüfung fehlgeschlagen (HTTP ${res.status})`);
+  return res.json();
+}
+
+export async function checkDocumentArchive(id: number): Promise<DocumentArchiveReport> {
+  const res = await apiFetch(`/documents/${id}/archive-check/`, { method: "POST" });
+  if (!res.ok) throw new Error(`Archivprüfung fehlgeschlagen (HTTP ${res.status})`);
+  return res.json();
+}
+
+export async function setDocumentLegalHold(
+  id: number,
+  enabled: boolean,
+  reason = "",
+): Promise<DocumentDetail> {
+  const res = await apiFetch(`/documents/${id}/legal-hold/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled, reason }),
+  });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const data = await res.json();
+      detail = data.detail || JSON.stringify(data);
+    } catch {
+      /* keine JSON-Fehlermeldung */
+    }
+    throw new Error(detail);
+  }
   return res.json();
 }
 
@@ -1664,6 +1762,22 @@ export async function getOCRHealth(): Promise<OCRHealthStatus> {
 export async function getSemanticIndexHealth(): Promise<SemanticIndexHealth> {
   const res = await apiFetch("/system/semantic-index/");
   if (!res.ok) throw new Error(`Semantic-Index laden fehlgeschlagen: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function getArchiveHealth(): Promise<ArchiveHealthStatus> {
+  const res = await apiFetch("/system/archive-health/");
+  if (!res.ok) throw new Error(`Archivstatus laden fehlgeschlagen: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function runArchiveBulkCheck(limit = 50): Promise<ArchiveBulkCheckResult> {
+  const res = await apiFetch("/system/archive-health/", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ limit }),
+  });
+  if (!res.ok) throw new Error(`Archivprüfung fehlgeschlagen: HTTP ${res.status}`);
   return res.json();
 }
 

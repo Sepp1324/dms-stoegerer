@@ -33,6 +33,7 @@ urlpatterns = [
         views.SemanticIndexHealthView.as_view(),
         name="semantic-index-health",
     ),
+    path("system/archive-health/", views.ArchiveHealthView.as_view(), name="archive-health"),
     path("system/ocr-health/", views.OCRHealthView.as_view(), name="ocr-health"),
     path("ask/", views.AskView.as_view(), name="ask"),
     path(

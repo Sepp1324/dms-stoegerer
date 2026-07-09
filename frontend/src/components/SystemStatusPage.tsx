@@ -1,9 +1,13 @@
 import { useEffect, useState } from "react";
 import {
   getBackupStatus,
+  getArchiveHealth,
   getOCRHealth,
   getSemanticIndexHealth,
   retryFailedOCRProcessing,
+  runArchiveBulkCheck,
+  type ArchiveHealthIssue,
+  type ArchiveHealthStatus,
   type BackupHealthStatus,
   type BackupMonitorEntry,
   type BackupStatus,
@@ -110,6 +114,67 @@ function issueReason(issue: OCRHealthIssue): string {
   return "Prüfen";
 }
 
+function archiveReason(issue: ArchiveHealthIssue): string {
+  if (issue.legal_hold) return "Legal Hold";
+  if (issue.archive_status === "error") return issue.archive_error || "Archivfehler";
+  if (issue.archive_status === "warning") return issue.archive_error || "Archivwarnung";
+  if (issue.retention.state === "expired") return "Retention abgelaufen";
+  if (issue.retention.state === "due_soon") return "Retention läuft bald ab";
+  return issue.archive_status_label;
+}
+
+function retentionLabel(issue: ArchiveHealthIssue): string {
+  if (issue.retention.state === "legal_hold") return "Legal Hold";
+  if (!issue.retention.retention_until) return "Keine Frist";
+  if (issue.retention.days_remaining === null) return issue.retention.retention_until;
+  if (issue.retention.days_remaining < 0) {
+    return `seit ${Math.abs(issue.retention.days_remaining)} Tagen abgelaufen`;
+  }
+  return `noch ${issue.retention.days_remaining} Tage`;
+}
+
+function ArchiveIssueList({ issues }: { issues: ArchiveHealthIssue[] }) {
+  return (
+    <section className="system-panel">
+      <div className="system-panel__head">
+        <div>
+          <h3>Archiv-Auffälligkeiten</h3>
+          <p>{issues.length ? `${issues.length} Dokumente mit Archivhinweis` : "Keine Archiv-Auffälligkeiten"}</p>
+        </div>
+      </div>
+      {issues.length > 0 && (
+        <div className="system-table-wrap">
+          <table className="system-table">
+            <thead>
+              <tr>
+                <th>Dokument</th>
+                <th>Grund</th>
+                <th>Archiv</th>
+                <th>Retention</th>
+              </tr>
+            </thead>
+            <tbody>
+              {issues.map((issue) => (
+                <tr key={issue.document_id}>
+                  <td>
+                    <span>{issue.title}</span>
+                    <span className="system-table__sub">
+                      ASN{String(issue.asn).padStart(6, "0")}
+                    </span>
+                  </td>
+                  <td>{archiveReason(issue)}</td>
+                  <td>{issue.archive_status_label}</td>
+                  <td>{retentionLabel(issue)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function OCRIssueList({
   issues,
   retrying,
@@ -168,20 +233,30 @@ function OCRIssueList({
 
 export default function SystemStatusPage() {
   const [status, setStatus] = useState<BackupStatus | null>(null);
+  const [archive, setArchive] = useState<ArchiveHealthStatus | null>(null);
   const [ocr, setOcr] = useState<OCRHealthStatus | null>(null);
   const [semantic, setSemantic] = useState<SemanticIndexHealth | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
   const [retryNote, setRetryNote] = useState<string | null>(null);
+  const [checkingArchive, setCheckingArchive] = useState(false);
+  const [archiveNote, setArchiveNote] = useState<string | null>(null);
 
   function load() {
     setLoading(true);
     setError(null);
     setRetryNote(null);
-    Promise.all([getBackupStatus(), getOCRHealth(), getSemanticIndexHealth()])
-      .then(([backupStatus, ocrStatus, semanticStatus]) => {
+    setArchiveNote(null);
+    Promise.all([
+      getBackupStatus(),
+      getArchiveHealth(),
+      getOCRHealth(),
+      getSemanticIndexHealth(),
+    ])
+      .then(([backupStatus, archiveStatus, ocrStatus, semanticStatus]) => {
         setStatus(backupStatus);
+        setArchive(archiveStatus);
         setOcr(ocrStatus);
         setSemantic(semanticStatus);
       })
@@ -205,9 +280,12 @@ export default function SystemStatusPage() {
   if (!status) return null;
 
   const tone: BackupHealthStatus =
-    status.status === "error" || ocr?.status === "error"
+    status.status === "error" || ocr?.status === "error" || archive?.status === "error"
       ? "error"
-      : status.status === "warn" || ocr?.status === "warn" || !!semantic?.missing_documents
+      : status.status === "warn"
+          || ocr?.status === "warn"
+          || archive?.status === "warn"
+          || !!semantic?.missing_documents
         ? "warn"
         : "ok";
   const headline =
@@ -225,6 +303,7 @@ export default function SystemStatusPage() {
       setRetryNote(`${result.queued} Verarbeitung${result.queued === 1 ? "" : "en"} neu angestoßen.`);
       await Promise.all([
         getBackupStatus().then(setStatus),
+        getArchiveHealth().then(setArchive),
         getOCRHealth().then(setOcr),
         getSemanticIndexHealth().then(setSemantic),
       ]);
@@ -232,6 +311,20 @@ export default function SystemStatusPage() {
       setRetryNote(err instanceof Error ? err.message : String(err));
     } finally {
       setRetrying(false);
+    }
+  }
+
+  async function checkArchive() {
+    setCheckingArchive(true);
+    setArchiveNote(null);
+    try {
+      const result = await runArchiveBulkCheck(50);
+      setArchive(result.health);
+      setArchiveNote(`${result.checked} Archivprüfung${result.checked === 1 ? "" : "en"} ausgeführt.`);
+    } catch (err) {
+      setArchiveNote(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCheckingArchive(false);
     }
   }
 
@@ -306,6 +399,55 @@ export default function SystemStatusPage() {
             retrying={retrying}
             onRetryAll={retryAllFailed}
           />
+        </>
+      )}
+
+      {archive && (
+        <>
+          <section className={`system-card system-card--${archive.status}`}>
+            <div className="system-card__head">
+              <h3>Archiv & Retention</h3>
+              <span className={`system-pill system-pill--${archive.status}`}>
+                {archive.status === "ok" ? "OK" : archive.status === "warn" ? "Warnung" : "Fehler"}
+              </span>
+            </div>
+            <div className="system-metrics">
+              <HealthMetric label="Geprüft OK" value={archive.summary.archive_ok} />
+              <HealthMetric
+                label="Warnungen"
+                value={archive.summary.archive_warning}
+                tone={archive.summary.archive_warning ? "warn" : "ok"}
+              />
+              <HealthMetric
+                label="Fehler"
+                value={archive.summary.archive_error}
+                tone={archive.summary.archive_error ? "error" : "ok"}
+              />
+              <HealthMetric
+                label="Ungeprüft"
+                value={archive.summary.archive_unchecked}
+                tone={archive.summary.archive_unchecked ? "warn" : "ok"}
+              />
+              <HealthMetric
+                label="Legal Hold"
+                value={archive.summary.legal_hold}
+                tone={archive.summary.legal_hold ? "warn" : "ok"}
+              />
+              <HealthMetric
+                label="Retention bald fällig"
+                value={archive.summary.retention_due_soon}
+                tone={archive.summary.retention_due_soon ? "warn" : "ok"}
+              />
+            </div>
+            <p className="system-card__message">
+              Dokumente werden {archive.thresholds.retention_due_soon_days} Tage vor Ablauf als fällig markiert.
+            </p>
+            <button onClick={checkArchive} disabled={checkingArchive}>
+              {checkingArchive ? "Prüfe …" : "Archivprüfung starten"}
+            </button>
+          </section>
+          {archiveNote && <p className="status status--warn">{archiveNote}</p>}
+          <ArchiveIssueList issues={archive.issues} />
         </>
       )}
 

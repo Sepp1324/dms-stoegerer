@@ -44,6 +44,7 @@ class DocumentVersionInline(admin.TabularInline):
         "sha256",
         "prev_hash",
         "is_immutable",
+        "seal_hash",
         "created_at",
     )
     readonly_fields = ("created_at",)
@@ -72,6 +73,8 @@ class DocumentAdmin(admin.ModelAdmin):
         "folder",
         "case_file",
         "review_status",
+        "archive_status",
+        "legal_hold",
         "added_at",
         "owner",
     )
@@ -79,13 +82,15 @@ class DocumentAdmin(admin.ModelAdmin):
         "review_status",
         "folder",
         "case_file",
+        "archive_status",
+        "legal_hold",
         "document_type",
         "correspondent",
         "tags",
     )
     search_fields = ("title", "asn")
     ordering = ("-added_at",)
-    readonly_fields = ("asn",)
+    readonly_fields = ("asn", "archive_checked_at", "archive_report")
     filter_horizontal = ("tags",)
     inlines = (DocumentVersionInline, CustomFieldValueInline, ASNScanInline)
 
@@ -108,6 +113,8 @@ class DocumentVersionAdmin(admin.ModelAdmin):
         "mime_type",
         "size",
         "is_immutable",
+        "retention_until",
+        "seal_hash",
         "created_at",
     )
     list_filter = ("processing_state", "is_immutable", "mime_type")
@@ -117,6 +124,10 @@ class DocumentVersionAdmin(admin.ModelAdmin):
         "processing_failed_step",
         "processing_failed_at",
         "processing_attempts",
+        "metadata_snapshot",
+        "snapshot_schema_version",
+        "snapshot_taken_at",
+        "seal_hash",
     )
 
 
