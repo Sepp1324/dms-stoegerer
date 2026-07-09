@@ -18,7 +18,7 @@ from typing import Any
 from django.utils import timezone
 from django.utils.text import slugify
 
-from documents.models import AuditLogEntry, Document
+from documents.models import AuditLogEntry, CaseFile, Document
 from documents.services import archive as archive_service
 from documents.services.asn import format_asn
 
@@ -115,6 +115,76 @@ def build_document_revision_package(document: Document) -> RevisionPackage:
         content=buffer.getvalue(),
         manifest=manifest,
     )
+
+
+def build_case_file_revision_package(case_file: CaseFile) -> RevisionPackage:
+    """Baut ein ZIP-Revisionspaket für eine komplette Vorgangsakte."""
+    generated_at = timezone.now()
+    manifest_entries: list[dict[str, Any]] = []
+    documents = list(
+        case_file.documents.select_related(
+            "correspondent",
+            "document_type",
+            "storage_path",
+            "folder",
+            "case_file",
+            "owner",
+            "current_version",
+        )
+        .prefetch_related("tags", "custom_field_values__field", "versions")
+        .order_by("added_at", "id")
+    )
+
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        _write_json(
+            zf,
+            "casefile-metadata.json",
+            _case_file_metadata_payload(case_file, documents, generated_at=generated_at),
+            manifest_entries,
+        )
+        _write_json(
+            zf,
+            "audit.json",
+            _case_file_audit_payload(case_file),
+            manifest_entries,
+        )
+
+        nested_packages = []
+        for document in documents:
+            package = build_document_revision_package(document)
+            path = f"documents/{_document_package_name(document, package.filename)}"
+            zf.writestr(path, package.content)
+            manifest_entries.append(_entry(path, data=package.content, kind="zip"))
+            nested_packages.append(
+                {
+                    "document_id": document.id,
+                    "title": document.title,
+                    "asn": document.asn,
+                    "asn_label": format_asn(document.asn) if document.asn else None,
+                    "path": path,
+                    "archive_status": package.manifest.get("archive_status"),
+                    "missing_files": package.manifest.get("missing_files", []),
+                }
+            )
+
+        manifest = {
+            "schema": "dms-casefile-revision-package-v1",
+            "generated_at": generated_at.isoformat(),
+            "case_file": {
+                "id": case_file.id,
+                "title": case_file.title,
+                "status": case_file.status,
+                "status_label": case_file.get_status_display(),
+            },
+            "document_count": len(documents),
+            "documents": nested_packages,
+            "entries": manifest_entries,
+        }
+        _write_json(zf, "manifest.json", manifest, manifest_entries=None)
+
+    filename = f"{slugify(case_file.title) or 'akte'}-{case_file.id}-revisionspaket.zip"
+    return RevisionPackage(filename=filename, content=buffer.getvalue(), manifest=manifest)
 
 
 def _metadata_payload(document: Document, *, generated_at) -> dict[str, Any]:
@@ -214,6 +284,72 @@ def _audit_payload(document: Document) -> list[dict[str, Any]]:
     ]
 
 
+def _case_file_metadata_payload(
+    case_file: CaseFile,
+    documents: list[Document],
+    *,
+    generated_at,
+) -> dict[str, Any]:
+    owner = case_file.owner
+    return {
+        "generated_at": generated_at.isoformat(),
+        "case_file": {
+            "id": case_file.id,
+            "title": case_file.title,
+            "description": case_file.description,
+            "status": case_file.status,
+            "status_label": case_file.get_status_display(),
+            "owner": owner.username if owner else None,
+            "ai_summary": case_file.ai_summary,
+            "ai_summary_source": case_file.ai_summary_source,
+            "ai_summary_generated_at": _iso(case_file.ai_summary_generated_at),
+            "created_at": _iso(case_file.created_at),
+            "updated_at": _iso(case_file.updated_at),
+        },
+        "documents": [
+            {
+                "id": document.id,
+                "title": document.title,
+                "asn": document.asn,
+                "asn_label": format_asn(document.asn) if document.asn else None,
+                "created_at": _iso(document.created_at),
+                "added_at": _iso(document.added_at),
+                "correspondent": document.correspondent.name
+                if document.correspondent
+                else None,
+                "document_type": document.document_type.name
+                if document.document_type
+                else None,
+                "folder": document.folder.full_path if document.folder else None,
+                "archive_status": document.archive_status,
+                "retention_until": _iso(document.retention_until),
+                "legal_hold": document.legal_hold,
+            }
+            for document in documents
+        ],
+    }
+
+
+def _case_file_audit_payload(case_file: CaseFile) -> list[dict[str, Any]]:
+    entries = (
+        AuditLogEntry.objects.select_related("actor")
+        .filter(object_type="CaseFile", object_id=str(case_file.id))
+        .order_by("timestamp", "id")
+    )
+    return [
+        {
+            "id": entry.id,
+            "timestamp": _iso(entry.timestamp),
+            "actor": entry.actor.username if entry.actor else None,
+            "action": entry.action,
+            "object_type": entry.object_type,
+            "object_id": entry.object_id,
+            "detail": entry.detail,
+        }
+        for entry in entries
+    ]
+
+
 def _write_json(
     zf: zipfile.ZipFile,
     name: str,
@@ -269,13 +405,20 @@ def _write_file(
     )
 
 
-def _entry(name: str, *, data: bytes) -> dict[str, Any]:
+def _entry(name: str, *, data: bytes, kind: str | None = None) -> dict[str, Any]:
     return {
         "path": name,
-        "kind": "json" if name.endswith(".json") else "text",
+        "kind": kind or ("json" if name.endswith(".json") else "text"),
         "size": len(data),
         "sha256": hashlib.sha256(data).hexdigest(),
     }
+
+
+def _document_package_name(document: Document, fallback: str) -> str:
+    asn = format_asn(document.asn) if document.asn else f"DOC{document.id}"
+    title = slugify(document.title) or "dokument"
+    suffix = Path(fallback).suffix or ".zip"
+    return f"{asn}-{title}-{document.id}{suffix}"
 
 
 def _suffix(path: str, *, fallback: str = "") -> str:
