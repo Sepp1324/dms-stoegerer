@@ -2012,6 +2012,12 @@ export function summarizeCaseFile(id: number): Promise<CaseFileSummaryResult> {
   return postJson<CaseFileSummaryResult>(`/case-files/${id}/summarize/`, {});
 }
 
+export async function getCaseFileRevisionPackage(id: number): Promise<Blob> {
+  const res = await apiFetch(`/case-files/${id}/revision-package/`);
+  if (!res.ok) throw new Error(`Akten-Revisionspaket nicht verfügbar (HTTP ${res.status})`);
+  return res.blob();
+}
+
 // --- Zusatzfelder (Custom Fields) ---
 // CRUD unter /api/custom-fields/ (STOAA-112). DELETE liefert 409, wenn noch
 // Werte am Feld hängen (kein Datenverlust); die UI fängt das ab.

@@ -4457,6 +4457,12 @@ button.due-item:hover {
 .case-section-head h3 {
   margin: 0.1rem 0 0;
 }
+.case-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  justify-content: flex-end;
+}
 .case-create {
   display: flex;
   flex-direction: column;

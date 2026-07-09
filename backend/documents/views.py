@@ -3738,6 +3738,23 @@ class CaseFileViewSet(viewsets.ModelViewSet):
             status=status.HTTP_200_OK,
         )
 
+    @action(detail=True, methods=["get"], url_path="revision-package")
+    def revision_package(self, request, pk=None):
+        """Exportiert die komplette Akte als prüfbares Revisionspaket."""
+        case_file = self.get_object()
+        AuditLogEntry.objects.create(
+            actor=request.user,
+            action="case_file_revision_package_export",
+            object_type="CaseFile",
+            object_id=str(case_file.id),
+            detail={"format": "zip", "scope": "case_file"},
+        )
+        package = revision_package_service.build_case_file_revision_package(case_file)
+        response = HttpResponse(package.content, content_type="application/zip")
+        response["Content-Disposition"] = f'attachment; filename="{package.filename}"'
+        response["Content-Length"] = str(len(package.content))
+        return response
+
 
 class ClassificationRuleViewSet(viewsets.ModelViewSet):
     queryset = ClassificationRule.objects.all()

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   addDocumentsToCaseFile,
   createCaseFile,
+  getCaseFileRevisionPackage,
   getCaseFiles,
   getDocuments,
   removeDocumentsFromCaseFile,
@@ -171,6 +172,27 @@ export default function CaseFilesPage({
     }
   }
 
+  async function downloadRevisionPackage() {
+    if (!selected) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const blob = await getCaseFileRevisionPackage(selected.id);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${safeFilename(selected.title || "akte")}-revisionspaket.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (loading) {
     return (
       <section className="case-files">
@@ -281,9 +303,14 @@ export default function CaseFilesPage({
                 <div className="case-section-head">
                   <h3>Akten-Gedächtnis</h3>
                   {canEdit && (
-                    <button onClick={summarize} disabled={busy}>
-                      {busy ? "Arbeite …" : "Zusammenfassen"}
-                    </button>
+                    <div className="case-actions">
+                      <button onClick={summarize} disabled={busy}>
+                        {busy ? "Arbeite …" : "Zusammenfassen"}
+                      </button>
+                      <button onClick={downloadRevisionPackage} disabled={busy}>
+                        Revisionspaket
+                      </button>
+                    </div>
                   )}
                 </div>
                 {selected.ai_summary ? (
@@ -409,4 +436,8 @@ export default function CaseFilesPage({
       </div>
     </section>
   );
+}
+
+function safeFilename(value: string) {
+  return value.trim().replace(/[^a-z0-9äöüß._-]+/gi, "-").replace(/^-+|-+$/g, "") || "akte";
 }
