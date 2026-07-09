@@ -896,6 +896,17 @@ textarea:focus-visible {
   line-height: 1.6;
   white-space: pre-wrap;
 }
+.copilot__answer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  align-items: center;
+  margin-top: 0.85rem;
+}
+.copilot__answer-actions span {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
 .copilot__retrieval {
   display: flex;
   flex-wrap: wrap;
@@ -4542,14 +4553,158 @@ button.due-item:hover {
 .case-timeline__title:hover {
   color: var(--accent);
 }
+
+/* --- Dossiers / Beweisakten --- */
+.dossiers {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+.dossiers__layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+  gap: var(--space-4);
+  align-items: start;
+}
+.dossiers__list,
+.dossier-detail {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--card);
+}
+.dossiers__list {
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  position: sticky;
+  top: var(--space-4);
+}
+.dossiers__head,
+.dossier-detail__top,
+.dossier-actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+.dossiers__head h2,
+.dossier-detail__top h2,
+.dossier-widget h3,
+.dossier-summary h3,
+.dossier-sources h3 {
+  margin: 0.1rem 0 0;
+}
+.dossier-create,
+.dossier-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.dossier-list__item {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--text);
+  padding: 0.75rem 0.85rem;
+  text-align: left;
+}
+.dossier-list__item:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+.dossier-list__item--active {
+  border-color: var(--accent);
+  background: var(--accent-tint);
+}
+.dossier-list__item span {
+  display: block;
+  color: var(--muted);
+  font-size: 0.78rem;
+  margin-top: 0.2rem;
+}
+.dossier-detail {
+  padding: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+.dossier-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.dossier-summary,
+.dossier-widget {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-sunken);
+  padding: var(--space-4);
+}
+.dossier-summary p {
+  white-space: pre-wrap;
+  line-height: 1.55;
+}
+.dossier-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--space-3);
+}
+.dossier-timeline-item {
+  display: block;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--text);
+  padding: 0.65rem 0.75rem;
+  text-align: left;
+  margin-top: var(--space-2);
+}
+.dossier-timeline-item span {
+  display: block;
+  color: var(--muted);
+  font-size: 0.78rem;
+  margin-top: 0.2rem;
+}
+.dossier-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: var(--space-2);
+}
+.dossier-chips span {
+  border: 1px solid rgba(59, 130, 246, 0.35);
+  border-radius: 999px;
+  padding: 0.16rem 0.48rem;
+  background: rgba(59, 130, 246, 0.08);
+  color: #bfdbfe;
+  font-size: 0.76rem;
+}
+.dossier-contract {
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-2);
+  margin-top: var(--space-2);
+}
+.dossier-contract span {
+  display: block;
+  color: var(--muted);
+  font-size: 0.82rem;
+  margin-top: 0.2rem;
+}
 @media (max-width: 900px) {
   .case-files__layout {
+    grid-template-columns: 1fr;
+  }
+  .dossiers__layout {
     grid-template-columns: 1fr;
   }
   .case-files__list {
     position: static;
   }
+  .dossiers__list {
+    position: static;
+  }
   .case-detail__top,
+  .dossier-detail__top,
   .case-section-head,
   .case-add-doc {
     flex-direction: column;

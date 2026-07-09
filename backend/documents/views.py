@@ -70,6 +70,7 @@ from .models import (
     CustomField,
     CustomFieldValue,
     Document,
+    Dossier,
     DocumentEntity,
     DocumentFolder,
     DocumentReminder,
@@ -98,6 +99,7 @@ from .serializers import (
     DocumentReminderSerializer,
     DocumentReviewTaskSerializer,
     DocumentSerializer,
+    DossierSerializer,
     DocumentFolderSerializer,
     DocumentShareLinkSerializer,
     DocumentTypeSerializer,
@@ -114,6 +116,7 @@ from .serializers import (
 )
 from .services import asn as asn_service
 from .services import contracts as contract_service
+from .services import dossiers as dossier_service
 from .services import entity_graph as entity_graph_service
 from .services import review_tasks as review_task_service
 from .services import semantic_index as semantic_index_service
@@ -2947,6 +2950,132 @@ class DocumentReviewTaskViewSet(viewsets.ReadOnlyModelViewSet):
             target_status=DocumentReviewTask.Status.IGNORED,
             reason=str(request.data.get("reason", "manual_ignore")),
         )
+
+
+class DossierViewSet(viewsets.ModelViewSet):
+    """Dossier Builder: gespeicherte, quellengebundene Rechercheakten."""
+
+    serializer_class = DossierSerializer
+    permission_classes = [ReadOnlyOrCanWrite]
+
+    def get_queryset(self):
+        qs = (
+            Dossier.objects.select_related("owner")
+            .prefetch_related(
+                "documents",
+                "documents__correspondent",
+                "documents__document_type",
+                "documents__folder",
+                "documents__current_version",
+            )
+            .annotate(document_count=Count("documents", distinct=True))
+            .order_by("-updated_at", "-created_at")
+        )
+        user = self.request.user
+        if not getattr(user, "is_dms_admin", False):
+            qs = qs.filter(owner=user)
+
+        status_value = self.request.query_params.get("status")
+        if status_value in {choice for choice, _label in Dossier.Status.choices}:
+            qs = qs.filter(status=status_value)
+
+        q = self.request.query_params.get("q", "").strip()
+        if q:
+            qs = qs.filter(
+                Q(title__icontains=q)
+                | Q(query__icontains=q)
+                | Q(summary__icontains=q)
+                | Q(documents__title__icontains=q)
+            )
+        return qs.distinct()
+
+    def perform_create(self, serializer):
+        dossier = serializer.save(owner=self.request.user)
+        AuditLogEntry.objects.create(
+            actor=self.request.user,
+            action="dossier_create",
+            object_type="Dossier",
+            object_id=str(dossier.id),
+            detail={"title": dossier.title, "query": dossier.query[:500]},
+        )
+
+    def _visible_documents(self):
+        qs = (
+            Document.objects.select_related(
+                "correspondent",
+                "document_type",
+                "folder",
+                "case_file",
+                "current_version",
+                "contract_record",
+            )
+            .prefetch_related("tags", "current_version__page_texts")
+            .exclude(current_version__isnull=True)
+            .order_by("-added_at")
+        )
+        if not getattr(self.request.user, "is_dms_admin", False):
+            qs = qs.filter(owner=self.request.user)
+        return qs
+
+    @action(detail=True, methods=["post"])
+    def generate(self, request, pk=None):
+        """Generiert das Dossier aus sichtbaren Dokumentquellen."""
+        if not getattr(request.user, "can_write", False):
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        dossier = self.get_object()
+        if dossier.status == Dossier.Status.FINAL:
+            return Response(
+                {"detail": "Finale Dossiers können nicht neu generiert werden."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        generated = dossier_service.generate_dossier(
+            dossier,
+            self._visible_documents().distinct()[:400],
+        )
+        AuditLogEntry.objects.create(
+            actor=request.user,
+            action="dossier_generate",
+            object_type="Dossier",
+            object_id=str(generated.id),
+            detail={
+                "source": generated.generated_source,
+                "sources": [source.get("document") for source in generated.sources],
+            },
+        )
+        return Response(self.get_serializer(generated).data)
+
+    @action(detail=True, methods=["post"])
+    def finalize(self, request, pk=None):
+        """Markiert ein Dossier als final."""
+        if not getattr(request.user, "can_write", False):
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        dossier = self.get_object()
+        dossier.status = Dossier.Status.FINAL
+        dossier.save(update_fields=["status", "updated_at"])
+        AuditLogEntry.objects.create(
+            actor=request.user,
+            action="dossier_finalize",
+            object_type="Dossier",
+            object_id=str(dossier.id),
+            detail={},
+        )
+        return Response(self.get_serializer(dossier).data)
+
+    @action(detail=True, methods=["get"], url_path="export-markdown")
+    def export_markdown(self, request, pk=None):
+        """Exportiert das Dossier als Markdown-Datei."""
+        dossier = self.get_object()
+        content = dossier_service.render_markdown(dossier)
+        filename = f"{slugify(dossier.title) or 'dossier'}-{dossier.id}.md"
+        response = HttpResponse(content, content_type="text/markdown; charset=utf-8")
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        return response
 
 
 class ContractRecordViewSet(viewsets.ModelViewSet):

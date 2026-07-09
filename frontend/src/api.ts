@@ -393,6 +393,55 @@ export interface CaseFileSummaryResult {
   source: string;
   sources: AskSource[];
 }
+export type DossierStatus = "draft" | "generated" | "final";
+export type DossierSource = "local" | "ai" | "unavailable" | "error";
+export interface DossierEntity {
+  id: number | null;
+  kind: string;
+  name: string;
+  roles: string[];
+  sources: string[];
+  identifiers: { kind: string; value: string }[];
+}
+export interface DossierContract {
+  id?: number;
+  provider?: string;
+  contract_number?: string;
+  contract_type_label?: string;
+  status_label?: string;
+  cancel_until?: string | null;
+  next_due_on?: string | null;
+  ends_on?: string | null;
+  sources: string[];
+}
+export interface DossierTimelineItem {
+  document: number;
+  title: string;
+  folder_path: string | null;
+  page: number | null;
+  sources: string[];
+  reason: string;
+}
+export interface Dossier {
+  id: number;
+  title: string;
+  query: string;
+  status: DossierStatus;
+  status_label: string;
+  owner: number | null;
+  summary: string;
+  timeline: DossierTimelineItem[];
+  sources: AskSource[];
+  entities: DossierEntity[];
+  contracts: DossierContract[];
+  generated_source: DossierSource;
+  generated_source_label: string;
+  generated_at: string | null;
+  created_at: string;
+  updated_at: string;
+  document_count: number;
+  documents: CaseFileDocument[];
+}
 
 export type ContractType =
   | "insurance"
@@ -1750,6 +1799,10 @@ export async function getCaseFiles(): Promise<CaseFile[]> {
   return listAllPages<CaseFile>("/case-files/");
 }
 
+export async function getDossiers(): Promise<Dossier[]> {
+  return listAllPages<Dossier>("/dossiers/");
+}
+
 export async function getContracts(
   query: ContractQuery = {},
 ): Promise<ContractRecord[]> {
@@ -1859,6 +1912,41 @@ export function createCaseFile(payload: {
   status?: CaseFileStatus;
 }): Promise<CaseFile> {
   return postJson<CaseFile>("/case-files/", payload);
+}
+
+export function createDossier(payload: {
+  title: string;
+  query: string;
+  status?: DossierStatus;
+}): Promise<Dossier> {
+  return postJson<Dossier>("/dossiers/", payload);
+}
+
+export async function updateDossier(
+  id: number,
+  payload: Partial<Pick<Dossier, "title" | "query" | "status">>,
+): Promise<Dossier> {
+  const res = await apiFetch(`/dossiers/${id}/`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(`Dossier speichern fehlgeschlagen: HTTP ${res.status}`);
+  return res.json();
+}
+
+export function generateDossier(id: number): Promise<Dossier> {
+  return postJson<Dossier>(`/dossiers/${id}/generate/`, {});
+}
+
+export function finalizeDossier(id: number): Promise<Dossier> {
+  return postJson<Dossier>(`/dossiers/${id}/finalize/`, {});
+}
+
+export async function exportDossierMarkdown(id: number): Promise<Blob> {
+  const res = await apiFetch(`/dossiers/${id}/export-markdown/`);
+  if (!res.ok) throw new Error(`Dossier-Export fehlgeschlagen: HTTP ${res.status}`);
+  return res.blob();
 }
 
 export async function updateCaseFile(

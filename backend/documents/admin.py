@@ -13,6 +13,7 @@ from .models import (
     CustomField,
     CustomFieldValue,
     Document,
+    Dossier,
     DocumentEmbedding,
     DocumentEntity,
     DocumentFolder,
@@ -161,6 +162,37 @@ class DocumentEmbeddingAdmin(admin.ModelAdmin):
         "token_count",
         "generated_at",
     )
+
+
+@admin.register(Dossier)
+class DossierAdmin(admin.ModelAdmin):
+    list_display = (
+        "title",
+        "status",
+        "owner",
+        "generated_source",
+        "document_count",
+        "generated_at",
+        "updated_at",
+    )
+    list_filter = ("status", "generated_source", "owner")
+    search_fields = ("title", "query", "summary", "documents__title")
+    filter_horizontal = ("documents",)
+    readonly_fields = (
+        "summary",
+        "timeline",
+        "sources",
+        "entities",
+        "contracts",
+        "generated_source",
+        "generated_at",
+        "created_at",
+        "updated_at",
+    )
+
+    @admin.display(description="Dokumente")
+    def document_count(self, obj):
+        return obj.documents.count()
 
 
 @admin.register(CaseFile)
