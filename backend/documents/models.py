@@ -828,6 +828,82 @@ class CaseFileCandidate(models.Model):
         return f"{self.document_id} → {target} ({self.score}%)"
 
 
+class DocumentReviewTask(models.Model):
+    """Konkreter Klärungsauftrag für ein Dokument.
+
+    ``Document.review_status`` ist der grobe fachliche Zustand. Dieses Modell
+    erklärt, *warum* ein Dokument noch in der Inbox liegt: fehlende Metadaten,
+    schwaches OCR, offene Kandidaten, Dublettenverdacht usw. Die Pipeline darf
+    Tasks automatisch erzeugen/auflösen; der Nutzer kann sie einzeln erledigen
+    oder ignorieren.
+    """
+
+    class Kind(models.TextChoices):
+        METADATA_MISSING = "metadata_missing", "Metadaten fehlen"
+        OCR_FAILED = "ocr_failed", "OCR fehlgeschlagen"
+        OCR_EMPTY = "ocr_empty", "OCR leer/schwach"
+        CLASSIFICATION_LOW_CONFIDENCE = (
+            "classification_low_confidence",
+            "Klassifizierung unsicher",
+        )
+        AI_SUGGESTION_PENDING = "ai_suggestion_pending", "KI-Vorschlag prüfen"
+        EXTRACTION_PENDING = "extraction_pending", "Strukturdaten prüfen"
+        CASE_FILE_PENDING = "case_file_pending", "Aktenvorschlag prüfen"
+        DUPLICATE_SUSPECTED = "duplicate_suspected", "Dublettenverdacht"
+        ASN_MISSING = "asn_missing", "ASN fehlt"
+        EMAIL_NEEDS_REVIEW = "email_needs_review", "E-Mail prüfen"
+
+    class Status(models.TextChoices):
+        OPEN = "open", "Offen"
+        RESOLVED = "resolved", "Erledigt"
+        IGNORED = "ignored", "Ignoriert"
+
+    document = models.ForeignKey(
+        Document, on_delete=models.CASCADE, related_name="review_tasks"
+    )
+    kind = models.CharField(max_length=40, choices=Kind.choices, db_index=True)
+    status = models.CharField(
+        max_length=16, choices=Status.choices, default=Status.OPEN, db_index=True
+    )
+    signature = models.CharField(
+        max_length=160,
+        help_text="Idempotenz-Schlüssel pro Dokument/Klärungsgrund.",
+    )
+    priority = models.PositiveSmallIntegerField(default=50, db_index=True)
+    message = models.CharField(max_length=255)
+    suggested_action = models.CharField(max_length=255, blank=True, default="")
+    data = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    resolved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="resolved_review_tasks",
+    )
+
+    class Meta:
+        verbose_name = "Klärungsauftrag"
+        verbose_name_plural = "Klärungsaufträge"
+        ordering = ["status", "priority", "created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["document", "signature"],
+                name="docs_revtask_sig_uniq",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["document", "status"], name="docs_revtask_doc_status"),
+            models.Index(fields=["status", "priority"], name="docs_revtask_status_prio"),
+            models.Index(fields=["kind", "status"], name="docs_revtask_kind_status"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.document_id}: {self.get_kind_display()} ({self.status})"
+
+
 # ---------------------------------------------------------------------------
 # Regelbasierte Klassifizierung (ecoDMS-artige Vorlage – deterministisch)
 # ---------------------------------------------------------------------------

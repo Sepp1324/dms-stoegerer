@@ -94,6 +94,18 @@ export type OcrStatus = "pending" | "running" | "success" | "failed" | "skipped"
 // Fachlicher Review-Status: getrennt vom technischen processing_state.
 // ``needs_review`` landet in der Inbox; ``reviewed`` wurde menschlich bestätigt.
 export type ReviewStatus = "needs_review" | "reviewed";
+export type ReviewTaskStatus = "open" | "resolved" | "ignored";
+export type ReviewTaskKind =
+  | "metadata_missing"
+  | "ocr_failed"
+  | "ocr_empty"
+  | "classification_low_confidence"
+  | "ai_suggestion_pending"
+  | "extraction_pending"
+  | "case_file_pending"
+  | "duplicate_suspected"
+  | "asn_missing"
+  | "email_needs_review";
 
 // UI-Buckets für den Listen-Filter ``?processing_state=`` (STOAA-248). ``processing``
 // fasst alle In-Flight-States (uploaded…sealed) zusammen; failed/retry_pending/ready
@@ -182,6 +194,8 @@ export interface DocumentItem {
   // Durchgriff auf ``versions``. Altdaten ohne current_version liefern ``null``.
   processing_state: ProcessingState | null;
   review_status: ReviewStatus;
+  review_task_count: number;
+  review_tasks: ReviewTask[];
   ocr_status: OcrStatus | null;
   // Suchergebnis-Snippet (STOAA-368/370): sicheres HTML mit ``<mark>`` rund um den
   // Treffer. Nur bei aktiver Volltextsuche (``?q=``) gefüllt; sonst / kein Treffer
@@ -223,6 +237,24 @@ export interface ExtractionCandidate {
   applied_at: string | null;
   dismissed_at: string | null;
 }
+export interface ReviewTask {
+  id: number;
+  document: number;
+  document_title: string;
+  kind: ReviewTaskKind;
+  kind_label: string;
+  status: ReviewTaskStatus;
+  status_label: string;
+  priority: number;
+  message: string;
+  suggested_action: string;
+  data: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+  resolved_at: string | null;
+  resolved_by: number | null;
+  asn_label: string | null;
+}
 export interface InboxSummary {
   total_needs_review: number;
   ready: number;
@@ -232,6 +264,8 @@ export interface InboxSummary {
   with_ai_suggestions: number;
   pending_extraction_candidates: number;
   pending_case_candidates: number;
+  open_review_tasks: number;
+  review_task_kinds: Partial<Record<ReviewTaskKind, number>>;
   oldest_added_at: string | null;
 }
 export interface InboxGenerateCandidatesResult {
@@ -753,6 +787,18 @@ export function markDocumentReviewed(
 
 export function markDocumentsReviewed(ids: number[]): Promise<BulkActionResult> {
   return postJson<BulkActionResult>("/documents/mark-reviewed-bulk/", { ids });
+}
+
+export function resolveReviewTask(id: number): Promise<ReviewTask> {
+  return postJson<ReviewTask>(`/review-tasks/${id}/resolve/`, {
+    reason: "frontend_resolve",
+  });
+}
+
+export function ignoreReviewTask(id: number): Promise<ReviewTask> {
+  return postJson<ReviewTask>(`/review-tasks/${id}/ignore/`, {
+    reason: "frontend_ignore",
+  });
 }
 
 export function generateInboxCandidates(

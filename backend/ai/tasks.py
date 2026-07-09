@@ -42,4 +42,8 @@ def suggest_document_metadata(document_id: int) -> dict:
     document.ai_suggestions = merged
     document.ai_suggested_at = timezone.now()
     document.save(update_fields=["ai_suggestions", "ai_suggested_at"])
+
+    from documents.services import review_tasks
+
+    review_tasks.sync_document_review_tasks(document)
     return {"status": "done", "document_id": document_id, "suggestions": merged}

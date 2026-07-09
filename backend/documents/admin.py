@@ -14,6 +14,7 @@ from .models import (
     Document,
     DocumentFolder,
     DocumentPageText,
+    DocumentReviewTask,
     DocumentType,
     DocumentVersion,
     ExtractionCandidate,
@@ -208,6 +209,35 @@ class CaseFileCandidateAdmin(admin.ModelAdmin):
         "created_at",
         "applied_at",
         "dismissed_at",
+    )
+
+
+@admin.register(DocumentReviewTask)
+class DocumentReviewTaskAdmin(admin.ModelAdmin):
+    list_display = (
+        "document",
+        "kind",
+        "status",
+        "priority",
+        "message",
+        "created_at",
+        "resolved_at",
+    )
+    list_filter = ("kind", "status", "priority")
+    search_fields = ("document__title", "message", "suggested_action")
+    readonly_fields = (
+        "document",
+        "kind",
+        "status",
+        "signature",
+        "priority",
+        "message",
+        "suggested_action",
+        "data",
+        "created_at",
+        "updated_at",
+        "resolved_at",
+        "resolved_by",
     )
 
 

@@ -1142,7 +1142,7 @@ textarea:focus-visible {
 }
 .inbox-metrics {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: 0.65rem;
 }
 .inbox-metric {
@@ -1299,6 +1299,63 @@ textarea:focus-visible {
   flex-wrap: wrap;
   gap: 0.25rem;
   margin-top: 0.5rem;
+}
+.review-tasks {
+  display: grid;
+  gap: 0.45rem;
+  margin-top: 0.65rem;
+}
+.review-task {
+  padding: 0.55rem 0.65rem;
+  border: 1px solid rgba(245, 158, 11, 0.32);
+  border-radius: 8px;
+  background: rgba(245, 158, 11, 0.08);
+}
+.review-task__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.2rem;
+}
+.review-task__head span {
+  color: #fcd34d;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+.review-task__head small {
+  color: var(--muted);
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+.review-task strong {
+  display: block;
+  color: var(--text);
+  font-size: 0.84rem;
+  line-height: 1.35;
+}
+.review-task p {
+  margin: 0.25rem 0 0;
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+.review-task__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.45rem;
+}
+.review-task__actions button {
+  font-size: 0.78rem;
+}
+.review-tasks__more,
+.review-tasks--empty span {
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+.review-tasks--empty {
+  padding: 0.45rem 0;
 }
 .smart-candidates {
   display: flex;

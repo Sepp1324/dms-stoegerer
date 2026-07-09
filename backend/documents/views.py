@@ -71,6 +71,7 @@ from .models import (
     Document,
     DocumentFolder,
     DocumentReminder,
+    DocumentReviewTask,
     DocumentShareLink,
     DocumentType,
     DocumentVersion,
@@ -90,6 +91,7 @@ from .serializers import (
     CorrespondentSerializer,
     CustomFieldSerializer,
     DocumentReminderSerializer,
+    DocumentReviewTaskSerializer,
     DocumentSerializer,
     DocumentFolderSerializer,
     DocumentShareLinkSerializer,
@@ -103,6 +105,7 @@ from .serializers import (
     WorkflowSerializer,
 )
 from .services import asn as asn_service
+from .services import review_tasks as review_task_service
 from .tasks import (
     bulk_classify_documents,
     process_document_version,
@@ -869,7 +872,10 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 "current_version",
             )
             .prefetch_related(
-                "tags", "versions", "custom_field_values__field"
+                "tags",
+                "versions",
+                "custom_field_values__field",
+                "review_tasks",
             )
         )
         # --- Owner-Isolation (STOAA-7) -------------------------------------
@@ -1304,6 +1310,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
                     "target": target,
                 },
             )
+            review_task_service.sync_document_review_tasks(document)
 
         return Response(ExtractionCandidateSerializer(candidate).data)
 
@@ -1341,6 +1348,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 "normalized_value": candidate.normalized_value,
             },
         )
+        review_task_service.sync_document_review_tasks(document)
         return Response(ExtractionCandidateSerializer(candidate).data)
 
     @action(detail=True, methods=["get", "post"], url_path="case-candidates")
@@ -1448,6 +1456,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
                     "score": candidate.score,
                 },
             )
+            review_task_service.sync_document_review_tasks(document)
 
         return Response(CaseFileCandidateSerializer(candidate).data)
 
@@ -1486,6 +1495,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 "score": candidate.score,
             },
         )
+        review_task_service.sync_document_review_tasks(document)
         return Response(CaseFileCandidateSerializer(candidate).data)
 
     def _metadata_snapshot(self, document) -> dict:
@@ -1527,6 +1537,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
         # Workflow-Engine: document_updated
         from . import workflows
         workflows.run_workflows(document, trigger_type="document_updated", source="api")
+        review_task_service.sync_document_review_tasks(document)
 
     def perform_destroy(self, instance):
         """Protokolliert die Löschung, bevor das Dokument entfernt wird.
@@ -1739,6 +1750,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 object_id=str(document.id),
                 detail={"fields": applied},
             )
+        review_task_service.sync_document_review_tasks(document)
 
         return Response(self.get_serializer(document).data)
 
@@ -1783,6 +1795,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
                     "keys": sorted(suggestions.keys()),
                 },
             )
+            review_task_service.sync_document_review_tasks(document)
 
         data = self.get_serializer(document).data
         return Response({**data, "source": result.get("source", "unavailable")})
@@ -1821,6 +1834,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 object_id=str(document.id),
                 detail={"fields": removed},
             )
+        review_task_service.sync_document_review_tasks(document)
 
         return Response(self.get_serializer(document).data)
 
@@ -2005,12 +2019,20 @@ class DocumentViewSet(viewsets.ModelViewSet):
             if document.review_status != Document.ReviewStatus.REVIEWED:
                 document.review_status = Document.ReviewStatus.REVIEWED
                 document.save(update_fields=["review_status"])
+                resolved_tasks = review_task_service.resolve_review_tasks(
+                    document,
+                    actor=request.user,
+                    reason="document_marked_reviewed",
+                )
                 AuditLogEntry.objects.create(
                     actor=request.user,
                     action="mark_reviewed",
                     object_type="Document",
                     object_id=str(document.id),
-                    detail={"review_status": Document.ReviewStatus.REVIEWED},
+                    detail={
+                        "review_status": Document.ReviewStatus.REVIEWED,
+                        "resolved_review_tasks": resolved_tasks,
+                    },
                 )
 
         serializer = self.get_serializer(document)
@@ -2038,6 +2060,14 @@ class DocumentViewSet(viewsets.ModelViewSet):
             PS.SEALED,
         ]
         oldest = inbox.order_by("added_at").values_list("added_at", flat=True).first()
+        open_tasks = DocumentReviewTask.objects.filter(
+            document__in=inbox,
+            status=DocumentReviewTask.Status.OPEN,
+        )
+        task_kinds = {
+            item["kind"]: item["count"]
+            for item in open_tasks.values("kind").annotate(count=Count("id"))
+        }
         return Response(
             {
                 "total_needs_review": inbox.count(),
@@ -2060,6 +2090,8 @@ class DocumentViewSet(viewsets.ModelViewSet):
                     document__in=inbox,
                     status=CaseFileCandidate.Status.PENDING,
                 ).count(),
+                "open_review_tasks": open_tasks.count(),
+                "review_task_kinds": task_kinds,
                 "oldest_added_at": oldest,
             }
         )
@@ -2090,6 +2122,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
             try:
                 extraction_created += extraction.generate_candidates(document)
                 case_created += case_matching.generate_candidates(document)
+                review_task_service.sync_document_review_tasks(document)
             except Exception as exc:  # noqa: BLE001
                 item_errors.append({"id": document.id, "error": str(exc)})
 
@@ -2144,6 +2177,11 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 document.review_status = Document.ReviewStatus.REVIEWED
                 document.save(update_fields=["review_status"])
                 updated_ids.append(document.id)
+                resolved_tasks = review_task_service.resolve_review_tasks(
+                    document,
+                    actor=request.user,
+                    reason="bulk_mark_reviewed",
+                )
                 AuditLogEntry.objects.create(
                     actor=request.user,
                     action="mark_reviewed",
@@ -2152,6 +2190,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
                     detail={
                         "review_status": Document.ReviewStatus.REVIEWED,
                         "mode": "bulk",
+                        "resolved_review_tasks": resolved_tasks,
                     },
                 )
 
@@ -2702,6 +2741,74 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 "errors": item_errors,
             },
             status=status.HTTP_200_OK,
+        )
+
+
+class DocumentReviewTaskViewSet(viewsets.ReadOnlyModelViewSet):
+    """Offene Klärungsaufgaben der Review-Inbox.
+
+    Der ViewSet ist bewusst task-zentriert: Die Dokumentliste zeigt Tasks nested
+    an, aber für gezielte Aktionen (einzelnen Hinweis erledigen/ignorieren)
+    braucht das Frontend stabile Endpunkte. Owner-Isolation läuft über das
+    verknüpfte Dokument; fremde Tasks ergeben 404.
+    """
+
+    serializer_class = DocumentReviewTaskSerializer
+    permission_classes = [ReadOnlyOrCanWrite]
+
+    def get_queryset(self):
+        qs = DocumentReviewTask.objects.select_related(
+            "document",
+            "document__current_version",
+            "resolved_by",
+        ).order_by("status", "priority", "created_at")
+        user = self.request.user
+        if not getattr(user, "is_dms_admin", False):
+            qs = qs.filter(document__owner=user)
+
+        params = self.request.query_params
+        status_value = params.get("status")
+        if status_value in {choice for choice, _label in DocumentReviewTask.Status.choices}:
+            qs = qs.filter(status=status_value)
+        kind = params.get("kind")
+        if kind in {choice for choice, _label in DocumentReviewTask.Kind.choices}:
+            qs = qs.filter(kind=kind)
+        document_id = params.get("document")
+        if document_id:
+            qs = qs.filter(document_id=document_id)
+        return qs
+
+    def _finish(self, request, *, target_status, reason):
+        if not request.user.can_write:
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        task = self.get_object()
+        review_task_service.resolve_review_tasks(
+            task.document,
+            actor=request.user,
+            task_ids=[task.id],
+            target_status=target_status,
+            reason=reason,
+        )
+        task.refresh_from_db()
+        return Response(self.get_serializer(task).data)
+
+    @action(detail=True, methods=["post"])
+    def resolve(self, request, pk=None):
+        return self._finish(
+            request,
+            target_status=DocumentReviewTask.Status.RESOLVED,
+            reason=str(request.data.get("reason", "manual_resolve")),
+        )
+
+    @action(detail=True, methods=["post"])
+    def ignore(self, request, pk=None):
+        return self._finish(
+            request,
+            target_status=DocumentReviewTask.Status.IGNORED,
+            reason=str(request.data.get("reason", "manual_ignore")),
         )
 
 
