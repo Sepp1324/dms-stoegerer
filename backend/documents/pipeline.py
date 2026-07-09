@@ -495,7 +495,16 @@ def _run_from(version: DocumentVersion, start_index: int) -> dict:
 
 def process_version(version: DocumentVersion) -> dict:
     """Vollständige Verarbeitung einer Version entlang der State Machine."""
-    return _run_from(version, 0)
+    result = _run_from(version, 0)
+    try:
+        from documents.services import review_tasks
+
+        result["review_tasks"] = review_tasks.sync_document_review_tasks(
+            version.document
+        )
+    except Exception:  # noqa: BLE001 - Review-Tasks dürfen Verarbeitung nicht kippen
+        logger.exception("Review-Task-Sync für Version %s fehlgeschlagen", version.id)
+    return result
 
 
 def retry_version(version: DocumentVersion, actor=None) -> dict:
@@ -529,7 +538,16 @@ def retry_version(version: DocumentVersion, actor=None) -> dict:
         detail={"to": precond, "step": name},
     )
 
-    return _run_from(version, start_index)
+    result = _run_from(version, start_index)
+    try:
+        from documents.services import review_tasks
+
+        result["review_tasks"] = review_tasks.sync_document_review_tasks(
+            version.document
+        )
+    except Exception:  # noqa: BLE001 - Review-Tasks dürfen Retry nicht kippen
+        logger.exception("Review-Task-Sync für Retry-Version %s fehlgeschlagen", version.id)
+    return result
 
 
 def _add_months(d, months: int):

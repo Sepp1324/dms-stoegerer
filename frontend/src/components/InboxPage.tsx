@@ -8,16 +8,20 @@ import {
   generateCaseFileCandidates,
   generateExtractionCandidates,
   getCaseFileCandidates,
+  getDocument,
   getDocuments,
   getDocumentThumbnail,
   getExtractionCandidates,
   getInboxSummary,
+  ignoreReviewTask,
   markDocumentReviewed,
   markDocumentsReviewed,
+  resolveReviewTask,
   type CaseFileCandidate,
   type DocumentItem,
   type ExtractionCandidate,
   type InboxSummary,
+  type ReviewTask,
   type ReviewLearningOptions,
 } from "../api";
 import { ProcessingBadge } from "./ProcessingStatus";
@@ -102,6 +106,7 @@ export default function InboxPage({
   const [bulkBusy, setBulkBusy] = useState<string | null>(null);
   const [bulkMessage, setBulkMessage] = useState<string | null>(null);
   const [learnTextByDoc, setLearnTextByDoc] = useState<Record<number, string>>({});
+  const [taskBusy, setTaskBusy] = useState<number | null>(null);
   const [candidatesByDoc, setCandidatesByDoc] = useState<
     Record<number, ExtractionCandidate[]>
   >({});
@@ -225,6 +230,34 @@ export default function InboxPage({
     setCandidatesByDoc((current) => ({ ...current, [docId]: list }));
   }
 
+  async function refreshDocumentCard(docId: number) {
+    try {
+      const detail = await getDocument(docId);
+      setDocs((current) =>
+        current.map((doc) =>
+          doc.id === docId
+            ? {
+                ...doc,
+                correspondent: detail.correspondent,
+                correspondent_name: detail.correspondent_name,
+                document_type: detail.document_type,
+                document_type_name: detail.document_type_name,
+                folder: detail.folder,
+                folder_name: detail.folder_name,
+                folder_path: detail.folder_path,
+                case_file: detail.case_file,
+                case_file_title: detail.case_file_title,
+                review_task_count: detail.review_task_count,
+                review_tasks: detail.review_tasks,
+              }
+            : doc,
+        ),
+      );
+    } catch {
+      /* Karte bleibt unverändert; der nächste Reload zieht den frischen Stand. */
+    }
+  }
+
   async function generateForDoc(docId: number) {
     const key = `generate:${docId}`;
     setCandidateBusy(key);
@@ -232,6 +265,7 @@ export default function InboxPage({
     try {
       const list = await generateExtractionCandidates(docId);
       setCandidatesByDoc((current) => ({ ...current, [docId]: list }));
+      await refreshDocumentCard(docId);
       await refreshSummary();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -247,6 +281,7 @@ export default function InboxPage({
     try {
       await applyExtractionCandidate(docId, candidateId);
       await refreshDocCandidates(docId);
+      await refreshDocumentCard(docId);
       await refreshSummary();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -262,6 +297,7 @@ export default function InboxPage({
     try {
       await dismissExtractionCandidate(docId, candidateId);
       await refreshDocCandidates(docId);
+      await refreshDocumentCard(docId);
       await refreshSummary();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -282,6 +318,7 @@ export default function InboxPage({
     try {
       const list = await generateCaseFileCandidates(docId);
       setCaseCandidatesByDoc((current) => ({ ...current, [docId]: list }));
+      await refreshDocumentCard(docId);
       await refreshSummary();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -297,6 +334,7 @@ export default function InboxPage({
     try {
       const candidate = await applyCaseFileCandidate(docId, candidateId);
       await refreshCaseCandidates(docId);
+      await refreshDocumentCard(docId);
       setDocs((current) =>
         current.map((doc) =>
           doc.id === docId
@@ -324,6 +362,7 @@ export default function InboxPage({
     try {
       await dismissCaseFileCandidate(docId, candidateId);
       await refreshCaseCandidates(docId);
+      await refreshDocumentCard(docId);
       await refreshSummary();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -341,6 +380,7 @@ export default function InboxPage({
     try {
       const result = await generateInboxCandidates(ids);
       await loadCandidates(docs);
+      load();
       await refreshSummary();
       const created = result.extraction_created + result.case_created;
       setBulkMessage(
@@ -371,6 +411,35 @@ export default function InboxPage({
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setBulkBusy(null);
+    }
+  }
+
+  async function finishTask(task: ReviewTask, action: "resolve" | "ignore") {
+    setTaskBusy(task.id);
+    setError(null);
+    setBulkMessage(null);
+    try {
+      if (action === "resolve") {
+        await resolveReviewTask(task.id);
+      } else {
+        await ignoreReviewTask(task.id);
+      }
+      setDocs((current) =>
+        current.map((doc) =>
+          doc.id === task.document
+            ? {
+                ...doc,
+                review_tasks: doc.review_tasks.filter((item) => item.id !== task.id),
+                review_task_count: Math.max(0, doc.review_task_count - 1),
+              }
+            : doc,
+        ),
+      );
+      await refreshSummary();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setTaskBusy(null);
     }
   }
 
@@ -407,6 +476,11 @@ export default function InboxPage({
           <SummaryCard label="bereit" value={summary.ready} tone="ok" />
           <SummaryCard label="in Arbeit" value={summary.processing} />
           <SummaryCard label="fehlerhaft" value={summary.failed} tone="error" />
+          <SummaryCard
+            label="Klärungen"
+            value={summary.open_review_tasks}
+            tone={summary.open_review_tasks > 0 ? "warn" : "ok"}
+          />
           <SummaryCard
             label="Vorschläge"
             value={
@@ -518,6 +592,48 @@ export default function InboxPage({
                         {tag.name}
                       </span>
                     ))}
+                  </div>
+                )}
+                {doc.review_tasks.length > 0 ? (
+                  <div className="review-tasks">
+                    {doc.review_tasks.slice(0, 4).map((task) => (
+                      <div className="review-task" key={task.id}>
+                        <div className="review-task__head">
+                          <span>{task.kind_label}</span>
+                          <small>Priorität {task.priority}</small>
+                        </div>
+                        <strong>{task.message}</strong>
+                        {task.suggested_action && <p>{task.suggested_action}</p>}
+                        {canEdit && (
+                          <div className="review-task__actions">
+                            <button
+                              type="button"
+                              onClick={() => finishTask(task, "resolve")}
+                              disabled={taskBusy === task.id}
+                            >
+                              Erledigt
+                            </button>
+                            <button
+                              type="button"
+                              className="link"
+                              onClick={() => finishTask(task, "ignore")}
+                              disabled={taskBusy === task.id}
+                            >
+                              Ignorieren
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                    {doc.review_tasks.length > 4 && (
+                      <span className="review-tasks__more">
+                        +{doc.review_tasks.length - 4} weitere
+                      </span>
+                    )}
+                  </div>
+                ) : (
+                  <div className="review-tasks review-tasks--empty">
+                    <span>Keine konkreten Klärungspunkte offen.</span>
                   </div>
                 )}
                 <div className="smart-candidates">

@@ -12,6 +12,7 @@ from .models import (
     ExtractionCandidate,
     DocumentFolder,
     DocumentReminder,
+    DocumentReviewTask,
     DocumentShareLink,
     DocumentType,
     DocumentVersion,
@@ -409,6 +410,50 @@ class CaseFileCandidateSerializer(serializers.ModelSerializer):
         return obj.get_status_display()
 
 
+class DocumentReviewTaskSerializer(serializers.ModelSerializer):
+    """Konkreter Klärungsauftrag für die Review-Inbox."""
+
+    kind_label = serializers.SerializerMethodField()
+    status_label = serializers.SerializerMethodField()
+    document_title = serializers.CharField(source="document.title", read_only=True)
+    asn_label = serializers.SerializerMethodField()
+
+    class Meta:
+        model = DocumentReviewTask
+        fields = (
+            "id",
+            "document",
+            "document_title",
+            "kind",
+            "kind_label",
+            "status",
+            "status_label",
+            "priority",
+            "message",
+            "suggested_action",
+            "data",
+            "created_at",
+            "updated_at",
+            "resolved_at",
+            "resolved_by",
+            "asn_label",
+        )
+        read_only_fields = fields
+
+    def get_kind_label(self, obj) -> str:
+        return obj.get_kind_display()
+
+    def get_status_label(self, obj) -> str:
+        return obj.get_status_display()
+
+    def get_asn_label(self, obj) -> str | None:
+        if not obj.document.asn:
+            return None
+        from .services.asn import format_asn
+
+        return format_asn(obj.document.asn)
+
+
 class DocumentSerializer(serializers.ModelSerializer):
     versions = DocumentVersionSerializer(many=True, read_only=True)
     tags = TagSerializer(many=True, read_only=True)
@@ -466,6 +511,8 @@ class DocumentSerializer(serializers.ModelSerializer):
     # in ``update()``/``create()`` (unique_together). ``required=False``, damit
     # ein PATCH ohne diesen Schlüssel die bestehenden Werte unangetastet lässt.
     custom_field_values = CustomFieldValueSerializer(many=True, required=False)
+    review_tasks = serializers.SerializerMethodField()
+    review_task_count = serializers.SerializerMethodField()
 
     class Meta:
         model = Document
@@ -500,6 +547,8 @@ class DocumentSerializer(serializers.ModelSerializer):
             "classification",
             "status",
             "review_status",
+            "review_task_count",
+            "review_tasks",
             "custom_field_values",
             "versions",
         )
@@ -534,6 +583,22 @@ class DocumentSerializer(serializers.ModelSerializer):
         from .services.search_snippet import build_snippet
 
         return build_snippet(getattr(obj, "snippet_raw", None))
+
+    def get_review_tasks(self, obj):
+        tasks = [
+            task
+            for task in obj.review_tasks.all()
+            if task.status == DocumentReviewTask.Status.OPEN
+        ]
+        tasks.sort(key=lambda task: (task.priority, task.created_at, task.id))
+        return DocumentReviewTaskSerializer(tasks, many=True).data
+
+    def get_review_task_count(self, obj) -> int:
+        return sum(
+            1
+            for task in obj.review_tasks.all()
+            if task.status == DocumentReviewTask.Status.OPEN
+        )
 
     def _upsert_custom_field_values(self, document, values):
         """Upsert der Zusatzfeld-Werte per unique_together (document, field).

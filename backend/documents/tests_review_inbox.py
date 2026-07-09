@@ -10,11 +10,13 @@ from .models import (
     Correspondent,
     Document,
     DocumentFolder,
+    DocumentReviewTask,
     DocumentType,
     DocumentVersion,
     ExtractionCandidate,
     Tag,
 )
+from .services import review_tasks
 
 User = get_user_model()
 
@@ -178,6 +180,134 @@ class DocumentReviewInboxTests(APITestCase):
         self.assertEqual(resp.data["ready"], 1)
         self.assertEqual(resp.data["pending_extraction_candidates"], 1)
         self.assertEqual(resp.data["pending_case_candidates"], 1)
+        self.assertEqual(resp.data["open_review_tasks"], 0)
+        self.assertEqual(resp.data["review_task_kinds"], {})
+
+    def test_review_task_sync_erzeugt_konkrete_aufgaben_idempotent(self):
+        doc = self._document(
+            "Unvollständig",
+            owner=self.owner,
+            review_status=Document.ReviewStatus.NEEDS_REVIEW,
+        )
+        version = doc.current_version
+        version.ocr_text = ""
+        version.ocr_status = "success"
+        version.save(update_fields=["ocr_text", "ocr_status"])
+
+        result = review_tasks.sync_document_review_tasks(doc)
+        self.assertGreaterEqual(result["created"], 2)
+
+        tasks = DocumentReviewTask.objects.filter(document=doc)
+        first_count = tasks.count()
+        kinds = {task.kind for task in tasks}
+        self.assertIn(DocumentReviewTask.Kind.METADATA_MISSING, kinds)
+        self.assertIn(DocumentReviewTask.Kind.OCR_EMPTY, kinds)
+        self.assertIn(DocumentReviewTask.Kind.CLASSIFICATION_LOW_CONFIDENCE, kinds)
+
+        review_tasks.sync_document_review_tasks(doc)
+        self.assertEqual(DocumentReviewTask.objects.filter(document=doc).count(), first_count)
+
+    def test_review_task_api_ist_owner_scoped_und_resolve_auditierbar(self):
+        own_task = DocumentReviewTask.objects.create(
+            document=self.needs_review,
+            kind=DocumentReviewTask.Kind.METADATA_MISSING,
+            signature="metadata_missing:test",
+            priority=20,
+            message="Metadaten fehlen.",
+        )
+        foreign_doc = self._document(
+            "Fremde Task",
+            owner=self.other,
+            review_status=Document.ReviewStatus.NEEDS_REVIEW,
+        )
+        DocumentReviewTask.objects.create(
+            document=foreign_doc,
+            kind=DocumentReviewTask.Kind.OCR_EMPTY,
+            signature="ocr_empty:test",
+            priority=15,
+            message="OCR leer.",
+        )
+
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get("/api/review-tasks/?status=open")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["count"], 1)
+        self.assertEqual(resp.data["results"][0]["id"], own_task.id)
+
+        resp = self.client.post(f"/api/review-tasks/{own_task.id}/resolve/")
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data["status"], DocumentReviewTask.Status.RESOLVED)
+        own_task.refresh_from_db()
+        self.assertEqual(own_task.resolved_by, self.owner)
+        self.assertTrue(
+            AuditLogEntry.objects.filter(
+                action="review_task_resolve",
+                object_id=str(self.needs_review.id),
+                actor=self.owner,
+            ).exists()
+        )
+
+    def test_review_task_ignore_gast_liefert_403(self):
+        guest_doc = self._document(
+            "Gast Task",
+            owner=self.guest,
+            review_status=Document.ReviewStatus.NEEDS_REVIEW,
+        )
+        task = DocumentReviewTask.objects.create(
+            document=guest_doc,
+            kind=DocumentReviewTask.Kind.METADATA_MISSING,
+            signature="metadata_missing:guest",
+            priority=20,
+            message="Metadaten fehlen.",
+        )
+
+        self.client.force_authenticate(self.guest)
+        resp = self.client.post(f"/api/review-tasks/{task.id}/ignore/")
+        self.assertEqual(resp.status_code, 403)
+
+    def test_mark_reviewed_loest_offene_review_tasks(self):
+        task = DocumentReviewTask.objects.create(
+            document=self.needs_review,
+            kind=DocumentReviewTask.Kind.METADATA_MISSING,
+            signature="metadata_missing:mark-reviewed",
+            priority=20,
+            message="Metadaten fehlen.",
+        )
+
+        self.client.force_authenticate(self.owner)
+        resp = self.client.post(f"/api/documents/{self.needs_review.id}/mark_reviewed/")
+
+        self.assertEqual(resp.status_code, 200)
+        task.refresh_from_db()
+        self.assertEqual(task.status, DocumentReviewTask.Status.RESOLVED)
+        self.assertEqual(task.resolved_by, self.owner)
+
+    def test_inbox_summary_zaehlt_offene_review_tasks_nach_kind(self):
+        DocumentReviewTask.objects.create(
+            document=self.needs_review,
+            kind=DocumentReviewTask.Kind.METADATA_MISSING,
+            signature="metadata_missing:summary",
+            priority=20,
+            message="Metadaten fehlen.",
+        )
+        DocumentReviewTask.objects.create(
+            document=self.needs_review,
+            kind=DocumentReviewTask.Kind.OCR_EMPTY,
+            signature="ocr_empty:summary",
+            priority=15,
+            message="OCR leer.",
+            status=DocumentReviewTask.Status.IGNORED,
+        )
+
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get("/api/documents/inbox-summary/")
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["open_review_tasks"], 1)
+        self.assertEqual(
+            resp.data["review_task_kinds"],
+            {DocumentReviewTask.Kind.METADATA_MISSING: 1},
+        )
 
     def test_mark_reviewed_mit_lernregel_legt_classification_rule_an(self):
         corr = Correspondent.objects.create(name="Wüstenrot")
