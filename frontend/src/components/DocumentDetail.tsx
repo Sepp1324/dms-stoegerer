@@ -9,6 +9,7 @@ import {
   getDocumentIntegrity,
   getDocumentPreview,
   getDocumentQr,
+  getDocumentRevisionPackage,
   getDocumentVersionFile,
   rejectDocument,
   retryProcessing,
@@ -294,6 +295,27 @@ export default function DocumentDetail({
     }
   }
 
+  async function downloadRevisionPackage() {
+    setArchiveBusy(true);
+    setArchiveError(null);
+    try {
+      const blob = await getDocumentRevisionPackage(id);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${safeFilename(doc?.title ?? "dokument")}-revisionspaket.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      setRefresh((r) => r + 1);
+    } catch (e) {
+      setArchiveError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setArchiveBusy(false);
+    }
+  }
+
   function startEdit() {
     if (!doc) return;
     setForm({
@@ -502,6 +524,7 @@ export default function DocumentDetail({
                   onRetry={onRetry}
                   onArchiveCheck={runArchiveCheck}
                   onToggleLegalHold={toggleLegalHold}
+                  onDownloadRevisionPackage={downloadRevisionPackage}
                   onDownloadQr={downloadQr}
                 />
               )}
@@ -609,4 +632,8 @@ export default function DocumentDetail({
       )}
     </div>
   );
+}
+
+function safeFilename(value: string) {
+  return value.trim().replace(/[^a-z0-9äöüß._-]+/gi, "-").replace(/^-+|-+$/g, "") || "dokument";
 }

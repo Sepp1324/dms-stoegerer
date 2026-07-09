@@ -15,6 +15,7 @@ export function DetailMeta({
   onRetry,
   onArchiveCheck,
   onToggleLegalHold,
+  onDownloadRevisionPackage,
   onDownloadQr,
 }: {
   doc: Detail;
@@ -27,6 +28,7 @@ export function DetailMeta({
   onRetry: () => void;
   onArchiveCheck: () => void;
   onToggleLegalHold: () => void;
+  onDownloadRevisionPackage: () => void;
   onDownloadQr: () => void;
 }) {
   return (
@@ -68,6 +70,9 @@ export function DetailMeta({
           <div className="archive-box__actions">
             <button type="button" onClick={onArchiveCheck} disabled={archiveBusy}>
               {archiveBusy ? "Prüfe …" : "Archiv prüfen"}
+            </button>
+            <button type="button" onClick={onDownloadRevisionPackage} disabled={archiveBusy}>
+              Revisionspaket
             </button>
             <button type="button" className="link" onClick={onToggleLegalHold} disabled={archiveBusy}>
               {doc.legal_hold ? "Legal Hold entfernen" : "Legal Hold setzen"}
