@@ -36,6 +36,7 @@ import { ProcessingBadge } from "./ProcessingStatus";
 import UploadZone from "./UploadZone";
 import MobileCapture from "./MobileCapture";
 import CaseFilesPage from "./CaseFilesPage";
+import ContractsPage from "./ContractsPage";
 import CopilotPage from "./CopilotPage";
 import DocumentDetail from "./DocumentDetail";
 import RulesPage from "./RulesPage";
@@ -52,6 +53,7 @@ type FolderFilterValue = number | "none" | "";
 type MainView =
   | "docs"
   | "cases"
+  | "contracts"
   | "copilot"
   | "inbox"
   | "capture"
@@ -669,6 +671,8 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
               ? "Erfassen"
               : view === "cases"
                 ? "Akten"
+              : view === "contracts"
+                ? "Verträge"
               : view === "copilot"
                 ? "Copilot"
               : view === "inbox"
@@ -749,6 +753,11 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
                 setSelectedId(docId);
                 setSelectedPage(pageNo ?? null);
               }}
+            />
+          ) : view === "contracts" ? (
+            <ContractsPage
+              canEdit={!!me?.can_write}
+              onOpenDocument={(docId) => setSelectedId(docId)}
             />
           ) : view === "rules" ? (
             <RulesPage canEdit={!!me?.can_write} />
@@ -1225,6 +1234,12 @@ function Sidebar({
           onClick={() => onNavigate("cases")}
           label="Akten"
           icon="M3 5a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v2H3zm0 6h18v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"
+        />
+        <NavItem
+          active={view === "contracts"}
+          onClick={() => onNavigate("contracts")}
+          label="Verträge"
+          icon="M7 2h10a2 2 0 0 1 2 2v16l-4-2-3 2-3-2-4 2V4a2 2 0 0 1 2-2m2 5v2h6V7zm0 4v2h6v-2zm0 4v2h4v-2z"
         />
         <NavItem
           active={view === "inbox"}

@@ -66,6 +66,7 @@ from .models import (
     CaseFileCandidate,
     ClassificationRule,
     Correspondent,
+    ContractRecord,
     CustomField,
     CustomFieldValue,
     Document,
@@ -89,6 +90,7 @@ from .serializers import (
     CaseFileSerializer,
     ClassificationRuleSerializer,
     CorrespondentSerializer,
+    ContractRecordSerializer,
     CustomFieldSerializer,
     DocumentReminderSerializer,
     DocumentReviewTaskSerializer,
@@ -105,6 +107,7 @@ from .serializers import (
     WorkflowSerializer,
 )
 from .services import asn as asn_service
+from .services import contracts as contract_service
 from .services import review_tasks as review_task_service
 from .tasks import (
     bulk_classify_documents,
@@ -2810,6 +2813,222 @@ class DocumentReviewTaskViewSet(viewsets.ReadOnlyModelViewSet):
             target_status=DocumentReviewTask.Status.IGNORED,
             reason=str(request.data.get("reason", "manual_ignore")),
         )
+
+
+class ContractRecordViewSet(viewsets.ModelViewSet):
+    """Contract Center: Verträge, Fristen und Prüfstatus je Dokument.
+
+    Die Erkennung läuft deterministisch aus OCR/Metadaten. Nutzer können
+    erkannte Datensätze bestätigen oder manuell korrigieren; Wiedervorlagen und
+    Review-Aufgaben werden synchron gehalten. Owner-Isolation folgt dem
+    verknüpften Dokument: fremde Verträge/Dokumente sind 404 statt Datenleck.
+    """
+
+    queryset = ContractRecord.objects.all()
+    serializer_class = ContractRecordSerializer
+    permission_classes = [ReadOnlyOrCanWrite]
+
+    def get_queryset(self):
+        qs = ContractRecord.objects.select_related(
+            "document",
+            "document__correspondent",
+            "document__current_version",
+            "case_file",
+            "extracted_from_version",
+            "reviewed_by",
+        ).order_by(
+            "-needs_review",
+            "cancel_until",
+            "next_due_on",
+            "provider",
+        )
+        user = self.request.user
+        if not getattr(user, "is_dms_admin", False):
+            qs = qs.filter(document__owner=user)
+
+        params = self.request.query_params
+        status_value = params.get("status")
+        if status_value in {choice for choice, _label in ContractRecord.Status.choices}:
+            qs = qs.filter(status=status_value)
+        contract_type = params.get("contract_type")
+        if contract_type in {
+            choice for choice, _label in ContractRecord.ContractType.choices
+        }:
+            qs = qs.filter(contract_type=contract_type)
+        needs_review = params.get("needs_review")
+        if needs_review in {"1", "true", "yes"}:
+            qs = qs.filter(needs_review=True)
+        elif needs_review in {"0", "false", "no"}:
+            qs = qs.filter(needs_review=False)
+        return qs
+
+    def _ensure_document_visible(self, document):
+        user = self.request.user
+        if getattr(user, "is_dms_admin", False):
+            return
+        if document is None or document.owner_id != user.id:
+            raise Http404("Dokument nicht gefunden.")
+
+    def perform_create(self, serializer):
+        document = serializer.validated_data.get("document")
+        self._ensure_document_visible(document)
+        record = serializer.save(source=ContractRecord.Source.MANUAL)
+        contract_service.ensure_contract_reminders(record)
+        if record.needs_review:
+            contract_service.sync_contract_review_task(record, actor=self.request.user)
+        else:
+            contract_service.confirm_contract(record, actor=self.request.user)
+        AuditLogEntry.objects.create(
+            actor=self.request.user,
+            action="contract_manual_create",
+            object_type="ContractRecord",
+            object_id=str(record.id),
+            detail={"document": record.document_id},
+        )
+
+    def perform_update(self, serializer):
+        document = serializer.validated_data.get(
+            "document", getattr(serializer.instance, "document", None)
+        )
+        self._ensure_document_visible(document)
+        record = serializer.save(source=ContractRecord.Source.MANUAL)
+        contract_service.ensure_contract_reminders(record)
+        if record.needs_review:
+            contract_service.sync_contract_review_task(record, actor=self.request.user)
+        else:
+            contract_service.confirm_contract(record, actor=self.request.user)
+        AuditLogEntry.objects.create(
+            actor=self.request.user,
+            action="contract_manual_update",
+            object_type="ContractRecord",
+            object_id=str(record.id),
+            detail={"document": record.document_id},
+        )
+
+    @action(detail=True, methods=["post"])
+    def confirm(self, request, pk=None):
+        """Bestätigt Vertragsdaten und erledigt die offene Contract-Review."""
+        if not getattr(request.user, "can_write", False):
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        record = contract_service.confirm_contract(self.get_object(), actor=request.user)
+        return Response(self.get_serializer(record).data)
+
+    @action(detail=True, methods=["post"])
+    def rescan(self, request, pk=None):
+        """Scannt das verknüpfte Dokument erneut nach Vertragsdaten."""
+        if not getattr(request.user, "can_write", False):
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        record = self.get_object()
+        result = contract_service.sync_contract_record(record.document, actor=request.user)
+        record.refresh_from_db()
+        return Response({"result": result, "contract": self.get_serializer(record).data})
+
+    @action(detail=False, methods=["get"])
+    def summary(self, request):
+        """Kompakte Kennzahlen für das Vertrags-Cockpit."""
+        today = timezone.now().date()
+        cancel_until = today + timedelta(days=90)
+        due_until = today + timedelta(days=30)
+        qs = self.get_queryset()
+        return Response(
+            {
+                "total": qs.count(),
+                "active": qs.filter(status=ContractRecord.Status.ACTIVE).count(),
+                "needs_review": qs.filter(needs_review=True).count(),
+                "cancel_soon": qs.filter(
+                    status=ContractRecord.Status.ACTIVE,
+                    cancel_until__gte=today,
+                    cancel_until__lte=cancel_until,
+                ).count(),
+                "due_soon": qs.filter(
+                    status=ContractRecord.Status.ACTIVE,
+                    next_due_on__gte=today,
+                    next_due_on__lte=due_until,
+                ).count(),
+                "expired": qs.filter(status=ContractRecord.Status.EXPIRED).count(),
+            }
+        )
+
+    @action(detail=False, methods=["post"])
+    def scan(self, request):
+        """Scannt sichtbare Dokumente nach Vertragsdaten.
+
+        Ohne ``ids`` wird ein begrenzter Batch aktueller READY-Dokumente genutzt.
+        Das macht den Endpunkt UI-tauglich und verhindert versehentliche
+        Langläufer im Request-Thread; große Bestände können mehrfach gescannt
+        oder später per Management Command/Celery ausgebaut werden.
+        """
+        if not getattr(request.user, "can_write", False):
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        raw_limit = request.data.get("limit", 50) if hasattr(request, "data") else 50
+        try:
+            limit = int(raw_limit)
+        except (TypeError, ValueError):
+            limit = 50
+        limit = max(1, min(limit, 200))
+
+        qs = Document.objects.select_related(
+            "current_version",
+            "correspondent",
+            "document_type",
+            "case_file",
+        ).exclude(current_version__isnull=True)
+        if not getattr(request.user, "is_dms_admin", False):
+            qs = qs.filter(owner=request.user)
+
+        raw_ids = request.data.get("ids") if hasattr(request, "data") else None
+        if raw_ids:
+            if not isinstance(raw_ids, list):
+                return Response(
+                    {"detail": "Feld 'ids' muss eine Liste sein."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            try:
+                ids = [int(raw_id) for raw_id in raw_ids]
+            except (TypeError, ValueError):
+                return Response(
+                    {"detail": "Feld 'ids' enthält ungültige Dokument-IDs."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            qs = qs.filter(id__in=ids)
+        else:
+            qs = qs.filter(
+                current_version__processing_state=DocumentVersion.ProcessingState.READY
+            ).order_by("-added_at")[:limit]
+
+        counters = {
+            "created": 0,
+            "updated": 0,
+            "unchanged": 0,
+            "no_contract": 0,
+            "missing": 0,
+            "failed": 0,
+        }
+        errors = []
+        scanned = 0
+        for document in qs:
+            scanned += 1
+            try:
+                result = contract_service.sync_contract_record(
+                    document, actor=request.user
+                )
+            except Exception as exc:  # noqa: BLE001 - Batch soll weiterlaufen
+                counters["failed"] += 1
+                errors.append({"document": document.id, "error": str(exc)[:500]})
+                continue
+            status_value = result.get("status", "failed")
+            counters[status_value] = counters.get(status_value, 0) + 1
+
+        return Response({"scanned": scanned, **counters, "errors": errors})
 
 
 class TagViewSet(viewsets.ModelViewSet):

@@ -849,6 +849,7 @@ class DocumentReviewTask(models.Model):
         AI_SUGGESTION_PENDING = "ai_suggestion_pending", "KI-Vorschlag prüfen"
         EXTRACTION_PENDING = "extraction_pending", "Strukturdaten prüfen"
         CASE_FILE_PENDING = "case_file_pending", "Aktenvorschlag prüfen"
+        CONTRACT_REVIEW = "contract_review", "Vertrag prüfen"
         DUPLICATE_SUSPECTED = "duplicate_suspected", "Dublettenverdacht"
         ASN_MISSING = "asn_missing", "ASN fehlt"
         EMAIL_NEEDS_REVIEW = "email_needs_review", "E-Mail prüfen"
@@ -1410,6 +1411,111 @@ class DocumentReminder(models.Model):
 
     def __str__(self) -> str:
         return f"Erinnerung {self.remind_on} für Dokument #{self.document_id}"
+
+
+class ContractRecord(models.Model):
+    """Strukturierter Vertrag/Fristen-Datensatz zu einem Dokument.
+
+    Ein Vertrag ist mehr als ein Dokumenttyp: Er bündelt Anbieter, Vertragsnummer,
+    Beträge, Kündigungs-/Fälligkeitsdaten und den Prüfstatus. Das Modell bleibt
+    bewusst 1:1 am Dokument, damit die erste Version des Contract Centers robust
+    und leicht verständlich bleibt.
+    """
+
+    class ContractType(models.TextChoices):
+        INSURANCE = "insurance", "Versicherung"
+        ENERGY = "energy", "Energie"
+        TELECOM = "telecom", "Telekom"
+        RENT = "rent", "Miete"
+        LOAN = "loan", "Kredit"
+        SUBSCRIPTION = "subscription", "Abo"
+        PUBLIC = "public", "Behörde"
+        OTHER = "other", "Sonstiges"
+
+    class BillingCycle(models.TextChoices):
+        MONTHLY = "monthly", "Monatlich"
+        QUARTERLY = "quarterly", "Quartalsweise"
+        YEARLY = "yearly", "Jährlich"
+        ONE_TIME = "one_time", "Einmalig"
+        UNKNOWN = "unknown", "Unklar"
+
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Aktiv"
+        CANCELED = "canceled", "Gekündigt"
+        EXPIRED = "expired", "Abgelaufen"
+        UNCLEAR = "unclear", "Unklar"
+
+    class Source(models.TextChoices):
+        HEURISTIC = "heuristic", "Heuristik"
+        AI = "ai", "KI"
+        MANUAL = "manual", "Manuell"
+        RULE = "rule", "Regel"
+
+    document = models.OneToOneField(
+        Document, on_delete=models.CASCADE, related_name="contract_record"
+    )
+    case_file = models.ForeignKey(
+        CaseFile,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="contract_records",
+    )
+    contract_type = models.CharField(
+        max_length=24, choices=ContractType.choices, default=ContractType.OTHER
+    )
+    provider = models.CharField(max_length=255, blank=True, default="")
+    contract_number = models.CharField(max_length=128, blank=True, default="")
+    amount = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    currency = models.CharField(max_length=3, default="EUR")
+    billing_cycle = models.CharField(
+        max_length=16, choices=BillingCycle.choices, default=BillingCycle.UNKNOWN
+    )
+    starts_on = models.DateField(null=True, blank=True)
+    ends_on = models.DateField(null=True, blank=True)
+    notice_period_days = models.PositiveIntegerField(null=True, blank=True)
+    cancel_until = models.DateField(null=True, blank=True)
+    next_due_on = models.DateField(null=True, blank=True)
+    status = models.CharField(
+        max_length=16, choices=Status.choices, default=Status.UNCLEAR, db_index=True
+    )
+    confidence = models.PositiveSmallIntegerField(default=0)
+    source = models.CharField(
+        max_length=16, choices=Source.choices, default=Source.HEURISTIC
+    )
+    needs_review = models.BooleanField(default=True, db_index=True)
+    extracted_from_version = models.ForeignKey(
+        DocumentVersion,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="contract_records",
+    )
+    notes = models.TextField(blank=True, default="")
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="reviewed_contract_records",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Vertrag"
+        verbose_name_plural = "Verträge"
+        ordering = ["needs_review", "cancel_until", "next_due_on", "provider"]
+        indexes = [
+            models.Index(fields=["status", "next_due_on"], name="docs_contract_status_due"),
+            models.Index(fields=["needs_review", "status"], name="docs_contract_review"),
+            models.Index(fields=["cancel_until"], name="docs_contract_cancel"),
+        ]
+
+    def __str__(self) -> str:
+        provider = self.provider or self.document.title
+        return f"{provider} · {self.get_contract_type_display()}"
 
 
 # ---------------------------------------------------------------------------

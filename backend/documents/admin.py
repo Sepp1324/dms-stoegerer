@@ -9,6 +9,7 @@ from .models import (
     CaseFileCandidate,
     ClassificationRule,
     Correspondent,
+    ContractRecord,
     CustomField,
     CustomFieldValue,
     Document,
@@ -239,6 +240,44 @@ class DocumentReviewTaskAdmin(admin.ModelAdmin):
         "resolved_at",
         "resolved_by",
     )
+
+
+@admin.register(ContractRecord)
+class ContractRecordAdmin(admin.ModelAdmin):
+    list_display = (
+        "provider",
+        "document",
+        "contract_type",
+        "status",
+        "cancel_until",
+        "next_due_on",
+        "needs_review",
+        "confidence",
+    )
+    list_filter = (
+        "contract_type",
+        "status",
+        "billing_cycle",
+        "needs_review",
+        "source",
+    )
+    search_fields = (
+        "provider",
+        "contract_number",
+        "document__title",
+        "document__current_version__ocr_text",
+    )
+    readonly_fields = (
+        "confidence",
+        "source",
+        "extracted_from_version",
+        "reviewed_at",
+        "reviewed_by",
+        "created_at",
+        "updated_at",
+    )
+    raw_id_fields = ("document", "case_file", "extracted_from_version", "reviewed_by")
+    ordering = ("-needs_review", "cancel_until", "next_due_on", "provider")
 
 
 @admin.register(ClassificationRule)
