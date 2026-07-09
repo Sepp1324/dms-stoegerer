@@ -5,6 +5,7 @@ import type { KeyboardEvent, ReactNode } from "react";
 // verbindlich; ``ai`` erscheint nur bei Schreibrecht (KI-Panel ist canEdit-only).
 export type TabId =
   | "overview"
+  | "entities"
   | "versions"
   | "workbench"
   | "ai"
@@ -15,6 +16,7 @@ export type TabId =
 
 export const DETAIL_TABS: { id: TabId; label: string }[] = [
   { id: "overview", label: "Übersicht" },
+  { id: "entities", label: "Entitäten" },
   { id: "versions", label: "Versionen & Verlauf" },
   { id: "workbench", label: "Werkbank" },
   { id: "ai", label: "KI-Vorschläge" },

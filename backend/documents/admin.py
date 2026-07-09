@@ -13,12 +13,16 @@ from .models import (
     CustomField,
     CustomFieldValue,
     Document,
+    DocumentEntity,
     DocumentFolder,
     DocumentPageText,
     DocumentReviewTask,
     DocumentType,
     DocumentVersion,
+    EntityIdentifier,
+    EntityRelation,
     ExtractionCandidate,
+    KnowledgeEntity,
     MailAccount,
     ProcessedMail,
     StoragePath,
@@ -278,6 +282,40 @@ class ContractRecordAdmin(admin.ModelAdmin):
     )
     raw_id_fields = ("document", "case_file", "extracted_from_version", "reviewed_by")
     ordering = ("-needs_review", "cancel_until", "next_due_on", "provider")
+
+
+class EntityIdentifierInline(admin.TabularInline):
+    model = EntityIdentifier
+    extra = 0
+    fields = ("kind", "value", "normalized_value", "source", "confidence")
+    readonly_fields = ("normalized_value",)
+
+
+@admin.register(KnowledgeEntity)
+class KnowledgeEntityAdmin(admin.ModelAdmin):
+    list_display = ("name", "kind", "owner", "confidence", "source", "last_seen_at")
+    list_filter = ("kind", "source", "owner")
+    search_fields = ("name", "canonical_name", "identifiers__value")
+    readonly_fields = ("canonical_name", "first_seen_at", "last_seen_at")
+    raw_id_fields = ("owner",)
+    inlines = (EntityIdentifierInline,)
+    ordering = ("kind", "name")
+
+
+@admin.register(DocumentEntity)
+class DocumentEntityAdmin(admin.ModelAdmin):
+    list_display = ("document", "entity", "role", "source", "confidence", "occurrences")
+    list_filter = ("role", "source", "entity__kind")
+    search_fields = ("document__title", "entity__name", "source_snippet")
+    raw_id_fields = ("document", "entity")
+
+
+@admin.register(EntityRelation)
+class EntityRelationAdmin(admin.ModelAdmin):
+    list_display = ("from_entity", "relation_type", "to_entity", "document", "confidence")
+    list_filter = ("relation_type", "source")
+    search_fields = ("from_entity__name", "to_entity__name", "document__title")
+    raw_id_fields = ("from_entity", "to_entity", "document")
 
 
 @admin.register(ClassificationRule)

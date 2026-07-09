@@ -828,6 +828,193 @@ class CaseFileCandidate(models.Model):
         return f"{self.document_id} → {target} ({self.score}%)"
 
 
+class KnowledgeEntity(models.Model):
+    """Ein erkannter Akteur oder Identifier im privaten DMS-Gedächtnis.
+
+    Entitäten sind bewusst owner-gescoped: derselbe Name kann in zwei privaten
+    Dokumenträumen unterschiedliche Bedeutung haben. Dokumentverknüpfungen und
+    Beziehungen bauen darauf den fachlichen Graphen auf.
+    """
+
+    class Kind(models.TextChoices):
+        PERSON = "person", "Person"
+        COMPANY = "company", "Firma"
+        AUTHORITY = "authority", "Behörde"
+        IBAN = "iban", "IBAN"
+        EMAIL = "email", "E-Mail"
+        PHONE = "phone", "Telefon"
+        CONTRACT_NUMBER = "contract_number", "Vertragsnummer"
+        POLICY_NUMBER = "policy_number", "Polizzennummer"
+        CUSTOMER_NUMBER = "customer_number", "Kundennummer"
+        TAX_NUMBER = "tax_number", "Steuernummer"
+        ADDRESS = "address", "Adresse"
+        OTHER = "other", "Sonstiges"
+
+    class Source(models.TextChoices):
+        OCR = "ocr", "OCR"
+        METADATA = "metadata", "Metadaten"
+        MAIL = "mail", "E-Mail"
+        CONTRACT = "contract", "Contract Center"
+        MANUAL = "manual", "Manuell"
+        HEURISTIC = "heuristic", "Heuristik"
+
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="knowledge_entities",
+    )
+    kind = models.CharField(max_length=32, choices=Kind.choices, db_index=True)
+    name = models.CharField(max_length=255)
+    canonical_name = models.CharField(max_length=255)
+    confidence = models.PositiveSmallIntegerField(default=50)
+    source = models.CharField(max_length=24, choices=Source.choices, default=Source.HEURISTIC)
+    metadata = models.JSONField(default=dict, blank=True)
+    first_seen_at = models.DateTimeField(auto_now_add=True)
+    last_seen_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        verbose_name = "Entität"
+        verbose_name_plural = "Entitäten"
+        ordering = ["kind", "name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["owner", "kind", "canonical_name"],
+                name="docs_ent_owner_kind_name",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["owner", "kind"], name="docs_ent_owner_kind"),
+            models.Index(fields=["kind", "canonical_name"], name="docs_ent_kind_name"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.name} ({self.get_kind_display()})"
+
+
+class EntityIdentifier(models.Model):
+    """Normalisierter Identifier an einer Entität, z. B. IBAN oder Kundennummer."""
+
+    entity = models.ForeignKey(
+        KnowledgeEntity, on_delete=models.CASCADE, related_name="identifiers"
+    )
+    kind = models.CharField(max_length=32, choices=KnowledgeEntity.Kind.choices)
+    value = models.CharField(max_length=255)
+    normalized_value = models.CharField(max_length=255)
+    source = models.CharField(
+        max_length=24,
+        choices=KnowledgeEntity.Source.choices,
+        default=KnowledgeEntity.Source.HEURISTIC,
+    )
+    confidence = models.PositiveSmallIntegerField(default=50)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Entitäts-Identifier"
+        verbose_name_plural = "Entitäts-Identifier"
+        unique_together = ("entity", "kind", "normalized_value")
+        indexes = [
+            models.Index(fields=["kind", "normalized_value"], name="docs_ident_kind_value"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.get_kind_display()}: {self.value}"
+
+
+class DocumentEntity(models.Model):
+    """Verknüpfung zwischen Dokument und Entität inklusive Rolle/Quelle."""
+
+    class Role(models.TextChoices):
+        MENTION = "mention", "Erwähnung"
+        CORRESPONDENT = "correspondent", "Korrespondent"
+        SENDER = "sender", "Absender"
+        RECIPIENT = "recipient", "Empfänger"
+        SUBJECT = "subject", "Betreff"
+        CONTRACT = "contract", "Vertrag"
+        ACCOUNT = "account", "Konto"
+        REFERENCE = "reference", "Referenz"
+
+    document = models.ForeignKey(
+        Document, on_delete=models.CASCADE, related_name="entity_links"
+    )
+    entity = models.ForeignKey(
+        KnowledgeEntity, on_delete=models.CASCADE, related_name="document_links"
+    )
+    role = models.CharField(max_length=24, choices=Role.choices, default=Role.MENTION)
+    source = models.CharField(
+        max_length=24,
+        choices=KnowledgeEntity.Source.choices,
+        default=KnowledgeEntity.Source.HEURISTIC,
+    )
+    confidence = models.PositiveSmallIntegerField(default=50)
+    occurrences = models.PositiveIntegerField(default=1)
+    source_snippet = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Dokument-Entität"
+        verbose_name_plural = "Dokument-Entitäten"
+        unique_together = ("document", "entity", "role", "source")
+        indexes = [
+            models.Index(fields=["document", "role"], name="docs_docent_doc_role"),
+            models.Index(fields=["entity", "role"], name="docs_docent_ent_role"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.document_id} → {self.entity}"
+
+
+class EntityRelation(models.Model):
+    """Kante zwischen zwei Entitäten im DMS-Gedächtnis."""
+
+    class RelationType(models.TextChoices):
+        RELATED = "related", "Verbunden"
+        MENTIONED_WITH = "mentioned_with", "Gemeinsam erwähnt"
+        USES_IDENTIFIER = "uses_identifier", "Nutzt Identifier"
+        CONTRACT_WITH = "contract_with", "Vertrag mit"
+        SAME_AS = "same_as", "Identisch"
+
+    from_entity = models.ForeignKey(
+        KnowledgeEntity, on_delete=models.CASCADE, related_name="outgoing_relations"
+    )
+    to_entity = models.ForeignKey(
+        KnowledgeEntity, on_delete=models.CASCADE, related_name="incoming_relations"
+    )
+    relation_type = models.CharField(
+        max_length=32, choices=RelationType.choices, default=RelationType.RELATED
+    )
+    document = models.ForeignKey(
+        Document,
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="entity_relations",
+    )
+    confidence = models.PositiveSmallIntegerField(default=50)
+    source = models.CharField(
+        max_length=24,
+        choices=KnowledgeEntity.Source.choices,
+        default=KnowledgeEntity.Source.HEURISTIC,
+    )
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Entitätsbeziehung"
+        verbose_name_plural = "Entitätsbeziehungen"
+        unique_together = ("from_entity", "to_entity", "relation_type", "document")
+        indexes = [
+            models.Index(fields=["from_entity", "relation_type"], name="docs_rel_from_type"),
+            models.Index(fields=["to_entity", "relation_type"], name="docs_rel_to_type"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.from_entity} → {self.to_entity} ({self.get_relation_type_display()})"
+
+
 class DocumentReviewTask(models.Model):
     """Konkreter Klärungsauftrag für ein Dokument.
 

@@ -39,6 +39,7 @@ import CaseFilesPage from "./CaseFilesPage";
 import ContractsPage from "./ContractsPage";
 import CopilotPage from "./CopilotPage";
 import DocumentDetail from "./DocumentDetail";
+import KnowledgeGraphPage from "./KnowledgeGraphPage";
 import RulesPage from "./RulesPage";
 import DuePage from "./DuePage";
 import WorkflowsPage from "./WorkflowsPage";
@@ -54,6 +55,7 @@ type MainView =
   | "docs"
   | "cases"
   | "contracts"
+  | "knowledge"
   | "copilot"
   | "inbox"
   | "capture"
@@ -673,6 +675,8 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
                 ? "Akten"
               : view === "contracts"
                 ? "Verträge"
+              : view === "knowledge"
+                ? "Gedächtnis"
               : view === "copilot"
                 ? "Copilot"
               : view === "inbox"
@@ -756,6 +760,11 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
             />
           ) : view === "contracts" ? (
             <ContractsPage
+              canEdit={!!me?.can_write}
+              onOpenDocument={(docId) => setSelectedId(docId)}
+            />
+          ) : view === "knowledge" ? (
+            <KnowledgeGraphPage
               canEdit={!!me?.can_write}
               onOpenDocument={(docId) => setSelectedId(docId)}
             />
@@ -1240,6 +1249,12 @@ function Sidebar({
           onClick={() => onNavigate("contracts")}
           label="Verträge"
           icon="M7 2h10a2 2 0 0 1 2 2v16l-4-2-3 2-3-2-4 2V4a2 2 0 0 1 2-2m2 5v2h6V7zm0 4v2h6v-2zm0 4v2h4v-2z"
+        />
+        <NavItem
+          active={view === "knowledge"}
+          onClick={() => onNavigate("knowledge")}
+          label="Gedächtnis"
+          icon="M12 2a4 4 0 0 1 4 4v1h2a3 3 0 0 1 0 6h-2v2h2a3 3 0 1 1 0 6h-4v-4h-4v4H6a3 3 0 1 1 0-6h2v-2H6a3 3 0 0 1 0-6h2V6a4 4 0 0 1 4-4m-2 5h4V6a2 2 0 1 0-4 0zm0 2v2h4V9zm0 4v2h4v-2z"
         />
         <NavItem
           active={view === "inbox"}

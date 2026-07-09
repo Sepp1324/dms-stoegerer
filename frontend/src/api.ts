@@ -468,6 +468,125 @@ export interface ContractQuery {
   needs_review?: boolean | "";
 }
 
+export type KnowledgeEntityKind =
+  | "person"
+  | "company"
+  | "authority"
+  | "iban"
+  | "email"
+  | "phone"
+  | "contract_number"
+  | "policy_number"
+  | "customer_number"
+  | "tax_number"
+  | "address"
+  | "other";
+export type EntitySource =
+  | "ocr"
+  | "metadata"
+  | "mail"
+  | "contract"
+  | "manual"
+  | "heuristic";
+export type DocumentEntityRole =
+  | "mention"
+  | "correspondent"
+  | "sender"
+  | "recipient"
+  | "subject"
+  | "contract"
+  | "account"
+  | "reference";
+export type EntityRelationType =
+  | "related"
+  | "mentioned_with"
+  | "uses_identifier"
+  | "contract_with"
+  | "same_as";
+export interface EntityIdentifier {
+  id: number;
+  entity: number;
+  kind: KnowledgeEntityKind;
+  kind_label: string;
+  value: string;
+  normalized_value: string;
+  source: EntitySource;
+  confidence: number;
+  created_at: string;
+}
+export interface KnowledgeEntity {
+  id: number;
+  owner: number | null;
+  kind: KnowledgeEntityKind;
+  kind_label: string;
+  name: string;
+  canonical_name: string;
+  confidence: number;
+  source: EntitySource;
+  source_label: string;
+  metadata: Record<string, unknown>;
+  identifiers: EntityIdentifier[];
+  document_count: number;
+  relation_count: number;
+  first_seen_at: string;
+  last_seen_at: string;
+}
+export interface DocumentEntityLink {
+  id: number;
+  document: number;
+  document_title: string;
+  entity: number;
+  entity_name: string;
+  entity_kind: KnowledgeEntityKind;
+  entity_kind_label: string;
+  role: DocumentEntityRole;
+  role_label: string;
+  source: EntitySource;
+  source_label: string;
+  confidence: number;
+  occurrences: number;
+  source_snippet: string;
+  created_at: string;
+  updated_at: string;
+}
+export interface EntityRelation {
+  id: number;
+  from_entity: number;
+  from_name: string;
+  from_kind: KnowledgeEntityKind;
+  to_entity: number;
+  to_name: string;
+  to_kind: KnowledgeEntityKind;
+  relation_type: EntityRelationType;
+  relation_type_label: string;
+  document: number | null;
+  document_title: string | null;
+  confidence: number;
+  source: EntitySource;
+  source_label: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+export interface KnowledgeSummary {
+  total: number;
+  by_kind: Partial<Record<KnowledgeEntityKind, number>>;
+  documents_linked: number;
+}
+export interface EntityScanResult {
+  scanned: number;
+  entities: number;
+  links: number;
+  relations: number;
+  failed: number;
+  errors: { document?: number; error: string }[];
+}
+export interface KnowledgeEntityQuery {
+  q?: string;
+  kind?: KnowledgeEntityKind | "";
+  document?: number | "";
+}
+
 export type CaseFileCandidateKind = "existing_case" | "new_case";
 export type CaseFileCandidateStatus = "pending" | "applied" | "dismissed";
 export interface CaseFileCandidateSignal {
@@ -1554,6 +1673,50 @@ export function scanContracts(ids?: number[]): Promise<ContractScanResult> {
 
 export function confirmContract(id: number): Promise<ContractRecord> {
   return postJson<ContractRecord>(`/contracts/${id}/confirm/`, {});
+}
+
+export async function getKnowledgeEntities(
+  query: KnowledgeEntityQuery = {},
+): Promise<KnowledgeEntity[]> {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) {
+    if (value !== undefined && value !== "" && value !== null) {
+      params.set(key, String(value));
+    }
+  }
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  return listAllPages<KnowledgeEntity>(`/knowledge-entities/${suffix}`);
+}
+
+export async function getKnowledgeSummary(): Promise<KnowledgeSummary> {
+  const res = await apiFetch("/knowledge-entities/summary/");
+  if (!res.ok) throw new Error(`Gedächtnis-Status laden fehlgeschlagen: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function getEntityDocuments(id: number): Promise<DocumentItem[]> {
+  const res = await apiFetch(`/knowledge-entities/${id}/documents/`);
+  if (!res.ok) throw new Error(`Dokumente laden fehlgeschlagen: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function getEntityRelations(id: number): Promise<EntityRelation[]> {
+  const res = await apiFetch(`/knowledge-entities/${id}/relations/`);
+  if (!res.ok) throw new Error(`Beziehungen laden fehlgeschlagen: HTTP ${res.status}`);
+  return res.json();
+}
+
+export function scanKnowledgeEntities(ids?: number[]): Promise<EntityScanResult> {
+  return postJson<EntityScanResult>(
+    "/knowledge-entities/scan/",
+    ids ? { ids } : {},
+  );
+}
+
+export function getDocumentEntities(
+  documentId: number,
+): Promise<DocumentEntityLink[]> {
+  return listAllPages<DocumentEntityLink>(`/document-entities/?document=${documentId}`);
 }
 
 export async function updateContract(
