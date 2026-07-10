@@ -51,30 +51,17 @@ import InboxPage from "./InboxPage";
 import EvidenceCenterPage from "./EvidenceCenterPage";
 import QualityCenterPage from "./QualityCenterPage";
 import DashboardPage from "./DashboardPage";
+import CommandPalette, {
+  type CommandPreset,
+  type CommandView,
+} from "./CommandPalette";
 
 // Von-/Bis-Eingaben eines CURRENCY-Zusatzfeld-Filters (STOAA-113).
 type CurrencyRange = { gte: string; lte: string };
 type FolderFilterValue = number | "none" | "";
 type WorkspaceMode = "cards" | "compact";
-type WorkspacePreset = "latest" | "processing" | "failed" | "unfiled" | "inbox" | "quality";
-type MainView =
-  | "dashboard"
-  | "docs"
-  | "cases"
-  | "dossiers"
-  | "contracts"
-  | "knowledge"
-  | "copilot"
-  | "inbox"
-  | "capture"
-  | "rules"
-  | "workflows"
-  | "fields"
-  | "mail"
-  | "evidence"
-  | "quality"
-  | "system"
-  | "faellig";
+type WorkspacePreset = CommandPreset;
+type MainView = CommandView;
 
 // Muss dem Backend entsprechen (DRF PageNumberPagination, config/settings.py:
 // REST_FRAMEWORK["PAGE_SIZE"] = 25). Nur für die Anzeige „Seite X von N" nötig;
@@ -204,6 +191,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   });
   // Aktive Hauptansicht (persistente linke Navigation).
   const [view, setView] = useState<MainView>("dashboard");
+  const [commandOpen, setCommandOpen] = useState(false);
   // Sidebar auf schmalen Screens ein-/ausklappbar.
   const [navOpen, setNavOpen] = useState(false);
   // Desktop-Sidebar auf Icon-only einklappbar; Zustand persistent (localStorage).
@@ -464,6 +452,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     setCurrencyFilters({});
     setTriage(false);
     setPage(1);
+    setView("docs");
 
     if (preset === "latest") {
       setOrdering("-added_at");
@@ -670,49 +659,80 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
 
   const previewDoc = previewId ? docs.find((doc) => doc.id === previewId) ?? null : null;
 
-  if (selectedId !== null) {
-    return (
-      <DocumentDetail
-        id={selectedId}
-        initialPage={selectedPage}
-        onBack={() => {
-          setSelectedId(null);
-          setSelectedPage(null);
-          setReloadKey((k) => k + 1); // ggf. geänderte Metadaten in der Liste zeigen
-        }}
-        correspondents={correspondents}
-        documentTypes={documentTypes}
-        storagePaths={storagePaths}
-        folders={folders.map((f) => ({ id: f.id, name: f.full_path }))}
-        allTags={tags}
-        customFields={customFields}
-        canEdit={!!me?.can_write}
-        onCreateCorrespondent={addCorrespondent}
-        onCreateDocumentType={addDocumentType}
-        onCreateStoragePath={addStoragePath}
-        onCreateFolder={addFolder}
-        onCreateTag={addTag}
-        onOpenDocument={(docId, pageNo) => {
-          setSelectedId(docId);
-          setSelectedPage(pageNo ?? null);
-        }}
-        onManageFields={
-          me?.is_dms_admin
-            ? () => {
-              setSelectedId(null);
-              setSelectedPage(null);
-              setView("fields");
-            }
-            : undefined
-        }
-      />
-    );
-  }
-
   const navigate = (v: MainView) => {
     setView(v);
     setNavOpen(false); // Overlay auf Mobil nach Auswahl schließen
   };
+
+  function navigateFromCommand(v: MainView) {
+    setSelectedId(null);
+    setSelectedPage(null);
+    navigate(v);
+    setCommandOpen(false);
+  }
+
+  function applyPresetFromCommand(preset: WorkspacePreset) {
+    setSelectedId(null);
+    setSelectedPage(null);
+    applyWorkspacePreset(preset);
+    setCommandOpen(false);
+  }
+
+  function openDocumentFromCommand(documentId: number) {
+    setSelectedPage(null);
+    setSelectedId(documentId);
+    setCommandOpen(false);
+  }
+
+  if (selectedId !== null) {
+    return (
+      <>
+        <DocumentDetail
+          id={selectedId}
+          initialPage={selectedPage}
+          onBack={() => {
+            setSelectedId(null);
+            setSelectedPage(null);
+            setReloadKey((k) => k + 1); // ggf. geänderte Metadaten in der Liste zeigen
+          }}
+          correspondents={correspondents}
+          documentTypes={documentTypes}
+          storagePaths={storagePaths}
+          folders={folders.map((f) => ({ id: f.id, name: f.full_path }))}
+          allTags={tags}
+          customFields={customFields}
+          canEdit={!!me?.can_write}
+          onCreateCorrespondent={addCorrespondent}
+          onCreateDocumentType={addDocumentType}
+          onCreateStoragePath={addStoragePath}
+          onCreateFolder={addFolder}
+          onCreateTag={addTag}
+          onOpenDocument={(docId, pageNo) => {
+            setSelectedId(docId);
+            setSelectedPage(pageNo ?? null);
+          }}
+          onManageFields={
+            me?.is_dms_admin
+              ? () => {
+                setSelectedId(null);
+                setSelectedPage(null);
+                setView("fields");
+              }
+              : undefined
+          }
+        />
+        <CommandPalette
+          open={commandOpen}
+          onOpenChange={setCommandOpen}
+          canWrite={!!me?.can_write}
+          isAdmin={!!me?.is_dms_admin}
+          onNavigate={navigateFromCommand}
+          onApplyPreset={applyPresetFromCommand}
+          onOpenDocument={openDocumentFromCommand}
+        />
+      </>
+    );
+  }
 
   return (
     <div className="layout">
@@ -799,6 +819,20 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
                         ? "Wiedervorlage"
                         : "Dokumente"}
           </h1>
+          <button
+            type="button"
+            className="command-trigger"
+            aria-label="Command Palette öffnen"
+            title="Suchen und Aktionen"
+            onClick={() => setCommandOpen(true)}
+          >
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+              <path
+                fill="currentColor"
+                d="M10 4a6 6 0 0 1 4.8 9.6l4.3 4.3-1.4 1.4-4.3-4.3A6 6 0 1 1 10 4m0 2a4 4 0 1 0 0 8 4 4 0 0 0 0-8"
+              />
+            </svg>
+          </button>
           {view === "docs" && (
             <>
               <input
@@ -1081,6 +1115,15 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
       {navOpen && (
         <div className="nav-backdrop" onClick={() => setNavOpen(false)} />
       )}
+      <CommandPalette
+        open={commandOpen}
+        onOpenChange={setCommandOpen}
+        canWrite={!!me?.can_write}
+        isAdmin={!!me?.is_dms_admin}
+        onNavigate={navigateFromCommand}
+        onApplyPreset={applyPresetFromCommand}
+        onOpenDocument={openDocumentFromCommand}
+      />
     </div>
   );
 }
