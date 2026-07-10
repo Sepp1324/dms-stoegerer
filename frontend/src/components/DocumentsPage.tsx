@@ -1301,7 +1301,7 @@ function Sidebar({
         <NavItem
           active={view === "faellig"}
           onClick={() => onNavigate("faellig")}
-          label="Wiedervorlage"
+          label="Fristen"
           icon="M12 2a6 6 0 0 0-6 6c0 3.5-1 5-2 6v1h16v-1c-1-1-2-2.5-2-6a6 6 0 0 0-6-6m0 20a2 2 0 0 0 2-2h-4a2 2 0 0 0 2 2z"
         />
         <NavItem

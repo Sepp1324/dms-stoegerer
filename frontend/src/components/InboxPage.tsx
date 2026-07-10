@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import {
+  applySuggestions,
   applyCaseFileCandidate,
   applyExtractionCandidate,
   dismissCaseFileCandidate,
   dismissExtractionCandidate,
+  getAutopilotInbox,
   generateInboxCandidates,
   generateCaseFileCandidates,
   generateExtractionCandidates,
@@ -17,6 +19,9 @@ import {
   markDocumentReviewed,
   markDocumentsReviewed,
   resolveReviewTask,
+  type AutopilotInbox,
+  type AutopilotItem,
+  type AutopilotSuggestion,
   type CaseFileCandidate,
   type DocumentItem,
   type ExtractionCandidate,
@@ -89,6 +94,146 @@ function SummaryCard({
   );
 }
 
+function laneTone(lane: AutopilotItem["lane"]): "default" | "warn" | "error" | "ok" {
+  if (lane === "ready") return "ok";
+  if (lane === "error") return "error";
+  if (lane === "metadata" || lane === "suggestions") return "warn";
+  return "default";
+}
+
+function AutopilotCockpit({
+  data,
+  onOpenDocument,
+}: {
+  data: AutopilotInbox | null;
+  onOpenDocument: (id: number) => void;
+}) {
+  if (!data) return null;
+  const lanes = data.summary.lanes;
+  const focusItems = data.items
+    .filter((item) => item.lane !== "ready")
+    .sort((a, b) => a.confidence - b.confidence)
+    .slice(0, 4);
+
+  return (
+    <section className="autopilot-cockpit" aria-label="Ablage-Autopilot">
+      <div className="autopilot-cockpit__head">
+        <div>
+          <p className="eyebrow">Ablage-Autopilot</p>
+          <h3>{data.summary.average_confidence}% durchschnittliche Sicherheit</h3>
+        </div>
+        <div className="autopilot-cockpit__stats">
+          <span>
+            <strong>{data.summary.auto_ready}</strong>
+            automatisch bereit
+          </span>
+          <span>
+            <strong>{data.summary.needs_human}</strong>
+            braucht Blick
+          </span>
+          <span>
+            <strong>{data.summary.pending_suggestions}</strong>
+            Vorschläge
+          </span>
+        </div>
+      </div>
+      <div className="autopilot-lanes">
+        <span className="autopilot-lane autopilot-lane--ok">Bereit {lanes.ready}</span>
+        <span className="autopilot-lane autopilot-lane--warn">
+          Vorschläge {lanes.suggestions}
+        </span>
+        <span className="autopilot-lane autopilot-lane--warn">
+          Metadaten {lanes.metadata}
+        </span>
+        <span className="autopilot-lane">Pipeline {lanes.processing}</span>
+        <span className="autopilot-lane autopilot-lane--error">
+          Fehler {lanes.error}
+        </span>
+      </div>
+      {focusItems.length > 0 && (
+        <div className="autopilot-focus">
+          {focusItems.map((item) => (
+            <button
+              type="button"
+              key={item.document}
+              className="autopilot-focus__item"
+              onClick={() => onOpenDocument(item.document)}
+              title={item.title}
+            >
+              <span>{item.lane_label}</span>
+              <strong>{item.title}</strong>
+              <small>
+                {item.confidence}% · {item.next_actions[0]?.label}
+              </small>
+            </button>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function AutopilotRow({
+  item,
+  canEdit,
+  busy,
+  onApplySuggestion,
+}: {
+  item: AutopilotItem | undefined;
+  canEdit: boolean;
+  busy: string | null;
+  onApplySuggestion: (item: AutopilotItem, suggestion: AutopilotSuggestion) => void;
+}) {
+  if (!item) return null;
+  const visibleSuggestions = item.suggestions.slice(0, 3);
+
+  return (
+    <div className={`autopilot-row autopilot-row--${laneTone(item.lane)}`}>
+      <div className="autopilot-row__head">
+        <span>{item.lane_label}</span>
+        <strong>{item.confidence}%</strong>
+      </div>
+      <div className="autopilot-row__body">
+        {item.missing_metadata.length > 0 && (
+          <p>Fehlt: {item.missing_metadata.join(", ")}</p>
+        )}
+        {item.reasons.slice(0, 2).map((reason) => (
+          <p key={reason}>{reason}</p>
+        ))}
+      </div>
+      {visibleSuggestions.length > 0 && (
+        <div className="autopilot-suggestions">
+          {visibleSuggestions.map((suggestion) => {
+            const key = [
+              item.document,
+              suggestion.kind,
+              suggestion.field,
+              suggestion.action.candidate_id ?? suggestion.value,
+            ].join(":");
+            return (
+              <div className="autopilot-suggestion" key={key}>
+                <span>{suggestion.label}</span>
+                <strong>{suggestion.value}</strong>
+                <small>{suggestion.confidence}%</small>
+                {canEdit && (
+                  <button
+                    type="button"
+                    className="link"
+                    onClick={() => onApplySuggestion(item, suggestion)}
+                    disabled={busy === key}
+                  >
+                    {busy === key ? "Übernehme …" : "Übernehmen"}
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function InboxPage({
   canEdit,
   onOpenDocument,
@@ -99,6 +244,7 @@ export default function InboxPage({
   const [docs, setDocs] = useState<DocumentItem[]>([]);
   const [count, setCount] = useState(0);
   const [summary, setSummary] = useState<InboxSummary | null>(null);
+  const [autopilot, setAutopilot] = useState<AutopilotInbox | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [savingId, setSavingId] = useState<number | null>(null);
@@ -115,12 +261,21 @@ export default function InboxPage({
     Record<number, CaseFileCandidate[]>
   >({});
   const [caseCandidateBusy, setCaseCandidateBusy] = useState<string | null>(null);
+  const [autopilotBusy, setAutopilotBusy] = useState<string | null>(null);
 
   async function refreshSummary() {
     try {
       setSummary(await getInboxSummary());
     } catch {
       /* Die Dokumentliste ist wichtiger; Summary bleibt beim letzten Stand. */
+    }
+  }
+
+  async function refreshAutopilot() {
+    try {
+      setAutopilot(await getAutopilotInbox());
+    } catch {
+      /* Die klassische Inbox bleibt nutzbar, falls der Autopilot kurz hakt. */
     }
   }
 
@@ -135,11 +290,13 @@ export default function InboxPage({
         ordering: "-added_at",
       }),
       getInboxSummary(),
+      getAutopilotInbox(),
     ])
-      .then(([res, nextSummary]) => {
+      .then(([res, nextSummary, nextAutopilot]) => {
         setDocs(res.results);
         setCount(res.count);
         setSummary(nextSummary);
+        setAutopilot(nextAutopilot);
         setSelectedIds((current) => {
           const visible = new Set(res.results.map((doc) => doc.id));
           return new Set([...current].filter((id) => visible.has(id)));
@@ -156,6 +313,9 @@ export default function InboxPage({
 
   const visibleIds = docs.map((doc) => doc.id);
   const selectedVisibleIds = visibleIds.filter((id) => selectedIds.has(id));
+  const autopilotByDoc = new Map(
+    (autopilot?.items ?? []).map((item) => [item.document, item]),
+  );
   const allVisibleSelected =
     docs.length > 0 && visibleIds.every((id) => selectedIds.has(id));
 
@@ -218,6 +378,7 @@ export default function InboxPage({
       });
       setCount((current) => Math.max(0, current - 1));
       await refreshSummary();
+      await refreshAutopilot();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -267,6 +428,7 @@ export default function InboxPage({
       setCandidatesByDoc((current) => ({ ...current, [docId]: list }));
       await refreshDocumentCard(docId);
       await refreshSummary();
+      await refreshAutopilot();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -283,6 +445,7 @@ export default function InboxPage({
       await refreshDocCandidates(docId);
       await refreshDocumentCard(docId);
       await refreshSummary();
+      await refreshAutopilot();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -299,6 +462,7 @@ export default function InboxPage({
       await refreshDocCandidates(docId);
       await refreshDocumentCard(docId);
       await refreshSummary();
+      await refreshAutopilot();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -320,6 +484,7 @@ export default function InboxPage({
       setCaseCandidatesByDoc((current) => ({ ...current, [docId]: list }));
       await refreshDocumentCard(docId);
       await refreshSummary();
+      await refreshAutopilot();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -348,6 +513,7 @@ export default function InboxPage({
         ),
       );
       await refreshSummary();
+      await refreshAutopilot();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -364,6 +530,7 @@ export default function InboxPage({
       await refreshCaseCandidates(docId);
       await refreshDocumentCard(docId);
       await refreshSummary();
+      await refreshAutopilot();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -382,6 +549,7 @@ export default function InboxPage({
       await loadCandidates(docs);
       load();
       await refreshSummary();
+      await refreshAutopilot();
       const created = result.extraction_created + result.case_created;
       setBulkMessage(
         `${created} Vorschläge für ${result.documents} Dokumente erzeugt.`,
@@ -406,6 +574,7 @@ export default function InboxPage({
       setSelectedIds(new Set());
       setCount((current) => Math.max(0, current - result.updated));
       await refreshSummary();
+      await refreshAutopilot();
       setBulkMessage(`${result.updated} Dokumente als geprüft markiert.`);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -436,10 +605,50 @@ export default function InboxPage({
         ),
       );
       await refreshSummary();
+      await refreshAutopilot();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setTaskBusy(null);
+    }
+  }
+
+  async function applyAutopilotSuggestion(
+    item: AutopilotItem,
+    suggestion: AutopilotSuggestion,
+  ) {
+    const key = [
+      item.document,
+      suggestion.kind,
+      suggestion.field,
+      suggestion.action.candidate_id ?? suggestion.value,
+    ].join(":");
+    setAutopilotBusy(key);
+    setError(null);
+    setBulkMessage(null);
+    try {
+      if (suggestion.action.type === "apply_ai_suggestion") {
+        await applySuggestions(item.document, suggestion.action.fields);
+      } else if (
+        suggestion.action.type === "apply_extraction_candidate" &&
+        suggestion.action.candidate_id
+      ) {
+        await applyExtractionCandidate(item.document, suggestion.action.candidate_id);
+        await refreshDocCandidates(item.document);
+      } else if (
+        suggestion.action.type === "apply_case_file_candidate" &&
+        suggestion.action.candidate_id
+      ) {
+        await applyCaseFileCandidate(item.document, suggestion.action.candidate_id);
+        await refreshCaseCandidates(item.document);
+      }
+      await refreshDocumentCard(item.document);
+      await refreshSummary();
+      await refreshAutopilot();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAutopilotBusy(null);
     }
   }
 
@@ -506,6 +715,8 @@ export default function InboxPage({
         </div>
       )}
 
+      <AutopilotCockpit data={autopilot} onOpenDocument={onOpenDocument} />
+
       {docs.length === 0 ? (
         <div className="state">
           <strong>Alles geprüft.</strong>
@@ -552,6 +763,7 @@ export default function InboxPage({
           <div className="inbox-list">
             {docs.map((doc) => {
               const learnText = learnTextByDoc[doc.id] ?? "";
+              const autopilotItem = autopilotByDoc.get(doc.id);
               return (
                 <article
                   className={`inbox-row ${canEdit ? "inbox-row--selectable" : ""}`}
@@ -594,6 +806,12 @@ export default function InboxPage({
                     ))}
                   </div>
                 )}
+                <AutopilotRow
+                  item={autopilotItem}
+                  canEdit={canEdit}
+                  busy={autopilotBusy}
+                  onApplySuggestion={applyAutopilotSuggestion}
+                />
                 {doc.review_tasks.length > 0 ? (
                   <div className="review-tasks">
                     {doc.review_tasks.slice(0, 4).map((task) => (

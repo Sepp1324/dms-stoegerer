@@ -117,12 +117,14 @@ from .serializers import (
 from .services import asn as asn_service
 from .services import archive as archive_service
 from .services import contracts as contract_service
+from .services import document_briefing as document_briefing_service
 from .services import dossiers as dossier_service
 from .services import evidence as evidence_service
 from .services import entity_graph as entity_graph_service
 from .services import review_tasks as review_task_service
 from .services import revision_package as revision_package_service
 from .services import semantic_index as semantic_index_service
+from .services import timeline as timeline_service
 from .tasks import (
     bulk_classify_documents,
     process_document_version,
@@ -152,6 +154,27 @@ _EXTRACTION_CUSTOM_FIELD_TARGETS = {
         CustomField.DataType.TEXT,
     ),
 }
+
+
+def _visible_documents_for(user):
+    qs = Document.objects.select_related(
+        "correspondent",
+        "document_type",
+        "folder",
+        "case_file",
+        "current_version",
+    )
+    if not getattr(user, "is_dms_admin", False):
+        qs = qs.filter(owner=user)
+    return qs
+
+
+def _parse_days(raw_value, *, default: int) -> int:
+    try:
+        days = int(raw_value if raw_value not in ("", None) else default)
+    except (TypeError, ValueError):
+        days = default
+    return max(0, min(days, 365))
 
 
 def _apply_custom_field_filters(qs, params):
@@ -631,6 +654,37 @@ class OCRRetryFailedView(APIView):
             },
             status=status.HTTP_202_ACCEPTED,
         )
+
+
+class TimelineView(APIView):
+    """Zentrale Fristen-/Timeline-API über Erinnerungen, Verträge und Aufgaben."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        days = _parse_days(request.query_params.get("days"), default=30)
+        return Response(
+            timeline_service.build_timeline(
+                _visible_documents_for(request.user),
+                days=days,
+            )
+        )
+
+
+class TimelineICSView(APIView):
+    """All-Day-iCalendar-Export der sichtbaren Fristen."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        days = _parse_days(request.query_params.get("days"), default=90)
+        content = timeline_service.build_ics(
+            _visible_documents_for(request.user),
+            days=days,
+        )
+        response = HttpResponse(content, content_type="text/calendar; charset=utf-8")
+        response["Content-Disposition"] = 'attachment; filename="dms-fristen.ics"'
+        return response
 
 
 class AskView(APIView):
@@ -1354,6 +1408,16 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 "results": results,
             }
         )
+
+    @action(detail=True, methods=["get"], url_path="briefing")
+    def briefing(self, request, pk=None):
+        """Handlungsorientiertes Dokument-Briefing aus vorhandenen DMS-Signalen."""
+        document = self.get_object()
+        payload = document_briefing_service.build_document_briefing(
+            document,
+            visible_documents=self.get_queryset(),
+        )
+        return Response(payload)
 
     @action(detail=True, methods=["post"], url_path="reindex-semantic")
     def reindex_semantic(self, request, pk=None):
@@ -2393,6 +2457,41 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 "oldest_added_at": oldest,
             }
         )
+
+    @action(detail=False, methods=["get"], url_path="autopilot-inbox")
+    def autopilot_inbox(self, request):
+        """Verdichtet die Review-Inbox zu einer Ablage-Autopilot-Entscheidung."""
+        try:
+            limit = int(request.query_params.get("limit", 25))
+        except (TypeError, ValueError):
+            limit = 25
+        limit = max(1, min(limit, 100))
+
+        inbox = (
+            self.get_queryset()
+            .filter(review_status=Document.ReviewStatus.NEEDS_REVIEW)
+            .select_related(
+                "correspondent",
+                "document_type",
+                "storage_path",
+                "folder",
+                "current_version",
+            )
+            .prefetch_related(
+                "tags",
+                "review_tasks",
+                "extraction_candidates",
+                "case_file_candidates__case_file",
+            )
+        )
+        total = inbox.count()
+        documents = list(inbox.order_by("-added_at", "-id")[:limit])
+
+        from .services import autopilot
+
+        payload = autopilot.build_inbox(documents, total=total)
+        payload["limit"] = limit
+        return Response(payload)
 
     @action(detail=False, methods=["post"], url_path="inbox-generate-candidates")
     def inbox_generate_candidates(self, request):
@@ -3891,6 +3990,54 @@ class ClassificationRuleViewSet(viewsets.ModelViewSet):
     queryset = ClassificationRule.objects.all()
     serializer_class = ClassificationRuleSerializer
     permission_classes = [ReadOnlyOrCanWrite]
+
+    def _simulation_documents(self, request):
+        qs = (
+            Document.objects.select_related(
+                "correspondent",
+                "document_type",
+                "storage_path",
+                "folder",
+                "current_version",
+            )
+            .prefetch_related("tags")
+            .all()
+        )
+        if not getattr(request.user, "is_dms_admin", False):
+            qs = qs.filter(owner=request.user)
+        return qs
+
+    def _simulate_payload(self, request, *, rule=None):
+        match = request.data.get("match") if isinstance(request.data, dict) else None
+        then = request.data.get("then") if isinstance(request.data, dict) else None
+        if rule is not None:
+            match = match if isinstance(match, dict) else rule.match
+            then = then if isinstance(then, dict) else rule.then
+        if not isinstance(match, dict) or not isinstance(then, dict):
+            return Response(
+                {"detail": "Felder 'match' und 'then' muessen Objekte sein."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        from .services import rule_simulator
+
+        return Response(
+            rule_simulator.simulate_rule(
+                match,
+                then,
+                self._simulation_documents(request),
+            )
+        )
+
+    @action(detail=False, methods=["post"], url_path="simulate")
+    def simulate_unsaved(self, request):
+        """Simuliert einen Regelentwurf aus dem Formular ohne DB-Schreibvorgang."""
+        return self._simulate_payload(request)
+
+    @action(detail=True, methods=["post"], url_path="simulate")
+    def simulate(self, request, pk=None):
+        """Simuliert eine bestehende Regel gegen sichtbare Dokumente."""
+        return self._simulate_payload(request, rule=self.get_object())
 
 
 class CustomFieldViewSet(viewsets.ModelViewSet):

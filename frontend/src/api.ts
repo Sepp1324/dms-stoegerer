@@ -302,6 +302,67 @@ export interface InboxGenerateCandidatesResult {
   case_created: number;
   errors: { id?: number; error: string }[];
 }
+export type AutopilotLane =
+  | "ready"
+  | "suggestions"
+  | "metadata"
+  | "processing"
+  | "error";
+export interface AutopilotSuggestion {
+  kind: "ai" | "extraction" | "case_file";
+  field: string;
+  label: string;
+  value: string;
+  confidence: number;
+  source: string;
+  reason?: string;
+  action: {
+    type:
+      | "apply_ai_suggestion"
+      | "apply_extraction_candidate"
+      | "apply_case_file_candidate";
+    fields?: string[];
+    candidate_id?: number;
+  };
+}
+export interface AutopilotNextAction {
+  kind: string;
+  label: string;
+  tone: "primary" | "warn" | "danger" | "neutral" | "ok";
+}
+export interface AutopilotItem {
+  document: number;
+  title: string;
+  asn_label: string | null;
+  lane: AutopilotLane;
+  lane_label: string;
+  confidence: number;
+  can_autofile: boolean;
+  bulk_safe: boolean;
+  missing_metadata: string[];
+  suggestions: AutopilotSuggestion[];
+  reasons: string[];
+  next_actions: AutopilotNextAction[];
+  signals: {
+    review_tasks: number;
+    ai_suggestions: number;
+    extraction_candidates: number;
+    case_candidates: number;
+    classification_rules: number;
+  };
+}
+export interface AutopilotInbox {
+  total: number;
+  limit: number;
+  summary: {
+    lanes: Record<AutopilotLane, number>;
+    average_confidence: number;
+    auto_ready: number;
+    needs_human: number;
+    pending_suggestions: number;
+  };
+  items: AutopilotItem[];
+}
 export interface ReviewLearningOptions {
   create_rule?: boolean;
   match_text?: string;
@@ -383,6 +444,38 @@ export interface ClassificationRule {
     folder?: string;
     tags?: string[];
   };
+}
+export type ClassificationRulePayload = Omit<ClassificationRule, "id">;
+export interface ClassificationRuleSimulationChange {
+  field: string;
+  to?: string;
+  current?: string;
+  value?: string | string[];
+  add?: string[];
+}
+export interface ClassificationRuleSimulationMatch {
+  id: number;
+  title: string;
+  asn_label: string | null;
+  correspondent_name: string | null;
+  document_type_name: string | null;
+  folder_path: string | null;
+  would_change: ClassificationRuleSimulationChange[];
+  already_ok: ClassificationRuleSimulationChange[];
+  conflicts: ClassificationRuleSimulationChange[];
+}
+export interface ClassificationRuleSimulation {
+  total_documents: number;
+  matched: number;
+  would_update: number;
+  already_ok: number;
+  conflicts: number;
+  match_rate: number;
+  risk: "low" | "medium" | "high";
+  impact_score: number;
+  warnings: string[];
+  sample_limit: number;
+  matches: ClassificationRuleSimulationMatch[];
 }
 
 export type CaseFileStatus = "active" | "waiting" | "done" | "archived";
@@ -1195,6 +1288,14 @@ export async function getInboxSummary(): Promise<InboxSummary> {
   return res.json();
 }
 
+export async function getAutopilotInbox(limit = 25): Promise<AutopilotInbox> {
+  const res = await apiFetch(`/documents/autopilot-inbox/?limit=${limit}`);
+  if (!res.ok) {
+    throw new Error(`Autopilot laden fehlgeschlagen: HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
 // Markiert ein Dokument fachlich als geprüft. Das Backend hält review_status
 // bewusst read-only für PATCH; die Review-Bestätigung ist eine eigene Action.
 export function markDocumentReviewed(
@@ -1755,6 +1856,152 @@ export interface SimilarDocumentsResult {
   model: string;
   results: SimilarDocument[];
 }
+export type BriefingRiskLevel = "clear" | "low" | "medium" | "high";
+export interface DocumentBriefingAction {
+  kind: string;
+  priority: number;
+  title: string;
+  description: string;
+  action_label: string;
+  target:
+    | "overview"
+    | "briefing"
+    | "entities"
+    | "similar"
+    | "versions"
+    | "workbench"
+    | "ai"
+    | "reminder"
+    | "freigabe"
+    | "fields"
+    | "audit";
+}
+export interface DocumentBriefing {
+  document: {
+    id: number;
+    title: string;
+    asn: number | null;
+    asn_label: string | null;
+    status: DocumentStatus;
+    status_label: string;
+    review_status: ReviewStatus;
+    review_status_label: string;
+    correspondent: string | null;
+    document_type: string | null;
+    folder: string | null;
+    case_file: {
+      id: number;
+      title: string;
+      status: CaseFileStatus;
+      status_label: string;
+    } | null;
+    page_count: number | null;
+    added_at: string;
+    created_at: string | null;
+  };
+  summary: { source: "ai_suggestions" | "ocr" | "metadata"; text: string };
+  risk_level: BriefingRiskLevel;
+  metadata_score: {
+    completed: number;
+    total: number;
+    percent: number;
+    missing: string[];
+  };
+  health: {
+    processing_state: ProcessingState | null;
+    ocr_status: OcrStatus | null;
+    ocr_error: string;
+    archive_status: ArchiveStatus;
+    archive_status_label: string;
+    archive_error: string;
+    retention: {
+      state: RetentionState;
+      retention_until: string | null;
+      days_remaining: number | null;
+    };
+    legal_hold: boolean;
+    legal_hold_reason: string;
+    sealed: boolean;
+    immutable: boolean;
+  };
+  next_actions: DocumentBriefingAction[];
+  risks: { level: "high" | "medium" | "info"; label: string; detail: string }[];
+  signals: {
+    ocr: { characters: number; words: number; has_text: boolean };
+    review_tasks: {
+      id: number;
+      kind: ReviewTaskKind;
+      kind_label: string;
+      priority: number;
+      message: string;
+      suggested_action: string;
+    }[];
+    reminders: {
+      id: number;
+      remind_on: string;
+      note: string;
+      due: boolean;
+    }[];
+    extraction_candidates: {
+      id: number;
+      field: ExtractionCandidateField;
+      field_label: string;
+      value: string;
+      confidence: number;
+    }[];
+    case_candidates: {
+      id: number;
+      kind: CaseFileCandidateKind;
+      kind_label: string;
+      target: string;
+      score: number;
+      reason: string;
+    }[];
+    contract: {
+      id: number;
+      provider: string;
+      provider_display: string;
+      contract_type: ContractType;
+      contract_type_label: string;
+      contract_number: string;
+      amount: string | null;
+      currency: string;
+      status: ContractStatus;
+      status_label: string;
+      needs_review: boolean;
+      cancel_until: string | null;
+      next_due_on: string | null;
+      ends_on: string | null;
+    } | null;
+    ai_suggestions: AiSuggestions;
+  };
+  timeline: { kind: string; label: string; date: string | null }[];
+  relations: {
+    entities: {
+      id: number;
+      name: string;
+      kind: KnowledgeEntityKind;
+      kind_label: string;
+      role: DocumentEntityRole;
+      role_label: string;
+      confidence: number;
+    }[];
+    related_documents: {
+      id: number;
+      title: string;
+      reason: string;
+      added_at: string;
+    }[];
+  };
+  audit: {
+    id: number;
+    timestamp: string;
+    actor: string | null;
+    action: string;
+    detail: Record<string, unknown>;
+  }[];
+  generated_at: string;
+}
 export interface SemanticReindexResult {
   status: string;
   created: number;
@@ -1786,6 +2033,12 @@ export async function askDocuments(
 export async function getSimilarDocuments(id: number): Promise<SimilarDocumentsResult> {
   const res = await apiFetch(`/documents/${id}/similar/`);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function getDocumentBriefing(id: number): Promise<DocumentBriefing> {
+  const res = await apiFetch(`/documents/${id}/briefing/`);
+  if (!res.ok) throw new Error(`Briefing nicht verfügbar (HTTP ${res.status})`);
   return res.json();
 }
 
@@ -2263,9 +2516,25 @@ export async function getRules(): Promise<ClassificationRule[]> {
   return listAll<ClassificationRule>("/classification-rules/");
 }
 export function createRule(
-  rule: Omit<ClassificationRule, "id">,
+  rule: ClassificationRulePayload,
 ): Promise<ClassificationRule> {
   return postJson<ClassificationRule>("/classification-rules/", rule);
+}
+export function simulateRuleDraft(
+  rule: ClassificationRulePayload,
+): Promise<ClassificationRuleSimulation> {
+  return postJson<ClassificationRuleSimulation>(
+    "/classification-rules/simulate/",
+    { match: rule.match, then: rule.then },
+  );
+}
+export function simulateExistingRule(
+  id: number,
+): Promise<ClassificationRuleSimulation> {
+  return postJson<ClassificationRuleSimulation>(
+    `/classification-rules/${id}/simulate/`,
+    {},
+  );
 }
 export async function deleteRule(id: number): Promise<void> {
   const res = await apiFetch(`/classification-rules/${id}/`, { method: "DELETE" });
@@ -2294,6 +2563,63 @@ export async function updateWorkflow(
 export async function deleteWorkflow(id: number): Promise<void> {
   const res = await apiFetch(`/workflows/${id}/`, { method: "DELETE" });
   if (!res.ok && res.status !== 204) throw new Error(`Löschen fehlgeschlagen: HTTP ${res.status}`);
+}
+
+// --- Fristen-Center / Timeline ---
+export type TimelineSource =
+  | "reminder"
+  | "contract"
+  | "review_task"
+  | "approval"
+  | "retention";
+export type TimelineBucket = "overdue" | "today" | "soon" | "upcoming";
+export type TimelineSeverity = "high" | "medium" | "low" | "info";
+export interface TimelineItem {
+  id: string;
+  source: TimelineSource;
+  source_id: number;
+  kind: string;
+  title: string;
+  description: string;
+  date: string;
+  days_delta: number;
+  bucket: TimelineBucket;
+  severity: TimelineSeverity;
+  document: number;
+  document_title: string;
+  action_label: string;
+  metadata: Record<string, unknown>;
+}
+export interface TimelineResult {
+  generated_at: string;
+  today: string;
+  horizon: string;
+  days: number;
+  summary: {
+    total: number;
+    overdue: number;
+    today: number;
+    soon: number;
+    upcoming: number;
+    high: number;
+    medium: number;
+    low: number;
+    by_source: Partial<Record<TimelineSource, number>>;
+  };
+  buckets: Record<TimelineBucket, TimelineItem[]>;
+  items: TimelineItem[];
+}
+export async function getTimeline(days?: number): Promise<TimelineResult> {
+  const suffix = days === undefined ? "" : `?days=${days}`;
+  const res = await apiFetch(`/timeline/${suffix}`);
+  if (!res.ok) throw new Error(`Fristen laden fehlgeschlagen: HTTP ${res.status}`);
+  return res.json();
+}
+export async function downloadTimelineIcs(days?: number): Promise<Blob> {
+  const suffix = days === undefined ? "" : `?days=${days}`;
+  const res = await apiFetch(`/timeline/ics/${suffix}`);
+  if (!res.ok) throw new Error(`Kalenderexport fehlgeschlagen: HTTP ${res.status}`);
+  return res.blob();
 }
 
 // --- Wiedervorlage/Erinnerungen (STOAA-372/374) ---
