@@ -36,6 +36,7 @@ import { ProcessingBadge } from "./ProcessingStatus";
 import UploadZone from "./UploadZone";
 import MobileCapture from "./MobileCapture";
 import CaseFilesPage from "./CaseFilesPage";
+import DossiersPage from "./DossiersPage";
 import ContractsPage from "./ContractsPage";
 import CopilotPage from "./CopilotPage";
 import DocumentDetail from "./DocumentDetail";
@@ -54,6 +55,7 @@ type FolderFilterValue = number | "none" | "";
 type MainView =
   | "docs"
   | "cases"
+  | "dossiers"
   | "contracts"
   | "knowledge"
   | "copilot"
@@ -677,6 +679,8 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
               ? "Erfassen"
               : view === "cases"
                 ? "Akten"
+              : view === "dossiers"
+                ? "Dossiers"
               : view === "contracts"
                 ? "Verträge"
               : view === "knowledge"
@@ -756,6 +760,14 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
             />
           ) : view === "cases" ? (
             <CaseFilesPage
+              canEdit={!!me?.can_write}
+              onOpenDocument={(docId, pageNo) => {
+                setSelectedId(docId);
+                setSelectedPage(pageNo ?? null);
+              }}
+            />
+          ) : view === "dossiers" ? (
+            <DossiersPage
               canEdit={!!me?.can_write}
               onOpenDocument={(docId, pageNo) => {
                 setSelectedId(docId);
@@ -1247,6 +1259,12 @@ function Sidebar({
           onClick={() => onNavigate("cases")}
           label="Akten"
           icon="M3 5a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v2H3zm0 6h18v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"
+        />
+        <NavItem
+          active={view === "dossiers"}
+          onClick={() => onNavigate("dossiers")}
+          label="Dossiers"
+          icon="M5 3h10l4 4v14H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2m9 1.5V8h3.5M7 11h8v2H7zm0 4h8v2H7z"
         />
         <NavItem
           active={view === "contracts"}

@@ -10,6 +10,7 @@ from .models import (
     CustomField,
     CustomFieldValue,
     Document,
+    Dossier,
     ExtractionCandidate,
     DocumentFolder,
     DocumentReminder,
@@ -381,6 +382,71 @@ class CaseFileSerializer(serializers.ModelSerializer):
 
     def get_documents(self, obj):
         docs = obj.documents.all().order_by("-created_at", "-added_at", "-id")
+        return CaseFileDocumentSerializer(docs, many=True).data
+
+
+class DossierSerializer(serializers.ModelSerializer):
+    """Gespeicherte Copilot-/Rechercheakte mit Quellenbelegen."""
+
+    status_label = serializers.SerializerMethodField()
+    generated_source_label = serializers.SerializerMethodField()
+    document_count = serializers.SerializerMethodField()
+    documents = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Dossier
+        fields = (
+            "id",
+            "title",
+            "query",
+            "status",
+            "status_label",
+            "owner",
+            "summary",
+            "timeline",
+            "sources",
+            "entities",
+            "contracts",
+            "generated_source",
+            "generated_source_label",
+            "generated_at",
+            "created_at",
+            "updated_at",
+            "document_count",
+            "documents",
+        )
+        read_only_fields = (
+            "owner",
+            "summary",
+            "timeline",
+            "sources",
+            "entities",
+            "contracts",
+            "generated_source",
+            "generated_source_label",
+            "generated_at",
+            "created_at",
+            "updated_at",
+            "document_count",
+            "documents",
+        )
+
+    def get_status_label(self, obj) -> str:
+        return obj.get_status_display()
+
+    def get_generated_source_label(self, obj) -> str:
+        return obj.get_generated_source_display()
+
+    def get_document_count(self, obj) -> int:
+        return getattr(obj, "document_count", None) or obj.documents.count()
+
+    def get_documents(self, obj):
+        docs = obj.documents.all().select_related(
+            "correspondent",
+            "document_type",
+            "folder",
+            "current_version",
+        )
         return CaseFileDocumentSerializer(docs, many=True).data
 
 

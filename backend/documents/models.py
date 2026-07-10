@@ -1737,6 +1737,70 @@ class ContractRecord(models.Model):
         return f"{provider} · {self.get_contract_type_display()}"
 
 
+class Dossier(models.Model):
+    """Gespeicherte Beweis-/Themenakte aus Copilot-Quellen.
+
+    Ein Dossier ist kein Ordner und kein Vorgang: Es ist ein erzeugtes
+    Recherche-Artefakt zu einer Frage. Die enthaltenen Quellen bleiben als JSON
+    versioniert am Dossier erhalten und die beteiligten Dokumente sind zusätzlich
+    relational verknüpft, damit Rechte, Navigation und spätere Exporte stabil
+    bleiben.
+    """
+
+    class Status(models.TextChoices):
+        DRAFT = "draft", "Entwurf"
+        GENERATED = "generated", "Generiert"
+        FINAL = "final", "Final"
+
+    class Source(models.TextChoices):
+        LOCAL = "local", "Lokal"
+        AI = "ai", "KI"
+        UNAVAILABLE = "unavailable", "KI nicht verfügbar"
+        ERROR = "error", "KI-Fehler"
+
+    title = models.CharField(max_length=255)
+    query = models.TextField(help_text="Frage/Thema, aus dem das Dossier erzeugt wird.")
+    status = models.CharField(
+        max_length=16,
+        choices=Status.choices,
+        default=Status.DRAFT,
+        db_index=True,
+    )
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="dossiers",
+    )
+    documents = models.ManyToManyField(Document, blank=True, related_name="dossiers")
+    summary = models.TextField(blank=True, default="")
+    timeline = models.JSONField(default=list, blank=True)
+    sources = models.JSONField(default=list, blank=True)
+    entities = models.JSONField(default=list, blank=True)
+    contracts = models.JSONField(default=list, blank=True)
+    generated_source = models.CharField(
+        max_length=24,
+        choices=Source.choices,
+        default=Source.LOCAL,
+    )
+    generated_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Dossier"
+        verbose_name_plural = "Dossiers"
+        ordering = ["-updated_at", "-created_at"]
+        indexes = [
+            models.Index(fields=["owner", "status"], name="docs_dossier_owner_status"),
+            models.Index(fields=["-updated_at"], name="docs_dossier_updated"),
+        ]
+
+    def __str__(self) -> str:
+        return self.title
+
+
 # ---------------------------------------------------------------------------
 # Semantischer Index
 # ---------------------------------------------------------------------------

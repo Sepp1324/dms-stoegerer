@@ -1,6 +1,8 @@
 import { useState } from "react";
 import {
   askDocuments,
+  createDossier,
+  generateDossier,
   type AskResult,
   type AskSource,
   type FolderRef,
@@ -17,6 +19,8 @@ export default function CopilotPage({
   const [question, setQuestion] = useState("");
   const [folder, setFolder] = useState<number | "none" | "">("");
   const [busy, setBusy] = useState(false);
+  const [savingDossier, setSavingDossier] = useState(false);
+  const [dossierNote, setDossierNote] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<AskResult | null>(null);
 
@@ -25,12 +29,33 @@ export default function CopilotPage({
     if (q.length < 3) return;
     setBusy(true);
     setError(null);
+    setDossierNote(null);
     try {
       setResult(await askDocuments(q, folder));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Copilot-Anfrage fehlgeschlagen.");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function saveAsDossier() {
+    const q = question.trim();
+    if (!result || q.length < 3) return;
+    setSavingDossier(true);
+    setError(null);
+    setDossierNote(null);
+    try {
+      const created = await createDossier({
+        title: q.length > 80 ? `${q.slice(0, 77)}…` : q,
+        query: q,
+      });
+      const generated = await generateDossier(created.id);
+      setDossierNote(`Dossier „${generated.title}“ gespeichert.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Dossier konnte nicht gespeichert werden.");
+    } finally {
+      setSavingDossier(false);
     }
   }
 
@@ -87,6 +112,15 @@ export default function CopilotPage({
                     : "Quellensuche"}
             </p>
             <p className="copilot__text">{result.answer}</p>
+            <div className="copilot__answer-actions">
+              <button
+                onClick={saveAsDossier}
+                disabled={savingDossier || result.sources.length === 0}
+              >
+                {savingDossier ? "Speichere …" : "Als Dossier speichern"}
+              </button>
+              {dossierNote && <span>{dossierNote}</span>}
+            </div>
             {result.retrieval && (
               <div className="copilot__retrieval">
                 <span>{result.sources.length} Quellen</span>
