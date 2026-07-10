@@ -54,6 +54,8 @@ import QualityCenterPage from "./QualityCenterPage";
 // Von-/Bis-Eingaben eines CURRENCY-Zusatzfeld-Filters (STOAA-113).
 type CurrencyRange = { gte: string; lte: string };
 type FolderFilterValue = number | "none" | "";
+type WorkspaceMode = "cards" | "compact";
+type WorkspacePreset = "latest" | "processing" | "failed" | "unfiled" | "inbox" | "quality";
 type MainView =
   | "docs"
   | "cases"
@@ -188,6 +190,16 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   // Aktuell geöffnetes Dokument (Detailansicht) oder null (Liste).
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [selectedPage, setSelectedPage] = useState<number | null>(null);
+  const [previewId, setPreviewId] = useState<number | null>(null);
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>(() => {
+    try {
+      return localStorage.getItem("dms.workspace.mode") === "compact"
+        ? "compact"
+        : "cards";
+    } catch {
+      return "cards";
+    }
+  });
   // Aktive Hauptansicht (persistente linke Navigation).
   const [view, setView] = useState<MainView>("docs");
   // Sidebar auf schmalen Screens ein-/ausklappbar.
@@ -207,6 +219,13 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
       /* localStorage optional (z. B. Privatmodus) – kein harter Fehler */
     }
   }, [navCollapsed]);
+  useEffect(() => {
+    try {
+      localStorage.setItem("dms.workspace.mode", workspaceMode);
+    } catch {
+      /* localStorage optional (z. B. Privatmodus) – kein harter Fehler */
+    }
+  }, [workspaceMode]);
 
   // Zusatzfeld-Definitionen laden (auch nach Admin-Änderungen erneut aufrufbar).
   function loadCustomFields() {
@@ -360,6 +379,17 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [debouncedQ, correspondent, documentType, tag, storagePath, folder, processingState, triage, me?.is_dms_admin, ordering, page, reloadKey, customFilterKey]);
 
+  useEffect(() => {
+    if (view !== "docs" || triage) return;
+    if (docs.length === 0) {
+      setPreviewId(null);
+      return;
+    }
+    if (previewId === null || !docs.some((doc) => doc.id === previewId)) {
+      setPreviewId(docs[0].id);
+    }
+  }, [docs, previewId, triage, view]);
+
   // Sichtbarkeit von „Zurücksetzen" & Empty-State-Text: alle roh getippten Filter.
   const hasCurrencyInput = useMemo(
     () =>
@@ -408,6 +438,51 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     setOrdering(v);
     setPage(1);
   }
+  function applyWorkspacePreset(preset: WorkspacePreset) {
+    setSelectedIds(new Set());
+    setBulkError(null);
+    setBulkMessage(null);
+    if (preset === "inbox") {
+      setView("inbox");
+      return;
+    }
+    if (preset === "quality") {
+      setView("quality");
+      return;
+    }
+
+    setQ("");
+    setCorrespondent("");
+    setDocumentType("");
+    setTag("");
+    setStoragePath("");
+    setFolder("");
+    setProcessingState("");
+    setOrdering("");
+    setCurrencyFilters({});
+    setTriage(false);
+    setPage(1);
+
+    if (preset === "latest") {
+      setOrdering("-added_at");
+    } else if (preset === "processing") {
+      setProcessingState("processing");
+    } else if (preset === "failed") {
+      setProcessingState("failed");
+    } else if (preset === "unfiled") {
+      setFolder("none");
+    }
+  }
+  const activeWorkspacePreset: WorkspacePreset | "custom" =
+    processingState === "processing"
+      ? "processing"
+      : processingState === "failed"
+        ? "failed"
+        : folder === "none"
+          ? "unfiled"
+          : !triage && !hasFilters && (ordering === "" || ordering === "-added_at")
+            ? "latest"
+            : "custom";
   // Triage-Ansicht umschalten (nur Admins). Zurück auf Seite 1, damit nach dem
   // Moduswechsel keine leere hohe Seitenzahl gezeigt wird.
   function onToggleTriage() {
@@ -434,6 +509,13 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     setOrdering("");
     setCurrencyFilters({});
     setPage(1);
+  }
+  function resetWorkspace() {
+    resetFilters();
+    setTriage(false);
+    setSelectedIds(new Set());
+    setBulkError(null);
+    setBulkMessage(null);
   }
 
   async function moveDocumentToFolder(documentId: number, targetFolder: number | null) {
@@ -583,6 +665,8 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     logout();
     onLogout();
   }
+
+  const previewDoc = previewId ? docs.find((doc) => doc.id === previewId) ?? null : null;
 
   if (selectedId !== null) {
     return (
@@ -841,10 +925,21 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
                 />
               )}
 
-              {/* Stammdaten-Filter leben in der Sidebar (STOAA-50); Sortierung/
-                  Zurücksetzen/Triage sind ins „…"-Topbar-Menü gewandert
-                  (STOAA-417) – die Suche bleibt so prominent. */}
-              <section>
+              {/* Stammdaten-Filter leben in der Sidebar (STOAA-50). Der Workspace
+                  legt darüber kuratierte Schnellansichten, Karten-/Kompaktmodus
+                  und eine permanente Dokumentvorschau. */}
+              <section className="workspace">
+                <WorkspaceToolbar
+                  count={count}
+                  selectedCount={selectedIds.size}
+                  loading={loading}
+                  activePreset={activeWorkspacePreset}
+                  mode={workspaceMode}
+                  hasFilters={hasFilters || triage}
+                  onPreset={applyWorkspacePreset}
+                  onModeChange={setWorkspaceMode}
+                  onReset={resetWorkspace}
+                />
                 {loading ? (
                   <SkeletonGrid />
                 ) : error ? (
@@ -912,43 +1007,58 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
                         onClassify={applyBulkClassify}
                       />
                     )}
-                    <p className="muted result-count">
-                      {count} {count === 1 ? "Dokument" : "Dokumente"}
-                    </p>
-                    <div className="doc-grid">
-                      {docs.map((d) =>
-                        triage ? (
-                          <TriageCard
-                            key={d.id}
-                            doc={d}
-                            users={users}
-                            onOpen={() => setSelectedId(d.id)}
-                            onAssigned={() => setReloadKey((k) => k + 1)}
-                          />
-                        ) : (
-                          <DocumentCard
-                            key={d.id}
-                            doc={d}
-                            selected={selectedIds.has(d.id)}
-                            onOpen={() => setSelectedId(d.id)}
-                            onSelectedChange={(checked) => toggleSelected(d.id, checked)}
-                            onDragStart={() => {
-                              setDraggingDocumentId(d.id);
-                              setFolderDropError(null);
-                            }}
-                            onDragEnd={() => setDraggingDocumentId(null)}
-                          />
-                        ),
+                    <div className={`workspace-shell${triage ? " workspace-shell--single" : ""}`}>
+                      <div className="workspace-list-pane">
+                        <p className="muted result-count">
+                          {count} {count === 1 ? "Dokument" : "Dokumente"}
+                        </p>
+                        <div className={`doc-grid doc-grid--${workspaceMode}`}>
+                          {docs.map((d) =>
+                            triage ? (
+                              <TriageCard
+                                key={d.id}
+                                doc={d}
+                                users={users}
+                                onOpen={() => setSelectedId(d.id)}
+                                onAssigned={() => setReloadKey((k) => k + 1)}
+                              />
+                            ) : (
+                              <DocumentCard
+                                key={d.id}
+                                doc={d}
+                                selected={selectedIds.has(d.id)}
+                                previewed={d.id === previewId}
+                                mode={workspaceMode}
+                                onPreview={() => setPreviewId(d.id)}
+                                onOpen={() => setSelectedId(d.id)}
+                                onSelectedChange={(checked) => toggleSelected(d.id, checked)}
+                                onDragStart={() => {
+                                  setDraggingDocumentId(d.id);
+                                  setFolderDropError(null);
+                                }}
+                                onDragEnd={() => setDraggingDocumentId(null)}
+                              />
+                            ),
+                          )}
+                        </div>
+                        <Pagination
+                          page={page}
+                          totalPages={Math.max(1, Math.ceil(count / PAGE_SIZE))}
+                          hasPrev={hasPrev}
+                          hasNext={hasNext}
+                          onPrev={() => setPage((p) => Math.max(1, p - 1))}
+                          onNext={() => setPage((p) => p + 1)}
+                        />
+                      </div>
+                      {!triage && (
+                        <WorkspaceInspector
+                          doc={previewDoc}
+                          onOpen={(id) => setSelectedId(id)}
+                          onOpenInbox={() => setView("inbox")}
+                          onOpenEvidence={() => setView("evidence")}
+                        />
                       )}
                     </div>
-                    <Pagination
-                      page={page}
-                      totalPages={Math.max(1, Math.ceil(count / PAGE_SIZE))}
-                      hasPrev={hasPrev}
-                      hasNext={hasNext}
-                      onPrev={() => setPage((p) => Math.max(1, p - 1))}
-                      onNext={() => setPage((p) => p + 1)}
-                    />
                   </>
                 )}
               </section>
@@ -1906,9 +2016,235 @@ function Pagination({
   );
 }
 
+function WorkspaceToolbar({
+  count,
+  selectedCount,
+  loading,
+  activePreset,
+  mode,
+  hasFilters,
+  onPreset,
+  onModeChange,
+  onReset,
+}: {
+  count: number;
+  selectedCount: number;
+  loading: boolean;
+  activePreset: WorkspacePreset | "custom";
+  mode: WorkspaceMode;
+  hasFilters: boolean;
+  onPreset: (preset: WorkspacePreset) => void;
+  onModeChange: (mode: WorkspaceMode) => void;
+  onReset: () => void;
+}) {
+  const presets: { id: WorkspacePreset; label: string; hint: string }[] = [
+    { id: "latest", label: "Neueste", hint: "Aktuelle Dokumente" },
+    { id: "processing", label: "In Arbeit", hint: "Pipeline läuft" },
+    { id: "failed", label: "Fehler", hint: "Retry nötig" },
+    { id: "unfiled", label: "Ohne Ordner", hint: "Einordnen" },
+    { id: "inbox", label: "Inbox", hint: "Review" },
+    { id: "quality", label: "Qualität", hint: "Mängel" },
+  ];
+  return (
+    <div className="workspace-toolbar">
+      <div className="workspace-toolbar__summary">
+        <span className="workspace-toolbar__eyebrow">Workspace</span>
+        <strong>
+          {loading ? "Lade Dokumente" : `${count} Dokument${count === 1 ? "" : "e"}`}
+        </strong>
+        <span>
+          {selectedCount > 0
+            ? `${selectedCount} ausgewählt`
+            : activePreset === "custom"
+              ? "Eigene Filteransicht"
+              : "Schnellansicht aktiv"}
+        </span>
+      </div>
+      <div className="workspace-views" aria-label="Schnellansichten">
+        {presets.map((preset) => (
+          <button
+            key={preset.id}
+            type="button"
+            className={`workspace-view${activePreset === preset.id ? " workspace-view--active" : ""}`}
+            onClick={() => onPreset(preset.id)}
+            title={preset.hint}
+          >
+            <strong>{preset.label}</strong>
+            <span>{preset.hint}</span>
+          </button>
+        ))}
+      </div>
+      <div className="workspace-toolbar__actions">
+        <div className="segmented" aria-label="Darstellung">
+          <button
+            type="button"
+            className={mode === "cards" ? "segmented__item segmented__item--active" : "segmented__item"}
+            onClick={() => onModeChange("cards")}
+          >
+            Karten
+          </button>
+          <button
+            type="button"
+            className={mode === "compact" ? "segmented__item segmented__item--active" : "segmented__item"}
+            onClick={() => onModeChange("compact")}
+          >
+            Kompakt
+          </button>
+        </div>
+        {hasFilters && (
+          <button type="button" className="link" onClick={onReset}>
+            Zurücksetzen
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function WorkspaceInspector({
+  doc,
+  onOpen,
+  onOpenInbox,
+  onOpenEvidence,
+}: {
+  doc: DocumentItem | null;
+  onOpen: (id: number) => void;
+  onOpenInbox: () => void;
+  onOpenEvidence: () => void;
+}) {
+  const [thumb, setThumb] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!doc) {
+      setThumb(null);
+      return;
+    }
+    let url: string | null = null;
+    let active = true;
+    setThumb(null);
+    getDocumentThumbnail(doc.id)
+      .then((blob) => {
+        if (!active) return;
+        url = URL.createObjectURL(blob);
+        setThumb(url);
+      })
+      .catch(() => {
+        /* Thumbnail optional – der Inspector bleibt mit Metadaten nutzbar. */
+      });
+    return () => {
+      active = false;
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [doc]);
+
+  if (!doc) {
+    return (
+      <aside className="workspace-inspector workspace-inspector--empty">
+        <strong>Kein Dokument ausgewählt</strong>
+        <span>Wähle eine Karte aus, um Vorschau, Status und Metadaten hier zu sehen.</span>
+      </aside>
+    );
+  }
+
+  const date = doc.created_at || doc.added_at;
+  return (
+    <aside className="workspace-inspector">
+      <div className="workspace-inspector__preview">
+        {thumb ? (
+          <img src={thumb} alt="" />
+        ) : (
+          <svg viewBox="0 0 24 24" width="58" height="58" aria-hidden="true">
+            <path
+              fill="currentColor"
+              d="M6 2h7l5 5v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2m7 1.5V8h4.5z"
+            />
+          </svg>
+        )}
+      </div>
+      <div className="workspace-inspector__head">
+        <span className="workspace-inspector__asn">
+          {doc.id ? `#${doc.id}` : "Dokument"}
+        </span>
+        <h3>{doc.title}</h3>
+        <p>
+          {doc.correspondent_name || "Unbekannter Korrespondent"}
+          {doc.document_type_name ? ` · ${doc.document_type_name}` : ""}
+        </p>
+      </div>
+      <div className="workspace-inspector__actions">
+        <button type="button" onClick={() => onOpen(doc.id)}>
+          Öffnen
+        </button>
+        <button type="button" className="secondary" onClick={onOpenInbox}>
+          Inbox
+        </button>
+        <button type="button" className="secondary" onClick={onOpenEvidence}>
+          Beweise
+        </button>
+      </div>
+      <dl className="workspace-inspector__grid">
+        <div>
+          <dt>Status</dt>
+          <dd><ProcessingBadge state={doc.processing_state} /></dd>
+        </div>
+        <div>
+          <dt>Review</dt>
+          <dd>{doc.review_status === "reviewed" ? "Geprüft" : "Zu prüfen"}</dd>
+        </div>
+        <div>
+          <dt>Datum</dt>
+          <dd>{new Date(date).toLocaleDateString("de-DE")}</dd>
+        </div>
+        <div>
+          <dt>Seiten</dt>
+          <dd>{doc.page_count ?? "-"}</dd>
+        </div>
+        <div>
+          <dt>Ordner</dt>
+          <dd>{doc.folder_path || "Ohne Ordner"}</dd>
+        </div>
+        <div>
+          <dt>Akte</dt>
+          <dd>{doc.case_file_title || "-"}</dd>
+        </div>
+        <div>
+          <dt>Archiv</dt>
+          <dd>{doc.archive_status_label}</dd>
+        </div>
+        <div>
+          <dt>OCR</dt>
+          <dd>{doc.ocr_status || "-"}</dd>
+        </div>
+      </dl>
+      {doc.tags.length > 0 && (
+        <div className="workspace-inspector__tags">
+          {doc.tags.map((tagItem) => (
+            <span
+              key={tagItem.id}
+              className="tag"
+              style={{ borderColor: tagItem.color, color: tagItem.color }}
+            >
+              {tagItem.name}
+            </span>
+          ))}
+        </div>
+      )}
+      {doc.review_task_count > 0 && (
+        <div className="workspace-inspector__notice">
+          <strong>{doc.review_task_count} offene Aufgabe(n)</strong>
+          <span>Dieses Dokument braucht noch menschliche Prüfung.</span>
+        </div>
+      )}
+    </aside>
+  );
+}
+
 function DocumentCard({
   doc,
   selected,
+  previewed,
+  mode,
+  onPreview,
   onOpen,
   onSelectedChange,
   onDragStart,
@@ -1916,6 +2252,9 @@ function DocumentCard({
 }: {
   doc: DocumentItem;
   selected: boolean;
+  previewed: boolean;
+  mode: WorkspaceMode;
+  onPreview: () => void;
   onOpen: () => void;
   onSelectedChange: (checked: boolean) => void;
   onDragStart: () => void;
@@ -1943,8 +2282,17 @@ function DocumentCard({
 
   return (
     <article
-      className={`doc-card${selected ? " doc-card--selected" : ""}`}
+      className={`doc-card doc-card--${mode}${selected ? " doc-card--selected" : ""}${previewed ? " doc-card--previewed" : ""}`}
       draggable
+      role="button"
+      tabIndex={0}
+      onClick={onPreview}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onPreview();
+        }
+      }}
       onDragStart={(event) => {
         event.dataTransfer.effectAllowed = "move";
         event.dataTransfer.setData("application/x-dms-document-id", String(doc.id));
@@ -1954,14 +2302,18 @@ function DocumentCard({
       onDragEnd={onDragEnd}
       title={`${doc.title} ziehen, um es in einen Ordner zu verschieben`}
     >
-      <label className="doc-card__select" title="Dokument auswählen">
+      <label
+        className="doc-card__select"
+        title="Dokument auswählen"
+        onClick={(event) => event.stopPropagation()}
+      >
         <input
           type="checkbox"
           checked={selected}
           onChange={(event) => onSelectedChange(event.target.checked)}
         />
       </label>
-      <button className="doc-card__open" onClick={onOpen} type="button">
+      <div className="doc-card__open">
         <div className="doc-card__preview">
           {thumb ? (
             <img className="doc-card__thumb" src={thumb} alt="" />
@@ -2011,8 +2363,18 @@ function DocumentCard({
             </span>
             <ProcessingBadge state={doc.processing_state} />
           </p>
+          <button
+            type="button"
+            className="doc-card__detail-btn"
+            onClick={(event) => {
+              event.stopPropagation();
+              onOpen();
+            }}
+          >
+            Öffnen
+          </button>
         </div>
-      </button>
+      </div>
     </article>
   );
 }

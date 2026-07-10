@@ -1025,11 +1025,213 @@ textarea:focus-visible {
   }
 }
 
+/* --- Dokument-Workspace --- */
+.workspace {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+.workspace-toolbar {
+  display: grid;
+  grid-template-columns: minmax(11rem, 0.62fr) minmax(0, 1.7fr) auto;
+  gap: var(--space-3);
+  align-items: stretch;
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--card);
+}
+.workspace-toolbar__summary {
+  display: grid;
+  align-content: center;
+  gap: 0.15rem;
+  min-width: 0;
+}
+.workspace-toolbar__eyebrow,
+.workspace-toolbar__summary span {
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+.workspace-toolbar__summary strong {
+  font-size: 1rem;
+}
+.workspace-views {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+.workspace-view {
+  display: grid;
+  gap: 0.08rem;
+  align-content: center;
+  min-height: 3.25rem;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  color: var(--text);
+  text-align: left;
+}
+.workspace-view:hover,
+.workspace-view--active {
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--border));
+  background: color-mix(in srgb, var(--accent) 9%, var(--surface-sunken));
+}
+.workspace-view strong {
+  font-size: 0.82rem;
+}
+.workspace-view span {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+.workspace-toolbar__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+.segmented {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  padding: 0.15rem;
+}
+.segmented__item {
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  padding: 0.38rem 0.65rem;
+  font-size: 0.8rem;
+}
+.segmented__item:hover,
+.segmented__item--active {
+  background: var(--card);
+  color: var(--text);
+}
+.workspace-shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(18rem, 24rem);
+  gap: var(--space-4);
+  align-items: start;
+}
+.workspace-shell--single {
+  grid-template-columns: 1fr;
+}
+.workspace-list-pane {
+  min-width: 0;
+}
+.workspace-inspector {
+  position: sticky;
+  top: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  max-height: calc(100vh - 2 * var(--space-4));
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--card);
+  padding: var(--space-4);
+}
+.workspace-inspector--empty {
+  min-height: 18rem;
+  justify-content: center;
+  color: var(--muted);
+}
+.workspace-inspector--empty strong,
+.workspace-inspector--empty span {
+  display: block;
+}
+.workspace-inspector__preview {
+  display: grid;
+  place-items: center;
+  min-height: 16rem;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: #fff;
+  color: #64748b;
+}
+.workspace-inspector__preview img {
+  display: block;
+  width: 100%;
+  max-height: 23rem;
+  object-fit: contain;
+}
+.workspace-inspector__head {
+  display: grid;
+  gap: 0.2rem;
+}
+.workspace-inspector__head h3 {
+  margin: 0;
+  font-size: 1.05rem;
+  line-height: 1.25;
+}
+.workspace-inspector__head p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+.workspace-inspector__asn {
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+.workspace-inspector__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.workspace-inspector__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+  margin: 0;
+}
+.workspace-inspector__grid > div {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  padding: 0.65rem 0.75rem;
+}
+.workspace-inspector__grid dt {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+.workspace-inspector__grid dd {
+  margin: 0.18rem 0 0;
+  font-size: 0.84rem;
+  word-break: break-word;
+}
+.workspace-inspector__tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+.workspace-inspector__notice {
+  display: grid;
+  gap: 0.15rem;
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--border));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--warn) 7%, var(--card));
+  padding: 0.75rem 0.85rem;
+}
+.workspace-inspector__notice span {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
 /* --- Dokument-Karten (Grid) --- */
 .doc-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
   gap: 1rem;
+}
+.doc-grid--compact {
+  grid-template-columns: 1fr;
+  gap: 0.55rem;
 }
 .doc-card {
   position: relative;
@@ -1052,6 +1254,10 @@ textarea:focus-visible {
 .doc-card--selected {
   border-color: var(--accent);
   box-shadow: inset 0 0 0 1px var(--accent);
+}
+.doc-card--previewed {
+  border-color: color-mix(in srgb, var(--accent) 70%, var(--border));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
 }
 .doc-card[draggable="true"] {
   cursor: grab;
@@ -1177,6 +1383,77 @@ textarea:focus-visible {
 .doc-card__date {
   font-size: 0.75rem;
   color: var(--muted);
+}
+.doc-card__detail-btn {
+  align-self: flex-start;
+  min-height: 2rem;
+  margin-top: 0.15rem;
+  padding: 0.32rem 0.7rem;
+  font-size: 0.78rem;
+}
+.doc-card--compact {
+  min-height: 0;
+}
+.doc-card--compact .doc-card__open {
+  display: grid;
+  grid-template-columns: 5rem minmax(0, 1fr);
+}
+.doc-card--compact .doc-card__preview {
+  aspect-ratio: auto;
+  min-height: 7rem;
+  border-right: 1px solid var(--border);
+  border-bottom: 0;
+}
+.doc-card--compact .doc-card__body {
+  padding: 0.7rem 0.85rem;
+}
+.doc-card--compact .doc-card__title {
+  -webkit-line-clamp: 1;
+}
+.doc-card--compact .doc-card__tags {
+  display: none;
+}
+.doc-card--compact .doc-card__snippet {
+  -webkit-line-clamp: 1;
+}
+.doc-card--compact .doc-card__detail-btn {
+  position: absolute;
+  right: 0.65rem;
+  bottom: 0.6rem;
+}
+
+@media (max-width: 1180px) {
+  .workspace-toolbar {
+    grid-template-columns: 1fr;
+  }
+  .workspace-toolbar__actions {
+    justify-content: flex-start;
+  }
+}
+@media (max-width: 980px) {
+  .workspace-shell {
+    grid-template-columns: 1fr;
+  }
+  .workspace-inspector {
+    position: static;
+    max-height: none;
+  }
+  .workspace-views {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+@media (max-width: 620px) {
+  .workspace-views {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .workspace-toolbar__actions,
+  .workspace-inspector__actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .doc-card--compact .doc-card__open {
+    grid-template-columns: 4.2rem minmax(0, 1fr);
+  }
 }
 
 /* --- Triage-Ansicht (STOAA-296): owner-lose Dokumente + „Owner setzen" --- */
