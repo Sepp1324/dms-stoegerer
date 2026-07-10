@@ -78,7 +78,10 @@ class ArchiveApiTests(ArchiveDocMixin, APITestCase):
         self.admin = User.objects.create_user(
             username="archive-admin", password="pw", role="admin"
         )
-        self.doc, _version, _path = self.make_ready_document(owner=self.user)
+        self.doc, self.version, self.path = self.make_ready_document(owner=self.user)
+        self.version.archive_path = str(self.path)
+        self.version.thumbnail_path = str(self.path)
+        self.version.save(update_fields=["archive_path", "thumbnail_path"])
 
     def test_document_archive_check_action_persists_and_audits(self):
         self.client.force_authenticate(self.user)
@@ -136,3 +139,44 @@ class ArchiveApiTests(ArchiveDocMixin, APITestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["summary"]["documents"], 1)
         self.assertEqual(response.data["summary"]["archive_ok"], 1)
+
+    def test_evidence_status_respects_owner_scope(self):
+        other_doc, other_version, other_path = self.make_ready_document(owner=self.admin)
+        other_version.archive_path = str(other_path)
+        other_version.thumbnail_path = str(other_path)
+        other_version.save(update_fields=["archive_path", "thumbnail_path"])
+        archive.verify_document_archive(self.doc)
+        archive.verify_document_archive(other_doc)
+
+        self.client.force_authenticate(self.user)
+        response = self.client.get("/api/documents/evidence-status/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["summary"]["documents"], 1)
+        self.assertEqual(response.data["summary"]["evidence_ok"], 1)
+
+    def test_evidence_report_verifies_document_and_audits_access(self):
+        archive.verify_document_archive(self.doc)
+        self.client.force_authenticate(self.user)
+
+        response = self.client.get(f"/api/documents/{self.doc.id}/evidence/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], "ok")
+        self.assertTrue(response.data["integrity"]["chain_ok"])
+        self.assertEqual(response.data["versions"][0]["version_no"], 1)
+        self.assertTrue(
+            AuditLogEntry.objects.filter(
+                action="evidence_report_view",
+                object_type="Document",
+                object_id=str(self.doc.id),
+            ).exists()
+        )
+
+    def test_evidence_report_is_owner_scoped(self):
+        other = User.objects.create_user(username="other-owner", password="pw", role="user")
+        self.client.force_authenticate(other)
+
+        response = self.client.get(f"/api/documents/{self.doc.id}/evidence/")
+
+        self.assertEqual(response.status_code, 404)
