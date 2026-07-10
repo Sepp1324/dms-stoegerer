@@ -26,6 +26,20 @@ if TYPE_CHECKING:  # pragma: no cover - nur für Typannotationen
 
 PDF_MIME = "application/pdf"
 
+FIELD_LABELS = {
+    "title": "Titel",
+    "created_at": "Belegdatum",
+    "document_type": "Typ",
+    "correspondent": "Korrespondent",
+    "storage_path": "Ablagepfad",
+    "folder": "Ordner",
+    "case_file": "Akte",
+    "owner": "Eigentümer",
+    "status": "Freigabestatus",
+    "review_status": "Review-Status",
+    "retention_until": "Aufbewahrung bis",
+}
+
 
 @dataclass(frozen=True)
 class CompareSummary:
@@ -63,6 +77,9 @@ class FileComparison:
     new_page_count: int | None
     changed: bool
     both_pdf: bool
+    sha256_changed: bool
+    size_delta: int
+    mime_changed: bool
 
 
 @dataclass(frozen=True)
@@ -76,6 +93,10 @@ class VersionComparison:
     text_diff: str
     text_diff_html: str
     files: FileComparison
+    change_score: int = 0
+    sections_changed: List[str] = field(default_factory=list)
+    human_summary: List[str] = field(default_factory=list)
+    page_summary: Dict[str, Any] = field(default_factory=dict)
     metadata_versioning_supported: bool = False
     # Stufe-1: vorhanden-aber-leer; Shape bleibt über Stufe 2 stabil.
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -114,7 +135,14 @@ class VersionComparison:
                 "new_page_count": self.files.new_page_count,
                 "changed": self.files.changed,
                 "both_pdf": self.files.both_pdf,
+                "sha256_changed": self.files.sha256_changed,
+                "size_delta": self.files.size_delta,
+                "mime_changed": self.files.mime_changed,
             },
+            "change_score": self.change_score,
+            "sections_changed": self.sections_changed,
+            "human_summary": self.human_summary,
+            "page_summary": self.page_summary,
             "metadata_versioning_supported": self.metadata_versioning_supported,
         }
 
@@ -173,6 +201,9 @@ def _compare_files(
         new_page_count=to_version.page_count,
         changed=binary_changed,
         both_pdf=both_pdf,
+        sha256_changed=binary_changed,
+        size_delta=to_version.size - from_version.size,
+        mime_changed=from_version.mime_type != to_version.mime_type,
     )
 
 
@@ -186,6 +217,30 @@ def _pages_changed(files: FileComparison) -> bool:
     if not files.both_pdf:
         return False
     return files.old_page_count != files.new_page_count
+
+
+def _page_summary(files: FileComparison) -> Dict[str, Any]:
+    """Leichte PDF-Seiten-Zusammenfassung ohne teure Pixelanalyse."""
+    old_count = files.old_page_count
+    new_count = files.new_page_count
+    page_count_changed = _pages_changed(files)
+    added = 0
+    removed = 0
+    if files.both_pdf and old_count is not None and new_count is not None:
+        added = max(new_count - old_count, 0)
+        removed = max(old_count - new_count, 0)
+    return {
+        "old_page_count": old_count,
+        "new_page_count": new_count,
+        "page_count_changed": page_count_changed,
+        "added": added,
+        "removed": removed,
+        # Stufe 1 kennt keine stabile Seitenidentität pro Version. Diese Flags
+        # bleiben bewusst false, bis eine echte Seitenmanifest-/Pixel-Diff-Stufe
+        # sie belastbar berechnen kann.
+        "reordered": False,
+        "rotation_changed": False,
+    }
 
 
 # --- Snapshot-Diff (Stufe 2, STOAA-312) --------------------------------------
@@ -264,6 +319,103 @@ def _diff_snapshots(
     }
 
 
+def _sections_changed(summary: CompareSummary) -> List[str]:
+    sections: List[str] = []
+    if summary.text_changed:
+        sections.append("text")
+    if summary.binary_changed:
+        sections.append("file")
+    if summary.pages_changed:
+        sections.append("pages")
+    if summary.metadata_changed:
+        sections.append("metadata")
+    if summary.tags_changed:
+        sections.append("tags")
+    if summary.custom_fields_changed:
+        sections.append("custom_fields")
+    return sections
+
+
+def _change_score(summary: CompareSummary) -> int:
+    score = 0
+    if summary.text_changed:
+        score += 30
+    if summary.binary_changed:
+        score += 20
+    if summary.pages_changed:
+        score += 15
+    if summary.metadata_changed:
+        score += 15
+    if summary.tags_changed:
+        score += 10
+    if summary.custom_fields_changed:
+        score += 10
+    return min(score, 100)
+
+
+def _human_summary(
+    *,
+    summary: CompareSummary,
+    files: FileComparison,
+    metadata: Dict[str, Any],
+    tags: Dict[str, List[Any]],
+    custom_fields: Dict[str, Any],
+) -> List[str]:
+    lines: List[str] = []
+    if summary.text_changed:
+        lines.append("Der erkannte Text hat sich geändert.")
+    if files.sha256_changed:
+        lines.append("Die Datei-Bytes unterscheiden sich (SHA-256 geändert).")
+    if files.mime_changed:
+        lines.append(
+            f"Der Dateityp wechselte von {files.old_mime_type or 'unbekannt'} "
+            f"zu {files.new_mime_type or 'unbekannt'}."
+        )
+    if files.size_delta:
+        direction = "größer" if files.size_delta > 0 else "kleiner"
+        lines.append(f"Die Datei wurde um {abs(files.size_delta)} Byte {direction}.")
+    if summary.pages_changed:
+        lines.append(
+            f"Die Seitenzahl änderte sich von {files.old_page_count} "
+            f"auf {files.new_page_count}."
+        )
+    if summary.metadata_changed:
+        labels = _changed_labels(metadata)
+        lines.append(
+            "Metadaten geändert"
+            + (": " + ", ".join(labels) if labels else ".")
+        )
+    if summary.tags_changed:
+        added = ", ".join(tag.get("name", str(tag.get("id"))) for tag in tags["added"])
+        removed = ", ".join(tag.get("name", str(tag.get("id"))) for tag in tags["removed"])
+        parts = []
+        if added:
+            parts.append(f"hinzu: {added}")
+        if removed:
+            parts.append(f"entfernt: {removed}")
+        lines.append("Schlagworte geändert" + (": " + "; ".join(parts) if parts else "."))
+    if summary.custom_fields_changed:
+        labels = _changed_labels(custom_fields)
+        lines.append(
+            "Zusatzfelder geändert"
+            + (": " + ", ".join(labels) if labels else ".")
+        )
+    if not lines:
+        lines.append("Keine relevanten Änderungen erkannt.")
+    return lines
+
+
+def _changed_labels(diff: Dict[str, Any]) -> List[str]:
+    keys = set(diff.get("added", {}).keys())
+    keys.update(diff.get("removed", {}).keys())
+    keys.update(diff.get("changed", {}).keys())
+    return [_field_label(key) for key in sorted(keys)]
+
+
+def _field_label(key: str) -> str:
+    return FIELD_LABELS.get(key, key)
+
+
 def compare_versions(
     document: "Document",
     from_version: "DocumentVersion",
@@ -305,6 +457,15 @@ def compare_versions(
         tags_changed=snap["tags_changed"],
         custom_fields_changed=snap["custom_fields_changed"],
     )
+    page_summary = _page_summary(files)
+    sections_changed = _sections_changed(summary)
+    human_summary = _human_summary(
+        summary=summary,
+        files=files,
+        metadata=snap["metadata"],
+        tags=snap["tags"],
+        custom_fields=snap["custom_fields"],
+    )
 
     # ``text_diff_html`` bleibt bei Gleichheit leer (Spec-Item 2 aus STOAA-288);
     # nur bei tatsächlicher Textänderung wird die HtmlDiff-Tabelle erzeugt. Das FE
@@ -319,6 +480,10 @@ def compare_versions(
         text_diff=_build_text_diff(from_text, to_text),
         text_diff_html=text_diff_html,
         files=files,
+        change_score=_change_score(summary),
+        sections_changed=sections_changed,
+        human_summary=human_summary,
+        page_summary=page_summary,
         metadata_versioning_supported=snap["supported"],
         metadata=snap["metadata"],
         tags=snap["tags"],

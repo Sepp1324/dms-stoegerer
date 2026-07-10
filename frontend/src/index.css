@@ -2035,6 +2035,60 @@ textarea:focus-visible {
   font-size: 0.8rem;
   color: var(--muted);
 }
+.compare-overview {
+  display: grid;
+  grid-template-columns: minmax(6rem, 0.34fr) minmax(0, 1fr);
+  gap: 0.75rem;
+  align-items: stretch;
+}
+.compare-score,
+.compare-summary {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  padding: 0.75rem 0.85rem;
+}
+.compare-score {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+}
+.compare-score strong {
+  display: block;
+  font-size: 2rem;
+  line-height: 1;
+}
+.compare-score span,
+.compare-summary h4 {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+.compare-summary h4 {
+  margin: 0 0 0.45rem;
+}
+.compare-summary ul {
+  margin: 0;
+  padding-left: 1rem;
+  font-size: 0.84rem;
+}
+.compare-summary li + li {
+  margin-top: 0.25rem;
+}
+.compare-section-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.65rem;
+}
+.compare-section-chips span {
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-radius: var(--radius-pill);
+  color: var(--accent);
+  padding: 0.1rem 0.55rem;
+  font-size: 0.72rem;
+}
 .compare-badges {
   display: flex;
   flex-wrap: wrap;
@@ -2096,6 +2150,29 @@ textarea:focus-visible {
   flex-wrap: wrap;
   gap: 0.8rem;
   margin-top: 0.6rem;
+}
+.compare-page-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(6.5rem, 1fr));
+  gap: 0.5rem;
+}
+.compare-page-summary > div {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  padding: 0.55rem 0.65rem;
+}
+.compare-page-summary strong,
+.compare-page-summary span {
+  display: block;
+}
+.compare-page-summary strong {
+  font-size: 1.05rem;
+}
+.compare-page-summary span {
+  color: var(--muted);
+  font-size: 0.74rem;
+  margin-top: 0.12rem;
 }
 .compare-diff {
   margin: 0;
@@ -2191,6 +2268,15 @@ textarea:focus-visible {
 .compare-tag--removed {
   color: var(--error);
   border-color: var(--error);
+}
+@media (max-width: 640px) {
+  .compare-overview {
+    grid-template-columns: 1fr;
+  }
+  .compare-score {
+    align-items: flex-start;
+    text-align: left;
+  }
 }
 .tag {
   display: inline-block;

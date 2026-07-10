@@ -4146,6 +4146,9 @@ class VersionCompareServiceTests(TestCase):
         self.assertIn("-alt", result.text_diff)
         self.assertIn("+neu", result.text_diff)
         self.assertIn("<table", result.text_diff_html)
+        self.assertIn("text", result.sections_changed)
+        self.assertGreaterEqual(result.change_score, 30)
+        self.assertIn("Text", " ".join(result.human_summary))
 
     def test_leerer_text_kein_crash(self):
         old = self._version(1, ocr_text="")
@@ -4175,6 +4178,7 @@ class VersionCompareServiceTests(TestCase):
         self.assertTrue(result.files.changed)
         self.assertEqual(result.files.old_sha256, "a" * 64)
         self.assertEqual(result.files.new_sha256, "b" * 64)
+        self.assertTrue(result.files.sha256_changed)
 
     def test_groesse_und_mime_gespiegelt(self):
         old = self._version(1, size=1234, mime_type="application/pdf")
@@ -4182,8 +4186,10 @@ class VersionCompareServiceTests(TestCase):
         result = self._compare(old, new)
         self.assertEqual(result.files.old_size, 1234)
         self.assertEqual(result.files.new_size, 2345)
+        self.assertEqual(result.files.size_delta, 1111)
         self.assertEqual(result.files.old_mime_type, "application/pdf")
         self.assertEqual(result.files.new_mime_type, "image/png")
+        self.assertTrue(result.files.mime_changed)
 
     # --- PDF-Stufe ------------------------------------------------------
     def test_beide_pdf_gleiche_seitenzahl(self):
@@ -4199,6 +4205,9 @@ class VersionCompareServiceTests(TestCase):
         result = self._compare(old, new)
         self.assertTrue(result.files.both_pdf)
         self.assertTrue(result.summary.pages_changed)
+        self.assertEqual(result.page_summary["added"], 1)
+        self.assertEqual(result.page_summary["removed"], 0)
+        self.assertTrue(result.page_summary["page_count_changed"])
 
     def test_nicht_pdf_kein_pages_changed(self):
         old = self._version(1, mime_type="image/png", page_count=1)
@@ -4260,6 +4269,13 @@ class VersionCompareApiTests(APITestCase):
         self.assertTrue(data["files"]["both_pdf"])
         self.assertEqual(data["files"]["old_page_count"], 3)
         self.assertEqual(data["files"]["new_page_count"], 4)
+        self.assertIn("change_score", data)
+        self.assertIn("human_summary", data)
+        self.assertIn("page_summary", data)
+        self.assertIn("text", data["sections_changed"])
+        self.assertIn("file", data["sections_changed"])
+        self.assertIn("pages", data["sections_changed"])
+        self.assertEqual(data["files"]["size_delta"], 1000)
         self.assertFalse(data["metadata_versioning_supported"])
         # Stufe-1-Sektionen vorhanden aber leer.
         self.assertEqual(data["metadata"], {})
@@ -4544,17 +4560,27 @@ class VersionCompareSnapshotDiffTests(TestCase):
         self.assertTrue(result["summary"]["metadata_changed"])
         self.assertTrue(result["summary"]["tags_changed"])
         self.assertTrue(result["summary"]["custom_fields_changed"])
+        self.assertIn("metadata", result["sections_changed"])
+        self.assertIn("tags", result["sections_changed"])
+        self.assertIn("custom_fields", result["sections_changed"])
+        self.assertGreaterEqual(result["change_score"], 35)
+        human = " ".join(result["human_summary"])
+        self.assertIn("Titel", human)
+        self.assertIn("C", human)
+        self.assertIn("Betrag", human)
 
     def test_gleiche_snapshots_keine_changes(self):
         snap = self._snap(title="Gleich", tags=[{"id": 1, "name": "A"}], custom_fields={"F": "1"})
-        old = self._version(1, snapshot=snap, ocr_text="gleich")
-        new = self._version(2, snapshot=dict(snap), ocr_text="gleich")
+        old = self._version(1, snapshot=snap, ocr_text="gleich", sha256="a" * 64)
+        new = self._version(2, snapshot=dict(snap), ocr_text="gleich", sha256="a" * 64)
         result = self._compare(old, new)
         self.assertTrue(result["metadata_versioning_supported"])
         self.assertFalse(result["summary"]["metadata_changed"])
         self.assertFalse(result["summary"]["tags_changed"])
         self.assertFalse(result["summary"]["custom_fields_changed"])
         self.assertEqual(result["tags"], {"added": [], "removed": []})
+        self.assertEqual(result["change_score"], 0)
+        self.assertEqual(result["sections_changed"], [])
 
     def test_supported_nur_wenn_beide_snapshots(self):
         with_snap = self._version(

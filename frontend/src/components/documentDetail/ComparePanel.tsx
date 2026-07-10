@@ -9,6 +9,43 @@ import {
 import { sanitizeDiffHtml } from "../../sanitize";
 import { formatBytes, shortHash } from "./format";
 
+const FIELD_LABELS: Record<string, string> = {
+  title: "Titel",
+  created_at: "Belegdatum",
+  document_type: "Typ",
+  correspondent: "Korrespondent",
+  storage_path: "Ablagepfad",
+  folder: "Ordner",
+  case_file: "Akte",
+  owner: "Eigentümer",
+  status: "Freigabestatus",
+  review_status: "Review-Status",
+  retention_until: "Aufbewahrung bis",
+};
+
+const SECTION_LABELS: Record<string, string> = {
+  text: "Text",
+  file: "Datei",
+  pages: "Seiten",
+  metadata: "Metadaten",
+  tags: "Tags",
+  custom_fields: "Zusatzfelder",
+};
+
+function fieldLabel(key: string): string {
+  return FIELD_LABELS[key] ?? key;
+}
+
+function sectionLabel(key: string): string {
+  return SECTION_LABELS[key] ?? key;
+}
+
+function formatSizeDelta(delta: number): string {
+  if (delta === 0) return "0 B";
+  const sign = delta > 0 ? "+" : "-";
+  return `${sign}${formatBytes(Math.abs(delta))}`;
+}
+
 // CSS-Klasse für eine Zeile eines unified-diff (Backend liefert difflib-Output).
 function diffLineClass(line: string): string {
   if (line.startsWith("+++") || line.startsWith("---") || line.startsWith("@@")) {
@@ -60,13 +97,13 @@ function SectionDiff({ diff }: { diff: CompareSectionDiff }) {
   return (
     <div className="compare-changes">
       {changed.map(([key, change]) => (
-        <ChangeRow key={`c-${key}`} label={key} change={change} />
+        <ChangeRow key={`c-${key}`} label={fieldLabel(key)} change={change} />
       ))}
       {added.map(([key, value]) => (
-        <ChangeRow key={`a-${key}`} label={key} change={{ old: null, new: value }} />
+        <ChangeRow key={`a-${key}`} label={fieldLabel(key)} change={{ old: null, new: value }} />
       ))}
       {removed.map(([key, value]) => (
-        <ChangeRow key={`r-${key}`} label={key} change={{ old: value, new: null }} />
+        <ChangeRow key={`r-${key}`} label={fieldLabel(key)} change={{ old: value, new: null }} />
       ))}
     </div>
   );
@@ -194,12 +231,39 @@ function CompareResultView({
 
   const tagsAdded = result.tags?.added ?? [];
   const tagsRemoved = result.tags?.removed ?? [];
+  const sectionsChanged = result.sections_changed ?? [];
+  const humanSummary = result.human_summary ?? [];
+  const pageSummary = result.page_summary;
 
   return (
     <div className="compare-result">
       <p className="compare-caption">
         Vergleich v{result.from_version} (A) → v{result.to_version} (B)
       </p>
+
+      <div className="compare-overview">
+        <div className="compare-score">
+          <strong>{result.change_score}</strong>
+          <span>Change Score</span>
+        </div>
+        <div className="compare-summary">
+          <h4>Was hat sich geändert?</h4>
+          <ul>
+            {humanSummary.map((line, idx) => (
+              <li key={`${idx}-${line}`}>{line}</li>
+            ))}
+          </ul>
+          <div className="compare-section-chips">
+            {sectionsChanged.length ? (
+              sectionsChanged.map((section) => (
+                <span key={section}>{sectionLabel(section)}</span>
+              ))
+            ) : (
+              <span>Keine Änderungen</span>
+            )}
+          </div>
+        </div>
+      </div>
 
       {/* Summary-Badges */}
       <div className="compare-badges">
@@ -242,9 +306,17 @@ function CompareResultView({
               <td className="mono">{shortHash(files.new_sha256)}</td>
             </tr>
             <tr>
+              <th>Hash geändert</th>
+              <td colSpan={2}>{files.sha256_changed ? "Ja" : "Nein"}</td>
+            </tr>
+            <tr>
               <th>Größe</th>
               <td>{formatBytes(files.old_size)}</td>
               <td>{formatBytes(files.new_size)}</td>
+            </tr>
+            <tr>
+              <th>Delta</th>
+              <td colSpan={2}>{formatSizeDelta(files.size_delta)}</td>
             </tr>
             <tr>
               <th>MIME</th>
@@ -273,6 +345,36 @@ function CompareResultView({
           >
             Version B herunterladen
           </button>
+        </div>
+      </div>
+
+      <div className="compare-section">
+        <h4>Seiten</h4>
+        <div className="compare-page-summary">
+          <div>
+            <strong>{pageSummary.old_page_count ?? "—"}</strong>
+            <span>Version A</span>
+          </div>
+          <div>
+            <strong>{pageSummary.new_page_count ?? "—"}</strong>
+            <span>Version B</span>
+          </div>
+          <div>
+            <strong>{pageSummary.added}</strong>
+            <span>Hinzugefügt</span>
+          </div>
+          <div>
+            <strong>{pageSummary.removed}</strong>
+            <span>Entfernt</span>
+          </div>
+          <div>
+            <strong>{pageSummary.reordered ? "Ja" : "Nein"}</strong>
+            <span>Reordered</span>
+          </div>
+          <div>
+            <strong>{pageSummary.rotation_changed ? "Ja" : "Nein"}</strong>
+            <span>Rotation geändert</span>
+          </div>
         </div>
       </div>
 
