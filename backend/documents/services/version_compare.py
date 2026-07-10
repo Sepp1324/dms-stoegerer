@@ -363,7 +363,7 @@ def _human_summary(
 ) -> List[str]:
     lines: List[str] = []
     if summary.text_changed:
-        lines.append("Der erkannte OCR-/Dokumenttext hat sich geändert.")
+        lines.append("Der erkannte Text hat sich geändert.")
     if files.sha256_changed:
         lines.append("Die Datei-Bytes unterscheiden sich (SHA-256 geändert).")
     if files.mime_changed:

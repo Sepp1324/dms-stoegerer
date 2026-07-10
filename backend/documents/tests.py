@@ -4571,8 +4571,8 @@ class VersionCompareSnapshotDiffTests(TestCase):
 
     def test_gleiche_snapshots_keine_changes(self):
         snap = self._snap(title="Gleich", tags=[{"id": 1, "name": "A"}], custom_fields={"F": "1"})
-        old = self._version(1, snapshot=snap, ocr_text="gleich")
-        new = self._version(2, snapshot=dict(snap), ocr_text="gleich")
+        old = self._version(1, snapshot=snap, ocr_text="gleich", sha256="a" * 64)
+        new = self._version(2, snapshot=dict(snap), ocr_text="gleich", sha256="a" * 64)
         result = self._compare(old, new)
         self.assertTrue(result["metadata_versioning_supported"])
         self.assertFalse(result["summary"]["metadata_changed"])
