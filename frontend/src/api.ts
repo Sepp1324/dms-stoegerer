@@ -2339,6 +2339,63 @@ export async function deleteWorkflow(id: number): Promise<void> {
   if (!res.ok && res.status !== 204) throw new Error(`Löschen fehlgeschlagen: HTTP ${res.status}`);
 }
 
+// --- Fristen-Center / Timeline ---
+export type TimelineSource =
+  | "reminder"
+  | "contract"
+  | "review_task"
+  | "approval"
+  | "retention";
+export type TimelineBucket = "overdue" | "today" | "soon" | "upcoming";
+export type TimelineSeverity = "high" | "medium" | "low" | "info";
+export interface TimelineItem {
+  id: string;
+  source: TimelineSource;
+  source_id: number;
+  kind: string;
+  title: string;
+  description: string;
+  date: string;
+  days_delta: number;
+  bucket: TimelineBucket;
+  severity: TimelineSeverity;
+  document: number;
+  document_title: string;
+  action_label: string;
+  metadata: Record<string, unknown>;
+}
+export interface TimelineResult {
+  generated_at: string;
+  today: string;
+  horizon: string;
+  days: number;
+  summary: {
+    total: number;
+    overdue: number;
+    today: number;
+    soon: number;
+    upcoming: number;
+    high: number;
+    medium: number;
+    low: number;
+    by_source: Partial<Record<TimelineSource, number>>;
+  };
+  buckets: Record<TimelineBucket, TimelineItem[]>;
+  items: TimelineItem[];
+}
+export async function getTimeline(days?: number): Promise<TimelineResult> {
+  const suffix = days === undefined ? "" : `?days=${days}`;
+  const res = await apiFetch(`/timeline/${suffix}`);
+  if (!res.ok) throw new Error(`Fristen laden fehlgeschlagen: HTTP ${res.status}`);
+  return res.json();
+}
+export async function downloadTimelineIcs(days?: number): Promise<Blob> {
+  const suffix = days === undefined ? "" : `?days=${days}`;
+  const res = await apiFetch(`/timeline/ics/${suffix}`);
+  if (!res.ok) throw new Error(`Kalenderexport fehlgeschlagen: HTTP ${res.status}`);
+  return res.blob();
+}
+
 // --- Wiedervorlage/Erinnerungen (STOAA-372/374) ---
 // Owner-gescopet über /api/reminders/ (nur Erinnerungen zu eigenen Dokumenten,
 // DMS-Admin sieht alle). ``remind_on`` ist ein reines Datum ("YYYY-MM-DD"),
