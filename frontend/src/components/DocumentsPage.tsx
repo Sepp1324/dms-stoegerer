@@ -49,6 +49,7 @@ import MailCenterPage from "./MailCenterPage";
 import SystemStatusPage from "./SystemStatusPage";
 import InboxPage from "./InboxPage";
 import EvidenceCenterPage from "./EvidenceCenterPage";
+import QualityCenterPage from "./QualityCenterPage";
 
 // Von-/Bis-Eingaben eines CURRENCY-Zusatzfeld-Filters (STOAA-113).
 type CurrencyRange = { gte: string; lte: string };
@@ -67,6 +68,7 @@ type MainView =
   | "fields"
   | "mail"
   | "evidence"
+  | "quality"
   | "system"
   | "faellig";
 
@@ -701,11 +703,13 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
                       ? "E-Mail"
                       : view === "evidence"
                         ? "Beweis-Center"
-                        : view === "system"
-                          ? "Systemstatus"
-                          : view === "faellig"
-                            ? "Wiedervorlage"
-                            : "Dokumente"}
+                      : view === "quality"
+                        ? "Qualität"
+                      : view === "system"
+                        ? "Systemstatus"
+                      : view === "faellig"
+                        ? "Wiedervorlage"
+                        : "Dokumente"}
           </h1>
           {view === "docs" && (
             <>
@@ -809,6 +813,8 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
             />
           ) : view === "evidence" ? (
             <EvidenceCenterPage onOpenDocument={(docId) => setSelectedId(docId)} />
+          ) : view === "quality" ? (
+            <QualityCenterPage onOpenDocument={(docId) => setSelectedId(docId)} />
           ) : view === "system" ? (
             <SystemStatusPage />
           ) : view === "capture" ? (
@@ -1321,6 +1327,12 @@ function Sidebar({
           onClick={() => onNavigate("evidence")}
           label="Beweise"
           icon="M12 2 4 5v6c0 5 3.4 9.4 8 11 4.6-1.6 8-6 8-11V5zm-1 13.2-3.4-3.4L9 10.4l2 2 4.4-4.4L16.8 9z"
+        />
+        <NavItem
+          active={view === "quality"}
+          onClick={() => onNavigate("quality")}
+          label="Qualität"
+          icon="M12 2 3 6v6c0 5 3.8 9.4 9 10 5.2-.6 9-5 9-10V6zm-4 8h2v6H8zm3-3h2v9h-2zm3 5h2v4h-2z"
         />
         {isAdmin && (
           <NavItem
