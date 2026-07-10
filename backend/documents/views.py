@@ -121,6 +121,7 @@ from .services import document_briefing as document_briefing_service
 from .services import dossiers as dossier_service
 from .services import evidence as evidence_service
 from .services import entity_graph as entity_graph_service
+from .services import quality as quality_service
 from .services import review_tasks as review_task_service
 from .services import revision_package as revision_package_service
 from .services import semantic_index as semantic_index_service
@@ -1295,6 +1296,16 @@ class DocumentViewSet(viewsets.ModelViewSet):
     def evidence_status(self, request):
         """Mandantengefiltertes Audit-/Beweis-Center für sichtbare Dokumente."""
         return Response(evidence_service.evidence_status(self.get_queryset()))
+
+    @action(detail=False, methods=["get"], url_path="quality-status")
+    def quality_status(self, request):
+        """Mandantengefiltertes Qualitätscenter für sichtbare Dokumente."""
+        return Response(quality_service.quality_status(self.get_queryset()))
+
+    @action(detail=True, methods=["get"], url_path="quality")
+    def quality(self, request, pk=None):
+        """Qualitätsprofil eines einzelnen sichtbaren Dokuments."""
+        return Response(quality_service.document_quality(self.get_object()))
 
     @action(detail=True, methods=["get"], url_path="evidence")
     def evidence(self, request, pk=None):

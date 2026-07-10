@@ -1091,6 +1091,91 @@ export interface EvidenceDocumentReport extends EvidenceIssue {
   archive_report: Record<string, unknown>;
 }
 
+export type DocumentQualityGrade = "excellent" | "good" | "warning" | "critical";
+export interface QualityIssue {
+  code: string;
+  category: "ocr" | "metadata" | "archive" | "review" | "processing" | string;
+  severity: EvidenceCheckStatus;
+  message: string;
+  action: string;
+}
+export interface DocumentQuality {
+  document_id: number;
+  title: string;
+  asn: number | null;
+  asn_label: string | null;
+  score: number;
+  grade: DocumentQualityGrade;
+  status: EvidenceCheckStatus;
+  summary: {
+    ocr: {
+      status: OcrStatus | null;
+      status_label: string;
+      text_length: number;
+      page_count: number | null;
+    };
+    metadata: {
+      completed: number;
+      total: number;
+      percent: number;
+      missing: string[];
+    };
+    archive: {
+      status: ArchiveStatus;
+      status_label: string;
+      checked_at: string | null;
+      error: string;
+      archive_file: boolean;
+      thumbnail: boolean;
+      immutable: boolean;
+      sealed: boolean;
+      metadata_snapshot: boolean;
+    };
+    review: {
+      status: ReviewStatus;
+      status_label: string;
+      open_tasks: number;
+      top_tasks: {
+        kind: ReviewTaskKind;
+        kind_label: string;
+        message: string;
+        priority: number;
+      }[];
+    };
+  };
+  issues: QualityIssue[];
+  metrics: {
+    ocr_text_length: number;
+    page_count: number | null;
+    open_review_tasks: number;
+    metadata_filled: number;
+    metadata_total: number;
+  };
+  archive_status: ArchiveStatus;
+  archive_status_label: string;
+  processing_state: ProcessingState | null;
+  ocr_status: OcrStatus | null;
+  added_at: string | null;
+  created_at: string | null;
+}
+export interface QualityStatus {
+  status: BackupHealthStatus;
+  generated_at: string;
+  summary: {
+    documents: number;
+    average_score: number;
+    excellent: number;
+    good: number;
+    warning: number;
+    critical: number;
+    ocr_issues: number;
+    metadata_issues: number;
+    archive_issues: number;
+    review_issues: number;
+  };
+  issues: DocumentQuality[];
+}
+
 // --- Freigabelinks (Share-Links, STOAA-190/192) ---
 // Verwaltungs-Sicht eines Freigabelinks. Enthält bewusst KEINEN Klartext-Token
 // (der kommt einmalig nur aus der Create-Response, siehe ShareLinkCreated).
@@ -1583,6 +1668,22 @@ export async function getEvidenceStatus(): Promise<EvidenceStatus> {
 export async function getDocumentEvidence(id: number): Promise<EvidenceDocumentReport> {
   const res = await apiFetch(`/documents/${id}/evidence/`);
   if (!res.ok) throw new Error(`Beweisbericht laden fehlgeschlagen: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function getQualityStatus(): Promise<QualityStatus> {
+  const res = await apiFetch("/documents/quality-status/");
+  if (!res.ok) {
+    throw new Error(`Qualitätscenter laden fehlgeschlagen: HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function getDocumentQuality(id: number): Promise<DocumentQuality> {
+  const res = await apiFetch(`/documents/${id}/quality/`);
+  if (!res.ok) {
+    throw new Error(`Qualitätsprofil laden fehlgeschlagen: HTTP ${res.status}`);
+  }
   return res.json();
 }
 
