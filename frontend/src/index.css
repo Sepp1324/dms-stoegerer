@@ -2022,8 +2022,6 @@ textarea:focus-visible {
   gap: 0.45rem;
   min-width: 0;
   align-self: start;
-  position: sticky;
-  top: 0.75rem;
 }
 .inbox-row__actions {
   display: flex;
@@ -2084,7 +2082,6 @@ textarea:focus-visible {
   .inbox-row__side {
     grid-column: 1 / -1;
     align-items: flex-start;
-    position: static;
     width: 100%;
   }
   .inbox-row__actions {
