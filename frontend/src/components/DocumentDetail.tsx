@@ -42,6 +42,7 @@ import { EntitiesPanel } from "./documentDetail/EntitiesPanel";
 import { SimilarDocumentsPanel } from "./documentDetail/SimilarDocumentsPanel";
 import { PdfWorkbenchPanel } from "./documentDetail/PdfWorkbenchPanel";
 import { AuditTrail } from "./documentDetail/AuditPanel";
+import { TimelinePanel } from "./documentDetail/TimelinePanel";
 import { formatIsoDate } from "./documentDetail/format";
 
 interface Props {
@@ -528,6 +529,11 @@ export default function DocumentDetail({
                   onDownloadQr={downloadQr}
                 />
               )}
+            </TabPanel>
+
+            {/* Semantische Timeline: lesbarer Lebenslauf des Dokuments. */}
+            <TabPanel id="timeline" active={activeTab}>
+              <TimelinePanel documentId={id} />
             </TabPanel>
 
             {/* Entitäten: private Wissensgraph-Links dieses Dokuments. */}

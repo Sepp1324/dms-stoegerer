@@ -743,6 +743,41 @@ export interface AuditEntry {
   // Aktionsabhängige Nutzlast, z. B. { changes: { title: { from, to } } }.
   detail: Record<string, unknown>;
 }
+export type TimelineCategory =
+  | "processing"
+  | "metadata"
+  | "workflow"
+  | "security"
+  | "archive"
+  | "export"
+  | "system";
+export type TimelineSeverity = "info" | "success" | "warning" | "error";
+export interface TimelineCategoryRef {
+  id: TimelineCategory;
+  label: string;
+}
+export interface TimelineItem {
+  id: number;
+  timestamp: string | null;
+  actor: number | null;
+  actor_name: string;
+  category: TimelineCategory;
+  category_label: string;
+  action: string;
+  object_type: string;
+  object_id: string;
+  title: string;
+  summary: string;
+  detail: Record<string, unknown>;
+  severity: TimelineSeverity;
+}
+export interface DocumentTimeline {
+  count: number;
+  limit: number;
+  truncated: boolean;
+  categories: TimelineCategoryRef[];
+  results: TimelineItem[];
+}
 export interface Paginated<T> {
   count: number;
   next: string | null;
@@ -1237,6 +1272,15 @@ export async function getDocumentAudit(
 ): Promise<Paginated<AuditEntry>> {
   const res = await apiFetch(`/documents/${id}/audit/?page=${page}`);
   if (!res.ok) throw new Error(`Verlauf laden fehlgeschlagen: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function getDocumentTimeline(
+  id: number,
+  limit = 150,
+): Promise<DocumentTimeline> {
+  const res = await apiFetch(`/documents/${id}/timeline/?limit=${limit}`);
+  if (!res.ok) throw new Error(`Timeline laden fehlgeschlagen: HTTP ${res.status}`);
   return res.json();
 }
 

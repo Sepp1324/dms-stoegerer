@@ -122,6 +122,7 @@ from .services import entity_graph as entity_graph_service
 from .services import review_tasks as review_task_service
 from .services import revision_package as revision_package_service
 from .services import semantic_index as semantic_index_service
+from .services import timeline as timeline_service
 from .tasks import (
     bulk_classify_documents,
     process_document_version,
@@ -1467,6 +1468,22 @@ class DocumentViewSet(viewsets.ModelViewSet):
         page = self.paginate_queryset(entries)
         serializer = AuditLogEntrySerializer(page, many=True)
         return self.get_paginated_response(serializer.data)
+
+    @action(detail=True, methods=["get"])
+    def timeline(self, request, pk=None):
+        """Semantisch normalisierte Timeline dieses Dokuments.
+
+        Quelle bleibt das append-only Audit-Log; diese Action liefert nur eine
+        UI-freundliche Leseschicht mit Kategorie, Titel, Summary und Severity.
+        """
+        document = self.get_object()
+        raw_limit = request.query_params.get("limit", 150)
+        try:
+            limit = int(raw_limit)
+        except (TypeError, ValueError):
+            limit = 150
+        limit = max(1, min(limit, 500))
+        return Response(timeline_service.build_document_timeline(document, limit=limit))
 
     @action(detail=True, methods=["get", "post"], url_path="extraction-candidates")
     def extraction_candidates(self, request, pk=None):
