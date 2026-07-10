@@ -994,6 +994,103 @@ export interface ArchiveBulkCheckResult {
   health: ArchiveHealthStatus;
 }
 
+export type EvidenceCheckStatus = "ok" | "warn" | "error";
+export interface EvidenceRisk {
+  code: string;
+  severity: EvidenceCheckStatus;
+  message: string;
+}
+export interface EvidenceCheck {
+  code: string;
+  status: EvidenceCheckStatus;
+  detail: string;
+}
+export interface EvidenceIssue {
+  document_id: number;
+  title: string;
+  asn: number;
+  asn_label: string | null;
+  status: EvidenceCheckStatus;
+  score: number;
+  risks: EvidenceRisk[];
+  checks: EvidenceCheck[];
+  archive_status: ArchiveStatus;
+  archive_status_label: string;
+  archive_checked_at: string | null;
+  archive_error: string;
+  retention: {
+    state: RetentionState;
+    retention_until: string | null;
+    days_remaining: number | null;
+  };
+  legal_hold: boolean;
+  legal_hold_reason: string;
+  current_version: number | null;
+  processing_state: string | null;
+  generated_at: string;
+}
+export interface EvidenceStatus {
+  status: BackupHealthStatus;
+  generated_at: string;
+  summary: {
+    documents: number;
+    evidence_ok: number;
+    warnings: number;
+    errors: number;
+    unchecked: number;
+    archive_missing: number;
+    hash_chain_errors: number;
+    seal_missing: number;
+    legal_hold: number;
+    retention_expired: number;
+  };
+  issues: EvidenceIssue[];
+}
+export interface EvidenceVersion {
+  id: number;
+  version_no: number;
+  sha256: string;
+  prev_hash: string;
+  file_present: boolean;
+  archive_present: boolean;
+  thumbnail_present: boolean;
+  processing_state: string;
+  ocr_status: string;
+  page_count: number | null;
+  size: number;
+  is_immutable: boolean;
+  metadata_snapshot_present: boolean;
+  snapshot_schema_version: number;
+  snapshot_taken_at: string | null;
+  seal_hash: string;
+  seal_ok: boolean;
+  created_at: string | null;
+}
+export interface EvidenceAuditEntry {
+  id: number;
+  timestamp: string | null;
+  actor: string | null;
+  action: string;
+  object_type: string;
+  object_id: string;
+  detail: Record<string, unknown>;
+}
+export interface EvidenceDocumentReport extends EvidenceIssue {
+  document_type: string | null;
+  correspondent: string | null;
+  storage_path: string | null;
+  folder: string | null;
+  case_file: string | null;
+  owner: string | null;
+  tags: string[];
+  versions: EvidenceVersion[];
+  audit: {
+    count: number;
+    latest: EvidenceAuditEntry[];
+  };
+  archive_report: Record<string, unknown>;
+}
+
 // --- Freigabelinks (Share-Links, STOAA-190/192) ---
 // Verwaltungs-Sicht eines Freigabelinks. Enthält bewusst KEINEN Klartext-Token
 // (der kommt einmalig nur aus der Create-Response, siehe ShareLinkCreated).
@@ -1475,6 +1572,18 @@ export async function getDocumentRevisionPackage(id: number): Promise<Blob> {
   const res = await apiFetch(`/documents/${id}/revision-package/`);
   if (!res.ok) throw new Error(`Revisionspaket nicht verfügbar (HTTP ${res.status})`);
   return res.blob();
+}
+
+export async function getEvidenceStatus(): Promise<EvidenceStatus> {
+  const res = await apiFetch("/documents/evidence-status/");
+  if (!res.ok) throw new Error(`Beweis-Center laden fehlgeschlagen: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function getDocumentEvidence(id: number): Promise<EvidenceDocumentReport> {
+  const res = await apiFetch(`/documents/${id}/evidence/`);
+  if (!res.ok) throw new Error(`Beweisbericht laden fehlgeschlagen: HTTP ${res.status}`);
+  return res.json();
 }
 
 // --- Versionsvergleich (STOAA-288/289/290 Stufe 1 + STOAA-312/313 Stufe 2) ---

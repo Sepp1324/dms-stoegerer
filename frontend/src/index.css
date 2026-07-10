@@ -4651,6 +4651,263 @@ button.due-card:hover {
   margin-top: 0.1rem;
 }
 
+/* --- Audit-/Beweis-Center --- */
+.evidence-center {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+.evidence-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--card);
+  padding: var(--space-4);
+}
+.evidence-banner h2,
+.evidence-banner p,
+.evidence-section-head h3,
+.evidence-section-head p,
+.evidence-block h4 {
+  margin: 0;
+}
+.evidence-banner p,
+.evidence-section-head p {
+  color: var(--muted);
+  font-size: 0.86rem;
+  margin-top: 0.2rem;
+}
+.evidence-banner--ok {
+  border-color: color-mix(in srgb, var(--ok) 42%, var(--border));
+}
+.evidence-banner--warn {
+  border-color: color-mix(in srgb, var(--warn) 50%, var(--border));
+}
+.evidence-banner--error {
+  border-color: color-mix(in srgb, var(--error) 52%, var(--border));
+}
+.evidence-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: var(--space-3);
+}
+.evidence-metric {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  padding: var(--space-3);
+}
+.evidence-metric--ok {
+  border-color: color-mix(in srgb, var(--ok) 26%, var(--border));
+}
+.evidence-metric--warn {
+  border-color: color-mix(in srgb, var(--warn) 44%, var(--border));
+}
+.evidence-metric--error {
+  border-color: color-mix(in srgb, var(--error) 50%, var(--border));
+}
+.evidence-metric strong {
+  display: block;
+  font-size: 1.4rem;
+  line-height: 1.1;
+}
+.evidence-metric span {
+  display: block;
+  color: var(--muted);
+  font-size: 0.78rem;
+  margin-top: 0.2rem;
+}
+.evidence-layout {
+  display: grid;
+  grid-template-columns: minmax(20rem, 0.8fr) minmax(0, 1.35fr);
+  gap: var(--space-4);
+  align-items: start;
+}
+.evidence-issues,
+.evidence-detail {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--card);
+  padding: var(--space-4);
+}
+.evidence-issues {
+  position: sticky;
+  top: var(--space-4);
+}
+.evidence-issue-list {
+  display: grid;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+.evidence-issue {
+  display: grid;
+  gap: 0.25rem;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  color: var(--text);
+  padding: 0.75rem 0.85rem;
+  text-align: left;
+}
+.evidence-issue:hover,
+.evidence-issue--active {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+.evidence-issue--error {
+  border-left: 3px solid var(--error);
+}
+.evidence-issue--warn {
+  border-left: 3px solid var(--warn);
+}
+.evidence-issue__meta,
+.evidence-issue__reason {
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+.evidence-issue__reason {
+  color: var(--text);
+}
+.evidence-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-height: 22rem;
+}
+.evidence-detail--empty {
+  color: var(--muted);
+  justify-content: center;
+}
+.evidence-detail--ok {
+  border-color: color-mix(in srgb, var(--ok) 35%, var(--border));
+}
+.evidence-detail--warn {
+  border-color: color-mix(in srgb, var(--warn) 42%, var(--border));
+}
+.evidence-detail--error {
+  border-color: color-mix(in srgb, var(--error) 48%, var(--border));
+}
+.evidence-detail__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+.evidence-detail__head h3 {
+  margin: 0.35rem 0 0.15rem;
+  font-size: 1.08rem;
+}
+.evidence-detail__head p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+.evidence-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+.evidence-detail-grid,
+.evidence-check-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: var(--space-3);
+}
+.evidence-detail-grid > div,
+.evidence-check {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  padding: 0.7rem 0.8rem;
+}
+.evidence-detail-grid span,
+.evidence-check span,
+.evidence-check small {
+  display: block;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+.evidence-detail-grid strong,
+.evidence-check strong {
+  display: block;
+  margin-top: 0.18rem;
+  word-break: break-word;
+}
+.evidence-check--ok {
+  border-color: color-mix(in srgb, var(--ok) 30%, var(--border));
+}
+.evidence-check--warn {
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+}
+.evidence-check--error {
+  border-color: color-mix(in srgb, var(--error) 48%, var(--border));
+}
+.evidence-block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.evidence-risk-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.evidence-risk {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  padding: 0.2rem 0.65rem;
+  font-size: 0.8rem;
+}
+.evidence-risk--warn {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 55%, var(--border));
+}
+.evidence-risk--error {
+  color: var(--error);
+  border-color: color-mix(in srgb, var(--error) 55%, var(--border));
+}
+.evidence-audit-list {
+  display: grid;
+  gap: var(--space-2);
+}
+.evidence-audit-entry {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  padding: 0.65rem 0.8rem;
+}
+.evidence-audit-entry strong,
+.evidence-audit-entry span {
+  display: block;
+}
+.evidence-audit-entry span {
+  color: var(--muted);
+  font-size: 0.78rem;
+  margin-top: 0.12rem;
+}
+@media (max-width: 980px) {
+  .evidence-layout {
+    grid-template-columns: 1fr;
+  }
+  .evidence-issues {
+    position: static;
+  }
+}
+@media (max-width: 620px) {
+  .evidence-banner,
+  .evidence-detail__head {
+    flex-direction: column;
+  }
+  .evidence-actions {
+    justify-content: flex-start;
+  }
+}
+
 /* --- DMS-Gedächtnis / Entitätsgraph --- */
 .knowledge-page {
   display: flex;

@@ -48,6 +48,7 @@ import CustomFieldsAdmin from "./CustomFieldsAdmin";
 import MailCenterPage from "./MailCenterPage";
 import SystemStatusPage from "./SystemStatusPage";
 import InboxPage from "./InboxPage";
+import EvidenceCenterPage from "./EvidenceCenterPage";
 
 // Von-/Bis-Eingaben eines CURRENCY-Zusatzfeld-Filters (STOAA-113).
 type CurrencyRange = { gte: string; lte: string };
@@ -65,6 +66,7 @@ type MainView =
   | "workflows"
   | "fields"
   | "mail"
+  | "evidence"
   | "system"
   | "faellig";
 
@@ -697,11 +699,13 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
                     ? "Zusatzfelder"
                     : view === "mail"
                       ? "E-Mail"
-                      : view === "system"
-                        ? "Systemstatus"
-                        : view === "faellig"
-                          ? "Fristen"
-                          : "Dokumente"}
+                      : view === "evidence"
+                        ? "Beweis-Center"
+                        : view === "system"
+                          ? "Systemstatus"
+                          : view === "faellig"
+                            ? "Wiedervorlage"
+                            : "Dokumente"}
           </h1>
           {view === "docs" && (
             <>
@@ -803,6 +807,8 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
               canEdit={!!me?.can_write}
               onOpenDocument={(docId) => setSelectedId(docId)}
             />
+          ) : view === "evidence" ? (
+            <EvidenceCenterPage onOpenDocument={(docId) => setSelectedId(docId)} />
           ) : view === "system" ? (
             <SystemStatusPage />
           ) : view === "capture" ? (
@@ -1309,6 +1315,12 @@ function Sidebar({
           onClick={() => onNavigate("workflows")}
           label="Workflows"
           icon="M4 4h6v6H4zm10 0h6v6h-6zM4 14h6v6H4zm13 0v3h3v2h-3v3h-2v-3h-3v-2h3v-3z"
+        />
+        <NavItem
+          active={view === "evidence"}
+          onClick={() => onNavigate("evidence")}
+          label="Beweise"
+          icon="M12 2 4 5v6c0 5 3.4 9.4 8 11 4.6-1.6 8-6 8-11V5zm-1 13.2-3.4-3.4L9 10.4l2 2 4.4-4.4L16.8 9z"
         />
         {isAdmin && (
           <NavItem

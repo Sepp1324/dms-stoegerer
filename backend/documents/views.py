@@ -119,6 +119,7 @@ from .services import archive as archive_service
 from .services import contracts as contract_service
 from .services import document_briefing as document_briefing_service
 from .services import dossiers as dossier_service
+from .services import evidence as evidence_service
 from .services import entity_graph as entity_graph_service
 from .services import review_tasks as review_task_service
 from .services import revision_package as revision_package_service
@@ -1289,6 +1290,24 @@ class DocumentViewSet(viewsets.ModelViewSet):
         response["Content-Disposition"] = f'attachment; filename="{package.filename}"'
         response["Content-Length"] = str(len(package.content))
         return response
+
+    @action(detail=False, methods=["get"], url_path="evidence-status")
+    def evidence_status(self, request):
+        """Mandantengefiltertes Audit-/Beweis-Center für sichtbare Dokumente."""
+        return Response(evidence_service.evidence_status(self.get_queryset()))
+
+    @action(detail=True, methods=["get"], url_path="evidence")
+    def evidence(self, request, pk=None):
+        """Frisch verifizierter Beweisbericht für ein einzelnes Dokument."""
+        document = self.get_object()
+        AuditLogEntry.objects.create(
+            actor=request.user,
+            action="evidence_report_view",
+            object_type="Document",
+            object_id=str(document.id),
+            detail={"scope": "document"},
+        )
+        return Response(evidence_service.document_report(document))
 
     @action(detail=True, methods=["get"])
     def integrity(self, request, pk=None):
