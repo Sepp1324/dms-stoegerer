@@ -1,12 +1,14 @@
-import { useEffect, useMemo, useState, type DragEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from "react";
 import {
   bulkClassifyDocuments,
   bulkUpdateDocuments,
+  createSavedView,
   createCorrespondent,
   createDocumentType,
   createFolder,
   createStoragePath,
   createTag,
+  deleteSavedView,
   getCorrespondents,
   getCustomFields,
   getDocuments,
@@ -14,11 +16,13 @@ import {
   getDocumentTypes,
   getFolders,
   getMe,
+  getSavedViews,
   getStoragePaths,
   getTags,
   getUsers,
   logout,
   setDocumentOwner,
+  updateSavedView,
   updateDocument,
   type CustomField,
   type DocumentItem,
@@ -27,6 +31,8 @@ import {
   type NamedRef,
   type ProcessingStateFilter,
   type ReviewStatus,
+  type SavedView,
+  type SavedViewQuery,
   type TagRef,
   type User,
 } from "../api";
@@ -72,6 +78,55 @@ const PAGE_SIZE = 25;
 // (Kind-Ticket STOAA-49, PR #29 gemergt → DocumentViewSet.get_queryset filtert
 // via `storage_path_id`). Der Abschnitt ist damit voll funktionsfähig aktiviert.
 const STORAGE_PATH_FILTER_ENABLED = true;
+const PROCESSING_VIEW_VALUES = new Set(["failed", "processing", "ready", "retry_pending"]);
+
+function toNumberOrEmpty(value: unknown): number | "" {
+  if (value === "" || value === null || value === undefined) return "";
+  const parsed = Number(value);
+  return Number.isInteger(parsed) ? parsed : "";
+}
+
+function toFolderFilterValue(value: unknown): FolderFilterValue {
+  if (value === "none") return "none";
+  return toNumberOrEmpty(value);
+}
+
+function toProcessingFilterValue(value: unknown): ProcessingStateFilter | "" {
+  return typeof value === "string" && PROCESSING_VIEW_VALUES.has(value)
+    ? (value as ProcessingStateFilter)
+    : "";
+}
+
+function customFiltersToCurrencyRanges(
+  filters: Record<string, string> | undefined,
+): Record<number, CurrencyRange> {
+  const out: Record<number, CurrencyRange> = {};
+  for (const [key, value] of Object.entries(filters ?? {})) {
+    const match = /^custom_field_(\d+)_(gte|lte)$/.exec(key);
+    if (!match) continue;
+    const fieldId = Number(match[1]);
+    const bound = match[2] as keyof CurrencyRange;
+    const current = out[fieldId] ?? { gte: "", lte: "" };
+    out[fieldId] = { ...current, [bound]: value };
+  }
+  return out;
+}
+
+function stableValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([key, item]) => [key, stableValue(item)]),
+    );
+  }
+  return value;
+}
+
+function savedViewKey(query: SavedViewQuery): string {
+  return JSON.stringify(stableValue(query));
+}
 
 // Kompaktes „…"-Overflow-Menü für selten genutzte Aktionen der Topbar
 // (STOAA-417). Reines UI-Element (kein neues Verhalten): Klick öffnet ein
@@ -192,6 +247,10 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   // Aktive Hauptansicht (persistente linke Navigation).
   const [view, setView] = useState<MainView>("dashboard");
   const [commandOpen, setCommandOpen] = useState(false);
+  const [savedViews, setSavedViews] = useState<SavedView[]>([]);
+  const [savedViewsBusy, setSavedViewsBusy] = useState(false);
+  const [savedViewsError, setSavedViewsError] = useState<string | null>(null);
+  const savedDefaultAppliedRef = useRef(false);
   // Sidebar auf schmalen Screens ein-/ausklappbar.
   const [navOpen, setNavOpen] = useState(false);
   // Desktop-Sidebar auf Icon-only einklappbar; Zustand persistent (localStorage).
@@ -216,6 +275,19 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
       /* localStorage optional (z. B. Privatmodus) – kein harter Fehler */
     }
   }, [workspaceMode]);
+
+  function loadSavedViews() {
+    setSavedViewsBusy(true);
+    setSavedViewsError(null);
+    getSavedViews()
+      .then(setSavedViews)
+      .catch((err) => {
+        setSavedViewsError(
+          err instanceof Error ? err.message : "Gespeicherte Ansichten konnten nicht geladen werden.",
+        );
+      })
+      .finally(() => setSavedViewsBusy(false));
+  }
 
   // Zusatzfeld-Definitionen laden (auch nach Admin-Änderungen erneut aufrufbar).
   function loadCustomFields() {
@@ -248,6 +320,12 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
       });
     loadCustomFields();
   }, []);
+
+  useEffect(() => {
+    loadSavedViews();
+    // reloadKey aktualisiert nach Uploads/Massenänderungen auch die Count-Badges.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reloadKey]);
 
   // Nutzerliste für das „Owner setzen"-Dropdown der Triage-Ansicht. Der Endpunkt
   // ist admin-only (403 für Normalnutzer), daher erst laden, wenn feststeht, dass
@@ -333,6 +411,35 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     return out;
   }, [currencyFields, debouncedCurrency]);
   const customFilterKey = JSON.stringify(customFilters);
+  const currentSavedQuery = useMemo<SavedViewQuery>(() => {
+    const query: SavedViewQuery = {};
+    if (q.trim()) query.q = q.trim();
+    if (correspondent) query.correspondent = correspondent;
+    if (documentType) query.document_type = documentType;
+    if (tag) query.tag = tag;
+    if (storagePath) query.storage_path = storagePath;
+    if (folder) query.folder = folder;
+    if (processingState) query.processing_state = processingState;
+    if (ordering) query.ordering = ordering;
+    if (Object.keys(customFilters).length > 0) query.customFilters = customFilters;
+    return query;
+  }, [
+    q,
+    correspondent,
+    documentType,
+    tag,
+    storagePath,
+    folder,
+    processingState,
+    ordering,
+    customFilterKey,
+    customFilters,
+  ]);
+  const activeSavedViewId = useMemo(() => {
+    const currentKey = savedViewKey(currentSavedQuery);
+    return savedViews.find((item) => savedViewKey(item.query) === currentKey)?.id ?? null;
+  }, [currentSavedQuery, savedViews]);
+  const activeSavedView = savedViews.find((item) => item.id === activeSavedViewId) ?? null;
 
   useEffect(() => {
     let active = true;
@@ -507,6 +614,104 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     setSelectedIds(new Set());
     setBulkError(null);
     setBulkMessage(null);
+  }
+
+  function applySavedView(savedView: SavedView) {
+    const query = savedView.query ?? {};
+    setSelectedId(null);
+    setSelectedPage(null);
+    setSelectedIds(new Set());
+    setBulkError(null);
+    setBulkMessage(null);
+    setQ(String(query.q ?? ""));
+    setCorrespondent(toNumberOrEmpty(query.correspondent));
+    setDocumentType(toNumberOrEmpty(query.document_type));
+    setTag(toNumberOrEmpty(query.tag));
+    setStoragePath(toNumberOrEmpty(query.storage_path));
+    setFolder(toFolderFilterValue(query.folder));
+    setProcessingState(toProcessingFilterValue(query.processing_state));
+    setOrdering(typeof query.ordering === "string" ? query.ordering : "");
+    setCurrencyFilters(customFiltersToCurrencyRanges(query.customFilters));
+    setTriage(false);
+    setPage(1);
+    setView("docs");
+    setNavOpen(false);
+  }
+
+  useEffect(() => {
+    if (savedDefaultAppliedRef.current || savedViews.length === 0) return;
+    savedDefaultAppliedRef.current = true;
+    const defaultView = savedViews.find((item) => item.is_default);
+    if (defaultView) applySavedView(defaultView);
+    // Der Default soll genau einmal nach dem ersten Laden angewendet werden.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [savedViews]);
+
+  function suggestSavedViewName() {
+    if (q.trim()) return `Suche: ${q.trim()}`;
+    if (folder === "none") return "Ohne Ordner";
+    if (processingState === "failed") return "Fehlerhafte Verarbeitung";
+    if (processingState === "processing") return "In Verarbeitung";
+    if (tag) return tags.find((item) => item.id === tag)?.name ?? "Tag-Ansicht";
+    if (correspondent) {
+      return (
+        correspondents.find((item) => item.id === correspondent)?.name ??
+        "Korrespondent-Ansicht"
+      );
+    }
+    return "Meine Ansicht";
+  }
+
+  async function saveCurrentView() {
+    const name = window.prompt("Name der gespeicherten Ansicht", suggestSavedViewName());
+    if (!name?.trim()) return;
+
+    setSavedViewsBusy(true);
+    setSavedViewsError(null);
+    try {
+      await createSavedView({
+        name: name.trim(),
+        query: currentSavedQuery,
+      });
+      loadSavedViews();
+    } catch (err) {
+      setSavedViewsError(
+        err instanceof Error ? err.message : "Ansicht konnte nicht gespeichert werden.",
+      );
+    } finally {
+      setSavedViewsBusy(false);
+    }
+  }
+
+  async function toggleDefaultSavedView(savedView: SavedView) {
+    setSavedViewsBusy(true);
+    setSavedViewsError(null);
+    try {
+      await updateSavedView(savedView.id, { is_default: !savedView.is_default });
+      loadSavedViews();
+    } catch (err) {
+      setSavedViewsError(
+        err instanceof Error ? err.message : "Startansicht konnte nicht geändert werden.",
+      );
+    } finally {
+      setSavedViewsBusy(false);
+    }
+  }
+
+  async function removeSavedView(savedView: SavedView) {
+    if (!window.confirm(`Gespeicherte Ansicht "${savedView.name}" löschen?`)) return;
+    setSavedViewsBusy(true);
+    setSavedViewsError(null);
+    try {
+      await deleteSavedView(savedView.id);
+      loadSavedViews();
+    } catch (err) {
+      setSavedViewsError(
+        err instanceof Error ? err.message : "Ansicht konnte nicht gelöscht werden.",
+      );
+    } finally {
+      setSavedViewsBusy(false);
+    }
   }
 
   async function moveDocumentToFolder(documentId: number, targetFolder: number | null) {
@@ -726,8 +931,10 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
           onOpenChange={setCommandOpen}
           canWrite={!!me?.can_write}
           isAdmin={!!me?.is_dms_admin}
+          savedViews={savedViews}
           onNavigate={navigateFromCommand}
           onApplyPreset={applyPresetFromCommand}
+          onApplySavedView={applySavedView}
           onOpenDocument={openDocumentFromCommand}
         />
       </>
@@ -771,6 +978,13 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
         currencyFields={currencyFields}
         currencyFilters={currencyFilters}
         onCurrencyChange={onCurrencyChange}
+        savedViews={savedViews}
+        activeSavedViewId={activeSavedViewId}
+        savedViewsBusy={savedViewsBusy}
+        savedViewsError={savedViewsError}
+        onSavedViewSelect={applySavedView}
+        onSavedViewDefault={toggleDefaultSavedView}
+        onSavedViewDelete={removeSavedView}
       />
 
       <div className="content">
@@ -979,11 +1193,14 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
                   selectedCount={selectedIds.size}
                   loading={loading}
                   activePreset={activeWorkspacePreset}
+                  activeSavedViewName={activeSavedView?.name ?? ""}
                   mode={workspaceMode}
                   hasFilters={hasFilters || triage}
+                  saveViewBusy={savedViewsBusy}
                   onPreset={applyWorkspacePreset}
                   onModeChange={setWorkspaceMode}
                   onReset={resetWorkspace}
+                  onSaveView={saveCurrentView}
                 />
                 {loading ? (
                   <SkeletonGrid />
@@ -1115,13 +1332,15 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
       {navOpen && (
         <div className="nav-backdrop" onClick={() => setNavOpen(false)} />
       )}
-      <CommandPalette
+        <CommandPalette
         open={commandOpen}
         onOpenChange={setCommandOpen}
         canWrite={!!me?.can_write}
         isAdmin={!!me?.is_dms_admin}
+        savedViews={savedViews}
         onNavigate={navigateFromCommand}
         onApplyPreset={applyPresetFromCommand}
+        onApplySavedView={applySavedView}
         onOpenDocument={openDocumentFromCommand}
       />
     </div>
@@ -1329,6 +1548,13 @@ function Sidebar({
   currencyFields,
   currencyFilters,
   onCurrencyChange,
+  savedViews,
+  activeSavedViewId,
+  savedViewsBusy,
+  savedViewsError,
+  onSavedViewSelect,
+  onSavedViewDefault,
+  onSavedViewDelete,
 }: {
   view: MainView;
   onNavigate: (v: MainView) => void;
@@ -1368,6 +1594,13 @@ function Sidebar({
     bound: keyof CurrencyRange,
     v: string,
   ) => void;
+  savedViews: SavedView[];
+  activeSavedViewId: number | null;
+  savedViewsBusy: boolean;
+  savedViewsError: string | null;
+  onSavedViewSelect: (view: SavedView) => void;
+  onSavedViewDefault: (view: SavedView) => void;
+  onSavedViewDelete: (view: SavedView) => void;
 }) {
   // Nach einer Filterauswahl auf Mobil das Overlay schließen (Desktop no-op).
   const pick = (fn: (v: number | "") => void) => (v: number | "") => {
@@ -1535,6 +1768,15 @@ function Sidebar({
           Desktop – der Mobil-Drawer zeigt die Filter stets vollständig). */}
       {view === "docs" && (
         <div className="nav-filters">
+          <SavedViewsSection
+            views={savedViews}
+            activeId={activeSavedViewId}
+            busy={savedViewsBusy}
+            error={savedViewsError}
+            onSelect={onSavedViewSelect}
+            onSetDefault={onSavedViewDefault}
+            onDelete={onSavedViewDelete}
+          />
           <ProcessingFilterSection
             active={processingState}
             onSelect={(v) => {
@@ -1603,6 +1845,95 @@ function Sidebar({
 // den Rest einblendet; ab dieser Länge erscheint zudem ein kleines Suchfeld.
 const SECTION_TOP_N = 8;
 const SECTION_SEARCH_THRESHOLD = 10;
+
+function SavedViewsSection({
+  views,
+  activeId,
+  busy,
+  error,
+  onSelect,
+  onSetDefault,
+  onDelete,
+}: {
+  views: SavedView[];
+  activeId: number | null;
+  busy: boolean;
+  error: string | null;
+  onSelect: (view: SavedView) => void;
+  onSetDefault: (view: SavedView) => void;
+  onDelete: (view: SavedView) => void;
+}) {
+  const [expanded, setExpanded] = useState(true);
+  return (
+    <div className="nav-section saved-views">
+      <button
+        className="nav-section__head"
+        onClick={() => setExpanded((e) => !e)}
+        aria-expanded={expanded}
+      >
+        <svg
+          className={`nav-section__chevron${expanded ? " nav-section__chevron--open" : ""}`}
+          viewBox="0 0 24 24"
+          width="14"
+          height="14"
+          aria-hidden="true"
+        >
+          <path fill="currentColor" d="M8 5l8 7-8 7z" />
+        </svg>
+        <span className="nav-section__title">Ansichten</span>
+        <span className="nav-section__count">{views.length}</span>
+      </button>
+      {expanded && (
+        <>
+          <ul className="nav-section__list saved-views__list">
+            {views.map((view) => {
+              const active = activeId === view.id;
+              return (
+                <li key={view.id} className="saved-view-row">
+                  <button
+                    className={`nav-filter saved-view-row__main${active ? " nav-filter--active" : ""}`}
+                    onClick={() => onSelect(view)}
+                    aria-current={active ? "true" : undefined}
+                    title={view.name}
+                  >
+                    <span className="nav-filter__label">{view.name}</span>
+                    <span className="nav-section__count">{view.count}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`saved-view-action${view.is_default ? " saved-view-action--active" : ""}`}
+                    onClick={() => onSetDefault(view)}
+                    disabled={busy}
+                    aria-label={`${view.name} als Startansicht markieren`}
+                    title={view.is_default ? "Startansicht entfernen" : "Als Startansicht"}
+                  >
+                    ★
+                  </button>
+                  <button
+                    type="button"
+                    className="saved-view-action saved-view-action--danger"
+                    onClick={() => onDelete(view)}
+                    disabled={busy}
+                    aria-label={`${view.name} löschen`}
+                    title="Löschen"
+                  >
+                    ×
+                  </button>
+                </li>
+              );
+            })}
+            {views.length === 0 && (
+              <li className="nav-section__empty muted">
+                Keine gespeicherten Ansichten
+              </li>
+            )}
+          </ul>
+          {error && <p className="nav-section__error">{error}</p>}
+        </>
+      )}
+    </div>
+  );
+}
 
 function FolderSection({
   folders,
@@ -2081,21 +2412,27 @@ function WorkspaceToolbar({
   selectedCount,
   loading,
   activePreset,
+  activeSavedViewName,
   mode,
   hasFilters,
+  saveViewBusy,
   onPreset,
   onModeChange,
   onReset,
+  onSaveView,
 }: {
   count: number;
   selectedCount: number;
   loading: boolean;
   activePreset: WorkspacePreset | "custom";
+  activeSavedViewName: string;
   mode: WorkspaceMode;
   hasFilters: boolean;
+  saveViewBusy: boolean;
   onPreset: (preset: WorkspacePreset) => void;
   onModeChange: (mode: WorkspaceMode) => void;
   onReset: () => void;
+  onSaveView: () => void;
 }) {
   const presets: { id: WorkspacePreset; label: string; hint: string }[] = [
     { id: "latest", label: "Neueste", hint: "Aktuelle Dokumente" },
@@ -2115,6 +2452,8 @@ function WorkspaceToolbar({
         <span>
           {selectedCount > 0
             ? `${selectedCount} ausgewählt`
+            : activeSavedViewName
+              ? `Ansicht: ${activeSavedViewName}`
             : activePreset === "custom"
               ? "Eigene Filteransicht"
               : "Schnellansicht aktiv"}
@@ -2151,6 +2490,9 @@ function WorkspaceToolbar({
             Kompakt
           </button>
         </div>
+        <button type="button" className="secondary" onClick={onSaveView} disabled={saveViewBusy}>
+          {saveViewBusy ? "Speichere …" : "Ansicht speichern"}
+        </button>
         {hasFilters && (
           <button type="button" className="link" onClick={onReset}>
             Zurücksetzen

@@ -330,6 +330,46 @@ h1 {
   font-size: 0.78rem;
   line-height: 1.35;
 }
+.saved-views {
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 0.35rem;
+  padding-bottom: 0.4rem;
+}
+.saved-views__list {
+  gap: 0.18rem;
+}
+.saved-view-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 1.75rem 1.75rem;
+  gap: 0.25rem;
+  align-items: center;
+}
+.saved-view-row__main {
+  min-width: 0;
+  padding-left: 1.4rem;
+}
+.saved-view-action {
+  display: grid;
+  place-items: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1;
+}
+.saved-view-action:hover:not(:disabled),
+.saved-view-action--active {
+  background: var(--hover-tint);
+  color: var(--text);
+}
+.saved-view-action--active {
+  color: var(--warn);
+}
+.saved-view-action--danger:hover:not(:disabled) {
+  color: var(--error);
+}
 
 .content {
   flex: 1;

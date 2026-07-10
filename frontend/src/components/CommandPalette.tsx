@@ -9,6 +9,7 @@ import {
 import {
   getDocuments,
   type DocumentItem,
+  type SavedView,
 } from "../api";
 import { ProcessingBadge } from "./ProcessingStatus";
 
@@ -64,7 +65,9 @@ export default function CommandPalette({
   isAdmin,
   onNavigate,
   onApplyPreset,
+  onApplySavedView,
   onOpenDocument,
+  savedViews = [],
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -72,7 +75,9 @@ export default function CommandPalette({
   isAdmin: boolean;
   onNavigate: (view: CommandView) => void;
   onApplyPreset: (preset: CommandPreset) => void;
+  onApplySavedView?: (view: SavedView) => void;
   onOpenDocument: (documentId: number) => void;
+  savedViews?: SavedView[];
 }) {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [query, setQuery] = useState("");
@@ -174,6 +179,26 @@ export default function CommandPalette({
       },
     });
 
+    const savedViewItems = savedViews.map(
+      (view): CommandItem => ({
+        id: `saved-view-${view.id}`,
+        group: "Smart Views",
+        title: view.name,
+        subtitle: `${view.count} Dokument${view.count === 1 ? "" : "e"} · gespeicherte Filteransicht`,
+        keywords: [
+          "smart view",
+          "gespeicherte ansicht",
+          view.description,
+          JSON.stringify(view.query),
+        ],
+        tone: view.is_default ? "ok" : "neutral",
+        run: () => {
+          onApplySavedView?.(view);
+          onOpenChange(false);
+        },
+      }),
+    );
+
     return [
       navigate("view-dashboard", "Cockpit öffnen", "Startansicht mit allen Signalen", "dashboard", ["dashboard", "home"]),
       navigate("view-docs", "Dokumente öffnen", "Archiv und Volltextsuche", "docs", ["archiv", "liste"]),
@@ -204,8 +229,9 @@ export default function CommandPalette({
       preset("preset-processing", "In Verarbeitung", "Pipeline läuft oder wartet", "processing", ["ocr", "pipeline"], "warn"),
       preset("preset-failed", "Fehlgeschlagene Verarbeitung", "Dokumente mit Retry-Bedarf", "failed", ["error", "fehler"], "danger"),
       preset("preset-unfiled", "Ohne Ordner", "Noch nicht einsortierte Dokumente", "unfiled", ["ordnerlos"], "warn"),
+      ...savedViewItems,
     ];
-  }, [canWrite, isAdmin, onApplyPreset, onNavigate, onOpenChange]);
+  }, [canWrite, isAdmin, onApplyPreset, onApplySavedView, onNavigate, onOpenChange, savedViews]);
 
   const documentItems = useMemo<CommandItem[]>(
     () =>
