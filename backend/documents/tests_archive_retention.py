@@ -21,7 +21,13 @@ class ArchiveDocMixin:
         self.tmpdir.cleanup()
         super().tearDown()
 
-    def make_ready_document(self, owner=None, *, content=b"archiv-test"):
+    def make_ready_document(
+        self,
+        owner=None,
+        *,
+        content=b"archiv-test",
+        with_artifacts=False,
+    ):
         doc = Document.objects.create(title="Archivdokument", owner=owner)
         path = Path(self.tmpdir.name) / f"doc-{doc.id}.pdf"
         path.write_bytes(content)
@@ -29,6 +35,8 @@ class ArchiveDocMixin:
             document=doc,
             version_no=1,
             file_path=str(path),
+            archive_path=str(path) if with_artifacts else "",
+            thumbnail_path=str(path) if with_artifacts else "",
             sha256=hashlib.sha256(content).hexdigest(),
             processing_state=DocumentVersion.ProcessingState.READY,
             is_immutable=False,
@@ -78,10 +86,10 @@ class ArchiveApiTests(ArchiveDocMixin, APITestCase):
         self.admin = User.objects.create_user(
             username="archive-admin", password="pw", role="admin"
         )
-        self.doc, self.version, self.path = self.make_ready_document(owner=self.user)
-        self.version.archive_path = str(self.path)
-        self.version.thumbnail_path = str(self.path)
-        self.version.save(update_fields=["archive_path", "thumbnail_path"])
+        self.doc, self.version, self.path = self.make_ready_document(
+            owner=self.user,
+            with_artifacts=True,
+        )
 
     def test_document_archive_check_action_persists_and_audits(self):
         self.client.force_authenticate(self.user)
@@ -141,10 +149,10 @@ class ArchiveApiTests(ArchiveDocMixin, APITestCase):
         self.assertEqual(response.data["summary"]["archive_ok"], 1)
 
     def test_evidence_status_respects_owner_scope(self):
-        other_doc, other_version, other_path = self.make_ready_document(owner=self.admin)
-        other_version.archive_path = str(other_path)
-        other_version.thumbnail_path = str(other_path)
-        other_version.save(update_fields=["archive_path", "thumbnail_path"])
+        other_doc, _other_version, _other_path = self.make_ready_document(
+            owner=self.admin,
+            with_artifacts=True,
+        )
         archive.verify_document_archive(self.doc)
         archive.verify_document_archive(other_doc)
 
