@@ -14,6 +14,7 @@ from .models import (
     DocumentType,
     DocumentVersion,
     ExtractionCandidate,
+    StoragePath,
     Tag,
 )
 from .services import review_tasks
@@ -419,3 +420,151 @@ class DocumentReviewInboxTests(APITestCase):
         )
         extract_mock.assert_called_once()
         case_mock.assert_called_once()
+
+    def test_autopilot_inbox_verdichtet_owner_scoped_signale(self):
+        """Autopilot zeigt nur eigene Dokumente und erklaert offene Entscheidungen."""
+        self.needs_review.ai_suggestions = {
+            "correspondent": "Wuestenrot",
+            "document_type": "Vertrag",
+            "tags": ["Versicherung"],
+        }
+        self.needs_review.classification = {}
+        self.needs_review.save(update_fields=["ai_suggestions", "classification"])
+        ExtractionCandidate.objects.create(
+            document=self.needs_review,
+            field=ExtractionCandidate.Field.AMOUNT,
+            value="225,74 EUR",
+            normalized_value="225.74",
+            confidence=88,
+            reason="Betrag im OCR erkannt",
+            status=ExtractionCandidate.Status.PENDING,
+        )
+        CaseFileCandidate.objects.create(
+            document=self.needs_review,
+            kind=CaseFileCandidate.Kind.NEW_CASE,
+            suggested_title="Wuestenrot Mobilitaetsversicherung",
+            signature="new:wuestenrot",
+            score=82,
+            reason="Versicherungsbegriffe erkannt",
+            status=CaseFileCandidate.Status.PENDING,
+        )
+        self._document(
+            "Fremder Autopilot",
+            owner=self.other,
+            review_status=Document.ReviewStatus.NEEDS_REVIEW,
+        )
+
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get("/api/documents/autopilot-inbox/")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data["total"], 1)
+        self.assertEqual(len(resp.data["items"]), 1)
+        item = resp.data["items"][0]
+        self.assertEqual(item["document"], self.needs_review.id)
+        self.assertEqual(item["lane"], "metadata")
+        self.assertIn("Korrespondent", item["missing_metadata"])
+        self.assertGreater(resp.data["summary"]["pending_suggestions"], 0)
+        suggestion_labels = {suggestion["label"] for suggestion in item["suggestions"]}
+        self.assertIn("Korrespondent", suggestion_labels)
+        self.assertIn("Betrag", suggestion_labels)
+        self.assertIn("Neue Akte", suggestion_labels)
+
+    def test_autopilot_ready_document_ist_bulk_safe(self):
+        """Vollstaendige, taskfreie Dokumente koennen im Batch abgelegt werden."""
+        corr = Correspondent.objects.create(name="EVN")
+        dtype = DocumentType.objects.create(name="Rechnung")
+        storage = StoragePath.objects.create(name="Finanzen")
+        folder = DocumentFolder.objects.create(name="Rechnungen")
+        ready = self._document(
+            "Fertiger Beleg",
+            owner=self.owner,
+            review_status=Document.ReviewStatus.NEEDS_REVIEW,
+        )
+        ready.correspondent = corr
+        ready.document_type = dtype
+        ready.storage_path = storage
+        ready.folder = folder
+        ready.classification = {"rules": ["EVN Rechnungen"]}
+        ready.save(
+            update_fields=[
+                "correspondent",
+                "document_type",
+                "storage_path",
+                "folder",
+                "classification",
+            ]
+        )
+
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get("/api/documents/autopilot-inbox/")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        item = next(i for i in resp.data["items"] if i["document"] == ready.id)
+        self.assertEqual(item["lane"], "ready")
+        self.assertTrue(item["can_autofile"])
+        self.assertTrue(item["bulk_safe"])
+        self.assertGreaterEqual(item["confidence"], 90)
+
+    def test_rule_simulation_ist_owner_scoped_und_read_only(self):
+        """Regelentwuerfe werden nur gegen sichtbare Dokumente simuliert."""
+        own_version = self.needs_review.current_version
+        own_version.ocr_text = "Wuestenrot Gruppe Mobilitaetsversicherung"
+        own_version.save(update_fields=["ocr_text"])
+        foreign = self._document(
+            "Fremde Wuestenrot Police",
+            owner=self.other,
+            review_status=Document.ReviewStatus.NEEDS_REVIEW,
+        )
+        foreign.current_version.ocr_text = "Wuestenrot Gruppe"
+        foreign.current_version.save(update_fields=["ocr_text"])
+
+        self.client.force_authenticate(self.owner)
+        resp = self.client.post(
+            "/api/classification-rules/simulate/",
+            {
+                "match": {"text_contains": ["Wuestenrot"]},
+                "then": {
+                    "correspondent": "Wuestenrot",
+                    "document_type": "Versicherung",
+                },
+            },
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data["matched"], 1)
+        self.assertEqual(resp.data["would_update"], 1)
+        self.assertEqual(resp.data["conflicts"], 0)
+        self.assertEqual(resp.data["matches"][0]["id"], self.needs_review.id)
+        self.needs_review.refresh_from_db()
+        self.assertIsNone(self.needs_review.correspondent)
+        self.assertIsNone(self.needs_review.document_type)
+
+    def test_existing_rule_simulation_zeigt_metadatenkonflikte(self):
+        """Bestehende Regeln lassen sich simulieren und zeigen Konflikte."""
+        evn = Correspondent.objects.create(name="EVN")
+        self.needs_review.correspondent = evn
+        self.needs_review.save(update_fields=["correspondent"])
+        version = self.needs_review.current_version
+        version.ocr_text = "Wuestenrot Versicherung"
+        version.save(update_fields=["ocr_text"])
+        rule = ClassificationRule.objects.create(
+            name="Wuestenrot",
+            priority=50,
+            enabled=True,
+            match={"text_contains": ["Wuestenrot"]},
+            then={"correspondent": "Wuestenrot"},
+        )
+
+        self.client.force_authenticate(self.owner)
+        resp = self.client.post(f"/api/classification-rules/{rule.id}/simulate/")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data["matched"], 1)
+        self.assertEqual(resp.data["conflicts"], 1)
+        self.assertEqual(resp.data["risk"], "high")
+        conflict = resp.data["matches"][0]["conflicts"][0]
+        self.assertEqual(conflict["field"], "correspondent")
+        self.assertEqual(conflict["current"], "EVN")
+        self.assertEqual(conflict["to"], "Wuestenrot")

@@ -302,6 +302,67 @@ export interface InboxGenerateCandidatesResult {
   case_created: number;
   errors: { id?: number; error: string }[];
 }
+export type AutopilotLane =
+  | "ready"
+  | "suggestions"
+  | "metadata"
+  | "processing"
+  | "error";
+export interface AutopilotSuggestion {
+  kind: "ai" | "extraction" | "case_file";
+  field: string;
+  label: string;
+  value: string;
+  confidence: number;
+  source: string;
+  reason?: string;
+  action: {
+    type:
+      | "apply_ai_suggestion"
+      | "apply_extraction_candidate"
+      | "apply_case_file_candidate";
+    fields?: string[];
+    candidate_id?: number;
+  };
+}
+export interface AutopilotNextAction {
+  kind: string;
+  label: string;
+  tone: "primary" | "warn" | "danger" | "neutral" | "ok";
+}
+export interface AutopilotItem {
+  document: number;
+  title: string;
+  asn_label: string | null;
+  lane: AutopilotLane;
+  lane_label: string;
+  confidence: number;
+  can_autofile: boolean;
+  bulk_safe: boolean;
+  missing_metadata: string[];
+  suggestions: AutopilotSuggestion[];
+  reasons: string[];
+  next_actions: AutopilotNextAction[];
+  signals: {
+    review_tasks: number;
+    ai_suggestions: number;
+    extraction_candidates: number;
+    case_candidates: number;
+    classification_rules: number;
+  };
+}
+export interface AutopilotInbox {
+  total: number;
+  limit: number;
+  summary: {
+    lanes: Record<AutopilotLane, number>;
+    average_confidence: number;
+    auto_ready: number;
+    needs_human: number;
+    pending_suggestions: number;
+  };
+  items: AutopilotItem[];
+}
 export interface ReviewLearningOptions {
   create_rule?: boolean;
   match_text?: string;
@@ -383,6 +444,38 @@ export interface ClassificationRule {
     folder?: string;
     tags?: string[];
   };
+}
+export type ClassificationRulePayload = Omit<ClassificationRule, "id">;
+export interface ClassificationRuleSimulationChange {
+  field: string;
+  to?: string;
+  current?: string;
+  value?: string | string[];
+  add?: string[];
+}
+export interface ClassificationRuleSimulationMatch {
+  id: number;
+  title: string;
+  asn_label: string | null;
+  correspondent_name: string | null;
+  document_type_name: string | null;
+  folder_path: string | null;
+  would_change: ClassificationRuleSimulationChange[];
+  already_ok: ClassificationRuleSimulationChange[];
+  conflicts: ClassificationRuleSimulationChange[];
+}
+export interface ClassificationRuleSimulation {
+  total_documents: number;
+  matched: number;
+  would_update: number;
+  already_ok: number;
+  conflicts: number;
+  match_rate: number;
+  risk: "low" | "medium" | "high";
+  impact_score: number;
+  warnings: string[];
+  sample_limit: number;
+  matches: ClassificationRuleSimulationMatch[];
 }
 
 export type CaseFileStatus = "active" | "waiting" | "done" | "archived";
@@ -1095,6 +1188,14 @@ export async function retryProcessing(id: number): Promise<DocumentVersion> {
 export async function getInboxSummary(): Promise<InboxSummary> {
   const res = await apiFetch("/documents/inbox-summary/");
   if (!res.ok) throw new Error(`Inbox-Status laden fehlgeschlagen: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function getAutopilotInbox(limit = 25): Promise<AutopilotInbox> {
+  const res = await apiFetch(`/documents/autopilot-inbox/?limit=${limit}`);
+  if (!res.ok) {
+    throw new Error(`Autopilot laden fehlgeschlagen: HTTP ${res.status}`);
+  }
   return res.json();
 }
 
@@ -2154,9 +2255,25 @@ export async function getRules(): Promise<ClassificationRule[]> {
   return listAll<ClassificationRule>("/classification-rules/");
 }
 export function createRule(
-  rule: Omit<ClassificationRule, "id">,
+  rule: ClassificationRulePayload,
 ): Promise<ClassificationRule> {
   return postJson<ClassificationRule>("/classification-rules/", rule);
+}
+export function simulateRuleDraft(
+  rule: ClassificationRulePayload,
+): Promise<ClassificationRuleSimulation> {
+  return postJson<ClassificationRuleSimulation>(
+    "/classification-rules/simulate/",
+    { match: rule.match, then: rule.then },
+  );
+}
+export function simulateExistingRule(
+  id: number,
+): Promise<ClassificationRuleSimulation> {
+  return postJson<ClassificationRuleSimulation>(
+    `/classification-rules/${id}/simulate/`,
+    {},
+  );
 }
 export async function deleteRule(id: number): Promise<void> {
   const res = await apiFetch(`/classification-rules/${id}/`, { method: "DELETE" });
