@@ -50,6 +50,7 @@ import SystemStatusPage from "./SystemStatusPage";
 import InboxPage from "./InboxPage";
 import EvidenceCenterPage from "./EvidenceCenterPage";
 import QualityCenterPage from "./QualityCenterPage";
+import DashboardPage from "./DashboardPage";
 
 // Von-/Bis-Eingaben eines CURRENCY-Zusatzfeld-Filters (STOAA-113).
 type CurrencyRange = { gte: string; lte: string };
@@ -57,6 +58,7 @@ type FolderFilterValue = number | "none" | "";
 type WorkspaceMode = "cards" | "compact";
 type WorkspacePreset = "latest" | "processing" | "failed" | "unfiled" | "inbox" | "quality";
 type MainView =
+  | "dashboard"
   | "docs"
   | "cases"
   | "dossiers"
@@ -201,7 +203,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     }
   });
   // Aktive Hauptansicht (persistente linke Navigation).
-  const [view, setView] = useState<MainView>("docs");
+  const [view, setView] = useState<MainView>("dashboard");
   // Sidebar auf schmalen Screens ein-/ausklappbar.
   const [navOpen, setNavOpen] = useState(false);
   // Desktop-Sidebar auf Icon-only einklappbar; Zustand persistent (localStorage).
@@ -763,7 +765,9 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
             </svg>
           </button>
           <h1 className="content-title">
-            {view === "capture"
+            {view === "dashboard"
+              ? "Cockpit"
+              : view === "capture"
               ? "Erfassen"
               : view === "cases"
                 ? "Akten"
@@ -842,7 +846,14 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
         </header>
 
         <div className="content-body">
-          {view === "copilot" ? (
+          {view === "dashboard" ? (
+            <DashboardPage
+              canWrite={!!me?.can_write}
+              isAdmin={!!me?.is_dms_admin}
+              onNavigate={navigate}
+              onOpenDocument={(docId) => setSelectedId(docId)}
+            />
+          ) : view === "copilot" ? (
             <CopilotPage
               folders={folders}
               onOpenDocument={(docId, pageNo) => {
@@ -1364,6 +1375,12 @@ function Sidebar({
       </div>
 
       <nav className="nav">
+        <NavItem
+          active={view === "dashboard"}
+          onClick={() => onNavigate("dashboard")}
+          label="Cockpit"
+          icon="M3 4h8v7H3zm10 0h8v4h-8zM3 13h8v7H3zm10-3h8v10h-8z"
+        />
         <NavItem
           active={view === "docs"}
           onClick={() => onNavigate("docs")}
