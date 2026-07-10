@@ -424,6 +424,23 @@ h1 {
   justify-content: flex-start;
   padding-left: 0;
 }
+.command-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 2.35rem;
+  height: 2.35rem;
+  padding: 0;
+  border: 1px solid var(--border);
+  background: var(--surface-sunken);
+  color: var(--muted);
+}
+.command-trigger:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--hover-tint);
+  border-color: var(--border-strong);
+}
 .nav-toggle {
   display: none;
   background: transparent;
@@ -586,6 +603,166 @@ h1 {
     right: auto;
     left: 0;
     max-width: calc(100vw - 2rem);
+  }
+}
+
+/* --- Command Palette --- */
+.command-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: start center;
+  padding: min(9vh, 5rem) 1rem 1rem;
+}
+.command-backdrop {
+  position: fixed;
+  inset: 0;
+  border: 0;
+  border-radius: 0;
+  background: rgba(2, 6, 23, 0.72);
+  backdrop-filter: blur(6px);
+  padding: 0;
+}
+.command-backdrop:hover:not(:disabled) {
+  background: rgba(2, 6, 23, 0.72);
+}
+.command-dialog {
+  position: relative;
+  z-index: 81;
+  width: min(760px, 100%);
+  max-height: min(78vh, 760px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: #0b1220;
+  box-shadow: var(--shadow-pop);
+}
+.command-search {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+.command-search svg {
+  flex-shrink: 0;
+  color: var(--muted);
+}
+.command-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font-size: 1rem;
+}
+.command-search input:focus,
+.command-search input:focus-visible {
+  border-color: transparent;
+  box-shadow: none;
+}
+.command-results {
+  min-height: 12rem;
+  overflow-y: auto;
+  padding: var(--space-3);
+}
+.command-group + .command-group {
+  margin-top: var(--space-3);
+}
+.command-group h3 {
+  margin: 0 0 var(--space-2);
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.command-item {
+  display: grid;
+  grid-template-columns: 0.35rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  min-height: 3.5rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  padding: 0.55rem 0.75rem;
+  text-align: left;
+}
+.command-item:hover:not(:disabled),
+.command-item--active {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: rgba(59, 130, 246, 0.12);
+}
+.command-item__mark {
+  width: 0.35rem;
+  height: 2rem;
+  border-radius: var(--radius-pill);
+  background: var(--border-strong);
+}
+.command-item--ok .command-item__mark {
+  background: var(--ok);
+}
+.command-item--warn .command-item__mark {
+  background: var(--warn);
+}
+.command-item--danger .command-item__mark {
+  background: var(--error);
+}
+.command-item__body {
+  min-width: 0;
+  display: grid;
+  gap: 0.12rem;
+}
+.command-item__body strong,
+.command-item__body span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.command-item__body span {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+.command-item__meta {
+  display: inline-flex;
+  justify-content: flex-end;
+  min-width: 5rem;
+}
+.command-empty,
+.command-error {
+  padding: var(--space-4);
+  color: var(--muted);
+  text-align: center;
+}
+.command-error {
+  color: var(--error);
+}
+@media (max-width: 640px) {
+  .command-layer {
+    place-items: start stretch;
+    padding: 0;
+  }
+  .command-dialog {
+    width: 100%;
+    max-height: 100vh;
+    min-height: 100vh;
+    border-radius: 0;
+    border-left: 0;
+    border-right: 0;
+  }
+  .command-item {
+    grid-template-columns: 0.35rem minmax(0, 1fr);
+  }
+  .command-item__meta {
+    grid-column: 2;
+    justify-content: flex-start;
+    min-width: 0;
   }
 }
 
