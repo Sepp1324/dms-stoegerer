@@ -13,6 +13,7 @@ from .models import (
     DocumentEntity,
     DocumentReminder,
     DocumentReviewTask,
+    DocumentType,
     DocumentVersion,
     KnowledgeEntity,
     OCRStatus,
@@ -29,11 +30,13 @@ class DocumentBriefingTests(APITestCase):
         cls.owner = User.objects.create_user(username="brief_owner", password="pw", role="user")
         cls.other = User.objects.create_user(username="brief_other", password="pw", role="user")
         cls.correspondent = Correspondent.objects.create(name="Helvetia")
+        cls.document_type = DocumentType.objects.create(name="Polizze")
         cls.case_file = CaseFile.objects.create(title="Versicherungen 2026", owner=cls.owner)
         cls.document = cls._document(
             "Polizze Haushalt",
             owner=cls.owner,
             correspondent=cls.correspondent,
+            document_type=cls.document_type,
             case_file=cls.case_file,
             ai_suggestions={"summary": "Haushaltsversicherung mit offener Vertragsprüfung."},
         )
@@ -87,11 +90,21 @@ class DocumentBriefingTests(APITestCase):
         )
 
     @classmethod
-    def _document(cls, title, *, owner, correspondent=None, case_file=None, ai_suggestions=None):
+    def _document(
+        cls,
+        title,
+        *,
+        owner,
+        correspondent=None,
+        document_type=None,
+        case_file=None,
+        ai_suggestions=None,
+    ):
         doc = Document.objects.create(
             title=title,
             owner=owner,
             correspondent=correspondent,
+            document_type=document_type,
             case_file=case_file,
             ai_suggestions=ai_suggestions or {},
         )
