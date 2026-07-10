@@ -31,6 +31,7 @@ import {
 import { DetailPreview } from "./documentDetail/DetailPreview";
 import { DetailMeta } from "./documentDetail/DetailMeta";
 import { EditForm, type EditFormState } from "./documentDetail/EditForm";
+import { BriefingPanel } from "./documentDetail/BriefingPanel";
 import { AiSuggestionsPanel } from "./documentDetail/AiSuggestionsPanel";
 import { VersionsPanel } from "./documentDetail/VersionsPanel";
 import { ComparePanel } from "./documentDetail/ComparePanel";
@@ -528,6 +529,18 @@ export default function DocumentDetail({
                   onDownloadQr={downloadQr}
                 />
               )}
+            </TabPanel>
+
+            {/* Briefing: Copilot-Übersicht mit Risiken, Aktionen und Beziehungen. */}
+            <TabPanel id="briefing" active={activeTab}>
+              <BriefingPanel
+                documentId={id}
+                canEdit={canEdit}
+                onSelectTab={setTab}
+                onOpenDocument={(documentId) =>
+                  onOpenDocument ? onOpenDocument(documentId) : undefined
+                }
+              />
             </TabPanel>
 
             {/* Entitäten: private Wissensgraph-Links dieses Dokuments. */}

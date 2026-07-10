@@ -117,6 +117,7 @@ from .serializers import (
 from .services import asn as asn_service
 from .services import archive as archive_service
 from .services import contracts as contract_service
+from .services import document_briefing as document_briefing_service
 from .services import dossiers as dossier_service
 from .services import entity_graph as entity_graph_service
 from .services import review_tasks as review_task_service
@@ -1335,6 +1336,16 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 "results": results,
             }
         )
+
+    @action(detail=True, methods=["get"], url_path="briefing")
+    def briefing(self, request, pk=None):
+        """Handlungsorientiertes Dokument-Briefing aus vorhandenen DMS-Signalen."""
+        document = self.get_object()
+        payload = document_briefing_service.build_document_briefing(
+            document,
+            visible_documents=self.get_queryset(),
+        )
+        return Response(payload)
 
     @action(detail=True, methods=["post"], url_path="reindex-semantic")
     def reindex_semantic(self, request, pk=None):

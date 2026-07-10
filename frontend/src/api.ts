@@ -1646,6 +1646,152 @@ export interface SimilarDocumentsResult {
   model: string;
   results: SimilarDocument[];
 }
+export type BriefingRiskLevel = "clear" | "low" | "medium" | "high";
+export interface DocumentBriefingAction {
+  kind: string;
+  priority: number;
+  title: string;
+  description: string;
+  action_label: string;
+  target:
+    | "overview"
+    | "briefing"
+    | "entities"
+    | "similar"
+    | "versions"
+    | "workbench"
+    | "ai"
+    | "reminder"
+    | "freigabe"
+    | "fields"
+    | "audit";
+}
+export interface DocumentBriefing {
+  document: {
+    id: number;
+    title: string;
+    asn: number | null;
+    asn_label: string | null;
+    status: DocumentStatus;
+    status_label: string;
+    review_status: ReviewStatus;
+    review_status_label: string;
+    correspondent: string | null;
+    document_type: string | null;
+    folder: string | null;
+    case_file: {
+      id: number;
+      title: string;
+      status: CaseFileStatus;
+      status_label: string;
+    } | null;
+    page_count: number | null;
+    added_at: string;
+    created_at: string | null;
+  };
+  summary: { source: "ai_suggestions" | "ocr" | "metadata"; text: string };
+  risk_level: BriefingRiskLevel;
+  metadata_score: {
+    completed: number;
+    total: number;
+    percent: number;
+    missing: string[];
+  };
+  health: {
+    processing_state: ProcessingState | null;
+    ocr_status: OcrStatus | null;
+    ocr_error: string;
+    archive_status: ArchiveStatus;
+    archive_status_label: string;
+    archive_error: string;
+    retention: {
+      state: RetentionState;
+      retention_until: string | null;
+      days_remaining: number | null;
+    };
+    legal_hold: boolean;
+    legal_hold_reason: string;
+    sealed: boolean;
+    immutable: boolean;
+  };
+  next_actions: DocumentBriefingAction[];
+  risks: { level: "high" | "medium" | "info"; label: string; detail: string }[];
+  signals: {
+    ocr: { characters: number; words: number; has_text: boolean };
+    review_tasks: {
+      id: number;
+      kind: ReviewTaskKind;
+      kind_label: string;
+      priority: number;
+      message: string;
+      suggested_action: string;
+    }[];
+    reminders: {
+      id: number;
+      remind_on: string;
+      note: string;
+      due: boolean;
+    }[];
+    extraction_candidates: {
+      id: number;
+      field: ExtractionCandidateField;
+      field_label: string;
+      value: string;
+      confidence: number;
+    }[];
+    case_candidates: {
+      id: number;
+      kind: CaseFileCandidateKind;
+      kind_label: string;
+      target: string;
+      score: number;
+      reason: string;
+    }[];
+    contract: {
+      id: number;
+      provider: string;
+      provider_display: string;
+      contract_type: ContractType;
+      contract_type_label: string;
+      contract_number: string;
+      amount: string | null;
+      currency: string;
+      status: ContractStatus;
+      status_label: string;
+      needs_review: boolean;
+      cancel_until: string | null;
+      next_due_on: string | null;
+      ends_on: string | null;
+    } | null;
+    ai_suggestions: AiSuggestions;
+  };
+  timeline: { kind: string; label: string; date: string | null }[];
+  relations: {
+    entities: {
+      id: number;
+      name: string;
+      kind: KnowledgeEntityKind;
+      kind_label: string;
+      role: DocumentEntityRole;
+      role_label: string;
+      confidence: number;
+    }[];
+    related_documents: {
+      id: number;
+      title: string;
+      reason: string;
+      added_at: string;
+    }[];
+  };
+  audit: {
+    id: number;
+    timestamp: string;
+    actor: string | null;
+    action: string;
+    detail: Record<string, unknown>;
+  }[];
+  generated_at: string;
+}
 export interface SemanticReindexResult {
   status: string;
   created: number;
@@ -1677,6 +1823,12 @@ export async function askDocuments(
 export async function getSimilarDocuments(id: number): Promise<SimilarDocumentsResult> {
   const res = await apiFetch(`/documents/${id}/similar/`);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function getDocumentBriefing(id: number): Promise<DocumentBriefing> {
+  const res = await apiFetch(`/documents/${id}/briefing/`);
+  if (!res.ok) throw new Error(`Briefing nicht verfügbar (HTTP ${res.status})`);
   return res.json();
 }
 
