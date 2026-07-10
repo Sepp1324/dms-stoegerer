@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import {
   addDocumentVersion,
   applySuggestions,
@@ -470,181 +470,341 @@ export default function DocumentDetail({
   const activeTab: TabId = visibleTabs.some((t) => t.id === tab) ? tab : "overview";
 
   return (
-    <div className="shell">
-      <header className="topbar">
-        <button className="link" onClick={onBack}>
+    <div className="shell shell--detail">
+      <header className="detail-topbar">
+        <button className="link detail-back" onClick={onBack}>
           ← Zurück zur Liste
         </button>
-        {doc && canEdit && !editing && <button onClick={startEdit}>Bearbeiten</button>}
+        {doc && (
+          <div className="detail-topbar__actions">
+            {canEdit && !editing && <button onClick={startEdit}>Bearbeiten</button>}
+            <button
+              type="button"
+              className="secondary"
+              onClick={downloadRevisionPackage}
+              disabled={archiveBusy}
+            >
+              Revisionspaket
+            </button>
+          </div>
+        )}
       </header>
 
       {error && <p className="status status--error">{error}</p>}
       {!doc && !error && <p className="muted">Lade …</p>}
 
       {doc && (
-        <div className="detail">
-          {/* Linke Spalte: große Vorschau, beim Scrollen der rechten Spalte sticky. */}
-          <DetailPreview pdfUrl={pdfUrl} pdfError={pdfError} title={doc.title} />
+        <div className="detail-workspace">
+          <DetailHero
+            doc={doc}
+            currentVersion={currentVersion}
+            integrityOk={integrity?.chain_ok ?? null}
+            activeTab={activeTab}
+            onSelectTab={setTab}
+            canEdit={canEdit}
+            editing={editing}
+            archiveBusy={archiveBusy}
+            onEdit={startEdit}
+            onArchiveCheck={runArchiveCheck}
+            onDownloadQr={downloadQr}
+          />
 
-          {/* Rechte Spalte: kompakte Info-/Aktionsspalte mit ARIA-Tabs. */}
-          <section className="card detail-panels">
-            <DetailTabs tabs={visibleTabs} active={activeTab} onSelect={setTab} />
+          <div className="detail">
+            {/* Linke Spalte: große Vorschau, beim Scrollen der rechten Spalte sticky. */}
+            <DetailPreview pdfUrl={pdfUrl} pdfError={pdfError} title={doc.title} />
 
-            {/* Übersicht: Titel, Verarbeitung, Klassifizierung, Metadaten.
-                Im Edit-Modus ersetzt das Formular die Anzeige. */}
-            <TabPanel id="overview" active={activeTab}>
-              {editing ? (
-                <EditForm
-                  form={form}
-                  setForm={setForm}
-                  correspondents={correspondents}
-                  documentTypes={documentTypes}
-                  storagePaths={storagePaths}
-                  folders={folders}
-                  allTags={allTags}
-                  onCreateCorrespondent={onCreateCorrespondent}
-                  onCreateDocumentType={onCreateDocumentType}
-                  onCreateStoragePath={onCreateStoragePath}
-                  onCreateFolder={onCreateFolder}
-                  onCreateTag={onCreateTag}
-                  toggleTag={toggleTag}
-                  saving={saving}
-                  saveError={saveError}
-                  onSave={save}
-                  onCancel={() => setEditing(false)}
-                />
-              ) : (
-                <DetailMeta
-                  doc={doc}
+            {/* Rechte Spalte: kompakte Info-/Aktionsspalte mit ARIA-Tabs. */}
+            <section className="card detail-panels">
+              <DetailTabs tabs={visibleTabs} active={activeTab} onSelect={setTab} />
+
+              {/* Übersicht: Titel, Verarbeitung, Klassifizierung, Metadaten.
+                  Im Edit-Modus ersetzt das Formular die Anzeige. */}
+              <TabPanel id="overview" active={activeTab}>
+                {editing ? (
+                  <EditForm
+                    form={form}
+                    setForm={setForm}
+                    correspondents={correspondents}
+                    documentTypes={documentTypes}
+                    storagePaths={storagePaths}
+                    folders={folders}
+                    allTags={allTags}
+                    onCreateCorrespondent={onCreateCorrespondent}
+                    onCreateDocumentType={onCreateDocumentType}
+                    onCreateStoragePath={onCreateStoragePath}
+                    onCreateFolder={onCreateFolder}
+                    onCreateTag={onCreateTag}
+                    toggleTag={toggleTag}
+                    saving={saving}
+                    saveError={saveError}
+                    onSave={save}
+                    onCancel={() => setEditing(false)}
+                  />
+                ) : (
+                  <DetailMeta
+                    doc={doc}
+                    canEdit={canEdit}
+                    currentVersion={currentVersion}
+                    retryBusy={retryBusy}
+                    retryError={retryError}
+                    archiveBusy={archiveBusy}
+                    archiveError={archiveError}
+                    onRetry={onRetry}
+                    onArchiveCheck={runArchiveCheck}
+                    onToggleLegalHold={toggleLegalHold}
+                    onDownloadRevisionPackage={downloadRevisionPackage}
+                    onDownloadQr={downloadQr}
+                  />
+                )}
+              </TabPanel>
+
+              {/* Briefing: Copilot-Übersicht mit Risiken, Aktionen und Beziehungen. */}
+              <TabPanel id="briefing" active={activeTab}>
+                <BriefingPanel
+                  documentId={id}
                   canEdit={canEdit}
-                  currentVersion={currentVersion}
-                  retryBusy={retryBusy}
-                  retryError={retryError}
-                  archiveBusy={archiveBusy}
-                  archiveError={archiveError}
-                  onRetry={onRetry}
-                  onArchiveCheck={runArchiveCheck}
-                  onToggleLegalHold={toggleLegalHold}
-                  onDownloadRevisionPackage={downloadRevisionPackage}
-                  onDownloadQr={downloadQr}
-                />
-              )}
-            </TabPanel>
-
-            {/* Briefing: Copilot-Übersicht mit Risiken, Aktionen und Beziehungen. */}
-            <TabPanel id="briefing" active={activeTab}>
-              <BriefingPanel
-                documentId={id}
-                canEdit={canEdit}
-                onSelectTab={setTab}
-                onOpenDocument={(documentId) =>
-                  onOpenDocument ? onOpenDocument(documentId) : undefined
-                }
-              />
-            </TabPanel>
-
-            {/* Entitäten: private Wissensgraph-Links dieses Dokuments. */}
-            <TabPanel id="entities" active={activeTab}>
-              <EntitiesPanel documentId={id} canEdit={canEdit} />
-            </TabPanel>
-
-            {/* Semantik: ähnliche Dokumente aus dem lokalen Embedding-Index. */}
-            <TabPanel id="similar" active={activeTab}>
-              <SimilarDocumentsPanel
-                documentId={id}
-                canEdit={canEdit}
-                onOpenDocument={onOpenDocument ?? (() => undefined)}
-              />
-            </TabPanel>
-
-            {/* Versionen & Verlauf: Versionsliste/Integrität + Vergleich. */}
-            <TabPanel id="versions" active={activeTab}>
-              <VersionsPanel
-                versions={versions}
-                currentVersionId={doc.current_version}
-                selectedVersionNo={selectedVersionNo}
-                onSelect={setSelectedVersionNo}
-                onDownload={downloadVersion}
-                integrity={integrity}
-                integrityError={integrityError}
-                canEdit={canEdit}
-                addBusy={addBusy}
-                addError={addError}
-                fileInputRef={fileInputRef}
-                onAddVersion={onAddVersion}
-              />
-              <ComparePanel
-                documentId={id}
-                versions={versions}
-                onDownload={downloadVersion}
-              />
-            </TabPanel>
-
-            {/* PDF-Werkbank: Seiten neu schreiben, splitten, zusammenführen. */}
-            <TabPanel id="workbench" active={activeTab}>
-              <PdfWorkbenchPanel
-                documentId={id}
-                canEdit={canEdit}
-                onChanged={() => setRefresh((r) => r + 1)}
-              />
-            </TabPanel>
-
-            {/* KI-Vorschläge (nur bei Schreibrecht). */}
-            {canEdit && (
-              <TabPanel id="ai" active={activeTab}>
-                <AiSuggestionsPanel
-                  suggestionRows={suggestionRows}
-                  summary={s.summary}
-                  applying={applying}
-                  regenerating={regenerating}
-                  regenNote={regenNote}
-                  applyError={applyError}
-                  onRegenerate={regenerate}
-                  onApply={apply}
-                  onDismiss={dismiss}
+                  onSelectTab={setTab}
+                  onOpenDocument={(documentId) =>
+                    onOpenDocument ? onOpenDocument(documentId) : undefined
+                  }
                 />
               </TabPanel>
-            )}
 
-            {/* Wiedervorlage. */}
-            <TabPanel id="reminder" active={activeTab}>
-              <ReminderPanel documentId={id} canEdit={canEdit} />
-            </TabPanel>
+              {/* Entitäten: private Wissensgraph-Links dieses Dokuments. */}
+              <TabPanel id="entities" active={activeTab}>
+                <EntitiesPanel documentId={id} canEdit={canEdit} />
+              </TabPanel>
 
-            {/* Freigabe: Status/Workflow + Freigabelinks. */}
-            <TabPanel id="freigabe" active={activeTab}>
-              <FreigabePanel
-                status={doc.status}
-                canEdit={canEdit}
-                busy={freigabeBusy}
-                error={freigabeError}
-                onSubmit={() => runFreigabe(() => submitDocument(id))}
-                onApprove={() => runFreigabe(() => approveDocument(id))}
-                onReject={(reason) => runFreigabe(() => rejectDocument(id, reason))}
-              />
-              <ShareLinksPanel documentId={id} canEdit={canEdit} />
-            </TabPanel>
+              {/* Semantik: ähnliche Dokumente aus dem lokalen Embedding-Index. */}
+              <TabPanel id="similar" active={activeTab}>
+                <SimilarDocumentsPanel
+                  documentId={id}
+                  canEdit={canEdit}
+                  onOpenDocument={onOpenDocument ?? (() => undefined)}
+                />
+              </TabPanel>
 
-            {/* Zusatzfelder. */}
-            <TabPanel id="fields" active={activeTab}>
-              <CustomFieldsPanel
-                fields={customFields}
-                values={doc.custom_field_values ?? []}
-                canEdit={canEdit}
-                onSave={saveCustomFields}
-                onManageFields={onManageFields}
-              />
-            </TabPanel>
+              {/* Versionen & Verlauf: Versionsliste/Integrität + Vergleich. */}
+              <TabPanel id="versions" active={activeTab}>
+                <VersionsPanel
+                  versions={versions}
+                  currentVersionId={doc.current_version}
+                  selectedVersionNo={selectedVersionNo}
+                  onSelect={setSelectedVersionNo}
+                  onDownload={downloadVersion}
+                  integrity={integrity}
+                  integrityError={integrityError}
+                  canEdit={canEdit}
+                  addBusy={addBusy}
+                  addError={addError}
+                  fileInputRef={fileInputRef}
+                  onAddVersion={onAddVersion}
+                />
+                <ComparePanel
+                  documentId={id}
+                  versions={versions}
+                  onDownload={downloadVersion}
+                />
+              </TabPanel>
 
-            {/* Audit. */}
-            <TabPanel id="audit" active={activeTab}>
-              <AuditTrail id={id} />
-            </TabPanel>
-          </section>
+              {/* PDF-Werkbank: Seiten neu schreiben, splitten, zusammenführen. */}
+              <TabPanel id="workbench" active={activeTab}>
+                <PdfWorkbenchPanel
+                  documentId={id}
+                  canEdit={canEdit}
+                  onChanged={() => setRefresh((r) => r + 1)}
+                />
+              </TabPanel>
+
+              {/* KI-Vorschläge (nur bei Schreibrecht). */}
+              {canEdit && (
+                <TabPanel id="ai" active={activeTab}>
+                  <AiSuggestionsPanel
+                    suggestionRows={suggestionRows}
+                    summary={s.summary}
+                    applying={applying}
+                    regenerating={regenerating}
+                    regenNote={regenNote}
+                    applyError={applyError}
+                    onRegenerate={regenerate}
+                    onApply={apply}
+                    onDismiss={dismiss}
+                  />
+                </TabPanel>
+              )}
+
+              {/* Wiedervorlage. */}
+              <TabPanel id="reminder" active={activeTab}>
+                <ReminderPanel documentId={id} canEdit={canEdit} />
+              </TabPanel>
+
+              {/* Freigabe: Status/Workflow + Freigabelinks. */}
+              <TabPanel id="freigabe" active={activeTab}>
+                <FreigabePanel
+                  status={doc.status}
+                  canEdit={canEdit}
+                  busy={freigabeBusy}
+                  error={freigabeError}
+                  onSubmit={() => runFreigabe(() => submitDocument(id))}
+                  onApprove={() => runFreigabe(() => approveDocument(id))}
+                  onReject={(reason) => runFreigabe(() => rejectDocument(id, reason))}
+                />
+                <ShareLinksPanel documentId={id} canEdit={canEdit} />
+              </TabPanel>
+
+              {/* Zusatzfelder. */}
+              <TabPanel id="fields" active={activeTab}>
+                <CustomFieldsPanel
+                  fields={customFields}
+                  values={doc.custom_field_values ?? []}
+                  canEdit={canEdit}
+                  onSave={saveCustomFields}
+                  onManageFields={onManageFields}
+                />
+              </TabPanel>
+
+              {/* Audit. */}
+              <TabPanel id="audit" active={activeTab}>
+                <AuditTrail id={id} />
+              </TabPanel>
+            </section>
+          </div>
         </div>
       )}
     </div>
   );
+}
+
+function DetailHero({
+  doc,
+  currentVersion,
+  integrityOk,
+  activeTab,
+  onSelectTab,
+  canEdit,
+  editing,
+  archiveBusy,
+  onEdit,
+  onArchiveCheck,
+  onDownloadQr,
+}: {
+  doc: Detail;
+  currentVersion: Detail["versions"][number] | undefined;
+  integrityOk: boolean | null;
+  activeTab: TabId;
+  onSelectTab: (tab: TabId) => void;
+  canEdit: boolean;
+  editing: boolean;
+  archiveBusy: boolean;
+  onEdit: () => void;
+  onArchiveCheck: () => void;
+  onDownloadQr: () => void;
+}) {
+  const primaryTabs: { id: TabId; label: string }[] = [
+    { id: "overview", label: "Überblick" },
+    { id: "briefing", label: "Briefing" },
+    { id: "ai", label: "KI" },
+    { id: "versions", label: "Versionen" },
+    { id: "workbench", label: "PDF" },
+    { id: "audit", label: "Audit" },
+  ];
+  const visiblePrimaryTabs = primaryTabs.filter((item) => item.id !== "ai" || canEdit);
+
+  return (
+    <section className="detail-hero">
+      <div className="detail-hero__main">
+        <div className="detail-hero__kicker">
+          <span>{doc.asn_label || "ohne ASN"}</span>
+          <span>{doc.document_type_name || "Ohne Typ"}</span>
+          <span>{doc.correspondent_name || "Unbekannt"}</span>
+        </div>
+        <h1>{doc.title}</h1>
+        <div className="detail-hero__chips">
+          <StatusChip tone={processingTone(currentVersion?.processing_state)}>
+            {currentVersion?.processing_state || "ohne Version"}
+          </StatusChip>
+          <StatusChip tone={archiveTone(doc.archive_status)}>
+            Archiv {doc.archive_status_label}
+          </StatusChip>
+          <StatusChip tone={integrityOk === false ? "error" : integrityOk ? "ok" : "neutral"}>
+            {integrityOk === false ? "Hash fehlerhaft" : integrityOk ? "Hash OK" : "Hash unbekannt"}
+          </StatusChip>
+          {doc.legal_hold && <StatusChip tone="warn">Legal Hold</StatusChip>}
+        </div>
+      </div>
+
+      <div className="detail-hero__facts">
+        <HeroFact label="Datum" value={doc.created_at ? formatIsoDate(doc.created_at) : "—"} />
+        <HeroFact label="Ordner" value={doc.folder_path || "Ohne Ordner"} />
+        <HeroFact label="Seiten" value={String(doc.page_count ?? "—")} />
+        <HeroFact label="Tags" value={doc.tags.length ? String(doc.tags.length) : "—"} />
+      </div>
+
+      <div className="detail-hero__actions">
+        {canEdit && !editing && (
+          <button type="button" onClick={onEdit}>
+            Bearbeiten
+          </button>
+        )}
+        <button type="button" className="secondary" onClick={onArchiveCheck} disabled={archiveBusy}>
+          {archiveBusy ? "Prüfe …" : "Archiv prüfen"}
+        </button>
+        <button type="button" className="secondary" onClick={onDownloadQr}>
+          ASN QR
+        </button>
+      </div>
+
+      <nav className="detail-hero-tabs" aria-label="Schnellnavigation">
+        {visiblePrimaryTabs.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            className={
+              activeTab === item.id
+                ? "detail-hero-tab detail-hero-tab--active"
+                : "detail-hero-tab"
+            }
+            onClick={() => onSelectTab(item.id)}
+          >
+            {item.label}
+          </button>
+        ))}
+      </nav>
+    </section>
+  );
+}
+
+function HeroFact({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="detail-hero-fact">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+function StatusChip({
+  tone,
+  children,
+}: {
+  tone: "ok" | "warn" | "error" | "neutral";
+  children: ReactNode;
+}) {
+  return <span className={`detail-status detail-status--${tone}`}>{children}</span>;
+}
+
+function processingTone(state?: string): "ok" | "warn" | "error" | "neutral" {
+  if (state === "ready") return "ok";
+  if (state === "failed") return "error";
+  if (!state) return "neutral";
+  return "warn";
+}
+
+function archiveTone(status: string): "ok" | "warn" | "error" | "neutral" {
+  if (status === "ok") return "ok";
+  if (status === "error") return "error";
+  if (status === "warning" || status === "unchecked") return "warn";
+  return "neutral";
 }
 
 function safeFilename(value: string) {
