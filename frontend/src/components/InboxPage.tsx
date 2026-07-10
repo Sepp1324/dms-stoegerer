@@ -814,7 +814,7 @@ export default function InboxPage({
                 />
                 {doc.review_tasks.length > 0 ? (
                   <div className="review-tasks">
-                    {doc.review_tasks.slice(0, 4).map((task) => (
+                    {doc.review_tasks.slice(0, 2).map((task) => (
                       <div className="review-task" key={task.id}>
                         <div className="review-task__head">
                           <span>{task.kind_label}</span>
@@ -843,9 +843,9 @@ export default function InboxPage({
                         )}
                       </div>
                     ))}
-                    {doc.review_tasks.length > 4 && (
+                    {doc.review_tasks.length > 2 && (
                       <span className="review-tasks__more">
-                        +{doc.review_tasks.length - 4} weitere
+                        +{doc.review_tasks.length - 2} weitere
                       </span>
                     )}
                   </div>
@@ -857,6 +857,7 @@ export default function InboxPage({
                 <div className="smart-candidates">
                   {(candidatesByDoc[doc.id] ?? [])
                     .filter((candidate) => candidate.status === "pending")
+                    .slice(0, 2)
                     .map((candidate) => (
                       <div className="smart-candidate" key={candidate.id}>
                         <div className="smart-candidate__head">
@@ -926,6 +927,7 @@ export default function InboxPage({
                 <div className="smart-candidates smart-candidates--case">
                   {(caseCandidatesByDoc[doc.id] ?? [])
                     .filter((candidate) => candidate.status === "pending")
+                    .slice(0, 2)
                     .map((candidate) => (
                       <div
                         className="smart-candidate smart-candidate--case"
