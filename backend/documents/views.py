@@ -2439,6 +2439,41 @@ class DocumentViewSet(viewsets.ModelViewSet):
             }
         )
 
+    @action(detail=False, methods=["get"], url_path="autopilot-inbox")
+    def autopilot_inbox(self, request):
+        """Verdichtet die Review-Inbox zu einer Ablage-Autopilot-Entscheidung."""
+        try:
+            limit = int(request.query_params.get("limit", 25))
+        except (TypeError, ValueError):
+            limit = 25
+        limit = max(1, min(limit, 100))
+
+        inbox = (
+            self.get_queryset()
+            .filter(review_status=Document.ReviewStatus.NEEDS_REVIEW)
+            .select_related(
+                "correspondent",
+                "document_type",
+                "storage_path",
+                "folder",
+                "current_version",
+            )
+            .prefetch_related(
+                "tags",
+                "review_tasks",
+                "extraction_candidates",
+                "case_file_candidates__case_file",
+            )
+        )
+        total = inbox.count()
+        documents = list(inbox.order_by("-added_at", "-id")[:limit])
+
+        from .services import autopilot
+
+        payload = autopilot.build_inbox(documents, total=total)
+        payload["limit"] = limit
+        return Response(payload)
+
     @action(detail=False, methods=["post"], url_path="inbox-generate-candidates")
     def inbox_generate_candidates(self, request):
         """Erzeugt Smart-Inbox- und Aktenvorschläge für mehrere Dokumente."""
@@ -3936,6 +3971,54 @@ class ClassificationRuleViewSet(viewsets.ModelViewSet):
     queryset = ClassificationRule.objects.all()
     serializer_class = ClassificationRuleSerializer
     permission_classes = [ReadOnlyOrCanWrite]
+
+    def _simulation_documents(self, request):
+        qs = (
+            Document.objects.select_related(
+                "correspondent",
+                "document_type",
+                "storage_path",
+                "folder",
+                "current_version",
+            )
+            .prefetch_related("tags")
+            .all()
+        )
+        if not getattr(request.user, "is_dms_admin", False):
+            qs = qs.filter(owner=request.user)
+        return qs
+
+    def _simulate_payload(self, request, *, rule=None):
+        match = request.data.get("match") if isinstance(request.data, dict) else None
+        then = request.data.get("then") if isinstance(request.data, dict) else None
+        if rule is not None:
+            match = match if isinstance(match, dict) else rule.match
+            then = then if isinstance(then, dict) else rule.then
+        if not isinstance(match, dict) or not isinstance(then, dict):
+            return Response(
+                {"detail": "Felder 'match' und 'then' muessen Objekte sein."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        from .services import rule_simulator
+
+        return Response(
+            rule_simulator.simulate_rule(
+                match,
+                then,
+                self._simulation_documents(request),
+            )
+        )
+
+    @action(detail=False, methods=["post"], url_path="simulate")
+    def simulate_unsaved(self, request):
+        """Simuliert einen Regelentwurf aus dem Formular ohne DB-Schreibvorgang."""
+        return self._simulate_payload(request)
+
+    @action(detail=True, methods=["post"], url_path="simulate")
+    def simulate(self, request, pk=None):
+        """Simuliert eine bestehende Regel gegen sichtbare Dokumente."""
+        return self._simulate_payload(request, rule=self.get_object())
 
 
 class CustomFieldViewSet(viewsets.ModelViewSet):
