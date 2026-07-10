@@ -1320,6 +1320,26 @@ export interface DocumentQuery {
   customFilters?: Record<string, string>;
 }
 
+export type SavedViewQuery = Omit<DocumentQuery, "owner" | "page">;
+
+export interface SavedView {
+  id: number;
+  name: string;
+  description: string;
+  query: SavedViewQuery;
+  is_default: boolean;
+  count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SavedViewPayload {
+  name?: string;
+  description?: string;
+  query?: SavedViewQuery;
+  is_default?: boolean;
+}
+
 export async function getDocuments(
   query: DocumentQuery = {},
 ): Promise<Paginated<DocumentItem>> {
@@ -1338,6 +1358,41 @@ export async function getDocuments(
   const res = await apiFetch(`/documents/?${params.toString()}`);
   if (!res.ok) throw new Error(`Laden fehlgeschlagen: HTTP ${res.status}`);
   return res.json();
+}
+
+export function getSavedViews(): Promise<SavedView[]> {
+  return listAll<SavedView>("/saved-views/");
+}
+
+export function createSavedView(payload: Required<Pick<SavedViewPayload, "name" | "query">> & SavedViewPayload): Promise<SavedView> {
+  return postJson<SavedView>("/saved-views/", payload);
+}
+
+export async function updateSavedView(
+  id: number,
+  payload: SavedViewPayload,
+): Promise<SavedView> {
+  const res = await apiFetch(`/saved-views/${id}/`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const data = await res.json();
+      detail = data.detail || JSON.stringify(data);
+    } catch {
+      /* keine JSON-Fehlermeldung */
+    }
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+export async function deleteSavedView(id: number): Promise<void> {
+  const res = await apiFetch(`/saved-views/${id}/`, { method: "DELETE" });
+  if (!res.ok) throw new Error(`Ansicht löschen fehlgeschlagen: HTTP ${res.status}`);
 }
 
 export async function getDocument(id: number): Promise<DocumentDetail> {

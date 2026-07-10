@@ -24,6 +24,7 @@ from .models import (
     KnowledgeEntity,
     MailAccount,
     ProcessedMail,
+    SavedView,
     StoragePath,
     Tag,
     Workflow,
@@ -114,6 +115,80 @@ class DocumentFolderSerializer(serializers.ModelSerializer):
                     "In diesem Ordner existiert bereits ein Unterordner mit diesem Namen."
                 )
         return attrs
+
+
+class SavedViewSerializer(serializers.ModelSerializer):
+    count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SavedView
+        fields = (
+            "id",
+            "name",
+            "description",
+            "query",
+            "is_default",
+            "count",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("count", "created_at", "updated_at")
+
+    def validate_name(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Der Name darf nicht leer sein.")
+        request = self.context.get("request")
+        if request is not None and request.user.is_authenticated:
+            siblings = SavedView.objects.filter(owner=request.user, name=value)
+            if self.instance is not None:
+                siblings = siblings.exclude(pk=self.instance.pk)
+            if siblings.exists():
+                raise serializers.ValidationError(
+                    "Eine gespeicherte Ansicht mit diesem Namen existiert bereits."
+                )
+        return value
+
+    def validate_query(self, value):
+        if not isinstance(value, dict):
+            raise serializers.ValidationError("Die gespeicherte Query muss ein Objekt sein.")
+
+        allowed = {
+            "q",
+            "correspondent",
+            "document_type",
+            "tag",
+            "storage_path",
+            "folder",
+            "case_file",
+            "processing_state",
+            "review_status",
+            "ordering",
+        }
+        cleaned = {}
+        for key, raw in value.items():
+            if key == "customFilters":
+                if not isinstance(raw, dict):
+                    continue
+                custom = {
+                    str(custom_key): str(custom_value)
+                    for custom_key, custom_value in raw.items()
+                    if str(custom_key).startswith("custom_field_")
+                    and custom_value not in ("", None)
+                }
+                if custom:
+                    cleaned[key] = custom
+            elif key in allowed and raw not in ("", None, [], {}):
+                cleaned[key] = raw
+        return cleaned
+
+    def get_count(self, obj):
+        request = self.context.get("request")
+        if request is None or not request.user.is_authenticated:
+            return 0
+        from .services.saved_views import count_documents_for_query
+
+        return count_documents_for_query(request.user, obj.query)
 
 
 class ClassificationRuleSerializer(serializers.ModelSerializer):

@@ -158,6 +158,49 @@ class DocumentFolder(models.Model):
         return " / ".join(reversed(parts))
 
 
+class SavedView(models.Model):
+    """Persönlich gespeicherte Dokumentansichten.
+
+    Gespeichert wird bewusst nur die Filter-Query der bestehenden Dokumentliste,
+    kein separates Suchmodell. Dadurch bleiben Owner-Isolation, Rechte und
+    zukünftige Filtererweiterungen an einer Stelle wirksam.
+    """
+
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="saved_views",
+    )
+    name = models.CharField(max_length=120)
+    description = models.CharField(max_length=255, blank=True, default="")
+    query = models.JSONField(default=dict, blank=True)
+    is_default = models.BooleanField(default=False, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Gespeicherte Ansicht"
+        verbose_name_plural = "Gespeicherte Ansichten"
+        ordering = ["name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["owner", "name"],
+                name="docs_saved_view_owner_name",
+            ),
+            models.UniqueConstraint(
+                fields=["owner"],
+                condition=Q(is_default=True),
+                name="docs_saved_view_one_default",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["owner", "name"], name="docs_sv_owner_name_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return self.name
+
+
 # ---------------------------------------------------------------------------
 # Custom Fields (typisierte Zusatzattribute – ecoDMS-Stärke)
 # ---------------------------------------------------------------------------

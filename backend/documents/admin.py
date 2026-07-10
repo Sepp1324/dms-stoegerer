@@ -27,6 +27,7 @@ from .models import (
     KnowledgeEntity,
     MailAccount,
     ProcessedMail,
+    SavedView,
     StoragePath,
     Tag,
     Workflow,
@@ -404,6 +405,14 @@ class AuditLogEntryAdmin(admin.ModelAdmin):
     list_display = ("timestamp", "actor", "action", "object_type", "object_id")
     list_filter = ("action", "object_type")
     readonly_fields = ("timestamp", "actor", "action", "object_type", "object_id", "detail")
+
+
+@admin.register(SavedView)
+class SavedViewAdmin(admin.ModelAdmin):
+    list_display = ("name", "owner", "is_default", "updated_at")
+    list_filter = ("is_default", "owner")
+    search_fields = ("name", "description", "owner__username")
+    readonly_fields = ("created_at", "updated_at")
 
 
 admin.site.register(Correspondent)

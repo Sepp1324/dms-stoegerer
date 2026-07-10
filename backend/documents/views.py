@@ -84,6 +84,7 @@ from .models import (
     MailAccount,
     OCRStatus,
     ProcessedMail,
+    SavedView,
     StoragePath,
     Tag,
     Workflow,
@@ -110,6 +111,7 @@ from .serializers import (
     KnowledgeEntitySerializer,
     MailAccountSerializer,
     ProcessedMailSerializer,
+    SavedViewSerializer,
     StoragePathSerializer,
     TagSerializer,
     WorkflowSerializer,
@@ -3811,6 +3813,39 @@ class DocumentFolderViewSet(viewsets.ModelViewSet):
             .annotate(document_count=Count("documents", filter=count_filter))
             .order_by("parent__name", "name")
         )
+
+
+class SavedViewViewSet(viewsets.ModelViewSet):
+    """Persönliche, gespeicherte Dokumentlisten-Ansichten."""
+
+    serializer_class = SavedViewSerializer
+    permission_classes = [ReadOnlyOrCanWrite]
+
+    def get_queryset(self):
+        return SavedView.objects.filter(owner=self.request.user).order_by("name")
+
+    def _save(self, serializer):
+        with transaction.atomic():
+            wants_default = serializer.validated_data.get(
+                "is_default",
+                getattr(serializer.instance, "is_default", False),
+            )
+            if wants_default:
+                siblings = SavedView.objects.filter(
+                    owner=self.request.user,
+                    is_default=True,
+                )
+                if serializer.instance is not None:
+                    siblings = siblings.exclude(pk=serializer.instance.pk)
+                siblings.update(is_default=False)
+            saved_view = serializer.save(owner=self.request.user)
+        return saved_view
+
+    def perform_create(self, serializer):
+        self._save(serializer)
+
+    def perform_update(self, serializer):
+        self._save(serializer)
 
 
 class CaseFileViewSet(viewsets.ModelViewSet):
