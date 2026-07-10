@@ -1623,8 +1623,20 @@ export interface CompareFileDiff {
   old_page_count: number | null;
   new_page_count: number | null;
   changed: boolean;
+  sha256_changed: boolean;
+  size_delta: number;
+  mime_changed: boolean;
   // Beide Versionen sind PDF (Voraussetzung für Seiten-Diff einer späteren Stufe).
   both_pdf: boolean;
+}
+export interface ComparePageSummary {
+  old_page_count: number | null;
+  new_page_count: number | null;
+  page_count_changed: boolean;
+  added: number;
+  removed: number;
+  reordered: boolean;
+  rotation_changed: boolean;
 }
 
 // Sektions-Diff für Metadaten und Zusatzfelder: ``added``/``removed`` sind
@@ -1652,6 +1664,10 @@ export interface VersionCompare {
   document: number;
   from_version: number;
   to_version: number;
+  change_score: number;
+  sections_changed: string[];
+  human_summary: string[];
+  page_summary: ComparePageSummary;
   summary: CompareSummary;
   text_diff: string;
   // HtmlDiff-Tabelle (difflib). Nur bei tatsächlicher Textänderung gefüllt, sonst
