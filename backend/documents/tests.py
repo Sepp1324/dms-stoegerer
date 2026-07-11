@@ -2985,7 +2985,9 @@ class DocumentProcessingStateMachineTests(TestCase):
                 side_effect=fake_thumbnail,
             ), mock.patch(
                 "ai.tasks.suggest_document_metadata.delay"
-            ) as suggest_delay:
+            ) as suggest_delay, mock.patch(
+                "documents.tasks.embed_document_version.delay"
+            ):
                 result = process_document_version(version.id)
 
         version.refresh_from_db()
@@ -3051,6 +3053,8 @@ class DocumentProcessingStateMachineTests(TestCase):
                 return_value=None,
             ), mock.patch(
                 "ai.tasks.suggest_document_metadata.delay"
+            ), mock.patch(
+                "documents.tasks.embed_document_version.delay"
             ):
                 result = process_document_version(version.id)
 
