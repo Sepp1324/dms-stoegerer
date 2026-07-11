@@ -29,7 +29,10 @@ spec:
     spec:
       containers:
         - name: postgres
-          image: postgres:16-alpine
+          # pgvector-Image (Postgres 16 + vector-Extension) für die semantische
+          # Suche. Datenformat identisch zu postgres:16 – bestehendes PVC bleibt
+          # kompatibel (gleiche PG-Major-Version).
+          image: pgvector/pgvector:pg16
           envFrom:
             - configMapRef:
                 name: dms-config

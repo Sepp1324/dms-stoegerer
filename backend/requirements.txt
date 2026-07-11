@@ -31,3 +31,7 @@ pyzbar==0.1.9
 # AI-Anbindung (optional je nach Provider)
 anthropic==0.42.0
 httpx==0.28.1
+# Semantische Suche: pgvector-Django-Integration (VectorField + VectorExtension).
+# Braucht das pgvector-Postgres-Image (deploy/k8s/base/postgres.yaml). Leichtes
+# Paket – keine ML-Abhängigkeit (die Embedding-Erzeugung kommt in Etappe 2).
+pgvector==0.3.6
