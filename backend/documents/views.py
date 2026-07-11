@@ -1477,6 +1477,12 @@ class DocumentViewSet(viewsets.ModelViewSet):
         Lesen; Owner-Scoping über ``get_object()``.
         """
         document = self.get_object()
+        if not document.asn:
+            # Sticker-only: ohne erkannten Barcode/QR hat das Dokument keine ASN.
+            return Response(
+                {"detail": "Dokument hat keine ASN (noch kein Barcode/QR erkannt)."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
         png = asn_service.render_qr(document)
         response = HttpResponse(png, content_type="image/png")
         response["Content-Disposition"] = (

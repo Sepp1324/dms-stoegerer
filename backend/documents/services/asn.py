@@ -172,8 +172,18 @@ def generate_asn(document) -> int:
 # ---------------------------------------------------------------------------
 # QR-Code
 # ---------------------------------------------------------------------------
+class NoASNError(ValueError):
+    """Das Dokument hat (noch) keine ASN – im Sticker-only-Modell möglich."""
+
+
 def qr_payload(document) -> str:
-    """Inhalt des QR-Codes: ausschließlich ``ASN000123`` (kein JSON, keine URL)."""
+    """Inhalt des QR-Codes: ausschließlich ``ASN000123`` (kein JSON, keine URL).
+
+    Wirft ``NoASNError``, wenn das Dokument keine ASN besitzt (Sticker-only:
+    ohne aufgeklebten/erkannten Barcode gibt es keine ASN → kein QR).
+    """
+    if not document.asn:
+        raise NoASNError("Dokument hat keine ASN (Sticker-only-Modell).")
     return format_asn(document.asn)
 
 
