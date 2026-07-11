@@ -107,32 +107,56 @@ def scan_pdf_for_asn(pdf_path: str) -> int | None:
     for idx, image in enumerate(images):
         if page_filter is not None and idx not in page_filter:
             continue
-        try:
-            # ZBar decodiert sonst alle unterstützten Symbologien. Auf normalen
-            # Dokumentseiten kann der DataBar-Decoder dabei noisy C-Assertions
-            # auf stderr schreiben. Für ASN brauchen wir ausschließlich QR und
-            # Code128, also scannen wir nur diese beiden Typen.
-            barcodes = pyzbar_decode(
-                image,
-                symbols=[ZBarSymbol.QRCODE, ZBarSymbol.CODE128],
-            )
-        except Exception as exc:
-            logger.warning("pyzbar decode Fehler Seite %d: %s", idx + 1, exc)
-            continue
-
-        for barcode in barcodes:
+        for variant in _decode_variants(image):
             try:
-                payload = barcode.data.decode("utf-8", errors="ignore")
-            except Exception:
-                continue
-            asn = _extract_asn_from_payload(payload, prefix)
-            if asn is not None:
-                logger.debug(
-                    "ASN %d per Barcode (%s) auf Seite %d erkannt.",
-                    asn,
-                    barcode.type,
-                    idx + 1,
+                # ZBar decodiert sonst alle unterstützten Symbologien. Auf normalen
+                # Dokumentseiten kann der DataBar-Decoder dabei noisy C-Assertions
+                # auf stderr schreiben. Für ASN brauchen wir ausschließlich QR und
+                # Code128, also scannen wir nur diese beiden Typen.
+                barcodes = pyzbar_decode(
+                    variant,
+                    symbols=[ZBarSymbol.QRCODE, ZBarSymbol.CODE128],
                 )
-                return asn
+            except Exception as exc:
+                logger.warning("pyzbar decode Fehler Seite %d: %s", idx + 1, exc)
+                continue
+
+            for barcode in barcodes:
+                try:
+                    payload = barcode.data.decode("utf-8", errors="ignore")
+                except Exception:
+                    continue
+                asn = _extract_asn_from_payload(payload, prefix)
+                if asn is not None:
+                    logger.debug(
+                        "ASN %d per Barcode (%s) auf Seite %d erkannt.",
+                        asn,
+                        barcode.type,
+                        idx + 1,
+                    )
+                    return asn
 
     return None
+
+
+def _decode_variants(image):
+    """Liefert Bildvarianten fürs Barcode-Decoding, robust zuerst.
+
+    Echte Scans (Brother-MFP u. a.) sind für QR/Code128 oft erst nach
+    Binarisierung lesbar – pyzbar findet auf dem farbigen/graustufigen Rohbild
+    nichts, aber auf einem sauber geschwellten Schwarz-Weiß-Bild schon
+    (bestätigt an einem realen ASN-QR: nur die Threshold-Variante dekodierte).
+    Reihenfolge: Rohbild, Graustufe, Autokontrast, Threshold(128). Sobald eine
+    Variante trifft, bricht der Aufrufer ab.
+    """
+    variants = [image]
+    try:
+        from PIL import ImageOps
+
+        gray = ImageOps.grayscale(image)
+        variants.append(gray)
+        variants.append(ImageOps.autocontrast(gray))
+        variants.append(gray.point(lambda px: 0 if px < 128 else 255))
+    except Exception:  # pragma: no cover - Pillow-Fehler nie fatal
+        pass
+    return variants
