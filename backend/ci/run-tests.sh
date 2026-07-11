@@ -14,7 +14,9 @@
 set -euo pipefail
 
 IMAGE="${1:?Nutzung: run-tests.sh <backend-image>}"
-POSTGRES_IMAGE="${CI_POSTGRES_IMAGE:-postgres:16}"
+# pgvector-Image, damit die vector-Extension (semantische Suche) in den Tests
+# per Migration angelegt werden kann. Datenformat = postgres:16.
+POSTGRES_IMAGE="${CI_POSTGRES_IMAGE:-pgvector/pgvector:pg16}"
 POSTGRES_TMPFS_SIZE="${CI_POSTGRES_TMPFS_SIZE:-1024m}"
 MIN_FREE_KB="${CI_MIN_FREE_KB:-1048576}"
 
