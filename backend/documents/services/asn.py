@@ -405,10 +405,16 @@ def match_and_reconcile(version, *, actor=None) -> dict:
 
     existing = find_document_by_asn(asn)
     if existing is None:
-        # ASN unbekannt, aber eindeutig auf dem Papier/Scan erkannt: Das Label
-        # hat Vorrang vor der beim Create provisorisch vergebenen fortlaufenden
-        # ASN. Das vermeidet genau den Fall, dass ein aufgeklebter QR-Code
-        # ignoriert wird und das Dokument eine neue, abweichende Nummer bekommt.
+        # ASN unbekannt. Übernehmen (das provisorisch vergebene Auto-ASN durch die
+        # erkannte Nummer ersetzen) NUR bei einem echten Barcode/QR – der ist
+        # eindeutig und absichtlich aufgeklebt. Eine per OCR-Text (inkl. Fuzzy-
+        # Matching) "erkannte" ASN ist NICHT vertrauenswürdig genug, um eine neue
+        # Nummer zu beanspruchen: sonst produziert Fließtext Pseudo-ASNs, die den
+        # ASNCounter vergiften und Dokumenten falsche Nummern geben (STOAA-ASN-Bug:
+        # z. B. "A5N 8062" → 8062). Text bleibt reine Erkennung ohne Vergabe.
+        if matched_by != "BARCODE":
+            return {"matched": False, "asn": asn, "reason": "text_only"}
+
         current = version.document
         claimed = _claim_detected_asn(
             current,
