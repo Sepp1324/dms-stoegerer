@@ -32,7 +32,52 @@ def process_document_version(version_id: int) -> dict:
     from ai.tasks import suggest_document_metadata
 
     suggest_document_metadata.delay(version.document_id)
+
+    # Semantische Embeddings nach dem OCR (eigener Task; CPU-lastig, blockiert OCR
+    # nicht). Für die Bedeutungssuche + Copilot-RAG.
+    embed_document_version.delay(version_id)
     return result
+
+
+@shared_task
+def embed_document_version(version_id: int) -> dict:
+    """Zerlegt den OCR-Text einer Version in Chunks und speichert Embeddings.
+
+    Idempotent: bestehende Chunks der Version werden zuerst entfernt. Fehler (z. B.
+    Modell nicht ladbar) brechen die Pipeline nicht – sie werden geloggt.
+    """
+    from ai import embeddings
+    from documents import chunking
+    from documents.models import DocumentChunk
+
+    if not embeddings.enabled():
+        return {"status": "disabled", "version_id": version_id}
+
+    version = DocumentVersion.objects.select_related("document").get(pk=version_id)
+    chunks = chunking.chunk_text(version.ocr_text or "")
+    DocumentChunk.objects.filter(version=version).delete()
+    if not chunks:
+        return {"status": "empty", "version_id": version_id}
+
+    try:
+        vectors = embeddings.embed_passages(chunks)
+    except Exception:
+        logger.exception("Embedding fehlgeschlagen für Version %s", version_id)
+        return {"status": "error", "version_id": version_id}
+
+    DocumentChunk.objects.bulk_create(
+        [
+            DocumentChunk(
+                document=version.document,
+                version=version,
+                chunk_index=i,
+                text=text,
+                embedding=vector,
+            )
+            for i, (text, vector) in enumerate(zip(chunks, vectors))
+        ]
+    )
+    return {"status": "done", "version_id": version_id, "chunks": len(chunks)}
 
 
 @shared_task

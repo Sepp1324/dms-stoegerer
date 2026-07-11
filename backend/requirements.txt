@@ -35,3 +35,7 @@ httpx==0.28.1
 # Braucht das pgvector-Postgres-Image (deploy/k8s/base/postgres.yaml). Leichtes
 # Paket – keine ML-Abhängigkeit (die Embedding-Erzeugung kommt in Etappe 2).
 pgvector==0.3.6
+# Lokale Text-Embeddings für die semantische Suche: fastembed (ONNX-Runtime,
+# mehrsprachig) – KEIN torch, läuft auf CPU. Modelle werden lazy geladen und
+# unter EMBEDDING_CACHE_DIR (/data/models, persistentes PVC) gecached.
+fastembed==0.3.6
