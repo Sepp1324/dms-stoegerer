@@ -226,6 +226,20 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
+# --- Semantische Suche: lokale Text-Embeddings (fastembed/ONNX) ---
+# EMBEDDING_MODEL muss zu EMBEDDING_DIM passen. Default: mehrsprachiges e5-large
+# (1024-dim, gut für Deutsch). Modell-Cache auf dem persistenten /data-PVC, damit
+# es nicht bei jedem Worker-Neustart neu geladen wird.
+EMBEDDING_ENABLED = os.getenv("EMBEDDING_ENABLED", "true").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "intfloat/multilingual-e5-large")
+EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1024"))
+EMBEDDING_CACHE_DIR = os.getenv("EMBEDDING_CACHE_DIR", str(DMS_DATA_DIR / "models"))
+
 # --- ASN-Barcode-Erkennung (STOAA-515) ---
 # pyzbar + libzbar0 müssen installiert sein; fehlen sie → WARN + Fallback auf OCR-Text.
 ASN_BARCODE_ENABLED = os.getenv("ASN_BARCODE_ENABLED", "true").lower() in ("1", "true", "yes")

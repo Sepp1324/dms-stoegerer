@@ -14,6 +14,11 @@ from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import Q
 from django.utils import timezone
+from pgvector.django import VectorField
+
+# Embedding-Dimension der semantischen Suche (muss zu settings.EMBEDDING_MODEL
+# passen; als Migrations-Konstante fix, Änderung = neue Migration).
+EMBEDDING_DIM = 1024
 
 
 class OCRStatus(models.TextChoices):
@@ -1977,3 +1982,36 @@ class BackupRun(models.Model):
 
     def __str__(self) -> str:
         return f"{self.get_kind_display()} {self.status} @ {self.created_at:%Y-%m-%d %H:%M}"
+
+
+class DocumentChunk(models.Model):
+    """Eingebetteter Textabschnitt eines Dokuments (semantische Suche / RAG).
+
+    Der OCR-Text wird in überlappende Chunks zerlegt; je Chunk ein pgvector-
+    Embedding. Cosine-Distance über diese Vektoren liefert die semantisch
+    relevantesten Stellen für Bedeutungssuche und Copilot-Retrieval. Chunks werden
+    beim (Re-)Embedden einer Version ersetzt und hängen per CASCADE am Dokument.
+    """
+
+    document = models.ForeignKey(
+        Document, on_delete=models.CASCADE, related_name="chunks"
+    )
+    version = models.ForeignKey(
+        DocumentVersion,
+        on_delete=models.CASCADE,
+        related_name="chunks",
+        null=True,
+        blank=True,
+    )
+    chunk_index = models.PositiveIntegerField(default=0)
+    text = models.TextField()
+    embedding = VectorField(dimensions=EMBEDDING_DIM, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Dokument-Chunk"
+        verbose_name_plural = "Dokument-Chunks"
+        ordering = ["document_id", "chunk_index"]
+
+    def __str__(self) -> str:
+        return f"Chunk {self.chunk_index} von Dokument #{self.document_id}"

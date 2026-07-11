@@ -23,6 +23,7 @@ RUN apt-get update \
         qpdf \
         poppler-utils \
         libzbar0 \
+        libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
