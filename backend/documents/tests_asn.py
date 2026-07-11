@@ -224,32 +224,32 @@ class ASNReconcileTests(TestCase):
             ASNScan.objects.filter(document=existing, matched_by="OCR").exists()
         )
 
-    def test_unknown_asn_is_claimed_by_current_document(self):
-        """Freie erkannte ASN → frisch importiertes Dokument übernimmt das Label."""
+    def test_unknown_ocr_asn_is_not_claimed(self):
+        """OCR-Text (inkl. Fuzzy) darf KEINE neue ASN beanspruchen.
+
+        Vergiftungsschutz: Nur ein echter Barcode/QR übernimmt eine freie ASN.
+        Eine per OCR-Text "erkannte", unbekannte ASN lässt das Dokument bei seiner
+        Auto-Nummer und zieht den Zähler NICHT hoch – sonst produziert Fließtext
+        (z. B. "A5N 8062") Pseudo-ASNs, die den Zähler vergiften.
+        """
         rescan = Document.objects.create(title="Scan")
-        detected_asn = rescan.asn + 50
+        auto_asn = rescan.asn
+        detected_asn = auto_asn + 5000
         v_new = _make_version(
             rescan,
             version_no=1,
             ocr_text=f"{asn_service.format_asn(detected_asn)} unbekannt",
         )
+        counter_before = ASNCounter.objects.get(pk=1).last_value
 
         result = asn_service.match_and_reconcile(v_new)
 
-        self.assertTrue(result["matched"])
-        self.assertFalse(result["moved"])
-        self.assertTrue(result["assigned"])
-        v_new.refresh_from_db()
+        self.assertFalse(result["matched"])
+        self.assertEqual(result.get("reason"), "text_only")
         rescan.refresh_from_db()
-        self.assertEqual(v_new.document_id, rescan.pk)
-        self.assertEqual(rescan.asn, detected_asn)
-        self.assertTrue(
-            ASNScan.objects.filter(document=rescan, matched_by="OCR").exists()
-        )
-        self.assertGreaterEqual(
-            ASNCounter.objects.get(pk=1).last_value,
-            detected_asn,
-        )
+        self.assertEqual(rescan.asn, auto_asn)  # Auto-Nummer bleibt unverändert
+        self.assertEqual(ASNCounter.objects.get(pk=1).last_value, counter_before)
+        self.assertFalse(ASNScan.objects.filter(document=rescan).exists())
 
     def test_no_asn_in_text_is_noop(self):
         rescan = Document.objects.create(title="Scan")
@@ -371,3 +371,35 @@ class ASNApiTests(APITestCase):
         self.assertEqual(resp.status_code, 200)
         ids = [d["id"] for d in resp.data["results"]]
         self.assertNotIn(self.foreign.id, ids)
+
+
+# ---------------------------------------------------------------------------
+# Reparatur vergifteter ASNs
+# ---------------------------------------------------------------------------
+class RepairAsnCommandTests(TestCase):
+    def test_repair_renumbers_poisoned_and_resets_counter(self):
+        """Vergiftete (absurd hohe) ASNs werden neu vergeben, Zähler zurückgesetzt."""
+        from django.core.management import call_command
+
+        clean = Document.objects.create(title="Sauber")  # kleine Auto-ASN
+        poisoned = Document.objects.create(title="Vergiftet")
+        Document.objects.filter(pk=poisoned.pk).update(asn=99999)
+        ASNCounter.objects.update_or_create(pk=1, defaults={"last_value": 99999})
+
+        call_command("repair_asn", threshold=1000)
+
+        poisoned.refresh_from_db()
+        self.assertLess(poisoned.asn, 1000)
+        self.assertGreater(poisoned.asn, clean.asn)
+        self.assertEqual(ASNCounter.objects.get(pk=1).last_value, poisoned.asn)
+
+    def test_repair_dry_run_changes_nothing(self):
+        from django.core.management import call_command
+
+        poisoned = Document.objects.create(title="Vergiftet")
+        Document.objects.filter(pk=poisoned.pk).update(asn=99999)
+
+        call_command("repair_asn", threshold=1000, dry_run=True)
+
+        poisoned.refresh_from_db()
+        self.assertEqual(poisoned.asn, 99999)
