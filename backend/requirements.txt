@@ -19,7 +19,9 @@ PyMuPDF==1.24.9
 pikepdf==8.15.1
 # Miniaturbilder (erste Seite → JPEG)
 pdf2image==1.17.0
-Pillow==11.0.0
+# Pillow auf 10.x gepinnt: fastembed 0.3.6 verlangt pillow<11.0.0 (>=10.3.0).
+# 10.4.0 erfüllt zugleich ocrmypdf/pikepdf/pillow-heif (alle nur >=10.x).
+Pillow==10.4.0
 # HEIC/HEIF-Support für die Mobile-Erfassung (STOAA-513); die Wheels bündeln
 # libheif → i. d. R. kein apt-Paket nötig. Image-Rebuild erforderlich.
 pillow-heif==0.18.0
