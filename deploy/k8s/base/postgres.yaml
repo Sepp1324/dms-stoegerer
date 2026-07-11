@@ -27,6 +27,24 @@ spec:
       labels:
         app: postgres
     spec:
+      # Ownership-Guard (STOAA): Der Wechsel von postgres:16-alpine (postgres-User
+      # = uid 70) auf das pgvector/Debian-Image (uid 999) hat die Mount-Wurzel
+      # /var/lib/postgresql/data mit uid 70 / Modus 0700 zurückgelassen. Der neue
+      # Prozess (uid 999) durfte das Verzeichnis nicht betreten und crashte beim
+      # mkdir ("Permission denied") -> Crash-Loop -> DB weg -> Login weg.
+      # Dieser Root-initContainer stellt die Ownership der Mount-Wurzel vor JEDEM
+      # Start sicher (idempotent, non-recursive – nur der Mount-Punkt selbst; die
+      # pgdata-Inhalte heilt der postgres-Entrypoint als root selbst). Verhindert
+      # einen erneuten Crash-Loop bei künftigen Image-/uid-Wechseln.
+      initContainers:
+        - name: fix-pgdata-perms
+          # Gleiches Image wie der Hauptcontainer -> kein zusätzlicher Pull (bereits
+          # auf den Nodes vorhanden); läuft standardmäßig als root (uid 0).
+          image: pgvector/pgvector:pg16
+          command: ["sh", "-c", "chown 999:999 /var/lib/postgresql/data"]
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
       containers:
         - name: postgres
           # pgvector-Image (Postgres 16 + vector-Extension) für die semantische
