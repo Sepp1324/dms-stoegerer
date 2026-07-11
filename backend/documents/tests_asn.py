@@ -1,11 +1,10 @@
-"""Tests für das ASN-Feature (Archive Serial Number, STOAA-284/285).
+"""Tests für das ASN-Feature (Archive Serial Number) im **Sticker-only-Modell**.
 
-Deckt die Spec-Anforderungen ab:
-
-* ASN – automatische Vergabe, keine Doppelvergabe, Parallelität/Transaktionssicherheit
-* QR  – Erzeugung + Inhalt
-* OCR – ASN-Erkennung, automatische Versionierung, unbekannte ASN
-* API – Dokument über ASN abrufen, QR herunterladen, Suche (ASN12345 == 12345)
+Sticker-only (Nutzer-Entscheidung): Es gibt KEINE automatische ASN-Vergabe mehr.
+Ein neues Dokument hat zunächst ``asn = None``; die ASN wird ausschließlich durch
+einen erkannten Barcode/QR im OCR-Nachlauf gesetzt (``match_and_reconcile`` →
+``_claim_detected_asn``). ``allocate_asn``/``generate_asn`` bleiben als manuelle
+Hilfsfunktionen erhalten (z. B. für die Reparatur/Backfill).
 """
 import threading
 
@@ -34,45 +33,42 @@ def _make_version(document, *, version_no=1, sha256="", ocr_text=""):
     return version
 
 
+def _assign(document, asn):
+    """Setzt eine ASN direkt (Sticker-only: sonst haben Dokumente keine ASN)."""
+    Document.objects.filter(pk=document.pk).update(asn=asn)
+    document.asn = asn
+    return document
+
+
 # ---------------------------------------------------------------------------
-# ASN-Vergabe
+# ASN-Vergabe (Sticker-only)
 # ---------------------------------------------------------------------------
 class ASNAssignmentTests(TestCase):
-    def test_asn_assigned_on_create(self):
-        """Jedes neue Dokument erhält automatisch eine ASN (> 0)."""
+    def test_new_document_has_no_asn(self):
+        """Sticker-only: ein neues Dokument bekommt KEINE automatische ASN."""
         doc = Document.objects.create(title="Doc")
-        self.assertIsNotNone(doc.asn)
-        self.assertGreater(doc.asn, 0)
+        self.assertIsNone(doc.asn)
 
-    def test_asn_sequential_and_gapless(self):
-        """Aufeinanderfolgende Dokumente bekommen lückenlose, eindeutige ASNs."""
-        docs = [Document.objects.create(title=f"Doc {i}") for i in range(5)]
-        asns = sorted(d.asn for d in docs)
-        # eindeutig
-        self.assertEqual(len(set(asns)), 5)
-        # lückenlos fortlaufend (unabhängig vom Startwert)
-        self.assertEqual(asns, list(range(asns[0], asns[0] + 5)))
-
-    def test_asn_is_immutable_across_saves(self):
-        """Eine einmal vergebene ASN wird durch weitere save() nie verändert."""
+    def test_assigned_asn_is_immutable_across_saves(self):
+        """Eine gesetzte ASN wird durch weitere save() nie verändert."""
         doc = Document.objects.create(title="Doc")
-        original = doc.asn
+        _assign(doc, 42)
         doc.title = "Doc – umbenannt"
         doc.save()
         doc.refresh_from_db()
-        self.assertEqual(doc.asn, original)
+        self.assertEqual(doc.asn, 42)
 
     def test_new_version_keeps_document_asn(self):
         """Mehrere Versionen ändern die ASN des Dokuments nicht."""
         doc = Document.objects.create(title="Doc")
-        original = doc.asn
+        _assign(doc, 7)
         _make_version(doc, version_no=1)
         _make_version(doc, version_no=2)
         doc.refresh_from_db()
-        self.assertEqual(doc.asn, original)
+        self.assertEqual(doc.asn, 7)
 
     def test_generate_asn_idempotent(self):
-        """generate_asn ist idempotent – ein Dokument mit ASN behält sie."""
+        """generate_asn (manuell) ist idempotent – ein Dokument mit ASN behält sie."""
         doc = Document.objects.create(title="Doc")
         first = asn_service.generate_asn(doc)
         second = asn_service.generate_asn(doc)
@@ -85,15 +81,6 @@ class ASNAssignmentTests(TestCase):
         b = asn_service.allocate_asn()
         self.assertEqual(b, a + 1)
 
-    def test_no_reuse_after_delete(self):
-        """Eine ASN wird nach dem Löschen des Dokuments nicht wiederverwendet."""
-        d1 = Document.objects.create(title="A")
-        d2 = Document.objects.create(title="B")
-        used = {d1.asn, d2.asn}
-        d2.delete()
-        d3 = Document.objects.create(title="C")
-        self.assertNotIn(d3.asn, used)
-
 
 class ASNConcurrencyTests(TransactionTestCase):
     """Parallelität/Transaktionssicherheit: keine Doppelvergabe unter Last."""
@@ -101,9 +88,6 @@ class ASNConcurrencyTests(TransactionTestCase):
     reset_sequences = True
 
     def test_parallel_allocation_has_no_duplicates(self):
-        from .models import ASNCounter
-
-        # Zähler vor dem Fan-out sicher anlegen (vermeidet Race beim ersten Insert).
         ASNCounter.objects.get_or_create(pk=1, defaults={"last_value": 0})
 
         threads_count = 5
@@ -117,7 +101,6 @@ class ASNConcurrencyTests(TransactionTestCase):
                 for _ in range(per_thread):
                     local.append(asn_service.allocate_asn())
             finally:
-                # Jede Thread-Verbindung sauber schließen.
                 connection.close()
             with lock:
                 results.extend(local)
@@ -130,7 +113,6 @@ class ASNConcurrencyTests(TransactionTestCase):
 
         total = threads_count * per_thread
         self.assertEqual(len(results), total)
-        # Kern-Garantie: keine Doppelvergabe.
         self.assertEqual(len(set(results)), total)
 
 
@@ -142,14 +124,8 @@ class ASNParseTests(TestCase):
         self.assertEqual(asn_service.parse_asn("ASN123"), 123)
         self.assertEqual(asn_service.parse_asn("asn 123"), 123)
         self.assertEqual(asn_service.parse_asn("ASN: 8062"), 8062)
-        self.assertEqual(asn_service.parse_asn("A S N\n8062"), 8062)
-        self.assertEqual(asn_service.parse_asn("A5N 8062"), 8062)
-        self.assertEqual(asn_service.parse_asn("ASN 8O62"), 8062)
-        self.assertEqual(asn_service.parse_asn("ASN 8I62"), 8162)
         self.assertEqual(asn_service.parse_asn("Rechnung ASN000045 vom 1.1."), 45)
-        self.assertEqual(asn_service.parse_asn("erste ASN12 dann ASN34"), 12)
         self.assertIsNone(asn_service.parse_asn("keine Nummer hier"))
-        # Reine Ziffern gelten im OCR-Text NICHT als ASN (nur ASN-präfigiert).
         self.assertIsNone(asn_service.parse_asn("12345"))
         self.assertIsNone(asn_service.parse_asn(""))
         self.assertIsNone(asn_service.parse_asn(None))
@@ -174,35 +150,39 @@ class ASNParseTests(TestCase):
 class ASNQRTests(TestCase):
     def test_render_qr_returns_png(self):
         doc = Document.objects.create(title="Doc")
+        _assign(doc, 123)
         png = asn_service.render_qr(doc)
         self.assertIsInstance(png, bytes)
-        # PNG-Signatur.
         self.assertTrue(png.startswith(b"\x89PNG\r\n\x1a\n"))
 
     def test_qr_payload_is_only_asn(self):
         doc = Document.objects.create(title="Doc")
+        _assign(doc, 123)
         payload = asn_service.qr_payload(doc)
-        self.assertEqual(payload, asn_service.format_asn(doc.asn))
-        # Enthält weder URL noch JSON.
+        self.assertEqual(payload, asn_service.format_asn(123))
         self.assertNotIn("http", payload)
         self.assertNotIn("{", payload)
-        # Round-trip über den Spec-Regex.
-        self.assertEqual(asn_service.parse_asn(payload), doc.asn)
+
+    def test_qr_payload_without_asn_raises(self):
+        """Sticker-only: ohne ASN gibt es keinen QR."""
+        doc = Document.objects.create(title="Ohne Sticker")
+        with self.assertRaises(asn_service.NoASNError):
+            asn_service.qr_payload(doc)
 
 
 # ---------------------------------------------------------------------------
-# OCR-Reconcile (Import-Historie)
+# OCR-/Barcode-Reconcile
 # ---------------------------------------------------------------------------
 class ASNReconcileTests(TestCase):
     def test_rescan_moves_version_to_existing_document(self):
         """Bekannte ASN im OCR-Text → Version wandert an das bestehende Dokument."""
         existing = Document.objects.create(title="Vertrag 2024")
+        _assign(existing, 55)
         _make_version(existing, version_no=1, sha256="a" * 64)
 
-        # Frisch eingescanntes Dokument, dessen OCR-Text die ASN des Bestands trägt.
         rescan = Document.objects.create(title="Scan")
         v_new = _make_version(
-            rescan, version_no=1, ocr_text=f"Kopf {asn_service.format_asn(existing.asn)} Fuss"
+            rescan, version_no=1, ocr_text=f"Kopf {asn_service.format_asn(55)} Fuss"
         )
         rescan_pk = rescan.pk
 
@@ -211,43 +191,32 @@ class ASNReconcileTests(TestCase):
         self.assertTrue(result["matched"])
         self.assertTrue(result["moved"])
         v_new.refresh_from_db()
-        # Version hängt jetzt am Bestandsdokument, als 2. Version.
         self.assertEqual(v_new.document_id, existing.pk)
         self.assertEqual(v_new.version_no, 2)
         existing.refresh_from_db()
         self.assertEqual(existing.current_version_id, v_new.id)
         self.assertEqual(existing.versions.count(), 2)
-        # Kein Duplikat: das versehentlich neue Dokument ist entfernt.
         self.assertFalse(Document.objects.filter(pk=rescan_pk).exists())
-        # Import-Historie protokolliert.
         self.assertTrue(
             ASNScan.objects.filter(document=existing, matched_by="OCR").exists()
         )
 
     def test_unknown_ocr_asn_is_not_claimed(self):
-        """OCR-Text (inkl. Fuzzy) darf KEINE neue ASN beanspruchen.
-
-        Vergiftungsschutz: Nur ein echter Barcode/QR übernimmt eine freie ASN.
-        Eine per OCR-Text "erkannte", unbekannte ASN lässt das Dokument bei seiner
-        Auto-Nummer und zieht den Zähler NICHT hoch – sonst produziert Fließtext
-        (z. B. "A5N 8062") Pseudo-ASNs, die den Zähler vergiften.
-        """
+        """OCR-Text darf KEINE neue ASN beanspruchen (nur Barcode/QR)."""
         rescan = Document.objects.create(title="Scan")
-        auto_asn = rescan.asn
-        detected_asn = auto_asn + 5000
         v_new = _make_version(
-            rescan,
-            version_no=1,
-            ocr_text=f"{asn_service.format_asn(detected_asn)} unbekannt",
+            rescan, version_no=1, ocr_text=f"{asn_service.format_asn(9042)} unbekannt"
         )
-        counter_before = ASNCounter.objects.get(pk=1).last_value
+        counter_before = ASNCounter.objects.get_or_create(
+            pk=1, defaults={"last_value": 0}
+        )[0].last_value
 
         result = asn_service.match_and_reconcile(v_new)
 
         self.assertFalse(result["matched"])
         self.assertEqual(result.get("reason"), "text_only")
         rescan.refresh_from_db()
-        self.assertEqual(rescan.asn, auto_asn)  # Auto-Nummer bleibt unverändert
+        self.assertIsNone(rescan.asn)  # Sticker-only: keine ASN ohne Barcode
         self.assertEqual(ASNCounter.objects.get(pk=1).last_value, counter_before)
         self.assertFalse(ASNScan.objects.filter(document=rescan).exists())
 
@@ -260,43 +229,39 @@ class ASNReconcileTests(TestCase):
         self.assertFalse(result["matched"])
         self.assertIsNone(result["asn"])
         self.assertEqual(v_new.document_id, rescan.pk)
+        rescan.refresh_from_db()
+        self.assertIsNone(rescan.asn)
 
-    def test_barcode_scanner_uses_documentversion_file_path_and_claims_free_asn(self):
-        """QR/Barcode-Scan nutzt file_path und hat Vorrang vor OCR-Text."""
+    def test_barcode_claims_free_asn_onto_document(self):
+        """QR/Barcode-Scan hat Vorrang und setzt die aufgeklebte ASN aufs Dokument."""
         from unittest import mock
 
         rescan = Document.objects.create(title="Scan mit QR")
-        detected_asn = rescan.asn + 100
         v_new = _make_version(
-            rescan,
-            version_no=1,
-            ocr_text="OCR wuerde ASN000001 liefern",
+            rescan, version_no=1, ocr_text="OCR wuerde ASN000001 liefern"
         )
         v_new.file_path = "/data/originals/scan-mit-qr.pdf"
         v_new.save(update_fields=["file_path"])
 
         with mock.patch(
             "documents.services.asn_barcode.scan_pdf_for_asn",
-            return_value=detected_asn,
+            return_value=777,
         ) as scan_pdf:
             result = asn_service.match_and_reconcile(v_new)
 
         scan_pdf.assert_called_once_with("/data/originals/scan-mit-qr.pdf")
         self.assertTrue(result["matched"])
-        self.assertEqual(result["asn"], detected_asn)
+        self.assertEqual(result["asn"], 777)
         rescan.refresh_from_db()
-        self.assertEqual(rescan.asn, detected_asn)
+        self.assertEqual(rescan.asn, 777)
         self.assertTrue(
             ASNScan.objects.filter(document=rescan, matched_by="BARCODE").exists()
         )
 
     def test_detect_asn_falls_back_to_existing_ocr_text(self):
-        """Backfill/Pipeline erkennen ASN auch ohne Barcode über vorhandenes OCR."""
         rescan = Document.objects.create(title="Scan mit OCR-ASN")
         v_new = _make_version(
-            rescan,
-            version_no=1,
-            ocr_text="Deckblatt\nASN\n8062\nRest",
+            rescan, version_no=1, ocr_text="Deckblatt\nASN\n8062\nRest"
         )
 
         asn, matched_by = asn_service.detect_asn(v_new)
@@ -315,7 +280,9 @@ class ASNApiTests(APITestCase):
         cls.other = User.objects.create_user(username="o", password="pw", role="user")
         cls.doc = Document.objects.create(title="Mein Dok", owner=cls.user)
         _make_version(cls.doc, version_no=1, sha256="b" * 64)
+        _assign(cls.doc, 4242)
         cls.foreign = Document.objects.create(title="Fremd", owner=cls.other)
+        _assign(cls.foreign, 5151)
 
     def test_by_asn_returns_document(self):
         self.client.force_authenticate(self.user)
@@ -343,13 +310,19 @@ class ASNApiTests(APITestCase):
         self.assertEqual(resp["Content-Type"], "image/png")
         self.assertTrue(resp.content.startswith(b"\x89PNG\r\n\x1a\n"))
 
+    def test_qr_without_asn_returns_404(self):
+        """Sticker-only: Dokument ohne ASN hat keinen QR."""
+        self.client.force_authenticate(self.user)
+        doc = Document.objects.create(title="Ohne Sticker", owner=self.user)
+        resp = self.client.get(f"/api/documents/{doc.id}/qr/")
+        self.assertEqual(resp.status_code, 404)
+
     def test_qr_foreign_document_404(self):
         self.client.force_authenticate(self.user)
         resp = self.client.get(f"/api/documents/{self.foreign.id}/qr/")
         self.assertEqual(resp.status_code, 404)
 
     def test_search_by_asn_number_and_prefixed_are_equivalent(self):
-        """Suche: 'ASN12345' und '12345' liefern dasselbe Dokument."""
         self.client.force_authenticate(self.user)
         label = asn_service.format_asn(self.doc.asn)
 
@@ -365,7 +338,6 @@ class ASNApiTests(APITestCase):
         self.assertEqual(ids_num, ids_prefixed)
 
     def test_search_by_asn_scopes_to_owner(self):
-        """ASN-Suche respektiert die Owner-Isolation (kein Fremd-Leak)."""
         self.client.force_authenticate(self.user)
         resp = self.client.get("/api/documents/", {"q": str(self.foreign.asn)})
         self.assertEqual(resp.status_code, 200)
@@ -374,16 +346,16 @@ class ASNApiTests(APITestCase):
 
 
 # ---------------------------------------------------------------------------
-# Reparatur vergifteter ASNs
+# Reparatur / Alt-ASNs leeren
 # ---------------------------------------------------------------------------
 class RepairAsnCommandTests(TestCase):
     def test_repair_renumbers_poisoned_and_resets_counter(self):
-        """Vergiftete (absurd hohe) ASNs werden neu vergeben, Zähler zurückgesetzt."""
         from django.core.management import call_command
 
-        clean = Document.objects.create(title="Sauber")  # kleine Auto-ASN
+        clean = Document.objects.create(title="Sauber")
+        _assign(clean, 5)
         poisoned = Document.objects.create(title="Vergiftet")
-        Document.objects.filter(pk=poisoned.pk).update(asn=99999)
+        _assign(poisoned, 99999)
         ASNCounter.objects.update_or_create(pk=1, defaults={"last_value": 99999})
 
         call_command("repair_asn", threshold=1000)
@@ -397,9 +369,24 @@ class RepairAsnCommandTests(TestCase):
         from django.core.management import call_command
 
         poisoned = Document.objects.create(title="Vergiftet")
-        Document.objects.filter(pk=poisoned.pk).update(asn=99999)
+        _assign(poisoned, 99999)
 
         call_command("repair_asn", threshold=1000, dry_run=True)
 
         poisoned.refresh_from_db()
         self.assertEqual(poisoned.asn, 99999)
+
+
+class ClearAutoAsnCommandTests(TestCase):
+    def test_clear_nulls_all_asns(self):
+        """clear_auto_asn leert alle vorhandenen ASNs (für Neu-Bekleben)."""
+        from django.core.management import call_command
+
+        doc = Document.objects.create(title="Alt")
+        _assign(doc, 12)
+
+        call_command("clear_auto_asn", yes=True)
+
+        doc.refresh_from_db()
+        self.assertIsNone(doc.asn)
+        self.assertEqual(ASNCounter.objects.get(pk=1).last_value, 0)

@@ -447,7 +447,13 @@ class Document(models.Model):
     # eigentliche (transaktionssichere, lückenlose) Vergabe-Logik lebt im Service
     # ``documents.services.asn``; ``save()`` ruft ihn nur als Invarianten-Absicherung
     # auf, damit JEDER Erstellungspfad garantiert genau eine ASN erhält.
-    asn = models.PositiveBigIntegerField(unique=True, editable=False, db_index=True)
+    # Sticker-only-Modell: Die ASN kommt AUSSCHLIESSLICH aus einem aufgeklebten
+    # Barcode/QR (siehe documents.services.asn.match_and_reconcile). Neue Dokumente
+    # werden OHNE ASN angelegt (``null``); erst ein erkanntes Label vergibt sie.
+    # ``unique`` erlaubt in Postgres beliebig viele NULLs.
+    asn = models.PositiveBigIntegerField(
+        unique=True, null=True, blank=True, editable=False, db_index=True
+    )
 
     class Meta:
         verbose_name = "Dokument"
@@ -458,18 +464,13 @@ class Document(models.Model):
         return self.title
 
     def save(self, *args, **kwargs):
-        """Sichert die ASN-Invariante ab: jedes neue Dokument erhält genau eine ASN.
+        """Sticker-only: KEINE automatische ASN-Vergabe mehr.
 
-        Die Vergabe (transaktionssicher, per ``select_for_update``) delegiert
-        vollständig an den Service ``documents.services.asn`` – hier steht bewusst
-        keine Businesslogik, nur der Aufruf, der die Invariante an der niedrigsten
-        Ebene erzwingt (unabhängig vom Erstellungspfad: Upload, Mail, Consume,
-        direktes POST). Eine einmal vergebene ASN wird nie überschrieben.
+        Neue Dokumente werden ohne ASN angelegt. Die ASN wird ausschließlich durch
+        einen erkannten Barcode/QR im OCR-Nachlauf gesetzt
+        (``documents.services.asn.match_and_reconcile`` → ``_claim_detected_asn``).
+        Eine einmal gesetzte ASN wird nie überschrieben (``editable=False``).
         """
-        if self._state.adding and not self.asn:
-            from documents.services.asn import assign_asn
-
-            assign_asn(self)
         super().save(*args, **kwargs)
 
 
