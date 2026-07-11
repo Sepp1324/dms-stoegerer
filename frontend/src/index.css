@@ -1249,7 +1249,7 @@ textarea:focus-visible {
 .dashboard {
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
+  gap: var(--space-5);
 }
 .dashboard-hero {
   display: flex;
@@ -1259,9 +1259,9 @@ textarea:focus-visible {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background:
-    linear-gradient(135deg, rgba(59, 130, 246, 0.16), transparent 44%),
+    linear-gradient(135deg, rgba(59, 130, 246, 0.09), transparent 52%),
     var(--card);
-  padding: var(--space-5);
+  padding: var(--space-6);
 }
 .dashboard-hero--ok {
   border-color: color-mix(in srgb, var(--ok) 30%, var(--border));
@@ -1281,6 +1281,7 @@ textarea:focus-visible {
   color: var(--muted);
   font-size: 0.78rem;
   font-weight: 700;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
 }
 .dashboard-hero h2 {
@@ -1339,14 +1340,14 @@ textarea:focus-visible {
 .dashboard-layout {
   display: grid;
   grid-template-columns: minmax(0, 1.38fr) minmax(22rem, 0.72fr);
-  gap: var(--space-4);
+  gap: var(--space-5);
   align-items: start;
 }
 .dashboard-main,
 .dashboard-side {
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
+  gap: var(--space-5);
   min-width: 0;
 }
 .dashboard-side {
@@ -1357,14 +1358,14 @@ textarea:focus-visible {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--card);
-  padding: var(--space-4);
+  padding: var(--space-5);
 }
 .dashboard-panel-head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: var(--space-3);
-  margin-bottom: var(--space-3);
+  margin-bottom: var(--space-4);
 }
 .dashboard-panel-head h3 {
   margin: 0;
