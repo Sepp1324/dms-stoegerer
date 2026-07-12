@@ -39,6 +39,7 @@ import {
 import { toCanonicalValue } from "../customFields";
 import { sanitizeSnippet } from "../sanitize";
 import { ProcessingBadge } from "./ProcessingStatus";
+import SemanticSearchPanel from "./SemanticSearchPanel";
 import UploadZone from "./UploadZone";
 import MobileCapture from "./MobileCapture";
 import CaseFilesPage from "./CaseFilesPage";
@@ -175,6 +176,7 @@ function OverflowMenu({
 
 export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   const [q, setQ] = useState("");
+  const [semanticOpen, setSemanticOpen] = useState(false);
   const [correspondent, setCorrespondent] = useState<number | "">("");
   const [documentType, setDocumentType] = useState<number | "">("");
   const [tag, setTag] = useState<number | "">("");
@@ -1055,6 +1057,24 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
                 value={q}
                 onChange={(e) => onSearchChange(e.target.value)}
               />
+              <button
+                type="button"
+                className="topbar-semantic"
+                onClick={() => setSemanticOpen(true)}
+                title="Bedeutungssuche – findet Dokumente nach Sinn, nicht nur nach Wörtern"
+              >
+                ✨ Bedeutung
+              </button>
+              {semanticOpen && (
+                <SemanticSearchPanel
+                  initialQuery={q}
+                  onClose={() => setSemanticOpen(false)}
+                  onOpenDocument={(id) => {
+                    setSemanticOpen(false);
+                    openDocumentFromCommand(id);
+                  }}
+                />
+              )}
               {/* Selten genutzte Aktionen (Sortierung, Zurücksetzen, Triage)
                   gebündelt im „…"-Menü, damit die Suche prominent bleibt. */}
               <OverflowMenu>

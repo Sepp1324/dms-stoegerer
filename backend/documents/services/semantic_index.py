@@ -1,30 +1,40 @@
-"""Providerfreier semantischer Index fuer Dokumente.
+"""Semantischer Index fuer Dokumente – echte Embeddings auf pgvector.
 
-V1 nutzt lokale Hash-Embeddings: deterministisch, schnell, keine API-Kosten und
-keine pgvector-Abhaengigkeit. Die fachliche API ist trotzdem so geschnitten,
-dass spaeter echte Embedding-Provider oder pgvector darunter passen.
+Der Index nutzt lokale fastembed/ONNX-Embeddings (Default ``multilingual-e5-large``,
+1024-dim, mehrsprachig, kein torch/API) und speichert je Text-Chunk einen
+pgvector-Vektor (``DocumentChunk.embedding``). Aehnlichkeit wird als Cosine-Distance
+direkt in Postgres berechnet – skaliert deutlich besser als Python-seitige Schleifen.
+
+Die fachliche API (``sync_document_embeddings``, ``search_documents``,
+``similar_documents``, ``embedding_health``) ist bewusst stabil gehalten: Copilot-
+Retrieval, Health-Endpoint und die Aehnlichkeitssuche haengen daran und ziehen die
+echten Embeddings ohne weitere Verdrahtung mit. Die Praesentations-Helfer
+(``snippet_around``/``highlight``) formen die Treffer fuer die UI.
 """
 from __future__ import annotations
 
-import hashlib
-import math
+import logging
 import re
-from collections import Counter
-from dataclasses import dataclass
 from html import escape
 from typing import Iterable
 
+from django.conf import settings
 from django.db.models import F
 from django.utils import timezone
+from pgvector.django import CosineDistance
 
-from documents.models import Document, DocumentEmbedding, DocumentVersion
+from ai import embeddings
+from documents import chunking
+from documents.models import Document, DocumentChunk, DocumentVersion
 
-EMBEDDING_MODEL = "local-hash-v1"
-DIMENSION = 192
-MAX_CHUNKS_PER_VERSION = 80
-MAX_WORDS_PER_CHUNK = 220
-OVERLAP_WORDS = 35
-MIN_SIMILARITY = 0.16
+logger = logging.getLogger(__name__)
+
+# Kennzeichnung des aktiven Embedders (echte fastembed/e5-Vektoren). Wird von
+# Management-Commands und dem Health-Endpoint als Modellname ausgegeben.
+EMBEDDING_MODEL = settings.EMBEDDING_MODEL
+DIMENSION = settings.EMBEDDING_DIM
+# Mindest-Cosine-Aehnlichkeit fuer einen Treffer (Rauschfilter, ueber Env justierbar).
+MIN_SIMILARITY = settings.EMBEDDING_MIN_SIMILARITY
 
 _TOKEN_RE = re.compile(r"[\wÄÖÜäöüß-]{2,}")
 _STOPWORDS = {
@@ -94,166 +104,219 @@ _SYNONYMS = {
 }
 
 
-@dataclass(frozen=True)
-class ChunkSpec:
-    page_no: int | None
-    source: str
-    text: str
+def sync_document_embeddings(
+    document: Document, *, version: DocumentVersion | None = None
+) -> dict:
+    """Erzeugt den semantischen Index (pgvector-Chunks) fuer eine Version neu.
 
-
-def sync_document_embeddings(document: Document, *, version: DocumentVersion | None = None) -> dict:
-    """Erzeugt den semantischen Index fuer die aktuelle oder angegebene Version."""
+    Idempotent: bestehende Chunks der Version werden zuerst entfernt. Ist die
+    Embedding-Erzeugung deaktiviert (Tests, Env), bleibt ein vorhandener Index
+    unangetastet und es wird nichts geladen. Fehler beim Modell brechen die
+    Pipeline nicht – sie werden geloggt und als Status zurueckgegeben.
+    """
     version = version or document.current_version
     if version is None:
         return {"status": "missing_version", "created": 0, "deleted": 0}
+    if not embeddings.enabled():
+        return {"status": "disabled", "created": 0, "deleted": 0, "model": EMBEDDING_MODEL}
 
-    chunks = build_chunks(document, version)
-    deleted, _ = DocumentEmbedding.objects.filter(
-        version=version, embedding_model=EMBEDDING_MODEL
-    ).delete()
-    rows = []
-    for index, chunk in enumerate(chunks[:MAX_CHUNKS_PER_VERSION]):
-        vector, magnitude, token_count = embed_text(chunk.text)
-        if magnitude <= 0:
-            continue
-        rows.append(
-            DocumentEmbedding(
+    texts = chunking.chunk_text(version.ocr_text or "")
+    deleted, _ = DocumentChunk.objects.filter(version=version).delete()
+    if not texts:
+        return {
+            "status": "empty",
+            "created": 0,
+            "deleted": deleted,
+            "version": version.id,
+            "model": EMBEDDING_MODEL,
+        }
+
+    try:
+        vectors = embeddings.embed_passages(texts)
+    except Exception:  # noqa: BLE001 – Modellfehler darf die Pipeline nicht kippen
+        logger.exception("Embedding fehlgeschlagen für Version %s", version.id)
+        return {
+            "status": "error",
+            "created": 0,
+            "deleted": deleted,
+            "version": version.id,
+            "model": EMBEDDING_MODEL,
+        }
+
+    DocumentChunk.objects.bulk_create(
+        [
+            DocumentChunk(
                 document=document,
                 version=version,
-                page_no=chunk.page_no,
                 chunk_index=index,
-                source=chunk.source,
-                text=chunk.text,
-                text_hash=hashlib.sha256(chunk.text.encode("utf-8")).hexdigest(),
-                embedding_model=EMBEDDING_MODEL,
-                dimension=DIMENSION,
-                vector=vector,
-                magnitude=magnitude,
-                token_count=token_count,
+                text=text,
+                embedding=vector,
             )
-        )
-    if rows:
-        DocumentEmbedding.objects.bulk_create(rows)
+            for index, (text, vector) in enumerate(zip(texts, vectors))
+        ]
+    )
     return {
-        "status": "indexed" if rows else "empty",
-        "created": len(rows),
+        "status": "indexed",
+        "created": len(texts),
         "deleted": deleted,
         "version": version.id,
         "model": EMBEDDING_MODEL,
     }
 
 
-def build_chunks(document: Document, version: DocumentVersion) -> list[ChunkSpec]:
-    """Baut Text-Chunks aus Seitentexten, OCR-Fallback und Metadaten."""
-    chunks: list[ChunkSpec] = []
-    page_texts = list(version.page_texts.order_by("page_no"))
-    if page_texts:
-        for page in page_texts:
-            for part in split_text(page.text):
-                chunks.append(
-                    ChunkSpec(
-                        page_no=page.page_no,
-                        source=DocumentEmbedding.Source.PAGE_TEXT,
-                        text=part,
-                    )
-                )
-    elif (version.ocr_text or "").strip():
-        for part in split_text(version.ocr_text):
-            chunks.append(
-                ChunkSpec(
-                    page_no=None,
-                    source=DocumentEmbedding.Source.OCR_TEXT,
-                    text=part,
-                )
-            )
-
-    metadata = metadata_text(document)
-    if metadata.strip():
-        chunks.append(
-            ChunkSpec(
-                page_no=None,
-                source=DocumentEmbedding.Source.METADATA,
-                text=metadata,
-            )
-        )
-    return chunks
-
-
-def split_text(text: str) -> list[str]:
-    """Teilt Text in ueberlappende Wort-Chunks."""
-    cleaned = re.sub(r"\s+", " ", text or "").strip()
-    words = cleaned.split()
-    if not words:
+def search_documents(
+    question: str,
+    documents: Iterable[Document],
+    *,
+    limit: int = 8,
+    min_score: float | None = None,
+) -> list[dict]:
+    """Sucht semantisch in einem bereits owner-gescopten Dokumentbestand."""
+    min_score = MIN_SIMILARITY if min_score is None else min_score
+    doc_ids = [doc.id for doc in documents]
+    if not doc_ids or not embeddings.enabled():
         return []
-    if len(words) <= MAX_WORDS_PER_CHUNK:
-        return [cleaned]
 
-    chunks = []
-    step = MAX_WORDS_PER_CHUNK - OVERLAP_WORDS
-    for start in range(0, len(words), step):
-        window = words[start : start + MAX_WORDS_PER_CHUNK]
-        if not window:
-            break
-        chunks.append(" ".join(window))
-        if start + MAX_WORDS_PER_CHUNK >= len(words):
-            break
-    return chunks
+    try:
+        query_vector = embeddings.embed_query(question)
+    except Exception:  # noqa: BLE001 – ohne Modell einfach keine semantischen Treffer
+        logger.exception("Query-Embedding fehlgeschlagen")
+        return []
 
-
-def metadata_text(document: Document) -> str:
-    """Verdichtet Dokumentkontext zu einem eigenen semantischen Chunk."""
-    parts = [
-        document.title,
-        document.correspondent.name if document.correspondent_id else "",
-        document.document_type.name if document.document_type_id else "",
-        document.folder.full_path if document.folder_id else "",
-        document.case_file.title if document.case_file_id else "",
-        document.mail_subject,
-        document.mail_sender,
-        " ".join(tag.name for tag in document.tags.all()),
-        f"ASN {document.asn}" if document.asn else "",
-    ]
-    if hasattr(document, "contract_record"):
-        contract = document.contract_record
-        parts.extend(
-            [
-                "Vertrag",
-                contract.provider,
-                contract.contract_number,
-                contract.get_contract_type_display(),
-                contract.get_status_display(),
-                str(contract.amount or ""),
-                str(contract.cancel_until or ""),
-                str(contract.next_due_on or ""),
-                str(contract.ends_on or ""),
-            ]
+    # Cosine-Distance in Postgres; nur Chunks der jeweils aktuellen Version. Wir
+    # holen mehr als ``limit`` Zeilen, weil pro Dokument nur der beste Chunk zaehlt.
+    rows = (
+        DocumentChunk.objects.select_related("document", "document__folder")
+        .filter(
+            document_id__in=doc_ids,
+            version_id=F("document__current_version_id"),
+            embedding__isnull=False,
         )
-    return " ".join(str(part or "") for part in parts)
+        .annotate(distance=CosineDistance("embedding", query_vector))
+        .order_by("distance")[: max(limit * 5, limit)]
+    )
+
+    terms = tokenize(question)
+    out: list[dict] = []
+    seen: set[int] = set()
+    for chunk in rows:
+        score = 1.0 - float(chunk.distance)
+        if score < min_score:
+            continue
+        if chunk.document_id in seen:
+            continue
+        seen.add(chunk.document_id)
+        snippet = snippet_around(chunk.text, terms)
+        out.append(
+            {
+                "document": chunk.document_id,
+                "document_title": chunk.document.title,
+                "folder_path": chunk.document.folder.full_path
+                if chunk.document.folder_id
+                else None,
+                "page": None,
+                "snippet": snippet,
+                "snippet_html": highlight(snippet, terms),
+                "score": round(score, 4),
+                "reason": "Semantischer Treffer",
+                "source_type": "semantic",
+                "matched_terms": terms[:8],
+                "semantic_model": EMBEDDING_MODEL,
+                "entities": [],
+                "contract": None,
+                "case_file": None,
+            }
+        )
+        if len(out) >= limit:
+            break
+    return out
 
 
-def embed_text(text: str) -> tuple[list[float], float, int]:
-    """Erzeugt ein lokales Hash-Embedding aus Tokens, Synonymen und Bigrams."""
-    tokens = tokenize(text)
-    if not tokens:
-        return [0.0] * DIMENSION, 0.0, 0
+def similar_documents(
+    document: Document, visible_documents: Iterable[Document], *, limit: int = 6
+) -> list[dict]:
+    """Findet aehnliche sichtbare Dokumente anhand der aktuellen Version."""
+    if not embeddings.enabled():
+        return []
 
-    features: list[str] = []
-    for token in tokens:
-        features.append(token)
-        features.extend(sorted(_SYNONYMS.get(token, set())))
-    features.extend(f"{a}_{b}" for a, b in zip(tokens, tokens[1:]))
+    base_vectors = list(
+        DocumentChunk.objects.filter(
+            document=document,
+            version=document.current_version,
+            embedding__isnull=False,
+        ).values_list("embedding", flat=True)
+    )
+    if not base_vectors:
+        return []
 
-    counts = Counter(features)
-    vector = [0.0] * DIMENSION
-    for feature, count in counts.items():
-        digest = hashlib.blake2b(feature.encode("utf-8"), digest_size=8).digest()
-        raw = int.from_bytes(digest, "big")
-        index = raw % DIMENSION
-        sign = -1.0 if (raw >> 8) & 1 else 1.0
-        # log-Skalierung verhindert, dass sehr haeufige Woerter den Vektor kapern.
-        vector[index] += sign * (1.0 + math.log(count))
-    magnitude = math.sqrt(sum(value * value for value in vector))
-    return vector, magnitude, len(tokens)
+    visible_ids = [doc.id for doc in visible_documents if doc.id != document.id]
+    if not visible_ids:
+        return []
+
+    import numpy as np
+
+    centroid = np.mean(np.asarray(base_vectors, dtype=float), axis=0).tolist()
+
+    rows = (
+        DocumentChunk.objects.select_related("document", "document__folder")
+        .filter(
+            document_id__in=visible_ids,
+            version_id=F("document__current_version_id"),
+            embedding__isnull=False,
+        )
+        .annotate(distance=CosineDistance("embedding", centroid))
+        .order_by("distance")[: max(limit * 5, limit)]
+    )
+
+    results: list[dict] = []
+    seen: set[int] = set()
+    for chunk in rows:
+        score = 1.0 - float(chunk.distance)
+        if score < MIN_SIMILARITY or chunk.document_id in seen:
+            continue
+        seen.add(chunk.document_id)
+        snippet = snippet_around(chunk.text, [])
+        results.append(
+            {
+                "document": chunk.document_id,
+                "document_title": chunk.document.title,
+                "folder_path": chunk.document.folder.full_path
+                if chunk.document.folder_id
+                else None,
+                "page": None,
+                "score": round(score, 4),
+                "reason": "Ähnlicher Inhalt",
+                "snippet": snippet,
+                "snippet_html": escape(snippet),
+            }
+        )
+        if len(results) >= limit:
+            break
+    return results
+
+
+def embedding_health(visible_documents: Iterable[Document] | None = None) -> dict:
+    """Kompakter Betriebsstatus des semantischen Index."""
+    docs = visible_documents if visible_documents is not None else Document.objects.all()
+    docs = docs.exclude(current_version__isnull=True)
+    doc_count = docs.count()
+    current_chunks = DocumentChunk.objects.filter(
+        document__in=docs,
+        version_id=F("document__current_version_id"),
+        embedding__isnull=False,
+    )
+    indexed_docs = current_chunks.values("document_id").distinct().count()
+    chunk_count = current_chunks.count()
+    return {
+        "model": EMBEDDING_MODEL,
+        "dimension": DIMENSION,
+        "enabled": embeddings.enabled(),
+        "documents": doc_count,
+        "indexed_documents": indexed_docs,
+        "missing_documents": max(doc_count - indexed_docs, 0),
+        "chunks": chunk_count,
+        "generated_at": timezone.now().isoformat(),
+    }
 
 
 def tokenize(text: str) -> list[str]:
@@ -270,196 +333,6 @@ def tokenize(text: str) -> list[str]:
             if known != token and len(known) >= 5 and known in token:
                 tokens.append(known)
     return tokens
-
-
-def search_documents(
-    question: str,
-    documents: Iterable[Document],
-    *,
-    limit: int = 8,
-    min_score: float = MIN_SIMILARITY,
-) -> list[dict]:
-    """Sucht semantisch in einem bereits owner-gescopten Dokumentbestand."""
-    docs = list(documents)
-    doc_ids = [doc.id for doc in docs]
-    if not doc_ids:
-        return []
-
-    query_vector, query_magnitude, _token_count = embed_text(question)
-    if query_magnitude <= 0:
-        return []
-
-    chunks = (
-        DocumentEmbedding.objects.select_related("document", "document__folder")
-        .filter(
-            document_id__in=doc_ids,
-            embedding_model=EMBEDDING_MODEL,
-            version_id=F("document__current_version_id"),
-        )
-        .order_by("-generated_at")
-    )
-    candidates = []
-    for chunk in chunks:
-        score = cosine(query_vector, query_magnitude, chunk.vector, chunk.magnitude)
-        if score < min_score:
-            continue
-        candidates.append((score, chunk))
-    candidates.sort(key=lambda item: (item[0], item[1].document.added_at), reverse=True)
-
-    out = []
-    seen: set[tuple[int, int | None]] = set()
-    terms = tokenize(question)
-    for score, chunk in candidates:
-        key = (chunk.document_id, chunk.page_no)
-        if key in seen:
-            continue
-        seen.add(key)
-        snippet = snippet_around(chunk.text, terms)
-        out.append(
-            {
-                "document": chunk.document_id,
-                "document_title": chunk.document.title,
-                "folder_path": chunk.document.folder.full_path
-                if chunk.document.folder_id
-                else None,
-                "page": chunk.page_no,
-                "snippet": snippet,
-                "snippet_html": highlight(snippet, terms),
-                "score": round(score, 4),
-                "reason": f"Semantischer Treffer ({chunk.get_source_display()})",
-                "source_type": "semantic",
-                "matched_terms": terms[:8],
-                "semantic_model": chunk.embedding_model,
-                "entities": [],
-                "contract": None,
-                "case_file": None,
-            }
-        )
-        if len(out) >= limit:
-            break
-    return out
-
-
-def similar_documents(document: Document, visible_documents: Iterable[Document], *, limit: int = 6) -> list[dict]:
-    """Findet aehnliche sichtbare Dokumente anhand der aktuellen Version."""
-    base_chunks = list(
-        DocumentEmbedding.objects.filter(
-            document=document,
-            version=document.current_version,
-            embedding_model=EMBEDDING_MODEL,
-        )
-    )
-    if not base_chunks:
-        return []
-
-    base_vector, base_magnitude = centroid(base_chunks)
-    if base_magnitude <= 0:
-        return []
-
-    visible_ids = [doc.id for doc in visible_documents if doc.id != document.id]
-    if not visible_ids:
-        return []
-
-    best_by_doc: dict[int, tuple[float, DocumentEmbedding]] = {}
-    chunks = (
-        DocumentEmbedding.objects.select_related("document", "document__folder")
-        .filter(
-            document_id__in=visible_ids,
-            embedding_model=EMBEDDING_MODEL,
-            version_id=F("document__current_version_id"),
-        )
-        .order_by("-generated_at")
-    )
-    for chunk in chunks:
-        score = cosine(base_vector, base_magnitude, chunk.vector, chunk.magnitude)
-        if score < MIN_SIMILARITY:
-            continue
-        current = best_by_doc.get(chunk.document_id)
-        if current is None or score > current[0]:
-            best_by_doc[chunk.document_id] = (score, chunk)
-
-    ranked = sorted(
-        best_by_doc.values(),
-        key=lambda item: (item[0], item[1].document.added_at),
-        reverse=True,
-    )
-    results = []
-    for score, chunk in ranked[:limit]:
-        results.append(
-            {
-                "document": chunk.document_id,
-                "document_title": chunk.document.title,
-                "folder_path": chunk.document.folder.full_path
-                if chunk.document.folder_id
-                else None,
-                "page": chunk.page_no,
-                "score": round(score, 4),
-                "reason": f"Ähnlicher {chunk.get_source_display()}",
-                "snippet": snippet_around(chunk.text, []),
-                "snippet_html": escape(snippet_around(chunk.text, [])),
-            }
-        )
-    return results
-
-
-def embedding_health(visible_documents: Iterable[Document] | None = None) -> dict:
-    """Kompakter Betriebsstatus des semantischen Index."""
-    docs = visible_documents if visible_documents is not None else Document.objects.all()
-    docs = docs.exclude(current_version__isnull=True)
-    doc_count = docs.count()
-    indexed_docs = (
-        DocumentEmbedding.objects.filter(
-            document__in=docs,
-            version_id=F("document__current_version_id"),
-            embedding_model=EMBEDDING_MODEL,
-        )
-        .values("document_id")
-        .distinct()
-        .count()
-    )
-    chunk_count = DocumentEmbedding.objects.filter(
-        document__in=docs,
-        version_id=F("document__current_version_id"),
-        embedding_model=EMBEDDING_MODEL,
-    ).count()
-    return {
-        "model": EMBEDDING_MODEL,
-        "dimension": DIMENSION,
-        "documents": doc_count,
-        "indexed_documents": indexed_docs,
-        "missing_documents": max(doc_count - indexed_docs, 0),
-        "chunks": chunk_count,
-        "generated_at": timezone.now().isoformat(),
-    }
-
-
-def centroid(chunks: list[DocumentEmbedding]) -> tuple[list[float], float]:
-    vector = [0.0] * DIMENSION
-    used = 0
-    for chunk in chunks:
-        if not chunk.vector or chunk.magnitude <= 0:
-            continue
-        for index, value in enumerate(chunk.vector[:DIMENSION]):
-            vector[index] += float(value)
-        used += 1
-    if used:
-        vector = [value / used for value in vector]
-    magnitude = math.sqrt(sum(value * value for value in vector))
-    return vector, magnitude
-
-
-def cosine(
-    left: list[float],
-    left_magnitude: float,
-    right: list[float],
-    right_magnitude: float,
-) -> float:
-    if left_magnitude <= 0 or right_magnitude <= 0:
-        return 0.0
-    dot = 0.0
-    for a, b in zip(left, right):
-        dot += float(a) * float(b)
-    return dot / (left_magnitude * right_magnitude)
 
 
 def snippet_around(text: str, terms: list[str], *, radius: int = 420) -> str:

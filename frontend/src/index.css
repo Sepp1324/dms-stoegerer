@@ -7038,3 +7038,88 @@ button.due-card:hover {
     scroll-behavior: auto !important;
   }
 }
+
+/* --- Bedeutungssuche (semantische Suche, pgvector/e5) --- */
+.topbar-semantic {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-shrink: 0;
+  white-space: nowrap;
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  padding: 0.45rem 0.7rem;
+  border-radius: var(--radius-sm);
+}
+.topbar-semantic:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--hover-tint);
+  border-color: var(--accent);
+}
+.semantic-search {
+  width: min(640px, 100%);
+  max-height: min(82vh, 720px);
+}
+.semantic-search__hint {
+  margin: 0;
+  font-size: 0.85rem;
+}
+.semantic-search__form {
+  display: flex;
+  gap: 0.6rem;
+}
+.semantic-search__form .search {
+  flex: 1 1 auto;
+}
+.semantic-search__results {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  overflow-y: auto;
+}
+.semantic-hit {
+  padding: 0.7rem 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.semantic-hit__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+.semantic-hit__title {
+  text-align: left;
+  font-weight: 600;
+}
+.semantic-hit__score {
+  flex-shrink: 0;
+  font-size: 0.8rem;
+  color: var(--accent);
+  background: var(--accent-tint);
+  border-radius: 999px;
+  padding: 0.1rem 0.5rem;
+}
+.semantic-hit__meta {
+  margin: 0;
+  font-size: 0.8rem;
+}
+.semantic-hit__snippet {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.semantic-hit__snippet mark {
+  background: var(--accent-tint);
+  color: var(--accent);
+  border-radius: 3px;
+  padding: 0 0.1em;
+}
+.form-error {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #f87171;
+}
