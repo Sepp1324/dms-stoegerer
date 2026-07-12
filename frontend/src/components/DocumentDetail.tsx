@@ -41,6 +41,7 @@ import { ShareLinksPanel } from "./documentDetail/ShareLinksPanel";
 import { CustomFieldsPanel } from "./documentDetail/CustomFieldsPanel";
 import { EntitiesPanel } from "./documentDetail/EntitiesPanel";
 import { AutoFilePanel } from "./documentDetail/AutoFilePanel";
+import { DuplicatesPanel } from "./documentDetail/DuplicatesPanel";
 import { SimilarDocumentsPanel } from "./documentDetail/SimilarDocumentsPanel";
 import { PdfWorkbenchPanel } from "./documentDetail/PdfWorkbenchPanel";
 import { AuditTrail } from "./documentDetail/AuditPanel";
@@ -586,6 +587,10 @@ export default function DocumentDetail({
                 <SimilarDocumentsPanel
                   documentId={id}
                   canEdit={canEdit}
+                  onOpenDocument={onOpenDocument ?? (() => undefined)}
+                />
+                <DuplicatesPanel
+                  documentId={id}
                   onOpenDocument={onOpenDocument ?? (() => undefined)}
                 />
               </TabPanel>
