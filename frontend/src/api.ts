@@ -2245,6 +2245,50 @@ export function reindexDocumentEmbeddings(id: number): Promise<SemanticReindexRe
   return postJson<SemanticReindexResult>(`/documents/${id}/reindex-semantic/`, {});
 }
 
+export interface FilingSuggestionValue {
+  id: number;
+  label: string;
+  confidence: number;
+}
+export interface FilingTagSuggestion {
+  id: number;
+  name: string;
+  confidence: number;
+}
+export interface FilingSuggestions {
+  status: "ok" | "disabled" | "no_embeddings" | "no_neighbors";
+  folder?: FilingSuggestionValue | null;
+  correspondent?: FilingSuggestionValue | null;
+  document_type?: FilingSuggestionValue | null;
+  tags?: FilingTagSuggestion[];
+  current?: {
+    folder: number | null;
+    correspondent: number | null;
+    document_type: number | null;
+    tags: number[];
+  };
+  neighbors?: { document: number; title: string; score: number }[];
+}
+/** Auto-Ablage: kNN-Vorschläge (Ordner/Tags/Korrespondent/Typ) aus ähnlichen Dokumenten. */
+export async function getFilingSuggestions(id: number): Promise<FilingSuggestions> {
+  const res = await apiFetch(`/documents/${id}/filing-suggestions/`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+export interface ApplyFilingResult {
+  applied: string[];
+  document: DocumentDetail;
+}
+export async function applyFiling(
+  id: number,
+  fields?: string[],
+): Promise<ApplyFilingResult> {
+  return postJson<ApplyFilingResult>(
+    `/documents/${id}/apply-filing/`,
+    fields ? { fields } : {},
+  );
+}
+
 export async function applySuggestions(
   id: number,
   fields?: string[],

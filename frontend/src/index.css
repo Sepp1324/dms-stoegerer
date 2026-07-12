@@ -7123,3 +7123,73 @@ button.due-card:hover {
   font-size: 0.85rem;
   color: #f87171;
 }
+
+/* --- Auto-Ablage (kNN-Ablagevorschläge über Embeddings) --- */
+.auto-file {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+.auto-file__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.8rem;
+}
+.auto-file__head h3 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+.auto-file__hint,
+.auto-file__note,
+.auto-file__basis {
+  margin: 0.2rem 0 0;
+  font-size: 0.82rem;
+}
+.auto-file__rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.auto-file__row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.8rem;
+  padding: 0.35rem 0;
+  border-bottom: 1px solid var(--border);
+}
+.auto-file__row:last-child {
+  border-bottom: none;
+}
+.auto-file__label {
+  color: var(--muted);
+  font-size: 0.85rem;
+  flex-shrink: 0;
+}
+.auto-file__value {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  text-align: right;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.auto-file__conf {
+  flex-shrink: 0;
+  font-weight: 500;
+  font-size: 0.78rem;
+  color: var(--accent);
+  background: var(--accent-tint);
+  border-radius: 999px;
+  padding: 0.05rem 0.45rem;
+}
+.auto-file__current {
+  flex-shrink: 0;
+  font-weight: 400;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
