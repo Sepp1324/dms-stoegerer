@@ -2238,6 +2238,63 @@ class DocumentViewSet(viewsets.ModelViewSet):
             {"applied": applied, "document": self.get_serializer(document).data}
         )
 
+    @action(detail=False, methods=["post"], url_path="auto-file-batch")
+    def auto_file_batch(self, request):
+        """Batch-Autopilot: sortiert alle noch nicht abgelegten Dokumente vor.
+
+        Läuft über die ordnerlosen, verarbeiteten Dokumente des Nutzers und wendet
+        pro Dokument nur hoch-sichere Vorschläge an (nur leere Felder). Body optional:
+        ``{"min_confidence": 0.8}``. Owner-gescoped via ``get_queryset``; ``can_write``.
+        """
+        if not request.user.can_write:
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        try:
+            min_conf = float(request.data.get("min_confidence", settings.AUTO_FILE_MIN_CONFIDENCE))
+        except (TypeError, ValueError):
+            min_conf = settings.AUTO_FILE_MIN_CONFIDENCE
+
+        visible = list(self.get_queryset())
+        targets = [
+            doc for doc in visible if doc.folder_id is None and doc.current_version_id
+        ][:200]
+
+        results = []
+        filed = 0
+        for document in targets:
+            outcome = auto_file_service.autofile_document(
+                document, visible, min_confidence=min_conf
+            )
+            applied = outcome.get("applied", [])
+            if applied:
+                filed += 1
+                AuditLogEntry.objects.create(
+                    actor=request.user,
+                    action="auto_file",
+                    object_type="Document",
+                    object_id=str(document.id),
+                    detail={"fields": applied, "min_confidence": min_conf, "batch": True},
+                )
+                review_task_service.sync_document_review_tasks(document)
+            results.append(
+                {
+                    "document": document.id,
+                    "title": document.title,
+                    "applied": applied,
+                    "status": outcome.get("status"),
+                }
+            )
+        return Response(
+            {
+                "processed": len(targets),
+                "filed": filed,
+                "min_confidence": min_conf,
+                "results": results,
+            }
+        )
+
     @action(detail=True, methods=["post"], url_path="suggest")
     def suggest(self, request, pk=None):
         """Regeneriert die KI-Metadatenvorschläge synchron (sofortiges UI-Feedback).

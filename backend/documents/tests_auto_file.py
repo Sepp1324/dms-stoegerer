@@ -157,6 +157,29 @@ class AutoFileServiceTests(TestCase):
         self.target.refresh_from_db()
         self.assertEqual(self.target.folder_id, manual.id)
 
+    def test_autofile_respects_confidence_threshold(self):
+        user2 = User.objects.create_user(username="af-conf", password="pw", role="user")
+        folder_a = DocumentFolder.objects.create(name="A")
+        folder_b = DocumentFolder.objects.create(name="B")
+        text = "Reisepass Personalausweis Bürgeramt Ausweisnummer."
+        make_doc(user2, "N1", text, folder=folder_a)
+        make_doc(user2, "N2", text, folder=folder_a)
+        make_doc(user2, "N3", text, folder=folder_b)  # 2:1 → Confidence ~0.667
+        target = make_doc(user2, "Ziel", text)
+        visible = Document.objects.filter(owner=user2)
+
+        # Unter der Schwelle (0.667 < 0.75) → nichts anwenden.
+        out_high = auto_file.autofile_document(target, visible, min_confidence=0.75)
+        self.assertEqual(out_high["applied"], [])
+        target.refresh_from_db()
+        self.assertIsNone(target.folder_id)
+
+        # Ab 0.6 greift der Mehrheits-Vorschlag (Ordner A).
+        out_low = auto_file.autofile_document(target, visible, min_confidence=0.6)
+        self.assertIn("folder", out_low["applied"])
+        target.refresh_from_db()
+        self.assertEqual(target.folder_id, folder_a.id)
+
 
 class AutoFileApiTests(APITestCase):
     @classmethod
@@ -194,5 +217,15 @@ class AutoFileApiTests(APITestCase):
 
         self.assertEqual(resp.status_code, 200)
         self.assertIn("folder", resp.data["applied"])
+        self.target.refresh_from_db()
+        self.assertEqual(self.target.folder_id, self.folder.id)
+
+    def test_auto_file_batch_files_unfiled_documents(self):
+        self.client.force_authenticate(self.user)
+
+        resp = self.client.post("/api/documents/auto-file-batch/")
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertGreaterEqual(resp.data["filed"], 1)
         self.target.refresh_from_db()
         self.assertEqual(self.target.folder_id, self.folder.id)

@@ -7193,3 +7193,16 @@ button.due-card:hover {
   font-size: 0.78rem;
   color: var(--muted);
 }
+.auto-file-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+  margin: 0 1.75rem 0.75rem;
+  padding: 0.6rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--accent-tint);
+  color: var(--text);
+  font-size: 0.9rem;
+}
