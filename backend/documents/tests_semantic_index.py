@@ -45,6 +45,10 @@ def setUpModule():
     _patchers.append(mock.patch("ai.embeddings.enabled", return_value=True))
     _patchers.append(mock.patch("ai.embeddings.embed_passages", side_effect=_fake_passages))
     _patchers.append(mock.patch("ai.embeddings.embed_query", side_effect=_fake_vector))
+    # Der Fake-Embedder liegt auf einer anderen Skala als e5; der produktive
+    # Ähnlichkeits-Floor (0.70) würde die deterministischen Treffer wegschneiden.
+    # Wird als Modul-Global zur Laufzeit gelesen -> Patch greift auf search/similar.
+    _patchers.append(mock.patch.object(semantic_index, "MIN_SIMILARITY", 0.1))
     for patcher in _patchers:
         patcher.start()
 
