@@ -150,10 +150,17 @@ def suggest_filing(document: Document, visible_documents, *, k: int = K_NEIGHBOR
     }
 
 
-def apply_filing(document: Document, suggestion: dict, *, fields: list[str] | None = None) -> list[str]:
+def apply_filing(
+    document: Document,
+    suggestion: dict,
+    *,
+    fields: list[str] | None = None,
+    min_confidence: float = 0.0,
+) -> list[str]:
     """Wendet Vorschläge an. FK-Felder nur, wenn leer (füllt Lücken, überschreibt
     keine manuelle Wahl); Tags werden ergänzt (Union). Gibt die geänderten Felder
-    zurück. ``fields`` beschränkt optional auf ausgewählte Felder.
+    zurück. ``fields`` beschränkt optional auf ausgewählte Felder; ``min_confidence``
+    filtert Vorschläge unterhalb der Schwelle (für den Autopilot).
     """
     wanted = fields if isinstance(fields, list) else ["folder", "correspondent", "document_type", "tags"]
     changed: list[str] = []
@@ -169,6 +176,8 @@ def apply_filing(document: Document, suggestion: dict, *, fields: list[str] | No
         proposal = suggestion.get(field)
         if not proposal or getattr(document, attr):
             continue  # kein Vorschlag oder Feld bereits gesetzt → nicht anfassen
+        if proposal["confidence"] < min_confidence:
+            continue
         setattr(document, attr, proposal["id"])
         changed.append(field)
 
@@ -178,9 +187,29 @@ def apply_filing(document: Document, suggestion: dict, *, fields: list[str] | No
 
     if "tags" in wanted and suggestion.get("tags"):
         existing = set(document.tags.values_list("id", flat=True))
-        to_add = [t["id"] for t in suggestion["tags"] if t["id"] not in existing]
+        to_add = [
+            t["id"]
+            for t in suggestion["tags"]
+            if t["id"] not in existing and t["confidence"] >= min_confidence
+        ]
         if to_add:
             document.tags.add(*to_add)
             changed.append("tags")
 
     return changed
+
+
+def autofile_document(
+    document: Document, visible_documents, *, min_confidence: float
+) -> dict:
+    """Autopilot: berechnet Vorschläge und wendet nur die hoch-sicheren an.
+
+    Fasst suggest_filing + apply_filing(min_confidence) zusammen. Gibt Status und
+    die tatsächlich geänderten Felder zurück. Schreibt KEINEN Audit-Eintrag – das
+    macht der Aufrufer (Pipeline/Endpoint), der den Actor kennt.
+    """
+    suggestion = suggest_filing(document, visible_documents)
+    if suggestion.get("status") != "ok":
+        return {"status": suggestion.get("status", "unknown"), "applied": []}
+    applied = apply_filing(document, suggestion, min_confidence=min_confidence)
+    return {"status": "ok", "applied": applied, "suggestion": suggestion}

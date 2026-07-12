@@ -2269,6 +2269,20 @@ export interface FilingSuggestions {
   };
   neighbors?: { document: number; title: string; score: number }[];
 }
+export interface AutoFileBatchResult {
+  processed: number;
+  filed: number;
+  min_confidence: number;
+  results: { document: number; title: string; applied: string[]; status?: string }[];
+}
+/** Batch-Autopilot: sortiert alle noch nicht abgelegten Dokumente vor. */
+export function autoFileBatch(minConfidence?: number): Promise<AutoFileBatchResult> {
+  return postJson<AutoFileBatchResult>(
+    "/documents/auto-file-batch/",
+    minConfidence != null ? { min_confidence: minConfidence } : {},
+  );
+}
+
 /** Auto-Ablage: kNN-Vorschläge (Ordner/Tags/Korrespondent/Typ) aus ähnlichen Dokumenten. */
 export async function getFilingSuggestions(id: number): Promise<FilingSuggestions> {
   const res = await apiFetch(`/documents/${id}/filing-suggestions/`);

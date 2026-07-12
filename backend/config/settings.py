@@ -252,6 +252,21 @@ EMBEDDING_CACHE_DIR = os.getenv("EMBEDDING_CACHE_DIR", str(DMS_DATA_DIR / "model
 # Ergebnisse) und ueber die Env feinjustierbar, sobald echte Daten vorliegen.
 EMBEDDING_MIN_SIMILARITY = float(os.getenv("EMBEDDING_MIN_SIMILARITY", "0.70"))
 
+# --- Auto-Ablage / Autopilot (kNN über Embeddings) ---
+# AUTO_FILE_ENABLED steuert NUR das automatische Einsortieren beim Ingest (Opt-in,
+# Default aus – der Nutzer soll das bewusst aktivieren). Die manuelle Batch-Aktion
+# „Posteingang aufräumen" und der Vorschlag in der Detailansicht laufen unabhängig
+# davon. AUTO_FILE_MIN_CONFIDENCE ist die Schwelle, ab der ein Vorschlag ohne
+# Rückfrage übernommen wird (bewusst hoch, damit der Autopilot nur bei klarer
+# Faktenlage zugreift).
+AUTO_FILE_ENABLED = os.getenv("AUTO_FILE_ENABLED", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+AUTO_FILE_MIN_CONFIDENCE = float(os.getenv("AUTO_FILE_MIN_CONFIDENCE", "0.75"))
+
 # --- ASN-Barcode-Erkennung (STOAA-515) ---
 # pyzbar + libzbar0 müssen installiert sein; fehlen sie → WARN + Fallback auf OCR-Text.
 ASN_BARCODE_ENABLED = os.getenv("ASN_BARCODE_ENABLED", "true").lower() in ("1", "true", "yes")

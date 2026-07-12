@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from "react";
 import {
+  autoFileBatch,
   bulkClassifyDocuments,
   bulkUpdateDocuments,
   createSavedView,
@@ -177,6 +178,8 @@ function OverflowMenu({
 export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   const [q, setQ] = useState("");
   const [semanticOpen, setSemanticOpen] = useState(false);
+  const [autoFileBusy, setAutoFileBusy] = useState(false);
+  const [autoFileNote, setAutoFileNote] = useState<string | null>(null);
   const [correspondent, setCorrespondent] = useState<number | "">("");
   const [documentType, setDocumentType] = useState<number | "">("");
   const [tag, setTag] = useState<number | "">("");
@@ -891,6 +894,30 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     setCommandOpen(false);
   }
 
+  async function runAutoFileBatch() {
+    setAutoFileBusy(true);
+    setAutoFileNote(null);
+    try {
+      const res = await autoFileBatch();
+      if (res.processed === 0) {
+        setAutoFileNote("Kein unabgelegtes Dokument gefunden.");
+      } else if (res.filed === 0) {
+        setAutoFileNote(
+          `Kein ausreichend sicherer Vorschlag für ${res.processed} unabgelegte(s) Dokument(e).`,
+        );
+      } else {
+        setAutoFileNote(
+          `${res.filed} von ${res.processed} Dokument(en) automatisch einsortiert.`,
+        );
+      }
+      setReloadKey((k) => k + 1);
+    } catch {
+      setAutoFileNote("Aufräumen fehlgeschlagen.");
+    } finally {
+      setAutoFileBusy(false);
+    }
+  }
+
   if (selectedId !== null) {
     return (
       <>
@@ -1103,6 +1130,17 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
                     {triage ? "Alle Dokumente" : "Nicht zugeordnet (Triage)"}
                   </button>
                 )}
+                {me?.can_write && (
+                  <button
+                    type="button"
+                    className="link"
+                    onClick={runAutoFileBatch}
+                    disabled={autoFileBusy}
+                    title="Ordnerlose Dokumente per Auto-Ablage vorsortieren"
+                  >
+                    {autoFileBusy ? "Räume auf …" : "🗂️ Posteingang aufräumen"}
+                  </button>
+                )}
                 {hasFilters && (
                   <button className="link" onClick={resetFilters}>
                     Filter zurücksetzen
@@ -1112,6 +1150,19 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
             </>
           )}
         </header>
+        {autoFileNote && (
+          <div className="auto-file-banner" role="status">
+            <span>{autoFileNote}</span>
+            <button
+              type="button"
+              className="link"
+              onClick={() => setAutoFileNote(null)}
+              aria-label="Schließen"
+            >
+              ✕
+            </button>
+          </div>
+        )}
 
         <div className="content-body">
           {view === "dashboard" ? (

@@ -499,6 +499,7 @@ def process_version(version: DocumentVersion) -> dict:
     _sync_contract_center(version, result, actor=version.created_by)
     _sync_entity_graph(version, result, actor=version.created_by)
     _sync_semantic_index(version, result, actor=version.created_by)
+    _sync_auto_file(version, result, actor=version.created_by)
     try:
         from documents.services import review_tasks
 
@@ -545,6 +546,7 @@ def retry_version(version: DocumentVersion, actor=None) -> dict:
     _sync_contract_center(version, result, actor=actor or version.created_by)
     _sync_entity_graph(version, result, actor=actor or version.created_by)
     _sync_semantic_index(version, result, actor=actor or version.created_by)
+    _sync_auto_file(version, result, actor=actor or version.created_by)
     try:
         from documents.services import review_tasks
 
@@ -599,6 +601,47 @@ def _sync_semantic_index(version: DocumentVersion, result: dict, *, actor=None) 
     except Exception:  # noqa: BLE001 - Semantik darf Pipeline nie kippen
         logger.exception("Semantic-Index-Sync für Version %s fehlgeschlagen", version.id)
         result["semantic_index"] = {"status": "failed"}
+
+
+def _sync_auto_file(version: DocumentVersion, result: dict, *, actor=None) -> None:
+    """Autopilot-Ablage: sortiert das Dokument nach dem Embedding-Sync automatisch
+    ein – nur bei ``settings.AUTO_FILE_ENABLED`` und nur hoch-sichere Vorschläge
+    (Confidence >= ``AUTO_FILE_MIN_CONFIDENCE``). Füllt ausschließlich leere Felder.
+    Best-effort: darf die Pipeline nie kippen.
+    """
+    if result.get("status") != "done":
+        return
+    from django.conf import settings
+
+    if not settings.AUTO_FILE_ENABLED:
+        return
+    try:
+        from documents.models import AuditLogEntry, Document
+        from documents.services import auto_file
+
+        document = version.document
+        if document.owner_id is None:
+            return  # eigentümerlose Triage-Dokumente nicht automatisch ablegen
+        outcome = auto_file.autofile_document(
+            document,
+            Document.objects.filter(owner_id=document.owner_id),
+            min_confidence=settings.AUTO_FILE_MIN_CONFIDENCE,
+        )
+        result["auto_file"] = outcome
+        if outcome.get("applied"):
+            AuditLogEntry.objects.create(
+                actor=actor,
+                action="auto_file",
+                object_type="Document",
+                object_id=str(document.id),
+                detail={
+                    "fields": outcome["applied"],
+                    "min_confidence": settings.AUTO_FILE_MIN_CONFIDENCE,
+                },
+            )
+    except Exception:  # noqa: BLE001 - Autopilot darf Pipeline nie kippen
+        logger.exception("Auto-Ablage für Version %s fehlgeschlagen", version.id)
+        result["auto_file"] = {"status": "failed"}
 
 
 def _add_months(d, months: int):
