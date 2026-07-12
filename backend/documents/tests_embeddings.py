@@ -55,7 +55,7 @@ class EmbedTaskTests(TestCase):
 
         result = embed_document_version(version.id)
 
-        self.assertEqual(result["status"], "done")
+        self.assertEqual(result["status"], "indexed")
         self.assertEqual(
             DocumentChunk.objects.filter(version=version).count(), len(expected)
         )

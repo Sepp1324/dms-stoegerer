@@ -2202,6 +2202,33 @@ export async function askDocuments(
   });
 }
 
+export interface SemanticSearchHit {
+  document: number;
+  document_title: string;
+  folder_path: string | null;
+  page: number | null;
+  snippet: string;
+  snippet_html: string;
+  score: number;
+  reason?: string;
+  source_type?: string;
+  matched_terms?: string[];
+}
+export interface SemanticSearchResult {
+  query: string;
+  count: number;
+  results: SemanticSearchHit[];
+  model: string;
+  enabled: boolean;
+}
+/** Bedeutungssuche (pgvector/e5): matcht die Bedeutung der Anfrage, nicht nur Wörter. */
+export async function semanticSearch(
+  q: string,
+  limit = 8,
+): Promise<SemanticSearchResult> {
+  return postJson<SemanticSearchResult>("/search/semantic/", { q, limit });
+}
+
 export async function getSimilarDocuments(id: number): Promise<SimilarDocumentsResult> {
   const res = await apiFetch(`/documents/${id}/similar/`);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);

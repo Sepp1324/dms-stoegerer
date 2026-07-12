@@ -1,11 +1,58 @@
+"""Tests für den semantischen Index (pgvector + fastembed).
+
+Die echte fastembed-Erzeugung wird durch einen deterministischen Fake ersetzt –
+der CI-Runner soll kein ~1 GB-Modell laden. Der Fake baut den Vektor aus denselben
+Tokens/Synonymen wie die Snippet-Logik (``semantic_index.tokenize``), sodass
+semantisch verwandte Texte hohe Cosine-Ähnlichkeit haben und Ranking, Owner-Scoping
+sowie die Endpunkte real gegen Postgres/pgvector geprüft werden.
+"""
+import hashlib
+import math
+from unittest import mock
+
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 from rest_framework.test import APITestCase
 
-from .models import Document, DocumentEmbedding, DocumentPageText, DocumentVersion
+from .models import Document, DocumentChunk, DocumentPageText, DocumentVersion
 from .services import semantic_index
 
 User = get_user_model()
+
+_DIM = settings.EMBEDDING_DIM
+
+
+def _fake_vector(text: str) -> list[float]:
+    """Deterministisches Bag-of-Tokens-Embedding (normalisiert) für Tests."""
+    vector = [0.0] * _DIM
+    for token in semantic_index.tokenize(text):
+        bucket = int(hashlib.blake2b(token.encode("utf-8"), digest_size=8).hexdigest(), 16)
+        vector[bucket % _DIM] += 1.0
+    norm = math.sqrt(sum(value * value for value in vector)) or 1.0
+    return [value / norm for value in vector]
+
+
+def _fake_passages(texts):
+    return [_fake_vector(text) for text in texts]
+
+
+_patchers = []
+
+
+def setUpModule():
+    # Für das ganze Modul aktiv – auch während setUpTestData (Index-Aufbau).
+    _patchers.append(mock.patch("ai.embeddings.enabled", return_value=True))
+    _patchers.append(mock.patch("ai.embeddings.embed_passages", side_effect=_fake_passages))
+    _patchers.append(mock.patch("ai.embeddings.embed_query", side_effect=_fake_vector))
+    for patcher in _patchers:
+        patcher.start()
+
+
+def tearDownModule():
+    for patcher in _patchers:
+        patcher.stop()
+    _patchers.clear()
 
 
 def make_doc(owner, title, text, *, page_no=1):
@@ -41,8 +88,11 @@ class SemanticIndexServiceTests(TestCase):
             "Stromrechnung",
             "Stromrechnung mit IBAN und Zahlungsreferenz.",
         )
-        semantic_index.sync_document_embeddings(insurance)
+        self.assertEqual(
+            semantic_index.sync_document_embeddings(insurance)["status"], "indexed"
+        )
         semantic_index.sync_document_embeddings(invoice)
+        self.assertTrue(DocumentChunk.objects.filter(document=insurance).exists())
 
         results = semantic_index.search_documents(
             "Welche Versicherungspolizze gibt es?",
@@ -84,7 +134,9 @@ class SemanticIndexServiceTests(TestCase):
         missing = make_doc(self.user, "Fehlt", "Noch nicht indexiert")
         semantic_index.sync_document_embeddings(indexed)
 
-        health = semantic_index.embedding_health(Document.objects.filter(id__in=[indexed.id, missing.id]))
+        health = semantic_index.embedding_health(
+            Document.objects.filter(id__in=[indexed.id, missing.id])
+        )
 
         self.assertEqual(health["documents"], 2)
         self.assertEqual(health["indexed_documents"], 1)
@@ -128,12 +180,27 @@ class SemanticIndexApiTests(APITestCase):
         self.assertIn(self.own_similar.id, ids)
         self.assertNotIn(self.foreign_similar.id, ids)
 
+    def test_semantic_search_endpoint_is_owner_scoped(self):
+        self.client.force_authenticate(self.user)
+
+        resp = self.client.post(
+            "/api/search/semantic/",
+            {"q": "Versicherung Polizze Prämie", "limit": 5},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        ids = [item["document"] for item in resp.data["results"]]
+        self.assertIn(self.base.id, ids)
+        self.assertIn(self.own_similar.id, ids)
+        self.assertNotIn(self.foreign_similar.id, ids)
+
     def test_reindex_endpoint_rebuilds_chunks_for_writer(self):
         self.client.force_authenticate(self.user)
-        DocumentEmbedding.objects.filter(document=self.base).delete()
+        DocumentChunk.objects.filter(document=self.base).delete()
 
         resp = self.client.post(f"/api/documents/{self.base.id}/reindex-semantic/")
 
         self.assertEqual(resp.status_code, 200)
         self.assertGreater(resp.data["created"], 0)
-        self.assertTrue(DocumentEmbedding.objects.filter(document=self.base).exists())
+        self.assertTrue(DocumentChunk.objects.filter(document=self.base).exists())

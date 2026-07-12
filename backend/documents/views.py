@@ -815,6 +815,57 @@ class AskView(APIView):
         return Response(result, status=status.HTTP_200_OK)
 
 
+class SemanticSearchView(APIView):
+    """Bedeutungssuche: findet Dokumente über semantische Ähnlichkeit (pgvector).
+
+    Anders als die Volltextsuche (Lexeme/ILIKE) matcht diese Suche die *Bedeutung*
+    der Anfrage gegen fastembed/e5-Embeddings der OCR-Chunks. Owner-gescoped wie
+    die restliche API. Nimmt ``q`` (oder ``question``) via GET-Query oder POST-Body.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return self._run(request, request.query_params)
+
+    def post(self, request):
+        return self._run(request, request.data)
+
+    def _run(self, request, data):
+        question = str(data.get("q") or data.get("question") or "").strip()
+        if len(question) < 3:
+            return Response(
+                {"detail": "Feld 'q' muss mindestens 3 Zeichen enthalten."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            limit = int(data.get("limit", 8))
+        except (TypeError, ValueError):
+            limit = 8
+        limit = max(1, min(limit, 20))
+
+        qs = (
+            Document.objects.select_related("folder", "current_version")
+            .exclude(current_version__isnull=True)
+        )
+        if not getattr(request.user, "is_dms_admin", False):
+            qs = qs.filter(owner=request.user)
+
+        results = semantic_index_service.search_documents(question, qs, limit=limit)
+        from ai import embeddings as _embeddings
+
+        return Response(
+            {
+                "query": question,
+                "count": len(results),
+                "results": results,
+                "model": semantic_index_service.EMBEDDING_MODEL,
+                "enabled": _embeddings.enabled(),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
 class DocumentUploadView(APIView):
     """Nimmt eine Datei per multipart/form-data auf und stößt die Pipeline an.
 
@@ -1409,8 +1460,8 @@ class DocumentViewSet(viewsets.ModelViewSet):
         )
         indexed = bool(
             document.current_version
-            and document.current_version.semantic_chunks.filter(
-                embedding_model=semantic_index_service.EMBEDDING_MODEL
+            and document.current_version.chunks.filter(
+                embedding__isnull=False
             ).exists()
         )
         return Response(

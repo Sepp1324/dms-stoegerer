@@ -33,51 +33,25 @@ def process_document_version(version_id: int) -> dict:
 
     suggest_document_metadata.delay(version.document_id)
 
-    # Semantische Embeddings nach dem OCR (eigener Task; CPU-lastig, blockiert OCR
-    # nicht). Für die Bedeutungssuche + Copilot-RAG.
-    embed_document_version.delay(version_id)
+    # Der semantische Index (Bedeutungssuche + Copilot-RAG) wird bereits innerhalb
+    # von pipeline.process_version() über _sync_semantic_index() synchron
+    # aufgebaut – kein separater Task nötig (ein einziger Indexierungs-Pfad).
     return result
 
 
 @shared_task
 def embed_document_version(version_id: int) -> dict:
-    """Zerlegt den OCR-Text einer Version in Chunks und speichert Embeddings.
+    """Baut den semantischen Index einer Version neu (Backfill/Async-Reindex).
 
-    Idempotent: bestehende Chunks der Version werden zuerst entfernt. Fehler (z. B.
-    Modell nicht ladbar) brechen die Pipeline nicht – sie werden geloggt.
+    Delegiert an ``semantic_index.sync_document_embeddings`` – denselben Kern, den
+    auch die Verarbeitungspipeline synchron nutzt. So gibt es genau einen
+    Indexierungs-Pfad (Chunking + fastembed + pgvector), idempotent pro Version.
+    Genutzt vom ``embed_documents``-Backfill-Command.
     """
-    from ai import embeddings
-    from documents import chunking
-    from documents.models import DocumentChunk
-
-    if not embeddings.enabled():
-        return {"status": "disabled", "version_id": version_id}
+    from documents.services import semantic_index
 
     version = DocumentVersion.objects.select_related("document").get(pk=version_id)
-    chunks = chunking.chunk_text(version.ocr_text or "")
-    DocumentChunk.objects.filter(version=version).delete()
-    if not chunks:
-        return {"status": "empty", "version_id": version_id}
-
-    try:
-        vectors = embeddings.embed_passages(chunks)
-    except Exception:
-        logger.exception("Embedding fehlgeschlagen für Version %s", version_id)
-        return {"status": "error", "version_id": version_id}
-
-    DocumentChunk.objects.bulk_create(
-        [
-            DocumentChunk(
-                document=version.document,
-                version=version,
-                chunk_index=i,
-                text=text,
-                embedding=vector,
-            )
-            for i, (text, vector) in enumerate(zip(chunks, vectors))
-        ]
-    )
-    return {"status": "done", "version_id": version_id, "chunks": len(chunks)}
+    return semantic_index.sync_document_embeddings(version.document, version=version)
 
 
 @shared_task

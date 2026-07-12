@@ -1,6 +1,6 @@
 from django.core.management.base import BaseCommand
 
-from documents.models import Document, DocumentEmbedding
+from documents.models import Document, DocumentChunk
 from documents.services import semantic_index
 
 
@@ -32,10 +32,9 @@ class Command(BaseCommand):
         docs = list(qs)
         if not options["all"]:
             indexed_ids = set(
-                DocumentEmbedding.objects.filter(
+                DocumentChunk.objects.filter(
                     document__in=docs,
                     version_id__in=[doc.current_version_id for doc in docs],
-                    embedding_model=semantic_index.EMBEDDING_MODEL,
                 ).values_list("document_id", flat=True)
             )
             docs = [doc for doc in docs if doc.id not in indexed_ids]

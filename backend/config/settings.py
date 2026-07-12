@@ -3,6 +3,7 @@
 Konfiguration erfolgt über Umgebungsvariablen (siehe .env.example).
 """
 import os
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -236,9 +237,20 @@ EMBEDDING_ENABLED = os.getenv("EMBEDDING_ENABLED", "true").strip().lower() in (
     "yes",
     "on",
 )
+# In der Testsuite standardmaessig AUS: die Verarbeitungspipeline ruft den
+# semantischen Index synchron auf; ohne diesen Schalter wuerde jeder Pipeline-Test
+# das ~1 GB grosse fastembed-Modell laden. Dedizierte Embedding-Tests patchen
+# ``ai.embeddings.enabled``/``embed_*`` und umgehen diesen Default gezielt.
+if "test" in sys.argv:
+    EMBEDDING_ENABLED = False
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "intfloat/multilingual-e5-large")
 EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1024"))
 EMBEDDING_CACHE_DIR = os.getenv("EMBEDDING_CACHE_DIR", str(DMS_DATA_DIR / "models"))
+# Mindest-Cosine-Aehnlichkeit (0..1) fuer semantische Treffer. e5-Embeddings sind
+# normalisiert und liegen fuer relevante Paare hoch/eng beieinander; der Floor
+# schneidet Rauschen ab, ist aber bewusst konservativ (lieber Recall als leere
+# Ergebnisse) und ueber die Env feinjustierbar, sobald echte Daten vorliegen.
+EMBEDDING_MIN_SIMILARITY = float(os.getenv("EMBEDDING_MIN_SIMILARITY", "0.70"))
 
 # --- ASN-Barcode-Erkennung (STOAA-515) ---
 # pyzbar + libzbar0 müssen installiert sein; fehlen sie → WARN + Fallback auf OCR-Text.
