@@ -40,6 +40,7 @@ import { FreigabePanel } from "./documentDetail/FreigabePanel";
 import { ShareLinksPanel } from "./documentDetail/ShareLinksPanel";
 import { CustomFieldsPanel } from "./documentDetail/CustomFieldsPanel";
 import { EntitiesPanel } from "./documentDetail/EntitiesPanel";
+import { AutoFilePanel } from "./documentDetail/AutoFilePanel";
 import { SimilarDocumentsPanel } from "./documentDetail/SimilarDocumentsPanel";
 import { PdfWorkbenchPanel } from "./documentDetail/PdfWorkbenchPanel";
 import { AuditTrail } from "./documentDetail/AuditPanel";
@@ -575,8 +576,13 @@ export default function DocumentDetail({
                 <EntitiesPanel documentId={id} canEdit={canEdit} />
               </TabPanel>
 
-              {/* Semantik: ähnliche Dokumente aus dem lokalen Embedding-Index. */}
+              {/* Semantik: Auto-Ablage-Vorschlag + ähnliche Dokumente (Embeddings). */}
               <TabPanel id="similar" active={activeTab}>
+                <AutoFilePanel
+                  documentId={id}
+                  canEdit={canEdit}
+                  onApplied={(updated) => setDoc(updated as Detail)}
+                />
                 <SimilarDocumentsPanel
                   documentId={id}
                   canEdit={canEdit}

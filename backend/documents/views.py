@@ -124,6 +124,7 @@ from .services import dossiers as dossier_service
 from .services import evidence as evidence_service
 from .services import entity_graph as entity_graph_service
 from .services import quality as quality_service
+from .services import auto_file as auto_file_service
 from .services import review_tasks as review_task_service
 from .services import revision_package as revision_package_service
 from .services import semantic_index as semantic_index_service
@@ -2185,6 +2186,57 @@ class DocumentViewSet(viewsets.ModelViewSet):
         review_task_service.sync_document_review_tasks(document)
 
         return Response(self.get_serializer(document).data)
+
+    @action(detail=True, methods=["get"], url_path="filing-suggestions")
+    def filing_suggestions(self, request, pk=None):
+        """Auto-Ablage-Vorschläge (Ordner/Tags/Korrespondent/Typ) per kNN-Embeddings.
+
+        Leitet die Vorschläge aus den inhaltlich ähnlichsten sichtbaren Dokumenten
+        ab (owner-gescoped via ``get_queryset``). Rein lokal – kein LLM/API-Key.
+        """
+        document = self.get_object()
+        return Response(
+            auto_file_service.suggest_filing(document, self.get_queryset())
+        )
+
+    @action(detail=True, methods=["post"], url_path="apply-filing")
+    def apply_filing(self, request, pk=None):
+        """Übernimmt die Auto-Ablage-Vorschläge: füllt leere Felder, ergänzt Tags.
+
+        Body optional: ``{"fields": ["folder","correspondent","document_type","tags"]}``.
+        FK-Felder werden nur gesetzt, wenn sie leer sind (überschreibt keine
+        manuelle Wahl); Tags werden ergänzt. Die Vorschläge werden serverseitig neu
+        berechnet (kein Vertrauen auf Client-Werte).
+        """
+        if not request.user.can_write:
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        document = self.get_object()
+        suggestion = auto_file_service.suggest_filing(document, self.get_queryset())
+        if suggestion.get("status") != "ok":
+            return Response(suggestion, status=status.HTTP_200_OK)
+
+        requested = request.data.get("fields")
+        applied = auto_file_service.apply_filing(
+            document,
+            suggestion,
+            fields=requested if isinstance(requested, list) else None,
+        )
+        if applied:
+            AuditLogEntry.objects.create(
+                actor=request.user,
+                action="apply_filing",
+                object_type="Document",
+                object_id=str(document.id),
+                detail={"fields": applied},
+            )
+            review_task_service.sync_document_review_tasks(document)
+        document.refresh_from_db()
+        return Response(
+            {"applied": applied, "document": self.get_serializer(document).data}
+        )
 
     @action(detail=True, methods=["post"], url_path="suggest")
     def suggest(self, request, pk=None):
