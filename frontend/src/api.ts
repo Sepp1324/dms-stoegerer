@@ -2229,6 +2229,46 @@ export async function semanticSearch(
   return postJson<SemanticSearchResult>("/search/semantic/", { q, limit });
 }
 
+export interface DuplicateHit {
+  document: number;
+  title: string;
+  score: number;
+  kind: "duplicate" | "version";
+  added_at: string | null;
+  sha256: string | null;
+}
+export interface DuplicatesResult {
+  status: "ok" | "disabled" | "no_embeddings";
+  threshold?: number;
+  results: DuplicateHit[];
+}
+/** Inhaltliche Beinah-Duplikate/Versionen eines Dokuments. */
+export async function getDocumentDuplicates(id: number): Promise<DuplicatesResult> {
+  const res = await apiFetch(`/documents/${id}/duplicates/`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+export interface DuplicatePair {
+  a: number;
+  a_title: string;
+  b: number;
+  b_title: string;
+  score: number;
+  kind: "duplicate" | "version";
+}
+export interface DuplicateReport {
+  status: "ok" | "disabled";
+  threshold?: number;
+  count: number;
+  pairs: DuplicatePair[];
+}
+/** Korpus-Report: Paare inhaltlicher Beinah-Duplikate im eigenen Bestand. */
+export async function getDuplicateReport(): Promise<DuplicateReport> {
+  const res = await apiFetch(`/documents/duplicate-report/`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
 export async function getSimilarDocuments(id: number): Promise<SimilarDocumentsResult> {
   const res = await apiFetch(`/documents/${id}/similar/`);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);

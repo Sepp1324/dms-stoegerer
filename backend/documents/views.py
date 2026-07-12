@@ -125,6 +125,7 @@ from .services import evidence as evidence_service
 from .services import entity_graph as entity_graph_service
 from .services import quality as quality_service
 from .services import auto_file as auto_file_service
+from .services import duplicates as duplicates_service
 from .services import review_tasks as review_task_service
 from .services import revision_package as revision_package_service
 from .services import semantic_index as semantic_index_service
@@ -2236,6 +2237,31 @@ class DocumentViewSet(viewsets.ModelViewSet):
         document.refresh_from_db()
         return Response(
             {"applied": applied, "document": self.get_serializer(document).data}
+        )
+
+    @action(detail=True, methods=["get"], url_path="duplicates")
+    def duplicates(self, request, pk=None):
+        """Inhaltliche Beinah-Duplikate/Versionen dieses Dokuments (owner-gescoped)."""
+        document = self.get_object()
+        try:
+            threshold = float(request.query_params["threshold"])
+        except (KeyError, TypeError, ValueError):
+            threshold = None
+        return Response(
+            duplicates_service.find_duplicates(
+                document, self.get_queryset(), threshold=threshold
+            )
+        )
+
+    @action(detail=False, methods=["get"], url_path="duplicate-report")
+    def duplicate_report(self, request):
+        """Korpus-Report: Paare inhaltlicher Beinah-Duplikate im Bestand des Nutzers."""
+        try:
+            threshold = float(request.query_params["threshold"])
+        except (KeyError, TypeError, ValueError):
+            threshold = None
+        return Response(
+            duplicates_service.duplicate_report(self.get_queryset(), threshold=threshold)
         )
 
     @action(detail=False, methods=["post"], url_path="auto-file-batch")

@@ -40,6 +40,7 @@ import {
 import { toCanonicalValue } from "../customFields";
 import { sanitizeSnippet } from "../sanitize";
 import { ProcessingBadge } from "./ProcessingStatus";
+import DuplicateReportModal from "./DuplicateReportModal";
 import SemanticSearchPanel from "./SemanticSearchPanel";
 import UploadZone from "./UploadZone";
 import MobileCapture from "./MobileCapture";
@@ -178,6 +179,7 @@ function OverflowMenu({
 export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   const [q, setQ] = useState("");
   const [semanticOpen, setSemanticOpen] = useState(false);
+  const [dupReportOpen, setDupReportOpen] = useState(false);
   const [autoFileBusy, setAutoFileBusy] = useState(false);
   const [autoFileNote, setAutoFileNote] = useState<string | null>(null);
   const [correspondent, setCorrespondent] = useState<number | "">("");
@@ -1102,6 +1104,12 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
                   }}
                 />
               )}
+              {dupReportOpen && (
+                <DuplicateReportModal
+                  onClose={() => setDupReportOpen(false)}
+                  onOpenDocument={openDocumentFromCommand}
+                />
+              )}
               {/* Selten genutzte Aktionen (Sortierung, Zurücksetzen, Triage)
                   gebündelt im „…"-Menü, damit die Suche prominent bleibt. */}
               <OverflowMenu>
@@ -1141,6 +1149,14 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
                     {autoFileBusy ? "Räume auf …" : "🗂️ Posteingang aufräumen"}
                   </button>
                 )}
+                <button
+                  type="button"
+                  className="link"
+                  onClick={() => setDupReportOpen(true)}
+                  title="Inhaltliche Duplikate im Bestand finden"
+                >
+                  🔎 Dubletten finden
+                </button>
                 {hasFilters && (
                   <button className="link" onClick={resetFilters}>
                     Filter zurücksetzen

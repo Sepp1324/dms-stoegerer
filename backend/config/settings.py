@@ -267,6 +267,13 @@ AUTO_FILE_ENABLED = os.getenv("AUTO_FILE_ENABLED", "false").strip().lower() in (
 )
 AUTO_FILE_MIN_CONFIDENCE = float(os.getenv("AUTO_FILE_MIN_CONFIDENCE", "0.75"))
 
+# --- Dubletten-/Versionserkennung (Cosine-Ähnlichkeit der Embeddings) ---
+# THRESHOLD: ab hier gilt ein Dokument als „mögliche Version" (sehr ähnlich).
+# STRONG: ab hier praktisch dasselbe Dokument („Duplikat"). Über Env justierbar,
+# sobald echte Daten zeigen, wie eng Re-Scans desselben Belegs beieinanderliegen.
+DUPLICATE_THRESHOLD = float(os.getenv("DUPLICATE_THRESHOLD", "0.93"))
+DUPLICATE_STRONG_THRESHOLD = float(os.getenv("DUPLICATE_STRONG_THRESHOLD", "0.97"))
+
 # --- ASN-Barcode-Erkennung (STOAA-515) ---
 # pyzbar + libzbar0 müssen installiert sein; fehlen sie → WARN + Fallback auf OCR-Text.
 ASN_BARCODE_ENABLED = os.getenv("ASN_BARCODE_ENABLED", "true").lower() in ("1", "true", "yes")
