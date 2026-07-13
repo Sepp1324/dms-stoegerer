@@ -913,6 +913,12 @@ class DocumentSerializer(serializers.ModelSerializer):
     review_task_count = serializers.SerializerMethodField()
     archive_status_label = serializers.SerializerMethodField()
     retention_state = serializers.SerializerMethodField()
+    # Soft-Merge von Dubletten: Titel des kanonischen Dokuments + Anzahl der
+    # Dubletten, die dieses Dokument ersetzt (fürs „ersetzt durch"-Banner).
+    superseded_by_title = serializers.CharField(
+        source="superseded_by.title", read_only=True, default=None
+    )
+    supersedes_count = serializers.SerializerMethodField()
 
     class Meta:
         model = Document
@@ -958,12 +964,18 @@ class DocumentSerializer(serializers.ModelSerializer):
             "archive_error",
             "review_task_count",
             "review_tasks",
+            "superseded_by",
+            "superseded_by_title",
+            "superseded_at",
+            "supersedes_count",
             "custom_field_values",
             "versions",
         )
         read_only_fields = (
             "added_at",
             "current_version",
+            "superseded_by",
+            "superseded_at",
             "owner",  # Eigentümer serverseitig gesetzt – nicht per Request änderbar (STOAA-7)
             "case_file",  # Zuordnung nur über CaseFileViewSet-Actions (Owner-Scope).
             "asn",  # unveränderlich, serverseitig vergeben (STOAA-284/285)
@@ -1020,6 +1032,13 @@ class DocumentSerializer(serializers.ModelSerializer):
 
     def get_archive_status_label(self, obj) -> str:
         return obj.get_archive_status_display()
+
+    def get_supersedes_count(self, obj) -> int:
+        # Annotation aus get_queryset bevorzugen (kein N+1); sonst zählen.
+        annotated = getattr(obj, "supersedes_count_ann", None)
+        if annotated is not None:
+            return annotated
+        return obj.supersedes.count()
 
     def get_retention_state(self, obj) -> dict:
         from documents.services import archive as archive_service

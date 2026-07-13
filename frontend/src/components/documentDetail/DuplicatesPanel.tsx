@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import {
   getDocumentDuplicates,
+  supersedeDocument,
   type DuplicateHit,
   type DuplicatesResult,
 } from "../../api";
@@ -9,38 +10,64 @@ import {
 /**
  * Zeigt inhaltliche Beinah-Duplikate/Versionen dieses Dokuments (Cosine über die
  * Embeddings). „Duplikat" = praktisch derselbe Beleg (Re-Scan), „Version" = sehr
- * ähnlich (evtl. neuere Fassung). Zum Vergleichen/Aufräumen öffnen.
+ * ähnlich. Mit Schreibrecht lässt sich ein Treffer per Klick als Dublette dieses
+ * Dokuments ausblenden (Soft-Merge, umkehrbar).
  */
 export function DuplicatesPanel({
   documentId,
+  canEdit,
   onOpenDocument,
+  onChanged,
 }: {
   documentId: number;
+  canEdit: boolean;
   onOpenDocument: (documentId: number, page?: number | null) => void;
+  onChanged?: () => void;
 }) {
   const [data, setData] = useState<DuplicatesResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [mergingId, setMergingId] = useState<number | null>(null);
 
-  useEffect(() => {
-    let active = true;
+  async function load() {
     setBusy(true);
     setError(null);
-    getDocumentDuplicates(documentId)
-      .then((res) => active && setData(res))
-      .catch(() => active && setError("Dubletten konnten nicht geladen werden."))
-      .finally(() => active && setBusy(false));
-    return () => {
-      active = false;
-    };
+    try {
+      setData(await getDocumentDuplicates(documentId));
+    } catch {
+      setError("Dubletten konnten nicht geladen werden.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [documentId]);
+
+  async function merge(hit: DuplicateHit) {
+    setMergingId(hit.document);
+    setError(null);
+    try {
+      // Der Treffer (hit) wird als Dublette DIESES Dokuments markiert/ausgeblendet.
+      await supersedeDocument(hit.document, documentId);
+      await load();
+      onChanged?.();
+    } catch {
+      setError("Zusammenführen fehlgeschlagen.");
+    } finally {
+      setMergingId(null);
+    }
+  }
 
   return (
     <section className="card duplicates">
       <div className="duplicates__head">
         <h3>Mögliche Dubletten</h3>
         <p className="muted duplicates__hint">
-          Inhaltlich (fast) gleiche Dokumente – zum Vergleichen/Aufräumen öffnen.
+          Inhaltlich (fast) gleiche Dokumente – öffnen zum Vergleichen, oder als
+          Dublette dieses Dokuments ausblenden.
         </p>
       </div>
 
@@ -59,30 +86,37 @@ export function DuplicatesPanel({
       {data?.status === "ok" && data.results.length > 0 && (
         <ul className="duplicates__list">
           {data.results.map((hit) => (
-            <DuplicateRow key={hit.document} hit={hit} onOpen={() => onOpenDocument(hit.document)} />
+            <li key={hit.document} className="duplicates__row">
+              <div className="duplicates__main">
+                <span className={`duplicates__badge duplicates__badge--${hit.kind}`}>
+                  {hit.kind === "duplicate" ? "Duplikat" : "Mögliche Version"}
+                </span>
+                <button className="link duplicates__title" onClick={() => onOpenDocument(hit.document)}>
+                  {hit.title}
+                </button>
+              </div>
+              <div className="duplicates__footer">
+                <span className="duplicates__meta muted">
+                  {Math.round(hit.score * 100)} % ähnlich
+                  {hit.added_at
+                    ? ` · ${new Date(hit.added_at).toLocaleDateString("de-AT")}`
+                    : ""}
+                </span>
+                {canEdit && (
+                  <button
+                    className="link"
+                    onClick={() => merge(hit)}
+                    disabled={mergingId === hit.document}
+                    title="Diesen Treffer als Dublette dieses Dokuments ausblenden (umkehrbar)"
+                  >
+                    {mergingId === hit.document ? "Führe zusammen …" : "Als Dublette ausblenden"}
+                  </button>
+                )}
+              </div>
+            </li>
           ))}
         </ul>
       )}
     </section>
-  );
-}
-
-function DuplicateRow({ hit, onOpen }: { hit: DuplicateHit; onOpen: () => void }) {
-  const isDup = hit.kind === "duplicate";
-  return (
-    <li className="duplicates__row">
-      <div className="duplicates__main">
-        <span className={`duplicates__badge duplicates__badge--${hit.kind}`}>
-          {isDup ? "Duplikat" : "Mögliche Version"}
-        </span>
-        <button className="link duplicates__title" onClick={onOpen}>
-          {hit.title}
-        </button>
-      </div>
-      <div className="duplicates__meta muted">
-        {Math.round(hit.score * 100)} % ähnlich
-        {hit.added_at ? ` · ${new Date(hit.added_at).toLocaleDateString("de-AT")}` : ""}
-      </div>
-    </li>
   );
 }

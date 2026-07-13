@@ -7252,6 +7252,25 @@ button.due-card:hover {
 .duplicates__meta {
   font-size: 0.8rem;
 }
+.duplicates__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+.detail-supersede-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+  margin-bottom: 1rem;
+  padding: 0.6rem 0.9rem;
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  border-radius: var(--radius-sm);
+  background: rgba(245, 158, 11, 0.12);
+  font-size: 0.9rem;
+}
 .duplicates__badge {
   flex-shrink: 0;
   font-size: 0.72rem;

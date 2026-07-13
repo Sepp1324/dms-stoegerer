@@ -224,6 +224,12 @@ export interface DocumentItem {
   archive_error: string;
   review_task_count: number;
   review_tasks: ReviewTask[];
+  // Soft-Merge von Dubletten: als Dublette ausgeblendet (ersetzt durch …) bzw.
+  // Anzahl der Dubletten, die dieses (kanonische) Dokument ersetzt.
+  superseded_by: number | null;
+  superseded_by_title: string | null;
+  superseded_at: string | null;
+  supersedes_count: number;
   ocr_status: OcrStatus | null;
   // Suchergebnis-Snippet (STOAA-368/370): sicheres HTML mit ``<mark>`` rund um den
   // Treffer. Nur bei aktiver Volltextsuche (``?q=``) gefüllt; sonst / kein Treffer
@@ -2267,6 +2273,14 @@ export async function getDuplicateReport(): Promise<DuplicateReport> {
   const res = await apiFetch(`/documents/duplicate-report/`);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
+}
+/** Soft-Merge: dieses Dokument als Dublette markieren (ersetzt durch ``by``). */
+export function supersedeDocument(id: number, by: number): Promise<DocumentDetail> {
+  return postJson<DocumentDetail>(`/documents/${id}/supersede/`, { by });
+}
+/** Dubletten-Markierung wieder aufheben (Undo). */
+export function unsupersedeDocument(id: number): Promise<DocumentDetail> {
+  return postJson<DocumentDetail>(`/documents/${id}/unsupersede/`, {});
 }
 
 export async function getSimilarDocuments(id: number): Promise<SimilarDocumentsResult> {

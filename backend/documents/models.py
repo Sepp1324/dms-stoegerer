@@ -384,6 +384,20 @@ class Document(models.Model):
         related_name="+",
     )
 
+    # Soft-Merge von Dubletten (STOAA): Dieses Dokument wurde als inhaltliche
+    # Dublette einer anderen (kanonischen) Fassung markiert. Es bleibt erhalten
+    # (keine destruktive Operation), wird aber aus den Standardlisten ausgeblendet;
+    # die Detailansicht zeigt einen „ersetzt durch"-Banner mit Undo.
+    superseded_by = models.ForeignKey(
+        "self",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="supersedes",
+        help_text="Als Dublette ausgeblendet – ersetzt durch dieses (kanonische) Dokument.",
+    )
+    superseded_at = models.DateTimeField(null=True, blank=True)
+
     retention_until = models.DateField(
         null=True,
         blank=True,
