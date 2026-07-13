@@ -39,12 +39,40 @@ print_storage_diagnostics() {
 }
 
 prune_ci_leftovers() {
-  # Der self-hosted Runner ist klein und langlebig. Alte CI-Container und
-  # BuildKit-Cache sind die häufigste Ursache für kaputte Postgres-Init-Läufe.
+  # Der self-hosted Runner ist klein und langlebig. Alte CI-Container, ungenutzte
+  # Images (v. a. die je Lauf getaggten dms-backend:<sha>) und BuildKit-Cache sind
+  # die häufigste Ursache für „Platte voll" / kaputte Postgres-Init-Läufe.
   docker ps -aq --filter "name=dms-ci-pg-" | xargs -r docker rm -f >/dev/null 2>&1 || true
   docker network ls -q --filter "name=dms-ci-net-" | xargs -r docker network rm >/dev/null 2>&1 || true
   docker container prune -f --filter "label=at.stoegerer.dms.ci=true" >/dev/null 2>&1 || true
+  # Ungenutzte Images abräumen: dangling immer, getaggte ab 48h Alter (räumt die
+  # aufgelaufenen alten CI-SHA-Images weg, schont aber frische Basis-Images →
+  # keine unnötigen Re-Pulls im Normalfall).
+  docker image prune -f >/dev/null 2>&1 || true
+  docker image prune -af --filter "until=48h" >/dev/null 2>&1 || true
   docker builder prune -f --filter "until=24h" >/dev/null 2>&1 || true
+}
+
+reclaim_hard() {
+  # Letzter Ausweg, wenn der sanfte Prune nicht reicht: ALLES Ungenutzte weg
+  # (auch frische Images/Cache). Kostet nur Re-Pull/Rebuild, kein Datenverlust –
+  # der Runner hält keine bleibenden Daten.
+  echo "Speicher weiterhin knapp – räume aggressiv nach (alle ungenutzten Images + Build-Cache)…" >&2
+  docker image prune -af >/dev/null 2>&1 || true
+  docker builder prune -af >/dev/null 2>&1 || true
+}
+
+free_kb_of() { df -Pk "$1" 2>/dev/null | awk 'NR==2 {print $4}'; }
+
+space_low() {
+  local path free_kb
+  for path in "." "/var/lib/docker"; do
+    [ -e "$path" ] || continue
+    free_kb="$(free_kb_of "$path")"
+    [ -n "$free_kb" ] || continue
+    [ "$free_kb" -lt "$MIN_FREE_KB" ] && return 0
+  done
+  return 1
 }
 
 assert_free_space() {
@@ -52,7 +80,7 @@ assert_free_space() {
   [ -e "$path" ] || return 0
 
   local free_kb
-  free_kb="$(df -Pk "$path" 2>/dev/null | awk 'NR==2 {print $4}' || true)"
+  free_kb="$(free_kb_of "$path" || true)"
   [ -n "$free_kb" ] || return 0
   if [ "${free_kb:-0}" -lt "$MIN_FREE_KB" ]; then
     echo "Zu wenig freier Speicher auf $path: ${free_kb:-0} KiB frei, benötigt mindestens $MIN_FREE_KB KiB." >&2
@@ -63,6 +91,10 @@ assert_free_space() {
 
 echo "::group::CI-Docker-Speicher prüfen"
 prune_ci_leftovers
+# Reicht der sanfte Prune nicht, einmal aggressiv nachräumen, bevor wir aufgeben.
+if space_low; then
+  reclaim_hard
+fi
 print_storage_diagnostics
 assert_free_space "."
 assert_free_space "/var/lib/docker"
