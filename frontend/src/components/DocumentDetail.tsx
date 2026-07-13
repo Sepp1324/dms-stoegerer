@@ -2,6 +2,7 @@ import { type ReactNode, useEffect, useRef, useState } from "react";
 import {
   addDocumentVersion,
   applySuggestions,
+  unsupersedeDocument,
   approveDocument,
   checkDocumentArchive,
   dismissSuggestions,
@@ -374,6 +375,18 @@ export default function DocumentDetail({
 
   const [applying, setApplying] = useState(false);
   const [applyError, setApplyError] = useState<string | null>(null);
+  const [supersedeBusy, setSupersedeBusy] = useState(false);
+
+  async function undoSupersede() {
+    setSupersedeBusy(true);
+    try {
+      setDoc(await unsupersedeDocument(id));
+    } catch {
+      /* Banner bleibt; Nutzer kann erneut versuchen. */
+    } finally {
+      setSupersedeBusy(false);
+    }
+  }
 
   async function apply(fields?: string[]) {
     setApplying(true);
@@ -511,6 +524,20 @@ export default function DocumentDetail({
             onDownloadQr={downloadQr}
           />
 
+          {doc.superseded_by && (
+            <div className="detail-supersede-banner" role="status">
+              <span>
+                Als Dublette ausgeblendet – ersetzt durch{" "}
+                <strong>{doc.superseded_by_title ?? `#${doc.superseded_by}`}</strong>.
+              </span>
+              {canEdit && (
+                <button className="link" onClick={undoSupersede} disabled={supersedeBusy}>
+                  {supersedeBusy ? "…" : "Rückgängig"}
+                </button>
+              )}
+            </div>
+          )}
+
           <div className="detail">
             {/* Linke Spalte: große Vorschau, beim Scrollen der rechten Spalte sticky. */}
             <DetailPreview pdfUrl={pdfUrl} pdfError={pdfError} title={doc.title} />
@@ -591,7 +618,9 @@ export default function DocumentDetail({
                 />
                 <DuplicatesPanel
                   documentId={id}
+                  canEdit={canEdit}
                   onOpenDocument={onOpenDocument ?? (() => undefined)}
+                  onChanged={() => setRefresh((r) => r + 1)}
                 />
               </TabPanel>
 

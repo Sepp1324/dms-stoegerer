@@ -68,6 +68,7 @@ def find_duplicates(
             document_id__in=visible_ids,
             version_id=F("document__current_version_id"),
             embedding__isnull=False,
+            document__superseded_by__isnull=True,  # bereits zusammengeführte ausblenden
         )
         .annotate(distance=CosineDistance("embedding", centroid))
         .order_by("distance")[: max(limit * 6, limit)]

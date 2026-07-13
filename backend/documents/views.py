@@ -1142,6 +1142,12 @@ class DocumentViewSet(viewsets.ModelViewSet):
 
         params = self.request.query_params
 
+        # Soft-Merge: als Dublette ausgeblendete Dokumente aus der LISTE entfernen
+        # (nur ``action == "list"`` – Detail/Actions bleiben erreichbar, sonst wäre
+        # das Undo unmöglich). ``?include_superseded=1`` zeigt sie bei Bedarf doch.
+        if self.action == "list" and not params.get("include_superseded"):
+            qs = qs.exclude(superseded_by__isnull=False)
+
         # Triage-Ansicht (STOAA-295): Admins können mit ``?owner=none`` gezielt
         # die eigentümerlosen (Triage-)Dokumente auflisten und anschließend per
         # ``set-owner`` zuweisen. Für Nicht-Admins ist der Param wirkungslos –
@@ -2252,6 +2258,77 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 document, self.get_queryset(), threshold=threshold
             )
         )
+
+    @action(detail=True, methods=["post"], url_path="supersede")
+    def supersede(self, request, pk=None):
+        """Markiert dieses Dokument als Dublette, ersetzt durch ein kanonisches.
+
+        Body: ``{"by": <canonical_id>}``. Soft-Merge: das Dokument bleibt erhalten,
+        wird aber aus den Standardlisten ausgeblendet (Undo via ``unsupersede``).
+        Keine destruktive Datei-Operation.
+        """
+        if not request.user.can_write:
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        document = self.get_object()
+        try:
+            canonical_id = int(request.data.get("by"))
+        except (TypeError, ValueError):
+            return Response(
+                {"detail": "Feld 'by' (kanonische Dokument-ID) fehlt oder ist ungültig."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if canonical_id == document.id:
+            return Response(
+                {"detail": "Ein Dokument kann sich nicht selbst ersetzen."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        canonical = self.get_queryset().filter(pk=canonical_id).first()
+        if canonical is None:
+            return Response(
+                {"detail": "Kanonisches Dokument nicht gefunden."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        if canonical.superseded_by_id is not None:
+            return Response(
+                {"detail": "Das Zieldokument ist selbst als Dublette markiert."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        document.superseded_by = canonical
+        document.superseded_at = timezone.now()
+        document.save(update_fields=["superseded_by", "superseded_at"])
+        AuditLogEntry.objects.create(
+            actor=request.user,
+            action="supersede",
+            object_type="Document",
+            object_id=str(document.id),
+            detail={"superseded_by": canonical.id},
+        )
+        return Response(self.get_serializer(document).data)
+
+    @action(detail=True, methods=["post"], url_path="unsupersede")
+    def unsupersede(self, request, pk=None):
+        """Hebt die Dubletten-Markierung wieder auf (Undo)."""
+        if not request.user.can_write:
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        document = self.get_object()
+        if document.superseded_by_id is not None:
+            document.superseded_by = None
+            document.superseded_at = None
+            document.save(update_fields=["superseded_by", "superseded_at"])
+            AuditLogEntry.objects.create(
+                actor=request.user,
+                action="unsupersede",
+                object_type="Document",
+                object_id=str(document.id),
+                detail={},
+            )
+        return Response(self.get_serializer(document).data)
 
     @action(detail=False, methods=["get"], url_path="duplicate-report")
     def duplicate_report(self, request):

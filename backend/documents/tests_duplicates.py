@@ -134,3 +134,74 @@ class DuplicateApiTests(APITestCase):
 
         self.assertEqual(resp.status_code, 200)
         self.assertGreaterEqual(resp.data["count"], 1)
+
+
+class SupersedeApiTests(APITestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(username="sup-api", password="pw", role="user")
+        cls.canonical = make_doc(cls.user, "Original", INVOICE)
+        cls.dup = make_doc(cls.user, "Dublette", INVOICE)
+
+    def _list_ids(self, query=""):
+        resp = self.client.get(f"/api/documents/{query}")
+        return [d["id"] for d in resp.data["results"]]
+
+    def test_supersede_hides_from_list_and_links(self):
+        self.client.force_authenticate(self.user)
+
+        resp = self.client.post(
+            f"/api/documents/{self.dup.id}/supersede/",
+            {"by": self.canonical.id},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.dup.refresh_from_db()
+        self.assertEqual(self.dup.superseded_by_id, self.canonical.id)
+        # aus der Standardliste ausgeblendet, kanonisches bleibt sichtbar
+        ids = self._list_ids()
+        self.assertNotIn(self.dup.id, ids)
+        self.assertIn(self.canonical.id, ids)
+        # explizit anzeigbar
+        self.assertIn(self.dup.id, self._list_ids("?include_superseded=1"))
+        # kanonisches zählt die Dublette
+        detail = self.client.get(f"/api/documents/{self.canonical.id}/")
+        self.assertEqual(detail.data["supersedes_count"], 1)
+
+    def test_unsupersede_restores(self):
+        self.client.force_authenticate(self.user)
+        self.client.post(
+            f"/api/documents/{self.dup.id}/supersede/",
+            {"by": self.canonical.id},
+            format="json",
+        )
+
+        resp = self.client.post(f"/api/documents/{self.dup.id}/unsupersede/")
+
+        self.assertEqual(resp.status_code, 200)
+        self.dup.refresh_from_db()
+        self.assertIsNone(self.dup.superseded_by_id)
+        self.assertIn(self.dup.id, self._list_ids())
+
+    def test_cannot_supersede_self(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.post(
+            f"/api/documents/{self.dup.id}/supersede/",
+            {"by": self.dup.id},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_superseded_excluded_from_duplicate_candidates(self):
+        self.client.force_authenticate(self.user)
+        self.client.post(
+            f"/api/documents/{self.dup.id}/supersede/",
+            {"by": self.canonical.id},
+            format="json",
+        )
+
+        resp = self.client.get(f"/api/documents/{self.canonical.id}/duplicates/")
+
+        ids = [r["document"] for r in resp.data["results"]]
+        self.assertNotIn(self.dup.id, ids)
