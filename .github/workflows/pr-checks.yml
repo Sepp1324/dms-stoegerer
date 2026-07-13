@@ -42,6 +42,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Vor dem Build aufräumen: der langlebige self-hosted Runner sammelt sonst
+      # ungenutzte Images/Build-Cache an, bis der Build an „Platte voll" scheitert
+      # (noch bevor run-tests.sh mit eigenem Prune drankäme).
+      - name: Runner-Speicher freihalten
+        run: |
+          docker image prune -f || true
+          docker image prune -af --filter "until=48h" || true
+          docker builder prune -f --filter "until=24h" || true
+          df -h . || true
+
       - name: Backend-Image bauen (flüchtiger CI-Tag)
         run: docker build -t "dms-backend-ci:${GITHUB_SHA}" ./backend
 
@@ -61,6 +71,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Runner-Speicher freihalten
+        run: |
+          docker image prune -f || true
+          docker image prune -af --filter "until=48h" || true
+          docker builder prune -f --filter "until=24h" || true
+          df -h . || true
 
       - name: Frontend-Image bauen (flüchtiger CI-Tag)
         run: docker build -t "dms-frontend-ci:${GITHUB_SHA}" ./frontend

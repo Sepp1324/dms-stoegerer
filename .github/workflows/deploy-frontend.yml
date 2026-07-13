@@ -52,6 +52,13 @@ jobs:
           echo "TAG=$TAG" >> "$GITHUB_ENV"
           echo "Deploying frontend with tag: $TAG"
 
+      - name: Runner-Speicher freihalten
+        run: |
+          docker image prune -f || true
+          docker image prune -af --filter "until=48h" || true
+          docker builder prune -f --filter "until=24h" || true
+          df -h . || true
+
       - name: Frontend-Image bauen
         run: docker build -t "$REGISTRY/dms-frontend:$TAG" ./frontend
 

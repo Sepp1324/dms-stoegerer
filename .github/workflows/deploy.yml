@@ -42,6 +42,17 @@ jobs:
       - name: Stable Secrets prüfen
         run: scripts/verify-stable-secrets.sh
 
+      # Der Deploy lässt die gepushten dms-backend/-frontend:<TAG>-Images lokal auf
+      # dem self-hosted Runner liegen. Ohne Aufräumen sammeln die sich über die
+      # Läufe an, bis die Platte voll ist. Vor dem Build ungenutzte Images (ab 48h)
+      # + alten Build-Cache abräumen.
+      - name: Runner-Speicher freihalten
+        run: |
+          docker image prune -f || true
+          docker image prune -af --filter "until=48h" || true
+          docker builder prune -f --filter "until=24h" || true
+          df -h . || true
+
       - name: Images bauen
         run: |
           set -euo pipefail
