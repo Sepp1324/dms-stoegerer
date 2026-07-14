@@ -7307,3 +7307,116 @@ button.due-card:hover {
   gap: 0.5rem;
   flex-wrap: wrap;
 }
+
+/* --- Fixkosten-/Ausgabenüberblick --- */
+.cost-overview {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+}
+.cost-overview__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.8rem;
+  flex-wrap: wrap;
+}
+.cost-overview__head h2 {
+  margin: 0;
+  font-size: 1.15rem;
+}
+.cost-overview__coverage {
+  font-size: 0.8rem;
+}
+.cost-overview__totals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.25rem;
+}
+.cost-total {
+  min-width: 160px;
+}
+.cost-total__monthly {
+  font-size: 1.9rem;
+  font-weight: 700;
+  line-height: 1.1;
+}
+.cost-total__label {
+  font-size: 0.8rem;
+}
+.cost-total__yearly {
+  margin-top: 0.25rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.cost-breakdown {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.cost-breakdown h3,
+.cost-upcoming h3 {
+  margin: 0.4rem 0 0.2rem;
+  font-size: 0.9rem;
+  color: var(--muted);
+  font-weight: 600;
+}
+.cost-bar {
+  display: grid;
+  grid-template-columns: minmax(90px, 1.2fr) 3fr auto;
+  align-items: center;
+  gap: 0.6rem;
+}
+.cost-bar__label {
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+.cost-bar__track {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--hover-tint);
+  overflow: hidden;
+}
+.cost-bar__fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+}
+.cost-bar__value {
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.cost-upcoming ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.cost-upcoming__row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 0.7rem;
+  align-items: baseline;
+  padding: 0.3rem 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.88rem;
+}
+.cost-upcoming__row:last-child {
+  border-bottom: none;
+}
+.cost-upcoming__date {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.cost-upcoming__name {
+  overflow-wrap: anywhere;
+}
+.cost-upcoming__amount {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
