@@ -162,7 +162,25 @@ _EXTRACTION_CUSTOM_FIELD_TARGETS = {
 }
 
 
+def _household_member_ids(user) -> set:
+    """IDs aller Nutzer, die mit ``user`` einen Haushalt teilen (inkl. user selbst).
+
+    Basis der Familien-Freigabe: ein für den Haushalt freigegebenes Dokument ist
+    für genau diese Nutzer LESBAR. Ohne Haushalt → nur der Nutzer selbst (dann ist
+    die Freigabe wirkungslos, kein Leak).
+    """
+    from django.contrib.auth import get_user_model
+
+    User = get_user_model()
+    ids = set(
+        User.objects.filter(households__members=user).values_list("id", flat=True)
+    )
+    ids.add(user.id)
+    return ids
+
+
 def _visible_documents_for(user):
+    """Lese-Sichtbarkeit: eigene Dokumente + für den Haushalt freigegebene."""
     qs = Document.objects.select_related(
         "correspondent",
         "document_type",
@@ -171,7 +189,11 @@ def _visible_documents_for(user):
         "current_version",
     )
     if not getattr(user, "is_dms_admin", False):
-        qs = qs.filter(owner=user)
+        member_ids = _household_member_ids(user)
+        qs = qs.filter(
+            Q(owner=user)
+            | (Q(shared_with_household=True) & Q(owner_id__in=member_ids))
+        )
     return qs
 
 
@@ -1113,6 +1135,32 @@ class DocumentViewSet(viewsets.ModelViewSet):
     filter_backends = [OrderingFilter]
     ordering_fields = ["added_at", "title"]
 
+    # Familien-Freigabe: NUR diese (lesenden) Actions erweitern die Sichtbarkeit auf
+    # haushaltsgeteilte Fremd-Dokumente. Alles andere – Schreiben, mutierende
+    # Sub-Actions und jede nicht gelistete Action – bleibt strikt owner-only.
+    # Fail-closed: vergisst man hier eine Action, ist sie zu streng (kein Leak),
+    # niemals zu offen.
+    SAFE_READ_ACTIONS = frozenset(
+        {
+            "list",
+            "retrieve",
+            "preview",
+            "download",
+            "thumbnail",
+            "similar",
+            "briefing",
+            "duplicates",
+            "filing_suggestions",
+            "audit",
+            "quality",
+            "evidence",
+            "integrity",
+            "qr",
+            "by_asn",
+            "revision_package",
+        }
+    )
+
     def get_queryset(self):
         qs = (
             Document.objects.all()
@@ -1131,15 +1179,23 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 "review_tasks",
             )
         )
-        # --- Owner-Isolation (STOAA-7) -------------------------------------
-        # Jeder Nutzer sieht/verwaltet ausschließlich eigene Dokumente. Da
-        # get_object() dieses Queryset nutzt, wirkt die Scope-Filterung auch
-        # auf Detail/Download/Update/Delete sowie die Sub-Actions (preview,
-        # thumbnail, audit, apply_suggestions): fremde IDs → 404 (kein Leak).
-        # Ausnahme: DMS-Admin (Rolle admin / superuser) verwaltet alles.
+        # --- Owner-Isolation (STOAA-7) + Familien-Freigabe -----------------
+        # Grundregel: Jeder Nutzer VERWALTET ausschließlich eigene Dokumente. Da
+        # get_object() dieses Queryset nutzt, bleiben Update/Delete und alle
+        # mutierenden Sub-Actions auf eigene Dokumente beschränkt (fremde IDs →
+        # 404). NUR für lesende Actions (SAFE_READ_ACTIONS) wird die Sichtbarkeit
+        # zusätzlich auf haushaltsgeteilte Fremd-Dokumente erweitert – Schreiben
+        # darauf ist ausgeschlossen. Ausnahme: DMS-Admin verwaltet alles.
         user = self.request.user
         if not getattr(user, "is_dms_admin", False):
-            qs = qs.filter(owner=user)
+            if self.action in self.SAFE_READ_ACTIONS:
+                member_ids = _household_member_ids(user)
+                qs = qs.filter(
+                    Q(owner=user)
+                    | (Q(shared_with_household=True) & Q(owner_id__in=member_ids))
+                )
+            else:
+                qs = qs.filter(owner=user)
 
         params = self.request.query_params
 
@@ -2329,6 +2385,37 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 object_id=str(document.id),
                 detail={},
             )
+        return Response(self.get_serializer(document).data)
+
+    @action(detail=True, methods=["post"], url_path="share-household")
+    def share_household(self, request, pk=None):
+        """Gibt dieses (eigene) Dokument für den Haushalt frei bzw. hebt die Freigabe auf.
+
+        Body: ``{"shared": true|false}``. Nur der Eigentümer (``can_write``); da
+        diese Action NICHT in SAFE_READ_ACTIONS steht, liefert get_object() ohnehin
+        nur eigene Dokumente. Freigeben setzt eine Haushalts-Mitgliedschaft voraus.
+        """
+        if not request.user.can_write:
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        document = self.get_object()
+        shared = bool(request.data.get("shared", True))
+        if shared and not request.user.households.exists():
+            return Response(
+                {"detail": "Bitte zuerst einen Haushalt anlegen oder beitreten."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        document.shared_with_household = shared
+        document.save(update_fields=["shared_with_household"])
+        AuditLogEntry.objects.create(
+            actor=request.user,
+            action="share_household",
+            object_type="Document",
+            object_id=str(document.id),
+            detail={"shared": shared},
+        )
         return Response(self.get_serializer(document).data)
 
     @action(detail=False, methods=["get"], url_path="duplicate-report")

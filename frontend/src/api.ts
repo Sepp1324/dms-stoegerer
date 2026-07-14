@@ -230,6 +230,11 @@ export interface DocumentItem {
   superseded_by_title: string | null;
   superseded_at: string | null;
   supersedes_count: number;
+  // Familien-Freigabe: für den Haushalt freigegeben + Eigentümer-Name (bei
+  // geteilten Fremd-Dokumenten).
+  shared_with_household: boolean;
+  owner_username: string | null;
+  is_owner: boolean;
   ocr_status: OcrStatus | null;
   // Suchergebnis-Snippet (STOAA-368/370): sicheres HTML mit ``<mark>`` rund um den
   // Treffer. Nur bei aktiver Volltextsuche (``?q=``) gefüllt; sonst / kein Treffer
@@ -2281,6 +2286,39 @@ export function supersedeDocument(id: number, by: number): Promise<DocumentDetai
 /** Dubletten-Markierung wieder aufheben (Undo). */
 export function unsupersedeDocument(id: number): Promise<DocumentDetail> {
   return postJson<DocumentDetail>(`/documents/${id}/unsupersede/`, {});
+}
+
+/** Familien-Freigabe eines Dokuments setzen/aufheben (nur Eigentümer). */
+export function shareDocumentHousehold(id: number, shared: boolean): Promise<DocumentDetail> {
+  return postJson<DocumentDetail>(`/documents/${id}/share-household/`, { shared });
+}
+
+export interface HouseholdMember {
+  id: number;
+  username: string;
+  email: string;
+}
+export interface Household {
+  id: number;
+  name: string;
+  members: HouseholdMember[];
+  created_at: string;
+}
+/** Eigener Haushalt (oder null, wenn in keinem). */
+export async function getMyHousehold(): Promise<Household | null> {
+  const res = await apiFetch("/households/");
+  if (!res.ok) throw new Error(`Haushalt laden fehlgeschlagen: HTTP ${res.status}`);
+  return res.json();
+}
+export function createHousehold(name: string): Promise<Household> {
+  return postJson<Household>("/households/", { name });
+}
+export function addHouseholdMember(id: number, username: string): Promise<Household> {
+  return postJson<Household>(`/households/${id}/members/`, { username });
+}
+export async function leaveHousehold(id: number): Promise<void> {
+  const res = await apiFetch(`/households/${id}/leave/`, { method: "POST" });
+  if (!res.ok) throw new Error(`Verlassen fehlgeschlagen: HTTP ${res.status}`);
 }
 
 export async function getSimilarDocuments(id: number): Promise<SimilarDocumentsResult> {

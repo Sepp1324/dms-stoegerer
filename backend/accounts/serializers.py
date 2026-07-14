@@ -1,6 +1,23 @@
 from rest_framework import serializers
 
-from .models import User
+from .models import Household, User
+
+
+class HouseholdSerializer(serializers.ModelSerializer):
+    """Haushalt inkl. Mitgliederliste (schmale User-Repräsentation)."""
+
+    members = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Household
+        fields = ("id", "name", "members", "created_at")
+        read_only_fields = fields
+
+    def get_members(self, obj) -> list:
+        return [
+            {"id": u.id, "username": u.username, "email": u.email}
+            for u in obj.members.all().order_by("username")
+        ]
 
 
 class UserChoiceSerializer(serializers.ModelSerializer):

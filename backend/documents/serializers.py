@@ -919,6 +919,12 @@ class DocumentSerializer(serializers.ModelSerializer):
         source="superseded_by.title", read_only=True, default=None
     )
     supersedes_count = serializers.SerializerMethodField()
+    # Familien-Freigabe: Eigentümer-Name, damit für den Haushalt freigegebene
+    # Fremd-Dokumente in der Liste/Detail zeigen, von wem sie stammen.
+    owner_username = serializers.CharField(
+        source="owner.username", read_only=True, default=None
+    )
+    is_owner = serializers.SerializerMethodField()
 
     class Meta:
         model = Document
@@ -968,6 +974,9 @@ class DocumentSerializer(serializers.ModelSerializer):
             "superseded_by_title",
             "superseded_at",
             "supersedes_count",
+            "shared_with_household",
+            "owner_username",
+            "is_owner",
             "custom_field_values",
             "versions",
         )
@@ -976,6 +985,7 @@ class DocumentSerializer(serializers.ModelSerializer):
             "current_version",
             "superseded_by",
             "superseded_at",
+            "shared_with_household",
             "owner",  # Eigentümer serverseitig gesetzt – nicht per Request änderbar (STOAA-7)
             "case_file",  # Zuordnung nur über CaseFileViewSet-Actions (Owner-Scope).
             "asn",  # unveränderlich, serverseitig vergeben (STOAA-284/285)
@@ -1032,6 +1042,10 @@ class DocumentSerializer(serializers.ModelSerializer):
 
     def get_archive_status_label(self, obj) -> str:
         return obj.get_archive_status_display()
+
+    def get_is_owner(self, obj) -> bool:
+        request = self.context.get("request")
+        return bool(request and obj.owner_id == getattr(request.user, "id", None))
 
     def get_supersedes_count(self, obj) -> int:
         # Annotation aus get_queryset bevorzugen (kein N+1); sonst zählen.

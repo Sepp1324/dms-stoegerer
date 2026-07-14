@@ -398,6 +398,11 @@ class Document(models.Model):
     )
     superseded_at = models.DateTimeField(null=True, blank=True)
 
+    # Familien-Freigabe (STOAA): Ist das gesetzt, dürfen die Mitglieder des
+    # Haushalts des Eigentümers dieses Dokument LESEN (Detail/Vorschau/Download).
+    # Schreibrechte bleiben ausschließlich beim Eigentümer.
+    shared_with_household = models.BooleanField(default=False, db_index=True)
+
     retention_until = models.DateField(
         null=True,
         blank=True,
