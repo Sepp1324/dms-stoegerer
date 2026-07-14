@@ -128,6 +128,7 @@ from .services import auto_file as auto_file_service
 from .services import duplicates as duplicates_service
 from .services import review_tasks as review_task_service
 from .services import revision_package as revision_package_service
+from .services import spending as spending_service
 from .services import semantic_index as semantic_index_service
 from .services import timeline as timeline_service
 from .tasks import (
@@ -3755,6 +3756,18 @@ class ContractRecordViewSet(viewsets.ModelViewSet):
                 ).count(),
                 "expired": qs.filter(status=ContractRecord.Status.EXPIRED).count(),
             }
+        )
+
+    @action(detail=False, methods=["get"], url_path="cost-overview")
+    def cost_overview(self, request):
+        """Fixkosten-/Ausgabenüberblick: monatliche/jährliche Summen + Aufschlüsselung."""
+        try:
+            upcoming_days = int(request.query_params.get("upcoming_days", 60))
+        except (TypeError, ValueError):
+            upcoming_days = 60
+        upcoming_days = max(1, min(upcoming_days, 365))
+        return Response(
+            spending_service.cost_overview(self.get_queryset(), upcoming_days=upcoming_days)
         )
 
     @action(detail=False, methods=["post"])

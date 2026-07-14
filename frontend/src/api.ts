@@ -2615,6 +2615,53 @@ export async function getContractSummary(): Promise<ContractSummary> {
   return res.json();
 }
 
+export interface CostCurrencyTotal {
+  currency: string;
+  monthly: number;
+  yearly: number;
+  contracts: number;
+}
+export interface CostBreakdownEntry {
+  currency: string;
+  monthly: number;
+  yearly: number;
+  count: number;
+  type?: string;
+  label?: string;
+  provider?: string;
+}
+export interface CostUpcoming {
+  document: number;
+  document_title: string;
+  provider: string | null;
+  type_label: string;
+  amount: number | null;
+  currency: string;
+  cycle_label: string;
+  due_on: string;
+}
+export interface CostOverview {
+  currency_totals: CostCurrencyTotal[];
+  by_type: CostBreakdownEntry[];
+  by_provider: CostBreakdownEntry[];
+  upcoming: CostUpcoming[];
+  coverage: {
+    active: number;
+    with_amount: number;
+    recurring: number;
+    one_time: number;
+    unknown: number;
+  };
+  upcoming_days: number;
+  generated_at: string;
+}
+/** Fixkosten-/Ausgabenüberblick aus den aktiven Verträgen. */
+export async function getCostOverview(): Promise<CostOverview> {
+  const res = await apiFetch("/contracts/cost-overview/");
+  if (!res.ok) throw new Error(`Ausgabenüberblick laden fehlgeschlagen: HTTP ${res.status}`);
+  return res.json();
+}
+
 export function scanContracts(ids?: number[]): Promise<ContractScanResult> {
   return postJson<ContractScanResult>("/contracts/scan/", ids ? { ids } : {});
 }

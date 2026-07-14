@@ -10,6 +10,7 @@ import {
   type ContractSummary,
   type ContractType,
 } from "../api";
+import CostOverviewPanel from "./CostOverviewPanel";
 
 function formatDate(value: string | null): string {
   if (!value) return "—";
@@ -124,6 +125,7 @@ export default function ContractsPage({
 
   return (
     <section className="contracts-page">
+      <CostOverviewPanel />
       <div className="contracts-toolbar">
         <div className="contract-metrics">
           <Metric label="Aktiv" value={metricValue(summary, "active")} />
