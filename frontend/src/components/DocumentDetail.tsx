@@ -2,6 +2,7 @@ import { type ReactNode, useEffect, useRef, useState } from "react";
 import {
   addDocumentVersion,
   applySuggestions,
+  shareDocumentHousehold,
   unsupersedeDocument,
   approveDocument,
   checkDocumentArchive,
@@ -388,6 +389,22 @@ export default function DocumentDetail({
     }
   }
 
+  const [shareBusy, setShareBusy] = useState(false);
+  const [shareError, setShareError] = useState<string | null>(null);
+
+  async function toggleShare() {
+    if (!doc) return;
+    setShareBusy(true);
+    setShareError(null);
+    try {
+      setDoc(await shareDocumentHousehold(id, !doc.shared_with_household));
+    } catch {
+      setShareError("Freigabe fehlgeschlagen – ist ein Haushalt angelegt?");
+    } finally {
+      setShareBusy(false);
+    }
+  }
+
   async function apply(fields?: string[]) {
     setApplying(true);
     setApplyError(null);
@@ -536,6 +553,28 @@ export default function DocumentDetail({
                 </button>
               )}
             </div>
+          )}
+
+          {doc.is_owner ? (
+            <div className="detail-share">
+              <label className="detail-share__toggle">
+                <input
+                  type="checkbox"
+                  checked={doc.shared_with_household}
+                  onChange={toggleShare}
+                  disabled={shareBusy || !canEdit}
+                />
+                <span>Für die Familie freigeben (nur Lesen)</span>
+              </label>
+              {shareError && <span className="form-error">{shareError}</span>}
+            </div>
+          ) : (
+            doc.owner_username && (
+              <div className="detail-share detail-share--foreign">
+                <span className="detail-share__badge">Geteilt von {doc.owner_username}</span>
+                <span className="muted">Nur-Lese-Zugriff über deinen Haushalt.</span>
+              </div>
+            )
           )}
 
           <div className="detail">

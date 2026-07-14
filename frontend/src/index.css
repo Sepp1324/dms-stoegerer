@@ -7420,3 +7420,68 @@ button.due-card:hover {
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
+
+/* --- Familie/Haushalt + Freigabe --- */
+.household {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  margin-bottom: 1.25rem;
+}
+.household h3 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+.household__hint {
+  margin: 0;
+  font-size: 0.82rem;
+}
+.household__row {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+.household__row input {
+  flex: 1 1 220px;
+}
+.household__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+}
+.household__members {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.9rem;
+}
+.detail-share {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+  padding: 0.55rem 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--card);
+  font-size: 0.9rem;
+}
+.detail-share__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+}
+.detail-share--foreign {
+  background: var(--accent-tint);
+  border-color: transparent;
+}
+.detail-share__badge {
+  font-weight: 600;
+  color: var(--accent);
+}
