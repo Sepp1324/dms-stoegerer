@@ -133,6 +133,12 @@ class DocumentFolder(models.Model):
         on_delete=models.CASCADE,
         related_name="children",
     )
+    # Ordnerweite Familien-Freigabe: Ist das gesetzt, sind alle Dokumente in diesem
+    # Ordner (und in seinen Unterordnern) für den Haushalt des jeweiligen
+    # Eigentümers LESBAR – Schreibrechte bleiben beim Eigentümer. Der Ordnerbaum ist
+    # global; die Sichtbarkeit bleibt aber an der Haushalts-Mitgliedschaft des
+    # Dokument-Eigentümers verankert (kein Leak über Haushalte hinweg).
+    shared_with_household = models.BooleanField(default=False, db_index=True)
 
     class Meta:
         verbose_name = "Ordner"

@@ -179,6 +179,47 @@ def _household_member_ids(user) -> set:
     return ids
 
 
+def _shared_folder_ids() -> set:
+    """Ordner-IDs, die (selbst ODER über einen Vorfahren) haushaltsgeteilt sind.
+
+    Der Ordnerbaum ist klein (Familien-DMS); wir laden ihn einmal und markieren
+    jeden Ordner, der einen freigegebenen Ordner in seiner Elternkette hat. So
+    wirkt eine Freigabe automatisch auf alle Unterordner.
+    """
+    rows = list(DocumentFolder.objects.values_list("id", "parent_id", "shared_with_household"))
+    parent = {fid: pid for fid, pid, _ in rows}
+    shared = {fid for fid, _, is_shared in rows if is_shared}
+    if not shared:
+        return set()
+    result: set = set()
+    for fid, _pid, _is_shared in rows:
+        cursor, seen = fid, set()
+        while cursor is not None and cursor not in seen:
+            seen.add(cursor)
+            if cursor in shared:
+                result.add(fid)
+                break
+            cursor = parent.get(cursor)
+    return result
+
+
+def _household_visibility_q(user):
+    """Q für die LESE-Sichtbarkeit: eigene Dokumente + haushaltsgeteilte.
+
+    Haushaltsgeteilt = Eigentümer ist Haushalts-Mitmitglied UND (Dokument selbst
+    freigegeben ODER in einem freigegebenen Ordner/Unterordner). Die Sichtbarkeit
+    bleibt strikt an der Haushalts-Mitgliedschaft des Eigentümers verankert –
+    niemals über Haushalte hinweg. EINE Quelle für alle Lese-Kontexte
+    (get_queryset lesend + _visible_documents_for), damit die Regel nicht driftet.
+    """
+    member_ids = _household_member_ids(user)
+    shared_folder_ids = _shared_folder_ids()
+    household_read = Q(owner_id__in=member_ids) & (
+        Q(shared_with_household=True) | Q(folder_id__in=shared_folder_ids)
+    )
+    return Q(owner=user) | household_read
+
+
 def _visible_documents_for(user):
     """Lese-Sichtbarkeit: eigene Dokumente + für den Haushalt freigegebene."""
     qs = Document.objects.select_related(
@@ -189,11 +230,7 @@ def _visible_documents_for(user):
         "current_version",
     )
     if not getattr(user, "is_dms_admin", False):
-        member_ids = _household_member_ids(user)
-        qs = qs.filter(
-            Q(owner=user)
-            | (Q(shared_with_household=True) & Q(owner_id__in=member_ids))
-        )
+        qs = qs.filter(_household_visibility_q(user))
     return qs
 
 
@@ -1189,11 +1226,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
         user = self.request.user
         if not getattr(user, "is_dms_admin", False):
             if self.action in self.SAFE_READ_ACTIONS:
-                member_ids = _household_member_ids(user)
-                qs = qs.filter(
-                    Q(owner=user)
-                    | (Q(shared_with_household=True) & Q(owner_id__in=member_ids))
-                )
+                qs = qs.filter(_household_visibility_q(user))
             else:
                 qs = qs.filter(owner=user)
 

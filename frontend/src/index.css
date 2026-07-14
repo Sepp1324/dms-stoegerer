@@ -7485,3 +7485,53 @@ button.due-card:hover {
   font-weight: 600;
   color: var(--accent);
 }
+
+/* --- Ordner-Freigabe (Familie) --- */
+.folder-sharing {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin-bottom: 1.25rem;
+}
+.folder-sharing h3 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+.folder-sharing__hint {
+  margin: 0;
+  font-size: 0.82rem;
+}
+.folder-sharing__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.folder-sharing__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+  padding: 0.3rem 0;
+  border-bottom: 1px solid var(--border);
+}
+.folder-sharing__row:last-child {
+  border-bottom: none;
+}
+.folder-sharing__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+.folder-sharing__count {
+  flex-shrink: 0;
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+}
