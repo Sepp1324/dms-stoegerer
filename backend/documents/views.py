@@ -1238,6 +1238,21 @@ class DocumentViewSet(viewsets.ModelViewSet):
         if self.action == "list" and not params.get("include_superseded"):
             qs = qs.exclude(superseded_by__isnull=False)
 
+        # Familien-Freigabe-Ansicht (?shared=with-me|by-me). Baut auf der bereits
+        # angewandten Lese-Sichtbarkeit auf: "with-me" blendet die eigenen
+        # Dokumente aus (übrig bleiben die vom Haushalt an mich geteilten);
+        # "by-me" zeigt meine eigenen, die ich per Dokument ODER Ordner freigegeben
+        # habe. Nur in der Liste wirksam.
+        if self.action == "list":
+            shared_scope = params.get("shared")
+            if shared_scope == "with-me":
+                qs = qs.exclude(owner=user)
+            elif shared_scope == "by-me":
+                qs = qs.filter(owner=user).filter(
+                    Q(shared_with_household=True)
+                    | Q(folder_id__in=_shared_folder_ids())
+                )
+
         # Triage-Ansicht (STOAA-295): Admins können mit ``?owner=none`` gezielt
         # die eigentümerlosen (Triage-)Dokumente auflisten und anschließend per
         # ``set-owner`` zuweisen. Für Nicht-Admins ist der Param wirkungslos –

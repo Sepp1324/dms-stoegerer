@@ -1310,6 +1310,10 @@ export interface DocumentQuery {
   // Fachlicher ecoDMS-artiger Ordnerfilter. ``"none"`` zeigt Dokumente ohne Ordner.
   folder?: number | "none" | "";
   case_file?: number | "";
+  // Familien-Freigabe-Ansicht: ``"with-me"`` = nur vom Haushalt an mich geteilte
+  // Fremd-Dokumente; ``"by-me"`` = meine eigenen, die ich (per Dokument oder Ordner)
+  // freigegeben habe. Leer = kein Freigabe-Filter.
+  shared?: "with-me" | "by-me" | "";
   // Verarbeitungsstatus-Filter (STOAA-248): grober UI-Bucket, leer = kein Filter.
   processing_state?: ProcessingStateFilter | "";
   // Fachlicher Inbox-Filter: offene oder bereits geprüfte Dokumente.
