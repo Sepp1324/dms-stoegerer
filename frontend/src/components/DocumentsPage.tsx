@@ -191,6 +191,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   const [folder, setFolder] = useState<FolderFilterValue>("");
   // Verarbeitungsstatus-Filter (STOAA-249): leer = kein Filter, sonst UI-Bucket.
   const [processingState, setProcessingState] = useState<ProcessingStateFilter | "">("");
+  const [sharedScope, setSharedScope] = useState<"" | "with-me" | "by-me">("");
   // Sortierung; "" = Backend-Standard (FTS-Relevanz bei Suche, sonst Datum neu→alt).
   const [ordering, setOrdering] = useState("");
   // Triage-Ansicht (STOAA-296): zeigt owner-lose Dokumente (?owner=none). Nur für
@@ -460,6 +461,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
       storage_path: storagePath,
       folder,
       processing_state: processingState,
+      shared: sharedScope,
       // Triage nur für Admins anfordern; das Backend ignoriert den Param für
       // Normalnutzer ohnehin, aber so bleibt die FE-Absicht eindeutig.
       owner: triage && me?.is_dms_admin ? "none" : "",
@@ -481,7 +483,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     };
     // customFilterKey serialisiert customFilters für einen stabilen Dep-Vergleich.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [debouncedQ, correspondent, documentType, tag, storagePath, folder, processingState, triage, me?.is_dms_admin, ordering, page, reloadKey, customFilterKey]);
+  }, [debouncedQ, correspondent, documentType, tag, storagePath, folder, processingState, sharedScope, triage, me?.is_dms_admin, ordering, page, reloadKey, customFilterKey]);
 
   useEffect(() => {
     if (view !== "docs" || triage) return;
@@ -502,10 +504,10 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   );
   const hasFilters = useMemo(
     () =>
-      !!(debouncedQ || correspondent || documentType || tag || storagePath || processingState) ||
+      !!(debouncedQ || correspondent || documentType || tag || storagePath || processingState || sharedScope) ||
       !!folder ||
       hasCurrencyInput,
-    [debouncedQ, correspondent, documentType, tag, storagePath, folder, processingState, hasCurrencyInput],
+    [debouncedQ, correspondent, documentType, tag, storagePath, folder, processingState, sharedScope, hasCurrencyInput],
   );
 
   // Jede Filter-/Suchänderung springt zurück auf Seite 1 – sonst zeigt eine
@@ -611,6 +613,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     setStoragePath("");
     setFolder("");
     setProcessingState("");
+    setSharedScope("");
     setOrdering("");
     setCurrencyFilters({});
     setPage(1);
@@ -1124,6 +1127,20 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
                     <option value="added_at">Datum (alt → neu)</option>
                     <option value="title">Titel (A–Z)</option>
                     <option value="-title">Titel (Z–A)</option>
+                  </select>
+                </label>
+                <label className="overflow-menu__field">
+                  <span>Familien-Freigabe</span>
+                  <select
+                    value={sharedScope}
+                    onChange={(e) => {
+                      setSharedScope(e.target.value as "" | "with-me" | "by-me");
+                      setPage(1);
+                    }}
+                  >
+                    <option value="">Alle Dokumente</option>
+                    <option value="with-me">Mit mir geteilt</option>
+                    <option value="by-me">Von mir geteilt</option>
                   </select>
                 </label>
                 {/* Triage-Umschalter nur für Admins: zeigt owner-lose Dokumente
