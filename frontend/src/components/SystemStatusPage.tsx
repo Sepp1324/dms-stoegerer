@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import HouseholdPanel from "./HouseholdPanel";
+import FolderSharingPanel from "./FolderSharingPanel";
 import {
   getBackupStatus,
   getArchiveHealth,
@@ -343,6 +344,7 @@ export default function SystemStatusPage() {
       </div>
 
       <HouseholdPanel />
+      <FolderSharingPanel />
 
       <div className="system-grid">
         <StatusCard

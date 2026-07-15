@@ -2621,6 +2621,17 @@ export interface FolderRef extends NamedRef {
   parent: number | null;
   full_path: string;
   document_count: number;
+  shared_with_household: boolean;
+}
+/** Ordnerweite Familien-Freigabe setzen/aufheben (wirkt auf Unterordner mit). */
+export async function setFolderShared(id: number, shared: boolean): Promise<FolderRef> {
+  const res = await apiFetch(`/folders/${id}/`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ shared_with_household: shared }),
+  });
+  if (!res.ok) throw new Error(`Ordner-Freigabe fehlgeschlagen: HTTP ${res.status}`);
+  return res.json();
 }
 export async function getFolders(): Promise<FolderRef[]> {
   return listAll<FolderRef>("/folders/");

@@ -88,9 +88,11 @@ class DocumentFolderSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = DocumentFolder
-        fields = ("id", "name", "parent", "full_path", "document_count")
+        fields = ("id", "name", "parent", "full_path", "document_count", "shared_with_household")
         extra_kwargs = {
             "parent": {"required": False},
+            # Ordnerweite Familien-Freigabe – per PATCH umschaltbar.
+            "shared_with_household": {"required": False},
         }
 
     def validate(self, attrs):
