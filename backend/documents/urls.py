@@ -42,6 +42,8 @@ urlpatterns = [
     path("ask/", views.AskView.as_view(), name="ask"),
     path("search/semantic/", views.SemanticSearchView.as_view(), name="search-semantic"),
     path("search/hybrid/", views.HybridSearchView.as_view(), name="search-hybrid"),
+    path("agent/plan/", views.AgentPlanView.as_view(), name="agent-plan"),
+    path("agent/execute/", views.AgentExecuteView.as_view(), name="agent-execute"),
     path(
         "system/ocr-health/retry-failed/",
         views.OCRRetryFailedView.as_view(),

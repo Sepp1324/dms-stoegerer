@@ -8,6 +8,7 @@ import {
   type FolderRef,
 } from "../api";
 import { sanitizeSnippet } from "../sanitize";
+import AgentPanel from "./AgentPanel";
 
 export default function CopilotPage({
   folders,
@@ -143,6 +144,8 @@ export default function CopilotPage({
           </div>
         </section>
       )}
+
+      <AgentPanel />
     </div>
   );
 }

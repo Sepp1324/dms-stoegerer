@@ -2220,6 +2220,33 @@ export async function askDocuments(
   });
 }
 
+export interface AgentAction {
+  action: string;
+  document: number;
+  document_title: string;
+  params: Record<string, unknown>;
+  summary: string;
+}
+export interface AgentPlanResult {
+  status: "ok" | "unavailable" | "no_candidates" | "invalid" | "error";
+  answer: string;
+  actions: AgentAction[];
+}
+export interface AgentExecuteResult {
+  applied: { document: number; action: string; summary: string }[];
+  errors: { document?: number; action?: string; error: string }[];
+}
+/** Copilot-Agent: schlägt aus einer Anweisung einen bestätigbaren Aktionsplan vor. */
+export function agentPlan(instruction: string): Promise<AgentPlanResult> {
+  return postJson<AgentPlanResult>("/agent/plan/", { instruction });
+}
+/** Führt bestätigte Agent-Aktionen aus. */
+export function agentExecute(
+  actions: { action: string; document: number; params: Record<string, unknown> }[],
+): Promise<AgentExecuteResult> {
+  return postJson<AgentExecuteResult>("/agent/execute/", { actions });
+}
+
 export interface SemanticSearchHit {
   document: number;
   document_title: string;
