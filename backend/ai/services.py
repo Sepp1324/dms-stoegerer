@@ -11,6 +11,7 @@ import logging
 import re
 from html import escape
 
+from . import flashcards
 from .providers import get_provider
 
 logger = logging.getLogger(__name__)
@@ -106,6 +107,29 @@ def suggest_metadata(ocr_text: str, *, max_chars: int = 6000) -> dict:
 
     suggestions = _parse_json(raw)
     return {"source": "ai", "provider": provider.name, "suggestions": suggestions}
+
+
+def generate_flashcards(ocr_text: str, *, max_questions: int = 8) -> dict:
+    """Erzeugt Psychologie-MC-Lernkarten aus Dokumenttext (für psychosr).
+
+    Gibt ``{"source": "ai"|"unavailable"|"error", "questions": [...]}`` zurück.
+    Jede Frage erfüllt den psychosr-Kontrakt (4 Aussagen, ≥1 richtig, kap 1..8).
+    """
+    provider = get_provider()
+    if not provider.available:
+        return {"source": "unavailable", "questions": []}
+    prompt = flashcards.build_prompt(ocr_text, max_questions)
+    try:
+        raw = provider.complete(prompt, system=flashcards.SYSTEM, max_tokens=8192)
+    except Exception as exc:  # noqa: BLE001 – Provider-Fehler sprechend surfacen
+        logger.warning(
+            "Flashcard-Generierung fehlgeschlagen (Provider %s): %s",
+            provider.name,
+            exc,
+        )
+        return {"source": "error", "provider": provider.name, "error": str(exc), "questions": []}
+    questions = flashcards.parse_and_validate(raw, max_questions=max_questions)
+    return {"source": "ai", "provider": provider.name, "questions": questions}
 
 
 def _parse_json(raw: str) -> dict:

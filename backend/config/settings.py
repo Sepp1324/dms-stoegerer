@@ -227,6 +227,17 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
+# --- psychosr-Anbindung (Auto-Lernkarten) ---
+# Sobald ein Dokument den Trigger-Tag erhält, erzeugt das DMS daraus MC-Fragen
+# und pusht sie an den SR-Trainer psychosr (POST /api/mc/add, Header X-Token).
+# Ohne PSYCHOSR_URL + PSYCHOSR_TOKEN ist die Automatik inaktiv (keine Wirkung).
+PSYCHOSR_URL = os.getenv("PSYCHOSR_URL", "")
+PSYCHOSR_TOKEN = os.getenv("PSYCHOSR_TOKEN", "")
+PSYCHOSR_TRIGGER_TAG = os.getenv("PSYCHOSR_TRIGGER_TAG", "Psychologie")
+PSYCHOSR_SYNCED_TAG = os.getenv("PSYCHOSR_SYNCED_TAG", "psychosr-synced")
+PSYCHOSR_DECK = os.getenv("PSYCHOSR_DECK", "mc")
+PSYCHOSR_MAX_QUESTIONS = int(os.getenv("PSYCHOSR_MAX_QUESTIONS", "8"))
+
 # --- Semantische Suche: lokale Text-Embeddings (fastembed/ONNX) ---
 # EMBEDDING_MODEL muss zu EMBEDDING_DIM passen. Default: mehrsprachiges e5-large
 # (1024-dim, gut für Deutsch). Modell-Cache auf dem persistenten /data-PVC, damit

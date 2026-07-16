@@ -20,7 +20,9 @@ class AIProvider:
 
     name = "base"
 
-    def complete(self, prompt: str, *, system: str | None = None) -> str:
+    def complete(
+        self, prompt: str, *, system: str | None = None, max_tokens: int = 1024
+    ) -> str:
         raise NotImplementedError
 
     @property
@@ -31,7 +33,9 @@ class AIProvider:
 class DisabledProvider(AIProvider):
     name = "disabled"
 
-    def complete(self, prompt: str, *, system: str | None = None) -> str:
+    def complete(
+        self, prompt: str, *, system: str | None = None, max_tokens: int = 1024
+    ) -> str:
         raise RuntimeError("KI ist deaktiviert (AI_PROVIDER=disabled).")
 
     @property
@@ -52,13 +56,15 @@ class AnthropicProvider(AIProvider):
     def available(self) -> bool:
         return bool(self.api_key)
 
-    def complete(self, prompt: str, *, system: str | None = None) -> str:
+    def complete(
+        self, prompt: str, *, system: str | None = None, max_tokens: int = 1024
+    ) -> str:
         import anthropic
 
         client = anthropic.Anthropic(api_key=self.api_key)
         kwargs: dict = {
             "model": self.model,
-            "max_tokens": 1024,
+            "max_tokens": max_tokens,
             "messages": [{"role": "user", "content": prompt}],
         }
         if system:
@@ -79,10 +85,17 @@ class OllamaProvider(AIProvider):
         self.model = settings.AI_MODEL
         self.base_url = settings.OLLAMA_BASE_URL.rstrip("/")
 
-    def complete(self, prompt: str, *, system: str | None = None) -> str:
+    def complete(
+        self, prompt: str, *, system: str | None = None, max_tokens: int = 1024
+    ) -> str:
         import httpx
 
-        payload: dict = {"model": self.model, "prompt": prompt, "stream": False}
+        payload: dict = {
+            "model": self.model,
+            "prompt": prompt,
+            "stream": False,
+            "options": {"num_predict": max_tokens},
+        }
         if system:
             payload["system"] = system
         resp = httpx.post(f"{self.base_url}/api/generate", json=payload, timeout=120)
@@ -103,7 +116,9 @@ class OpenAIProvider(AIProvider):
     def available(self) -> bool:
         return bool(self.api_key)
 
-    def complete(self, prompt: str, *, system: str | None = None) -> str:
+    def complete(
+        self, prompt: str, *, system: str | None = None, max_tokens: int = 1024
+    ) -> str:
         import httpx
 
         messages = []
@@ -113,7 +128,7 @@ class OpenAIProvider(AIProvider):
         resp = httpx.post(
             "https://api.openai.com/v1/chat/completions",
             headers={"Authorization": f"Bearer {self.api_key}"},
-            json={"model": self.model, "messages": messages},
+            json={"model": self.model, "messages": messages, "max_tokens": max_tokens},
             timeout=120,
         )
         resp.raise_for_status()

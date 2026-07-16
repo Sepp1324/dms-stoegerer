@@ -88,6 +88,27 @@ kubectl apply -k deploy/k8s
 
 Danach ist das DMS unter `http://dms.local` erreichbar (Traefik-Ingress).
 
+## psychosr-Integration (Auto-Lernkarten)
+
+Sobald ein Dokument den Tag **„Psychologie"** erhält, erzeugt das DMS daraus
+automatisch Aussagen-MC-Fragen (4 Aussagen je Frage, Kapitel 1–8) und schickt sie
+an den SR-Trainer **psychosr** (`POST /api/mc/add`). Ablauf:
+
+1. `m2m_changed`-Signal auf `Document.tags` erkennt den Trigger-Tag → Celery-Task
+   `push_document_flashcards` ([documents/tasks.py](backend/documents/tasks.py)).
+2. Der Task nimmt den OCR-Volltext, `ai.services.generate_flashcards` erzeugt via
+   der KI-Provider-Abstraktion geprüfte MC-Fragen (Validierung in
+   [ai/flashcards.py](backend/ai/flashcards.py)).
+3. [documents/psychosr_client.py](backend/documents/psychosr_client.py) pusht jede
+   Karte (Header `X-Token`) ins psychosr-Deck `mc`, mit Titel `DMS: <Dokument>`.
+4. **Idempotent:** danach wird der Marker-Tag `psychosr-synced` gesetzt; erneutes
+   Taggen erzeugt keine Dubletten.
+
+Konfiguration (ConfigMap + Secret): `PSYCHOSR_URL`, `PSYCHOSR_TOKEN` (= psychosrs
+`POMODORO_TOKEN`), `PSYCHOSR_TRIGGER_TAG`, `PSYCHOSR_DECK`, `PSYCHOSR_MAX_QUESTIONS`.
+Ohne `PSYCHOSR_URL`+`PSYCHOSR_TOKEN` ist die Automatik inaktiv. psychosr selbst
+braucht **keine Änderung** – nur ein gesetztes `POMODORO_TOKEN`.
+
 ## Backup & Restore
 
 Das DMS sichert täglich Datenbank + Dateiablage (`/data`) offsite. Der k8s-CronJob
