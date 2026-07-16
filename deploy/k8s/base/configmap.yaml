@@ -40,3 +40,21 @@ data:
   ASN_BARCODE_DPI: "300"
   # Leer = alle Seiten; komma-getrennte 1-basierte Seitenzahlen z. B. "1,2"
   ASN_BARCODE_PAGES: ""
+
+  # --- Kalibrierte Embedding-Schwellen (aus calibrate_embeddings am echten Bestand) ---
+  # e5 komprimiert diesen (rechnungslastigen) Korpus in ein sehr enges, hohes Band
+  # (Nachbar-Ähnlichkeit p50≈0.968, min≈0.88, max≈0.98). Die Code-Defaults (0.70/0.93)
+  # waren dafür viel zu niedrig (fast alles galt als Dublette). Werte hier ersetzen
+  # die Defaults per Env – kein Rebuild nötig, greifen beim nächsten Rollout.
+  #
+  # Dubletten bewusst präzisionslastig (lieber wenige, sichere Treffer als Fehlalarme
+  # bei den vielen gleich-vorlagigen Rechnungen): "Duplikat" nur ganz oben, "mögliche
+  # Version" ab ~p95.
+  DUPLICATE_STRONG_THRESHOLD: "0.980"
+  DUPLICATE_THRESHOLD: "0.975"
+  # Such-Floor (Query→Passage liegt niedriger als Doc→Doc): recall-first, die
+  # Hybrid-Suche liefert Präzision über den Volltext-Teil.
+  EMBEDDING_MIN_SIMILARITY: "0.75"
+  # Autopilot-Auslöseschwelle ist ein Stimmenanteil (nicht die rohe Cosine-Distanz),
+  # daher von der Kompression unabhängig – 0.75 bleibt eine solide Bar.
+  AUTO_FILE_MIN_CONFIDENCE: "0.75"
