@@ -33,6 +33,14 @@ data:
   AI_PROVIDER: "anthropic"
   AI_MODEL: "claude-opus-4-8"
   OLLAMA_BASE_URL: "http://ollama:11434"
+  # --- psychosr-Auto-Lernkarten ---
+  # Dokument mit Trigger-Tag -> DMS generiert MC-Fragen -> push an psychosr.
+  # PSYCHOSR_URL leer = Automatik aus. PSYCHOSR_TOKEN liegt im Secret.
+  PSYCHOSR_URL: "https://psychosr.stoegerer-home.cloud"
+  PSYCHOSR_TRIGGER_TAG: "Psychologie"
+  PSYCHOSR_SYNCED_TAG: "psychosr-synced"
+  PSYCHOSR_DECK: "mc"
+  PSYCHOSR_MAX_QUESTIONS: "8"
   # ASN-Barcode-Erkennung (STOAA-515): Code128 + QR via pyzbar/libzbar0.
   # Fehlt libzbar0 im Image → WARN + Fallback auf OCR-Text, kein Pipeline-Crash.
   ASN_BARCODE_ENABLED: "true"

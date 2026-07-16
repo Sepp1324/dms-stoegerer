@@ -18,6 +18,66 @@ logger = logging.getLogger(__name__)
 
 
 @shared_task
+def push_document_flashcards(document_id: int) -> dict:
+    """Erzeugt aus einem Dokument MC-Lernkarten und pusht sie an **psychosr**.
+
+    Ausgelöst, sobald ein Dokument den Trigger-Tag (Default „Psychologie")
+    erhält (siehe ``documents/signals.py``). Idempotent: Dokumente mit dem
+    Marker-Tag (``PSYCHOSR_SYNCED_TAG``) werden übersprungen, damit erneutes
+    Taggen keine Dubletten erzeugt.
+    """
+    from ai.services import generate_flashcards
+
+    from . import psychosr_client
+    from .models import Document, Tag
+
+    if not psychosr_client.is_configured():
+        return {"status": "disabled", "document_id": document_id}
+
+    try:
+        document = Document.objects.select_related("current_version").get(pk=document_id)
+    except Document.DoesNotExist:
+        return {"status": "missing", "document_id": document_id}
+
+    synced_name = getattr(settings, "PSYCHOSR_SYNCED_TAG", "psychosr-synced")
+    if document.tags.filter(name=synced_name).exists():
+        return {"status": "already_synced", "document_id": document_id}
+
+    version = document.current_version
+    text = (version.ocr_text if version else "") or ""
+    if not text.strip():
+        return {"status": "no_text", "document_id": document_id}
+
+    max_q = getattr(settings, "PSYCHOSR_MAX_QUESTIONS", 8)
+    result = generate_flashcards(text, max_questions=max_q)
+    questions = result.get("questions") or []
+    if result.get("source") != "ai" or not questions:
+        return {
+            "status": result.get("source", "unavailable"),
+            "document_id": document_id,
+            "generated": 0,
+        }
+
+    push = psychosr_client.push_flashcards(
+        questions, source_title=document.title or f"Dokument {document_id}"
+    )
+
+    if push.get("pushed"):
+        marker = Tag.objects.filter(name=synced_name).first()
+        if marker is None:
+            marker = Tag.objects.create(name=synced_name, color="#6366F1")
+        document.tags.add(marker)
+
+    return {
+        "status": "done",
+        "document_id": document_id,
+        "generated": len(questions),
+        "pushed": push.get("pushed", 0),
+        "failed": push.get("failed", 0),
+    }
+
+
+@shared_task
 def process_document_version(version_id: int) -> dict:
     """Verarbeitet eine neu angelegte Version bis ``READY``.
 
