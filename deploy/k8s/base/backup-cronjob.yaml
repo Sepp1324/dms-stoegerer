@@ -6,6 +6,12 @@
 #
 # Zugangsdaten (SSH-Key/Host/Pfad) aus Secret dms-backup-secrets (siehe secret.example.yaml).
 # NICHTS davon ins Repo committen.
+#
+# Härtung (STOAA): activeDeadlineSeconds verhindert, dass ein hängender Lauf (z. B.
+# rsync wartet auf die NAS) mit concurrencyPolicy=Forbid tagelang alle folgenden
+# Läufe blockiert. Zusätzlich läuft die SSH-Vorabprüfung ganz am Anfang: ein
+# abgelehnter Key scheitert in Sekunden mit klarer Statusmeldung (statt erst nach
+# pg_dump+tar), damit das Monitoring den echten Grund zeigt.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -14,10 +20,20 @@ metadata:
 spec:
   schedule: "0 2 * * *"
   concurrencyPolicy: Forbid
+  # Verpasste Schedules (z. B. Node kurz weg) noch bis 10 min nachholen; danach
+  # verfallen lassen (kein unkontrolliertes Nachfeuern).
+  startingDeadlineSeconds: 600
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
   jobTemplate:
     spec:
+      # Sicherheitsnetz: ein einzelner Lauf darf nie länger als 1 h laufen. Läuft
+      # er über (Hänger), wird er beendet → der nächste Schedule kann wieder starten
+      # (sonst würde Forbid ihn dauerhaft aussperren).
+      activeDeadlineSeconds: 3600
+      # Höchstens 2 Wiederholungen pro Lauf; danach gilt der Job als Failed und der
+      # Monitor meldet den Fehler (statt endloser Retries).
+      backoffLimit: 2
       template:
         metadata:
           labels:
@@ -72,6 +88,29 @@ spec:
                   echo "=== DMS Backup Start: ${TIMESTAMP} ==="
                   record_backup_status running "Backup-Job läuft"
 
+                  # --- SSH-Key + Wrapper vorbereiten ---
+                  SSH_KEY_FILE="/tmp/backup_ssh_key"
+                  printf '%s\n' "${BACKUP_SSH_KEY}" > "${SSH_KEY_FILE}"
+                  chmod 600 "${SSH_KEY_FILE}"
+
+                  SSH_WRAPPER="/tmp/backup_ssh"
+                  {
+                    printf '#!/bin/sh\n'
+                    printf 'exec ssh -p "%s" -i "%s" -o IdentitiesOnly=yes -o BatchMode=yes -o PreferredAuthentications=publickey -o StrictHostKeyChecking=no "$@"\n' "${BACKUP_SSH_PORT:-22}" "${SSH_KEY_FILE}"
+                  } > "${SSH_WRAPPER}"
+                  chmod 700 "${SSH_WRAPPER}"
+
+                  # --- SSH-Vorabprüfung: fail-fast mit klarer Ursache, BEVOR wir
+                  #     pg_dump + tar verschwenden (ein abgelehnter Key war die
+                  #     Ursache des 6-Tage-Ausfalls; das Monitoring soll das zeigen). ---
+                  echo "--- SSH-Vorabprüfung: ${BACKUP_SSH_USER}@${BACKUP_SSH_HOST} (Port ${BACKUP_SSH_PORT:-22})"
+                  if ! "${SSH_WRAPPER}" "${BACKUP_SSH_USER}@${BACKUP_SSH_HOST}" "echo SSH OK"; then
+                    record_backup_status failed "SSH-Auth zur NAS abgelehnt – Public-Key/authorized_keys + Rechte auf der NAS prüfen (Port ${BACKUP_SSH_PORT:-22})."
+                    MONITOR_OK=1
+                    echo "FEHLER: SSH-Auth zur NAS fehlgeschlagen – pg_dump/tar übersprungen." >&2
+                    exit 1
+                  fi
+
                   echo "--- pg_dump: postgres/${POSTGRES_DB} → ${DB_BACKUP}"
                   PGPASSWORD="${POSTGRES_PASSWORD}" pg_dump \
                     -h "${POSTGRES_HOST}" \
@@ -84,21 +123,7 @@ spec:
                     -C /data \
                     archive thumbnails consume
 
-                  echo "--- rsync → ${BACKUP_SSH_USER}@${BACKUP_SSH_HOST}:${BACKUP_TARGET_PATH} (SSH-Port ${BACKUP_SSH_PORT:-22})"
-
-                  SSH_KEY_FILE="/tmp/backup_ssh_key"
-                  printf '%s\n' "${BACKUP_SSH_KEY}" > "${SSH_KEY_FILE}"
-                  chmod 600 "${SSH_KEY_FILE}"
-
-                  SSH_WRAPPER="/tmp/backup_ssh"
-                  {
-                    printf '#!/bin/sh\n'
-                    printf 'exec ssh -p "%s" -i "%s" -o IdentitiesOnly=yes -o BatchMode=yes -o PreferredAuthentications=publickey -o StrictHostKeyChecking=no "$@"\n' "${BACKUP_SSH_PORT:-22}" "${SSH_KEY_FILE}"
-                  } > "${SSH_WRAPPER}"
-                  chmod 700 "${SSH_WRAPPER}"
-
-                  "${SSH_WRAPPER}" "${BACKUP_SSH_USER}@${BACKUP_SSH_HOST}" "echo SSH OK"
-
+                  echo "--- Übertragung → ${BACKUP_SSH_USER}@${BACKUP_SSH_HOST}:${BACKUP_TARGET_PATH}"
                   scp -O -S "${SSH_WRAPPER}" \
                     "${DB_BACKUP}" "${DATA_BACKUP}" \
                     "${BACKUP_SSH_USER}@${BACKUP_SSH_HOST}:${BACKUP_TARGET_PATH}/"
