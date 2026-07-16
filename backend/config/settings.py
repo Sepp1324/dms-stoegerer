@@ -273,6 +273,11 @@ AUTO_FILE_MIN_CONFIDENCE = float(os.getenv("AUTO_FILE_MIN_CONFIDENCE", "0.75"))
 # sobald echte Daten zeigen, wie eng Re-Scans desselben Belegs beieinanderliegen.
 DUPLICATE_THRESHOLD = float(os.getenv("DUPLICATE_THRESHOLD", "0.93"))
 DUPLICATE_STRONG_THRESHOLD = float(os.getenv("DUPLICATE_STRONG_THRESHOLD", "0.97"))
+# Lexikalisches Zusatzsignal (Jaccard über OCR-Tokens): trennt echte Doppel-Scans
+# (nahezu identischer Text) von wiederkehrenden, aber verschiedenen Dokumenten mit
+# gleicher Vorlage (z. B. monatliche Rechnungen), die semantisch fast gleich sind.
+# Nur wenn Cosine >= STRONG UND lexikalisch >= diesem Wert gilt "Duplikat".
+DUPLICATE_LEXICAL_STRONG = float(os.getenv("DUPLICATE_LEXICAL_STRONG", "0.80"))
 
 # --- ASN-Barcode-Erkennung (STOAA-515) ---
 # pyzbar + libzbar0 müssen installiert sein; fehlen sie → WARN + Fallback auf OCR-Text.
