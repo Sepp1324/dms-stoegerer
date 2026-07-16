@@ -967,6 +967,44 @@ class HybridSearchView(APIView):
         )
 
 
+class AgentPlanView(APIView):
+    """Copilot-Agent: schlägt aus einer Anweisung einen bestätigbaren Aktionsplan vor.
+
+    Führt NICHTS aus – gibt nur Vorschläge zurück (whitelisted, owner-gescoped auf
+    eigene Dokumente). Der Nutzer bestätigt anschließend über ``AgentExecuteView``.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not request.user.can_write:
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        from .services import agent
+
+        instruction = str(request.data.get("instruction", "")).strip()
+        return Response(agent.plan(request.user, instruction))
+
+
+class AgentExecuteView(APIView):
+    """Führt vom Nutzer bestätigte Agent-Aktionen deterministisch aus (owner-scoped)."""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not request.user.can_write:
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        from .services import agent
+
+        result = agent.execute(request.user, request.data.get("actions", []))
+        return Response(result)
+
+
 class DocumentUploadView(APIView):
     """Nimmt eine Datei per multipart/form-data auf und stößt die Pipeline an.
 
