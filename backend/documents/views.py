@@ -928,6 +928,45 @@ class SemanticSearchView(APIView):
         )
 
 
+class HybridSearchView(APIView):
+    """Hybride Suche: Volltext (FTS) + Semantik in EINEM Ranking (RRF).
+
+    Vereint die Präzision der PostgreSQL-Volltextsuche mit der Trefferquote der
+    semantischen Suche. Haushalts-Sichtbarkeit wie die Liste (eigene + für die
+    Familie freigegebene). ``q`` via GET-Query oder POST-Body.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return self._run(request, request.query_params)
+
+    def post(self, request):
+        return self._run(request, request.data)
+
+    def _run(self, request, data):
+        query = str(data.get("q") or data.get("question") or "").strip()
+        if len(query) < 3:
+            return Response(
+                {"detail": "Feld 'q' muss mindestens 3 Zeichen enthalten."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            limit = int(data.get("limit", 10))
+        except (TypeError, ValueError):
+            limit = 10
+        limit = max(1, min(limit, 25))
+
+        from .services import hybrid_search as hybrid_search_service
+
+        qs = _visible_documents_for(request.user).exclude(current_version__isnull=True)
+        results = hybrid_search_service.hybrid_search(qs, query, limit=limit)
+        return Response(
+            {"query": query, "count": len(results), "results": results},
+            status=status.HTTP_200_OK,
+        )
+
+
 class DocumentUploadView(APIView):
     """Nimmt eine Datei per multipart/form-data auf und stößt die Pipeline an.
 

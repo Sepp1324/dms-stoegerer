@@ -2244,6 +2244,21 @@ export async function semanticSearch(
   return postJson<SemanticSearchResult>("/search/semantic/", { q, limit });
 }
 
+export interface HybridSearchHit extends SemanticSearchHit {
+  // Welche Verfahren dieses Dokument gefunden haben: "fts" (Volltext) und/oder
+  // "semantic" (Bedeutung). Beide → besonders sicherer Treffer.
+  sources: ("fts" | "semantic")[];
+}
+export interface HybridSearchResult {
+  query: string;
+  count: number;
+  results: HybridSearchHit[];
+}
+/** Hybride Suche: Volltext + Bedeutung zu einem Ranking fusioniert (RRF). */
+export async function hybridSearch(q: string, limit = 10): Promise<HybridSearchResult> {
+  return postJson<HybridSearchResult>("/search/hybrid/", { q, limit });
+}
+
 export interface DuplicateHit {
   document: number;
   title: string;
