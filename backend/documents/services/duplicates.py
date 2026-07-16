@@ -12,6 +12,7 @@ Klassifikation:
 from __future__ import annotations
 
 import logging
+import re
 
 from django.conf import settings
 from django.db.models import F
@@ -23,6 +24,34 @@ logger = logging.getLogger(__name__)
 
 THRESHOLD = float(getattr(settings, "DUPLICATE_THRESHOLD", 0.93))
 STRONG_THRESHOLD = float(getattr(settings, "DUPLICATE_STRONG_THRESHOLD", 0.97))
+LEXICAL_STRONG = float(getattr(settings, "DUPLICATE_LEXICAL_STRONG", 0.80))
+
+_TOKEN_RE = re.compile(r"[a-z0-9äöüß]{2,}")
+
+
+def _normalized_tokens(text: str | None) -> set:
+    """Menge normalisierter Tokens (inkl. Zahlen – Rechnungsnummern/Beträge zählen)."""
+    return set(_TOKEN_RE.findall((text or "").lower()))
+
+
+def _lexical_similarity(tokens_a: set, tokens_b: set) -> float:
+    """Jaccard-Ähnlichkeit zweier Tokenmengen (0..1)."""
+    if not tokens_a or not tokens_b:
+        return 0.0
+    union = len(tokens_a | tokens_b)
+    return len(tokens_a & tokens_b) / union if union else 0.0
+
+
+def _classify(score: float, lexical: float) -> str:
+    """"duplicate" nur bei hohem Cosine UND nahezu identischem Text; sonst "version".
+
+    Trennt echte Doppel-Scans (Text fast gleich) von wiederkehrenden, aber
+    verschiedenen Dokumenten gleicher Vorlage (semantisch fast gleich, Text weicht
+    in Nummern/Daten/Beträgen ab).
+    """
+    if score >= STRONG_THRESHOLD and lexical >= LEXICAL_STRONG:
+        return "duplicate"
+    return "version"
 
 
 def _centroid(document: Document) -> list[float] | None:
@@ -74,6 +103,10 @@ def find_duplicates(
         .order_by("distance")[: max(limit * 6, limit)]
     )
 
+    base_tokens = _normalized_tokens(
+        document.current_version.ocr_text if document.current_version_id else ""
+    )
+
     results: list[dict] = []
     seen: set[int] = set()
     for chunk in rows:
@@ -82,12 +115,15 @@ def find_duplicates(
             continue
         seen.add(chunk.document_id)
         doc = chunk.document
+        cand_text = doc.current_version.ocr_text if doc.current_version_id else ""
+        lexical = _lexical_similarity(base_tokens, _normalized_tokens(cand_text))
         results.append(
             {
                 "document": doc.id,
                 "title": doc.title,
                 "score": round(score, 4),
-                "kind": "duplicate" if score >= STRONG_THRESHOLD else "version",
+                "lexical": round(lexical, 3),
+                "kind": _classify(score, lexical),
                 "added_at": doc.added_at.isoformat() if doc.added_at else None,
                 "sha256": doc.current_version.sha256 if doc.current_version_id else None,
             }
@@ -131,6 +167,7 @@ def duplicate_report(
                     "b": hit["document"],
                     "b_title": titles.get(hit["document"], hit["title"]),
                     "score": hit["score"],
+                    "lexical": hit.get("lexical"),
                     "kind": hit["kind"],
                 }
 
