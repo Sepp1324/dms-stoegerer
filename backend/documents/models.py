@@ -409,6 +409,10 @@ class Document(models.Model):
     # Schreibrechte bleiben ausschließlich beim Eigentümer.
     shared_with_household = models.BooleanField(default=False, db_index=True)
 
+    # Freie persönliche Notiz zum Dokument (z. B. „Kündigung abgeschickt am …").
+    # Fließt in die Volltextsuche ein (Gewicht B), damit man danach suchen kann.
+    note = models.TextField(blank=True, default="")
+
     retention_until = models.DateField(
         null=True,
         blank=True,

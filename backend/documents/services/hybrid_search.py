@@ -26,6 +26,7 @@ def _fts_ranked_ids(visible_qs, query: str, *, limit: int) -> list[int]:
         + SearchVector("tags__name", weight="B", config="german")
         + SearchVector("mail_subject", weight="B", config="german")
         + SearchVector("mail_sender", weight="B", config="german")
+        + SearchVector("note", weight="B", config="german")
         + SearchVector("current_version__ocr_text", weight="D", config="german")
     )
     search_query = SearchQuery(query, config="german")

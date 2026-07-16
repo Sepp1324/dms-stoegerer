@@ -92,6 +92,7 @@ def filter_documents_for_query(user, query):
             + SearchVector("tags__name", weight="B", config="german")
             + SearchVector("mail_subject", weight="B", config="german")
             + SearchVector("mail_sender", weight="B", config="german")
+            + SearchVector("note", weight="B", config="german")
             + SearchVector("current_version__ocr_text", weight="D", config="german")
         )
         search_query = SearchQuery(q, config="german")
