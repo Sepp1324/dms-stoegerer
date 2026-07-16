@@ -1093,9 +1093,9 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
                 type="button"
                 className="topbar-semantic"
                 onClick={() => setSemanticOpen(true)}
-                title="Bedeutungssuche – findet Dokumente nach Sinn, nicht nur nach Wörtern"
+                title="Smart-Suche – Volltext + Bedeutung fusioniert"
               >
-                ✨ Bedeutung
+                🔎 Smart-Suche
               </button>
               {semanticOpen && (
                 <SemanticSearchPanel

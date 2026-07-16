@@ -1,12 +1,20 @@
 import { useEffect, useRef, useState } from "react";
 
-import { semanticSearch, type SemanticSearchHit } from "../api";
+import { hybridSearch, type HybridSearchHit } from "../api";
 import { sanitizeSnippet } from "../sanitize";
 
+function sourceLabel(sources: HybridSearchHit["sources"]): string {
+  const hasFts = sources.includes("fts");
+  const hasSem = sources.includes("semantic");
+  if (hasFts && hasSem) return "Volltext + Bedeutung";
+  if (hasSem) return "Bedeutung";
+  return "Volltext";
+}
+
 /**
- * Bedeutungssuche (pgvector/e5): findet Dokumente nach *Sinn*, nicht nur nach
- * exakten Wörtern. Owner-gescoped über die API. Bewusst als eigenes Overlay
- * gehalten, damit die klassische Volltextliste unberührt bleibt.
+ * Smart-Suche: fusioniert Volltext (exakte Begriffe) und semantische Bedeutung zu
+ * einem Ranking (RRF). Bewusst als eigenes Overlay, damit die klassische
+ * Volltextliste unberührt bleibt.
  */
 export default function SemanticSearchPanel({
   initialQuery,
@@ -20,8 +28,7 @@ export default function SemanticSearchPanel({
   const [query, setQuery] = useState(initialQuery);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [hits, setHits] = useState<SemanticSearchHit[] | null>(null);
-  const [disabled, setDisabled] = useState(false);
+  const [hits, setHits] = useState<HybridSearchHit[] | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   async function run(q: string) {
@@ -33,17 +40,15 @@ export default function SemanticSearchPanel({
     setLoading(true);
     setError(null);
     try {
-      const res = await semanticSearch(trimmed, 10);
+      const res = await hybridSearch(trimmed, 12);
       setHits(res.results);
-      setDisabled(!res.enabled);
     } catch {
-      setError("Bedeutungssuche fehlgeschlagen. Bitte erneut versuchen.");
+      setError("Suche fehlgeschlagen. Bitte erneut versuchen.");
     } finally {
       setLoading(false);
     }
   }
 
-  // Beim Öffnen fokussieren und – falls schon eine Anfrage anliegt – direkt suchen.
   useEffect(() => {
     inputRef.current?.focus();
     if (initialQuery.trim().length >= 3) {
@@ -57,23 +62,20 @@ export default function SemanticSearchPanel({
       className="modal-overlay"
       role="dialog"
       aria-modal="true"
-      aria-label="Bedeutungssuche"
+      aria-label="Smart-Suche"
       onClick={onClose}
     >
-      <div
-        className="modal-card semantic-search"
-        onClick={(e) => e.stopPropagation()}
-      >
+      <div className="modal-card semantic-search" onClick={(e) => e.stopPropagation()}>
         <div className="modal-card__head">
-          <h3>Bedeutungssuche</h3>
+          <h3>Smart-Suche</h3>
           <button className="link" onClick={onClose} aria-label="Schließen">
             ✕
           </button>
         </div>
 
         <p className="muted semantic-search__hint">
-          Findet Dokumente nach Sinn – z. B. „Wann läuft meine Kfz-Versicherung
-          aus?" trifft auch Polizzen ohne diese Wörter.
+          Kombiniert exakte Volltext-Treffer mit der Bedeutung – z. B. „Wann läuft
+          meine Kfz-Versicherung aus?" findet auch Polizzen ohne diese Wörter.
         </p>
 
         <form
@@ -96,15 +98,10 @@ export default function SemanticSearchPanel({
         </form>
 
         {error && <p className="form-error">{error}</p>}
-        {disabled && (
-          <p className="muted">
-            Der semantische Index ist deaktiviert (EMBEDDING_ENABLED=false).
-          </p>
-        )}
 
         <div className="semantic-search__results">
           {hits && hits.length === 0 && !loading && (
-            <p className="muted">Keine bedeutungsähnlichen Treffer.</p>
+            <p className="muted">Keine Treffer.</p>
           )}
           {hits?.map((hit) => (
             <article key={hit.document} className="card semantic-hit">
@@ -115,13 +112,11 @@ export default function SemanticSearchPanel({
                 >
                   {hit.document_title}
                 </button>
-                <span className="semantic-hit__score" title="Ähnlichkeit">
-                  {Math.round(hit.score * 100)} %
+                <span className="semantic-hit__score" title="Fundstelle">
+                  {sourceLabel(hit.sources)}
                 </span>
               </div>
-              <p className="muted semantic-hit__meta">
-                {hit.folder_path ?? "Kein Ordner"}
-              </p>
+              <p className="muted semantic-hit__meta">{hit.folder_path ?? "Kein Ordner"}</p>
               {(hit.snippet_html || hit.snippet) && (
                 <p
                   className="semantic-hit__snippet"

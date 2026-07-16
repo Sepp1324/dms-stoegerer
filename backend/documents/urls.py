@@ -41,6 +41,7 @@ urlpatterns = [
     path("timeline/ics/", views.TimelineICSView.as_view(), name="timeline-ics"),
     path("ask/", views.AskView.as_view(), name="ask"),
     path("search/semantic/", views.SemanticSearchView.as_view(), name="search-semantic"),
+    path("search/hybrid/", views.HybridSearchView.as_view(), name="search-hybrid"),
     path(
         "system/ocr-health/retry-failed/",
         views.OCRRetryFailedView.as_view(),
