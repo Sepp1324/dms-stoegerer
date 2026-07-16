@@ -13,7 +13,15 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase
 from rest_framework.test import APITestCase
 
-from documents.models import Document, DocumentReminder, DocumentVersion, Tag
+from documents.models import (
+    Correspondent,
+    Document,
+    DocumentFolder,
+    DocumentReminder,
+    DocumentType,
+    DocumentVersion,
+    Tag,
+)
 from documents.services import agent
 
 User = get_user_model()
@@ -88,6 +96,38 @@ class AgentExecuteTests(TestCase):
         )
         self.assertEqual(res["applied"], [])
         self.assertEqual(len(res["errors"]), 1)
+
+    def test_set_correspondent_and_type(self):
+        agent.execute(
+            self.user,
+            [
+                {"action": "set_correspondent", "document": self.doc.id, "params": {"name": "Finanzamt"}},
+                {"action": "set_document_type", "document": self.doc.id, "params": {"name": "Bescheid"}},
+            ],
+        )
+        self.doc.refresh_from_db()
+        self.assertEqual(self.doc.correspondent, Correspondent.objects.get(name="Finanzamt"))
+        self.assertEqual(self.doc.document_type, DocumentType.objects.get(name="Bescheid"))
+
+    def test_move_to_existing_folder(self):
+        folder = DocumentFolder.objects.create(name="Steuern")
+        res = agent.execute(
+            self.user,
+            [{"action": "move_to_folder", "document": self.doc.id, "params": {"folder": "Steuern"}}],
+        )
+        self.assertEqual(len(res["applied"]), 1)
+        self.doc.refresh_from_db()
+        self.assertEqual(self.doc.folder_id, folder.id)
+
+    def test_move_to_unknown_folder_errors(self):
+        res = agent.execute(
+            self.user,
+            [{"action": "move_to_folder", "document": self.doc.id, "params": {"folder": "GibtsNicht"}}],
+        )
+        self.assertEqual(res["applied"], [])
+        self.assertEqual(len(res["errors"]), 1)
+        self.doc.refresh_from_db()
+        self.assertIsNone(self.doc.folder_id)
 
 
 class AgentPlanTests(TestCase):

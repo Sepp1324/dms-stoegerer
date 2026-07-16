@@ -15,7 +15,15 @@ import json
 import logging
 from datetime import date
 
-from documents.models import AuditLogEntry, Document, DocumentReminder, Tag
+from documents.models import (
+    AuditLogEntry,
+    Correspondent,
+    Document,
+    DocumentFolder,
+    DocumentReminder,
+    DocumentType,
+    Tag,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -59,10 +67,53 @@ def _do_set_reminder(user, document, params) -> str:
     return f"Wiedervorlage am {due.isoformat()} angelegt"
 
 
+def _get_or_create_ci(model, name: str):
+    return model.objects.filter(name__iexact=name).first() or model.objects.create(
+        name=name[:255]
+    )
+
+
+def _do_set_correspondent(user, document, params) -> str:
+    name = str(params.get("name", "")).strip()
+    if not name:
+        raise ValueError("Korrespondent-Name fehlt.")
+    document.correspondent = _get_or_create_ci(Correspondent, name)
+    document.save(update_fields=["correspondent"])
+    return f"Korrespondent '{document.correspondent.name}' gesetzt"
+
+
+def _do_set_document_type(user, document, params) -> str:
+    name = str(params.get("name", "")).strip()
+    if not name:
+        raise ValueError("Dokumenttyp-Name fehlt.")
+    document.document_type = _get_or_create_ci(DocumentType, name)
+    document.save(update_fields=["document_type"])
+    return f"Dokumenttyp '{document.document_type.name}' gesetzt"
+
+
+def _do_move_to_folder(user, document, params) -> str:
+    name = str(params.get("folder", "")).strip()
+    if not name:
+        raise ValueError("Ordnername fehlt.")
+    # Bewusst NUR bestehende Ordner (keine Auto-Anlage → keine Tippfehler-Ordner);
+    # gleichnamige Ordner in verschiedenen Ebenen sind mehrdeutig → Fehler.
+    matches = list(DocumentFolder.objects.filter(name__iexact=name)[:2])
+    if not matches:
+        raise ValueError(f"Ordner '{name}' nicht gefunden.")
+    if len(matches) > 1:
+        raise ValueError(f"Ordnername '{name}' ist mehrdeutig.")
+    document.folder = matches[0]
+    document.save(update_fields=["folder"])
+    return f"In Ordner '{matches[0].full_path}' verschoben"
+
+
 HANDLERS = {
     "add_tag": _do_add_tag,
     "set_note": _do_set_note,
     "set_reminder": _do_set_reminder,
+    "set_correspondent": _do_set_correspondent,
+    "set_document_type": _do_set_document_type,
+    "move_to_folder": _do_move_to_folder,
 }
 
 
@@ -73,6 +124,12 @@ def _summarize(action: str, params: dict, title: str) -> str:
         return f"Notiz an '{title}' setzen: {str(params.get('note', ''))[:80]}"
     if action == "set_reminder":
         return f"Wiedervorlage am {params.get('date', '?')} für '{title}' anlegen"
+    if action == "set_correspondent":
+        return f"Korrespondent '{params.get('name', '')}' an '{title}' setzen"
+    if action == "set_document_type":
+        return f"Dokumenttyp '{params.get('name', '')}' an '{title}' setzen"
+    if action == "move_to_folder":
+        return f"'{title}' in Ordner '{params.get('folder', '')}' verschieben"
     return action
 
 
@@ -151,7 +208,10 @@ def plan(user, instruction: str, *, limit: int = 10) -> dict:
         "Erlaubte Aktionen:\n"
         "- add_tag: params {\"tag\": \"...\"}\n"
         "- set_note: params {\"note\": \"...\"}\n"
-        "- set_reminder: params {\"date\": \"YYYY-MM-DD\", \"note\": \"...\"}\n\n"
+        "- set_reminder: params {\"date\": \"YYYY-MM-DD\", \"note\": \"...\"}\n"
+        "- set_correspondent: params {\"name\": \"...\"}\n"
+        "- set_document_type: params {\"name\": \"...\"}\n"
+        "- move_to_folder: params {\"folder\": \"...\"}  (nur bestehende Ordner)\n\n"
         "Antworte AUSSCHLIESSLICH mit JSON in dieser Form:\n"
         '{"actions": [{"action": "add_tag", "document": <id>, "params": {"tag": "..."}}]}\n'
         "Schlage nur Aktionen vor, die zur Anweisung passen. Keine Erklärung, nur JSON."
