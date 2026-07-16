@@ -235,6 +235,8 @@ export interface DocumentItem {
   shared_with_household: boolean;
   owner_username: string | null;
   is_owner: boolean;
+  // Freie persönliche Notiz (durchsuchbar).
+  note: string;
   ocr_status: OcrStatus | null;
   // Suchergebnis-Snippet (STOAA-368/370): sicheres HTML mit ``<mark>`` rund um den
   // Treffer. Nur bei aktiver Volltextsuche (``?q=``) gefüllt; sonst / kein Treffer
@@ -1915,6 +1917,7 @@ export interface DocumentPatch {
   storage_path?: number | null;
   folder?: number | null;
   tag_ids?: number[];
+  note?: string;
   // Zusatzfeld-Werte als Upsert-Liste (STOAA-112): jeder Eintrag mit
   // CustomField-PK und kanonischem Wert. Leerer Wert = Feld am Dokument löschen.
   // Fehlt der Key ganz, bleiben vorhandene Werte unangetastet.

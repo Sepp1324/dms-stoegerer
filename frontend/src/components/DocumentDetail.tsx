@@ -44,6 +44,7 @@ import { CustomFieldsPanel } from "./documentDetail/CustomFieldsPanel";
 import { EntitiesPanel } from "./documentDetail/EntitiesPanel";
 import { AutoFilePanel } from "./documentDetail/AutoFilePanel";
 import { DuplicatesPanel } from "./documentDetail/DuplicatesPanel";
+import { NotePanel } from "./documentDetail/NotePanel";
 import { SimilarDocumentsPanel } from "./documentDetail/SimilarDocumentsPanel";
 import { PdfWorkbenchPanel } from "./documentDetail/PdfWorkbenchPanel";
 import { AuditTrail } from "./documentDetail/AuditPanel";
@@ -576,6 +577,13 @@ export default function DocumentDetail({
               </div>
             )
           )}
+
+          <NotePanel
+            documentId={id}
+            initialNote={doc.note ?? ""}
+            editable={!!doc.is_owner && canEdit}
+            onSaved={(updated) => setDoc(updated as Detail)}
+          />
 
           <div className="detail">
             {/* Linke Spalte: große Vorschau, beim Scrollen der rechten Spalte sticky. */}

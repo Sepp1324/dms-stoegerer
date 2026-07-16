@@ -979,6 +979,7 @@ class DocumentSerializer(serializers.ModelSerializer):
             "shared_with_household",
             "owner_username",
             "is_owner",
+            "note",
             "custom_field_values",
             "versions",
         )
