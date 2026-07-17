@@ -1005,6 +1005,26 @@ class AgentExecuteView(APIView):
         return Response(result)
 
 
+class AgentUndoView(APIView):
+    """Macht eine zuvor ausgeführte Agent-Aktion rückgängig (owner-gescoped).
+
+    Nutzt die beim Ausführen im Audit-Eintrag hinterlegte Umkehr-Information; die
+    Umkehr selbst ist deterministisch (kein LLM). Doppeltes Undo wird erkannt.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not request.user.can_write:
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        from .services import agent
+
+        return Response(agent.undo(request.user, request.data.get("audit_id")))
+
+
 class DocumentUploadView(APIView):
     """Nimmt eine Datei per multipart/form-data auf und stößt die Pipeline an.
 

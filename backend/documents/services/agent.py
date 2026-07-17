@@ -34,37 +34,39 @@ _AGENT_SYSTEM = (
 )
 
 
-def _do_add_tag(user, document, params) -> str:
+def _do_add_tag(user, document, params):
     name = str(params.get("tag", "")).strip()
     if not name:
         raise ValueError("Tag-Name fehlt.")
     tag = Tag.objects.filter(name__iexact=name).first() or Tag.objects.create(name=name[:64])
+    was_present = document.tags.filter(pk=tag.pk).exists()
     document.tags.add(tag)
-    return f"Tag '{tag.name}' hinzugefügt"
+    return f"Tag '{tag.name}' hinzugefügt", {"tag_id": tag.id, "was_present": was_present}
 
 
-def _do_set_note(user, document, params) -> str:
+def _do_set_note(user, document, params):
     note = str(params.get("note", "")).strip()
     if not note:
         raise ValueError("Notiz-Text fehlt.")
+    previous = document.note
     document.note = note[:5000]
     document.save(update_fields=["note"])
-    return "Notiz gesetzt"
+    return "Notiz gesetzt", {"previous_note": previous}
 
 
-def _do_set_reminder(user, document, params) -> str:
+def _do_set_reminder(user, document, params):
     raw = str(params.get("date", "")).strip()
     try:
         due = date.fromisoformat(raw)
     except (ValueError, TypeError):
         raise ValueError(f"Ungültiges Datum '{raw}' (erwartet YYYY-MM-DD).")
-    DocumentReminder.objects.create(
+    reminder = DocumentReminder.objects.create(
         document=document,
         remind_on=due,
         note=str(params.get("note", "")).strip(),
         created_by=user,
     )
-    return f"Wiedervorlage am {due.isoformat()} angelegt"
+    return f"Wiedervorlage am {due.isoformat()} angelegt", {"reminder_id": reminder.id}
 
 
 def _get_or_create_ci(model, name: str):
@@ -73,25 +75,27 @@ def _get_or_create_ci(model, name: str):
     )
 
 
-def _do_set_correspondent(user, document, params) -> str:
+def _do_set_correspondent(user, document, params):
     name = str(params.get("name", "")).strip()
     if not name:
         raise ValueError("Korrespondent-Name fehlt.")
+    previous = document.correspondent_id
     document.correspondent = _get_or_create_ci(Correspondent, name)
     document.save(update_fields=["correspondent"])
-    return f"Korrespondent '{document.correspondent.name}' gesetzt"
+    return f"Korrespondent '{document.correspondent.name}' gesetzt", {"previous": previous}
 
 
-def _do_set_document_type(user, document, params) -> str:
+def _do_set_document_type(user, document, params):
     name = str(params.get("name", "")).strip()
     if not name:
         raise ValueError("Dokumenttyp-Name fehlt.")
+    previous = document.document_type_id
     document.document_type = _get_or_create_ci(DocumentType, name)
     document.save(update_fields=["document_type"])
-    return f"Dokumenttyp '{document.document_type.name}' gesetzt"
+    return f"Dokumenttyp '{document.document_type.name}' gesetzt", {"previous": previous}
 
 
-def _do_move_to_folder(user, document, params) -> str:
+def _do_move_to_folder(user, document, params):
     name = str(params.get("folder", "")).strip()
     if not name:
         raise ValueError("Ordnername fehlt.")
@@ -102,9 +106,10 @@ def _do_move_to_folder(user, document, params) -> str:
         raise ValueError(f"Ordner '{name}' nicht gefunden.")
     if len(matches) > 1:
         raise ValueError(f"Ordnername '{name}' ist mehrdeutig.")
+    previous = document.folder_id
     document.folder = matches[0]
     document.save(update_fields=["folder"])
-    return f"In Ordner '{matches[0].full_path}' verschoben"
+    return f"In Ordner '{matches[0].full_path}' verschoben", {"previous": previous}
 
 
 HANDLERS = {
@@ -115,6 +120,78 @@ HANDLERS = {
     "set_document_type": _do_set_document_type,
     "move_to_folder": _do_move_to_folder,
 }
+
+
+# --- Undo -------------------------------------------------------------------
+# Jede Aktion hinterlegt beim Ausführen die zur Umkehr nötige Information im
+# Audit-Eintrag ("undo"). Die Umkehr selbst ist rein deterministisch.
+
+
+def _undo_add_tag(document, undo) -> str:
+    if undo.get("was_present"):
+        return "Tag war vorher bereits gesetzt – nichts entfernt"
+    document.tags.remove(undo.get("tag_id"))
+    return "Tag entfernt"
+
+
+def _undo_set_note(document, undo) -> str:
+    document.note = undo.get("previous_note", "") or ""
+    document.save(update_fields=["note"])
+    return "Notiz zurückgesetzt"
+
+
+def _undo_set_reminder(document, undo) -> str:
+    DocumentReminder.objects.filter(
+        id=undo.get("reminder_id"), document=document
+    ).delete()
+    return "Wiedervorlage gelöscht"
+
+
+def _undo_fk(document, undo, field: str, label: str) -> str:
+    setattr(document, f"{field}_id", undo.get("previous"))
+    document.save(update_fields=[field])
+    return f"{label} zurückgesetzt"
+
+
+UNDO_HANDLERS = {
+    "add_tag": _undo_add_tag,
+    "set_note": _undo_set_note,
+    "set_reminder": _undo_set_reminder,
+    "set_correspondent": lambda d, u: _undo_fk(d, u, "correspondent", "Korrespondent"),
+    "set_document_type": lambda d, u: _undo_fk(d, u, "document_type", "Dokumenttyp"),
+    "move_to_folder": lambda d, u: _undo_fk(d, u, "folder", "Ordner"),
+}
+
+
+def undo(user, audit_id) -> dict:
+    """Macht eine zuvor ausgeführte Agent-Aktion rückgängig (owner-gescoped)."""
+    entry = AuditLogEntry.objects.filter(
+        id=audit_id, actor=user, object_type="Document"
+    ).first()
+    if entry is None or not str(entry.action).startswith("agent_"):
+        return {"status": "not_found", "message": "Aktion nicht gefunden."}
+    action = str(entry.action)[len("agent_") :]
+    if action not in UNDO_HANDLERS:
+        return {"status": "unsupported", "message": "Nicht rückgängig machbar."}
+    detail = dict(entry.detail or {})
+    if detail.get("undone"):
+        return {"status": "already_undone", "message": "Bereits rückgängig gemacht."}
+    document = Document.objects.filter(id=entry.object_id, owner=user).first()
+    if document is None:
+        return {"status": "not_found", "message": "Dokument nicht gefunden oder kein Zugriff."}
+
+    message = UNDO_HANDLERS[action](document, detail.get("undo") or {})
+    detail["undone"] = True
+    entry.detail = detail
+    entry.save(update_fields=["detail"])
+    AuditLogEntry.objects.create(
+        actor=user,
+        action="agent_undo",
+        object_type="Document",
+        object_id=str(document.id),
+        detail={"undid_audit": entry.id, "undid_action": action},
+    )
+    return {"status": "ok", "message": message}
 
 
 def _summarize(action: str, params: dict, title: str) -> str:
@@ -256,16 +333,25 @@ def execute(user, actions) -> dict:
             )
             continue
         try:
-            summary = HANDLERS[action](user, document, params)
+            summary, undo_payload = HANDLERS[action](user, document, params)
         except ValueError as exc:
             errors.append({"document": doc_id, "action": action, "error": str(exc)})
             continue
-        AuditLogEntry.objects.create(
+        entry = AuditLogEntry.objects.create(
             actor=user,
             action=f"agent_{action}",
             object_type="Document",
             object_id=str(doc_id),
-            detail={"params": params},
+            # "undo" trägt die zur Umkehr nötige Information (Vorzustand bzw. die
+            # angelegte Objekt-ID) – Grundlage für agent.undo().
+            detail={"params": params, "undo": undo_payload},
         )
-        applied.append({"document": doc_id, "action": action, "summary": summary})
+        applied.append(
+            {
+                "document": doc_id,
+                "action": action,
+                "summary": summary,
+                "audit_id": entry.id,
+            }
+        )
     return {"applied": applied, "errors": errors}
