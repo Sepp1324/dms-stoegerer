@@ -130,6 +130,77 @@ class AgentExecuteTests(TestCase):
         self.assertIsNone(self.doc.folder_id)
 
 
+class AgentUndoTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user("undo-u", password="pw", role="user")
+        cls.other = User.objects.create_user("undo-o", password="pw", role="user")
+
+    def _apply(self, doc, action, params):
+        res = agent.execute(self.user, [{"action": action, "document": doc.id, "params": params}])
+        self.assertEqual(len(res["applied"]), 1, res)
+        return res["applied"][0]["audit_id"]
+
+    def test_undo_add_tag_removes_it(self):
+        doc = _doc(self.user, "UndoTag")
+        audit_id = self._apply(doc, "add_tag", {"tag": "Temporär"})
+        self.assertTrue(doc.tags.filter(name="Temporär").exists())
+
+        res = agent.undo(self.user, audit_id)
+
+        self.assertEqual(res["status"], "ok")
+        self.assertFalse(doc.tags.filter(name="Temporär").exists())
+
+    def test_undo_set_note_restores_previous(self):
+        doc = _doc(self.user, "UndoNote")
+        doc.note = "Alt"
+        doc.save(update_fields=["note"])
+        audit_id = self._apply(doc, "set_note", {"note": "Neu"})
+
+        agent.undo(self.user, audit_id)
+
+        doc.refresh_from_db()
+        self.assertEqual(doc.note, "Alt")
+
+    def test_undo_reminder_deletes_it(self):
+        doc = _doc(self.user, "UndoRem")
+        due = (date.today() + timedelta(days=10)).isoformat()
+        audit_id = self._apply(doc, "set_reminder", {"date": due, "note": "X"})
+        self.assertTrue(DocumentReminder.objects.filter(document=doc).exists())
+
+        agent.undo(self.user, audit_id)
+
+        self.assertFalse(DocumentReminder.objects.filter(document=doc).exists())
+
+    def test_undo_move_to_folder_restores_previous(self):
+        doc = _doc(self.user, "UndoFolder")
+        DocumentFolder.objects.create(name="Ziel")
+        audit_id = self._apply(doc, "move_to_folder", {"folder": "Ziel"})
+        doc.refresh_from_db()
+        self.assertIsNotNone(doc.folder_id)
+
+        agent.undo(self.user, audit_id)
+
+        doc.refresh_from_db()
+        self.assertIsNone(doc.folder_id)
+
+    def test_double_undo_is_guarded(self):
+        doc = _doc(self.user, "UndoTwice")
+        audit_id = self._apply(doc, "add_tag", {"tag": "Einmal"})
+        self.assertEqual(agent.undo(self.user, audit_id)["status"], "ok")
+
+        self.assertEqual(agent.undo(self.user, audit_id)["status"], "already_undone")
+
+    def test_undo_of_foreign_action_rejected(self):
+        doc = _doc(self.user, "UndoForeign")
+        audit_id = self._apply(doc, "add_tag", {"tag": "Meins"})
+
+        res = agent.undo(self.other, audit_id)
+
+        self.assertEqual(res["status"], "not_found")
+        self.assertTrue(doc.tags.filter(name="Meins").exists())
+
+
 class AgentPlanTests(TestCase):
     @classmethod
     def setUpTestData(cls):

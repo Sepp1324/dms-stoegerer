@@ -7614,3 +7614,9 @@ button.due-card:hover {
   gap: 0.2rem;
   font-size: 0.9rem;
 }
+.agent-panel__applied-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.8rem;
+}

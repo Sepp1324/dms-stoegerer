@@ -2232,9 +2232,24 @@ export interface AgentPlanResult {
   answer: string;
   actions: AgentAction[];
 }
+export interface AgentAppliedAction {
+  document: number;
+  action: string;
+  summary: string;
+  // Audit-Eintrag der Ausführung – Grundlage für „Rückgängig".
+  audit_id: number;
+}
 export interface AgentExecuteResult {
-  applied: { document: number; action: string; summary: string }[];
+  applied: AgentAppliedAction[];
   errors: { document?: number; action?: string; error: string }[];
+}
+export interface AgentUndoResult {
+  status: "ok" | "not_found" | "unsupported" | "already_undone";
+  message: string;
+}
+/** Macht eine ausgeführte Agent-Aktion rückgängig. */
+export function agentUndo(auditId: number): Promise<AgentUndoResult> {
+  return postJson<AgentUndoResult>("/agent/undo/", { audit_id: auditId });
 }
 /** Copilot-Agent: schlägt aus einer Anweisung einen bestätigbaren Aktionsplan vor. */
 export function agentPlan(instruction: string): Promise<AgentPlanResult> {

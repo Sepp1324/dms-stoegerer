@@ -3,6 +3,7 @@ import { useState } from "react";
 import {
   agentExecute,
   agentPlan,
+  agentUndo,
   type AgentAction,
   type AgentExecuteResult,
 } from "../api";
@@ -21,6 +22,25 @@ export default function AgentPanel() {
   const [executing, setExecuting] = useState(false);
   const [result, setResult] = useState<AgentExecuteResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [undone, setUndone] = useState<Set<number>>(new Set());
+  const [undoBusy, setUndoBusy] = useState<number | null>(null);
+
+  async function undo(auditId: number) {
+    setUndoBusy(auditId);
+    setError(null);
+    try {
+      const res = await agentUndo(auditId);
+      if (res.status === "ok" || res.status === "already_undone") {
+        setUndone((prev) => new Set(prev).add(auditId));
+      } else {
+        setError(res.message);
+      }
+    } catch {
+      setError("Rückgängig fehlgeschlagen.");
+    } finally {
+      setUndoBusy(null);
+    }
+  }
 
   async function plan() {
     if (instruction.trim().length < 3) return;
@@ -50,6 +70,7 @@ export default function AgentPanel() {
         chosen.map((a) => ({ action: a.action, document: a.document, params: a.params })),
       );
       setResult(res);
+      setUndone(new Set());
       setActions([]); // Plan verbraucht – neue Anweisung für weitere Aktionen
     } catch {
       setError("Ausführen fehlgeschlagen.");
@@ -125,8 +146,23 @@ export default function AgentPanel() {
         <div className="agent-panel__result">
           {result.applied.length > 0 && (
             <ul className="agent-panel__applied">
-              {result.applied.map((a, i) => (
-                <li key={i}>✓ {a.summary}</li>
+              {result.applied.map((a) => (
+                <li key={a.audit_id} className="agent-panel__applied-row">
+                  <span>
+                    {undone.has(a.audit_id) ? "↩" : "✓"} {a.summary}
+                  </span>
+                  {undone.has(a.audit_id) ? (
+                    <span className="muted">rückgängig gemacht</span>
+                  ) : (
+                    <button
+                      className="link"
+                      onClick={() => undo(a.audit_id)}
+                      disabled={undoBusy === a.audit_id}
+                    >
+                      {undoBusy === a.audit_id ? "…" : "Rückgängig"}
+                    </button>
+                  )}
+                </li>
               ))}
             </ul>
           )}

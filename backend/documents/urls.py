@@ -44,6 +44,7 @@ urlpatterns = [
     path("search/hybrid/", views.HybridSearchView.as_view(), name="search-hybrid"),
     path("agent/plan/", views.AgentPlanView.as_view(), name="agent-plan"),
     path("agent/execute/", views.AgentExecuteView.as_view(), name="agent-execute"),
+    path("agent/undo/", views.AgentUndoView.as_view(), name="agent-undo"),
     path(
         "system/ocr-health/retry-failed/",
         views.OCRRetryFailedView.as_view(),
