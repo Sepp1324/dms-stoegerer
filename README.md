@@ -10,10 +10,15 @@ Konzept & Architektur: siehe [KONZEPT.md](KONZEPT.md).
 
 - **Backend:** Django 5 + Django REST Framework
 - **Task-Queue:** Celery + Redis (OCR, Klassifizierung, E-Mail-Abruf – ab Stufe 1)
-- **Datenbank:** PostgreSQL 16
+- **Datenbank:** PostgreSQL 16 mit **pgvector** (Image `pgvector/pgvector:pg16`) für die semantische Suche
 - **Frontend:** React + Vite + TypeScript (SPA)
-- **KI:** Provider-Abstraktion (Claude / Ollama / OpenAI, umschaltbar)
+- **KI:** Provider-Abstraktion (Claude / Ollama / OpenAI, umschaltbar) · lokale
+  Text-Embeddings via **fastembed/ONNX** (kein torch, kein API-Call)
 - **Deployment:** Docker Compose (lokal) · Kubernetes-Manifeste für **k3s**
+
+> **Semantik-/KI-Funktionen** (Smart-Suche, Auto-Ablage, Autopilot, Dubletten,
+> Copilot-Agent, Familien-Freigabe) inkl. aller Stellschrauben und Betriebs-Runbooks:
+> siehe **[docs/ai-stack.md](docs/ai-stack.md)**.
 
 ## Projektstruktur
 
