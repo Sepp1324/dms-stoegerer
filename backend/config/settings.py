@@ -23,9 +23,23 @@ def env_list(name: str, default: str = "") -> list[str]:
 
 
 # --- Kern ---
-SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "insecure-dev-key-change-me")
+_INSECURE_DEFAULT_SECRET = "insecure-dev-key-change-me"
+SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", _INSECURE_DEFAULT_SECRET)
 DEBUG = env_bool("DJANGO_DEBUG", True)
 ALLOWED_HOSTS = env_list("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1")
+
+# Fail-closed (P2): In Produktion (DEBUG=false) NICHT mit dem unsicheren
+# Default-SECRET_KEY starten – sonst sind Session-Cookies und JWT-Signaturen
+# trivial fälschbar. Beim Test-Runner (``manage.py test``) bewusst nachsichtig,
+# damit die Suite ohne gesetztes Secret läuft.
+_RUNNING_TESTS = "test" in sys.argv
+if not DEBUG and not _RUNNING_TESTS and SECRET_KEY == _INSECURE_DEFAULT_SECRET:
+    from django.core.exceptions import ImproperlyConfigured
+
+    raise ImproperlyConfigured(
+        "DJANGO_SECRET_KEY muss in Produktion (DJANGO_DEBUG=false) gesetzt sein "
+        "– der unsichere Default ist nicht erlaubt."
+    )
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -219,6 +233,32 @@ DATA_UPLOAD_MAX_MEMORY_SIZE = int(os.getenv("DATA_UPLOAD_MAX_MEMORY_MB", "10")) 
 # --- CORS (React-Dev-Server spricht die API) ---
 CORS_ALLOWED_ORIGINS = env_list("DJANGO_CORS_ORIGINS", "http://localhost:5173")
 CSRF_TRUSTED_ORIGINS = CORS_ALLOWED_ORIGINS
+
+# --- Sicherheit / HTTPS-Härtung (P2) ---
+# Immer aktiv (unschädlich auch lokal):
+SESSION_COOKIE_HTTPONLY = True
+SECURE_CONTENT_TYPE_NOSNIFF = True
+
+# Die folgende Härtung greift NUR in Produktion (DEBUG=false); die lokale
+# Entwicklung über http bleibt unberührt. Alle Schalter sind per Env übersteuerbar.
+if not DEBUG:
+    # TLS wird am Ingress (Traefik) terminiert; der Backend-Pod sieht http mit
+    # X-Forwarded-Proto=https. Ohne diesen Header hielte Django jede Anfrage für
+    # unverschlüsselt (und würde secure-Cookies/Redirect falsch bewerten).
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    SESSION_COOKIE_SECURE = env_bool("SESSION_COOKIE_SECURE", True)
+    CSRF_COOKIE_SECURE = env_bool("CSRF_COOKIE_SECURE", True)
+    # Django-seitiger http->https-Redirect: Default AUS, weil Traefik das i. d. R.
+    # schon am Edge erledigt; per Env aktivierbar. (k8s-HTTP-Probes werten 3xx als
+    # Erfolg, ein Redirect bräche sie also nicht.)
+    SECURE_SSL_REDIRECT = env_bool("SECURE_SSL_REDIRECT", False)
+    # HSTS: erzwingt https im Browser nach dem ersten Besuch. includeSubDomains
+    # bewusst Default AUS – der DMS teilt sich die Parent-Domain mit anderen
+    # Diensten (z. B. der Registry), die HSTS nicht ungefragt erben sollen.
+    # preload ebenfalls AUS (irreversible Selbstverpflichtung, Listen-Eintrag).
+    SECURE_HSTS_SECONDS = int(os.getenv("SECURE_HSTS_SECONDS", "31536000"))
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = env_bool("SECURE_HSTS_INCLUDE_SUBDOMAINS", False)
+    SECURE_HSTS_PRELOAD = env_bool("SECURE_HSTS_PRELOAD", False)
 
 # --- Celery ---
 CELERY_BROKER_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
