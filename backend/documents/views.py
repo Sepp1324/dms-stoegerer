@@ -15,7 +15,8 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import connection, transaction
 from django.db.models import Case, DecimalField, Q, Value, When
-from django.db.models import Count, Max
+from django.db.models import Count, IntegerField, Max, OuterRef, Subquery
+from django.db.models.functions import Coalesce
 from django.db.models.functions import Cast
 from django.http import (
     FileResponse,
@@ -1345,14 +1346,43 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 "document_type",
                 "storage_path",
                 "folder",
+                # Ordner-Eltern vorladen: ``folder.full_path`` läuft die Eltern-
+                # Kette hoch (Perf: sonst 1 Query je Ebene je Dokument). Zwei
+                # Ebenen decken die übliche Verschachtelung ab; tiefer greift der
+                # Fallback (selten).
+                "folder__parent",
+                "folder__parent__parent",
                 "case_file",
                 "current_version",
+                # owner_username/is_owner + superseded_by_title sonst N+1 je Doku.
+                "owner",
+                "superseded_by",
             )
             .prefetch_related(
                 "tags",
                 "versions",
+                # Versionsersteller (created_by) für die nested versions-Liste –
+                # sonst 1 Query je Version.
+                "versions__created_by",
                 "custom_field_values__field",
                 "review_tasks",
+            )
+            # supersedes_count via Subquery statt .count() je Doku (N+1). BEWUSST
+            # als Subquery, NICHT als Count()-Aggregat: Ein Aggregat erzwingt ein
+            # GROUP BY, das die Default-Sortierung (-added_at) kippt. Die Subquery
+            # bleibt eine einzige Query und lässt Ordering unberührt.
+            .annotate(
+                supersedes_count_ann=Coalesce(
+                    Subquery(
+                        Document.objects.filter(superseded_by=OuterRef("pk"))
+                        .order_by()
+                        .values("superseded_by")
+                        .annotate(n=Count("pk"))
+                        .values("n"),
+                        output_field=IntegerField(),
+                    ),
+                    0,
+                )
             )
         )
         # --- Owner-Isolation (STOAA-7) + Familien-Freigabe -----------------
