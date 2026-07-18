@@ -15,7 +15,8 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import connection, transaction
 from django.db.models import Case, DecimalField, Q, Value, When
-from django.db.models import Count, Max
+from django.db.models import Count, IntegerField, Max, OuterRef, Subquery
+from django.db.models.functions import Coalesce
 from django.db.models.functions import Cast
 from django.http import (
     FileResponse,
@@ -1366,9 +1367,23 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 "custom_field_values__field",
                 "review_tasks",
             )
-            # supersedes_count als Annotation statt .count() je Doku (N+1). Der
-            # Serializer bevorzugt ``supersedes_count_ann`` (siehe get_supersedes_count).
-            .annotate(supersedes_count_ann=Count("supersedes", distinct=True))
+            # supersedes_count via Subquery statt .count() je Doku (N+1). BEWUSST
+            # als Subquery, NICHT als Count()-Aggregat: Ein Aggregat erzwingt ein
+            # GROUP BY, das die Default-Sortierung (-added_at) kippt. Die Subquery
+            # bleibt eine einzige Query und lässt Ordering unberührt.
+            .annotate(
+                supersedes_count_ann=Coalesce(
+                    Subquery(
+                        Document.objects.filter(superseded_by=OuterRef("pk"))
+                        .order_by()
+                        .values("superseded_by")
+                        .annotate(n=Count("pk"))
+                        .values("n"),
+                        output_field=IntegerField(),
+                    ),
+                    0,
+                )
+            )
         )
         # --- Owner-Isolation (STOAA-7) + Familien-Freigabe -----------------
         # Grundregel: Jeder Nutzer VERWALTET ausschließlich eigene Dokumente. Da
