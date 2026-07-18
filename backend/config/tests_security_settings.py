@@ -23,6 +23,15 @@ class RedisAuthUrlTests(SimpleTestCase):
                 "redis://:s3cr3t@redis:6379/0",
             )
 
+    def test_special_chars_are_url_encoded(self):
+        # base64-typische Sonderzeichen (+/=) und ein : dürfen die URL nicht
+        # zerlegen – sie müssen prozentkodiert werden.
+        with mock.patch.dict(os.environ, {"REDIS_PASSWORD": "a+b/c=d:1a"}):
+            self.assertEqual(
+                _with_redis_auth("redis://redis:6379/0"),
+                "redis://:a%2Bb%2Fc%3Dd%3A1a@redis:6379/0",
+            )
+
     def test_url_with_existing_auth_unchanged(self):
         with mock.patch.dict(os.environ, {"REDIS_PASSWORD": "s3cr3t"}):
             self.assertEqual(

@@ -278,7 +278,13 @@ def _with_redis_auth(url: str) -> str:
     scheme, rest = url.split("://", 1)
     if "@" in rest:  # bereits Zugangsdaten enthalten
         return url
-    return f"{scheme}://:{password}@{rest}"
+    # Passwort MUSS URL-kodiert werden: Sonderzeichen (z. B. aus base64: ``+/=``
+    # oder ein ``:``) würden sonst die URL zerlegen und Celery/kombu mit
+    # "Port could not be cast to integer" abstürzen lassen. ``safe=""`` kodiert
+    # auch ``/`` und ``:``.
+    from urllib.parse import quote
+
+    return f"{scheme}://:{quote(password, safe='')}@{rest}"
 
 
 REDIS_URL = _with_redis_auth(REDIS_URL)
