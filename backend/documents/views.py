@@ -1345,15 +1345,30 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 "document_type",
                 "storage_path",
                 "folder",
+                # Ordner-Eltern vorladen: ``folder.full_path`` läuft die Eltern-
+                # Kette hoch (Perf: sonst 1 Query je Ebene je Dokument). Zwei
+                # Ebenen decken die übliche Verschachtelung ab; tiefer greift der
+                # Fallback (selten).
+                "folder__parent",
+                "folder__parent__parent",
                 "case_file",
                 "current_version",
+                # owner_username/is_owner + superseded_by_title sonst N+1 je Doku.
+                "owner",
+                "superseded_by",
             )
             .prefetch_related(
                 "tags",
                 "versions",
+                # Versionsersteller (created_by) für die nested versions-Liste –
+                # sonst 1 Query je Version.
+                "versions__created_by",
                 "custom_field_values__field",
                 "review_tasks",
             )
+            # supersedes_count als Annotation statt .count() je Doku (N+1). Der
+            # Serializer bevorzugt ``supersedes_count_ann`` (siehe get_supersedes_count).
+            .annotate(supersedes_count_ann=Count("supersedes", distinct=True))
         )
         # --- Owner-Isolation (STOAA-7) + Familien-Freigabe -----------------
         # Grundregel: Jeder Nutzer VERWALTET ausschließlich eigene Dokumente. Da
