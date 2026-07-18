@@ -1359,6 +1359,7 @@ export interface SavedViewPayload {
 
 export async function getDocuments(
   query: DocumentQuery = {},
+  signal?: AbortSignal,
 ): Promise<Paginated<DocumentItem>> {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(query)) {
@@ -1372,7 +1373,9 @@ export async function getDocuments(
       params.set(key, String(value));
     }
   }
-  const res = await apiFetch(`/documents/?${params.toString()}`);
+  // ``signal`` erlaubt dem Aufrufer, eine veraltete Listen-/Suchanfrage
+  // abzubrechen (schnelles Tippen/Filtern) statt sie nur zu ignorieren.
+  const res = await apiFetch(`/documents/?${params.toString()}`, { signal });
   if (!res.ok) throw new Error(`Laden fehlgeschlagen: HTTP ${res.status}`);
   return res.json();
 }

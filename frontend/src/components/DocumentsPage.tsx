@@ -1,4 +1,13 @@
-import { useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from "react";
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type DragEvent,
+  type ReactNode,
+} from "react";
 import {
   autoFileBatch,
   bulkClassifyDocuments,
@@ -44,22 +53,26 @@ import DuplicateReportModal from "./DuplicateReportModal";
 import SemanticSearchPanel from "./SemanticSearchPanel";
 import UploadZone from "./UploadZone";
 import MobileCapture from "./MobileCapture";
-import CaseFilesPage from "./CaseFilesPage";
-import DossiersPage from "./DossiersPage";
-import ContractsPage from "./ContractsPage";
-import CopilotPage from "./CopilotPage";
-import DocumentDetail from "./DocumentDetail";
-import KnowledgeGraphPage from "./KnowledgeGraphPage";
-import RulesPage from "./RulesPage";
-import DuePage from "./DuePage";
-import WorkflowsPage from "./WorkflowsPage";
-import CustomFieldsAdmin from "./CustomFieldsAdmin";
-import MailCenterPage from "./MailCenterPage";
-import SystemStatusPage from "./SystemStatusPage";
-import InboxPage from "./InboxPage";
-import EvidenceCenterPage from "./EvidenceCenterPage";
-import QualityCenterPage from "./QualityCenterPage";
-import DashboardPage from "./DashboardPage";
+// Code-Splitting (Perf, #8): die großen, sich gegenseitig ausschließenden
+// Seiten-Views werden lazy geladen (eigene Chunks statt alles im Haupt-Bundle).
+// Beim ersten Öffnen einer View lädt Vite deren Chunk nach; die Suspense-Grenze
+// unten zeigt solange einen Ladehinweis.
+const CaseFilesPage = lazy(() => import("./CaseFilesPage"));
+const DossiersPage = lazy(() => import("./DossiersPage"));
+const ContractsPage = lazy(() => import("./ContractsPage"));
+const CopilotPage = lazy(() => import("./CopilotPage"));
+const DocumentDetail = lazy(() => import("./DocumentDetail"));
+const KnowledgeGraphPage = lazy(() => import("./KnowledgeGraphPage"));
+const RulesPage = lazy(() => import("./RulesPage"));
+const DuePage = lazy(() => import("./DuePage"));
+const WorkflowsPage = lazy(() => import("./WorkflowsPage"));
+const CustomFieldsAdmin = lazy(() => import("./CustomFieldsAdmin"));
+const MailCenterPage = lazy(() => import("./MailCenterPage"));
+const SystemStatusPage = lazy(() => import("./SystemStatusPage"));
+const InboxPage = lazy(() => import("./InboxPage"));
+const EvidenceCenterPage = lazy(() => import("./EvidenceCenterPage"));
+const QualityCenterPage = lazy(() => import("./QualityCenterPage"));
+const DashboardPage = lazy(() => import("./DashboardPage"));
 import CommandPalette, {
   type CommandPreset,
   type CommandView,
@@ -450,37 +463,45 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   const activeSavedView = savedViews.find((item) => item.id === activeSavedViewId) ?? null;
 
   useEffect(() => {
-    let active = true;
+    // AbortController (#8): eine veraltete Listen-/Suchanfrage wird beim
+    // nächsten Dep-Wechsel (Tippen/Filter/Seite) wirklich abgebrochen, nicht
+    // nur ignoriert – spart Backend-Last und vermeidet Races.
+    const ctrl = new AbortController();
     setLoading(true);
     setError(null);
-    getDocuments({
-      q: debouncedQ,
-      correspondent,
-      document_type: documentType,
-      tag,
-      storage_path: storagePath,
-      folder,
-      processing_state: processingState,
-      shared: sharedScope,
-      // Triage nur für Admins anfordern; das Backend ignoriert den Param für
-      // Normalnutzer ohnehin, aber so bleibt die FE-Absicht eindeutig.
-      owner: triage && me?.is_dms_admin ? "none" : "",
-      ordering,
-      page,
-      customFilters,
-    })
+    getDocuments(
+      {
+        q: debouncedQ,
+        correspondent,
+        document_type: documentType,
+        tag,
+        storage_path: storagePath,
+        folder,
+        processing_state: processingState,
+        shared: sharedScope,
+        // Triage nur für Admins anfordern; das Backend ignoriert den Param für
+        // Normalnutzer ohnehin, aber so bleibt die FE-Absicht eindeutig.
+        owner: triage && me?.is_dms_admin ? "none" : "",
+        ordering,
+        page,
+        customFilters,
+      },
+      ctrl.signal,
+    )
       .then((res) => {
-        if (!active) return;
         setDocs(res.results);
         setCount(res.count);
         setHasNext(res.next !== null);
         setHasPrev(res.previous !== null);
       })
-      .catch((err) => active && setError(err instanceof Error ? err.message : String(err)))
-      .finally(() => active && setLoading(false));
-    return () => {
-      active = false;
-    };
+      .catch((err) => {
+        if (ctrl.signal.aborted) return; // abgebrochene Anfrage: still verwerfen
+        setError(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => {
+        if (!ctrl.signal.aborted) setLoading(false);
+      });
+    return () => ctrl.abort();
     // customFilterKey serialisiert customFilters für einen stabilen Dep-Vergleich.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [debouncedQ, correspondent, documentType, tag, storagePath, folder, processingState, sharedScope, triage, me?.is_dms_admin, ordering, page, reloadKey, customFilterKey]);
@@ -926,8 +947,9 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   if (selectedId !== null) {
     return (
       <>
-        <DocumentDetail
-          id={selectedId}
+        <Suspense fallback={<div className="muted">Lade Dokument …</div>}>
+          <DocumentDetail
+            id={selectedId}
           initialPage={selectedPage}
           onBack={() => {
             setSelectedId(null);
@@ -959,7 +981,8 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
               }
               : undefined
           }
-        />
+          />
+        </Suspense>
         <CommandPalette
           open={commandOpen}
           onOpenChange={setCommandOpen}
@@ -1198,6 +1221,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
         )}
 
         <div className="content-body">
+          <Suspense fallback={<div className="muted">Lade Ansicht …</div>}>
           {view === "dashboard" ? (
             <DashboardPage
               canWrite={!!me?.can_write}
@@ -1430,6 +1454,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
               </section>
             </>
           )}
+          </Suspense>
         </div>
       </div>
 
