@@ -1500,6 +1500,31 @@ export async function getExtractionCandidates(
   return res.json();
 }
 
+export interface InboxCandidateBundle {
+  extraction: ExtractionCandidate[];
+  cases: CaseFileCandidate[];
+}
+
+/**
+ * Batch (#1): Extraction- + Akten-Kandidaten für mehrere Dokumente in EINEM
+ * Request statt zwei je Dokument. Ersetzt den Request-Storm der Smart-Inbox.
+ */
+export async function getInboxCandidates(
+  ids: number[],
+): Promise<Record<number, InboxCandidateBundle>> {
+  if (ids.length === 0) return {};
+  const res = await apiFetch(`/documents/inbox-candidates/?ids=${ids.join(",")}`);
+  if (!res.ok) {
+    throw new Error(`Inbox-Vorschläge laden fehlgeschlagen: HTTP ${res.status}`);
+  }
+  const raw = (await res.json()) as Record<string, InboxCandidateBundle>;
+  const out: Record<number, InboxCandidateBundle> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    out[Number(key)] = value;
+  }
+  return out;
+}
+
 export async function generateExtractionCandidates(
   id: number,
 ): Promise<ExtractionCandidate[]> {

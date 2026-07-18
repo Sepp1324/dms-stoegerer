@@ -14,6 +14,7 @@ import {
   getDocuments,
   getDocumentThumbnail,
   getExtractionCandidates,
+  getInboxCandidates,
   getInboxSummary,
   ignoreReviewTask,
   markDocumentReviewed,
@@ -344,22 +345,22 @@ export default function InboxPage({
   }
 
   async function loadCandidates(items: DocumentItem[]) {
+    // Batch (#1): EIN Request für alle sichtbaren Dokumente statt 2 je Dokument.
     const next: Record<number, ExtractionCandidate[]> = {};
     const nextCases: Record<number, CaseFileCandidate[]> = {};
-    await Promise.all(
-      items.map(async (doc) => {
-        try {
-          next[doc.id] = await getExtractionCandidates(doc.id);
-        } catch {
-          next[doc.id] = [];
-        }
-        try {
-          nextCases[doc.id] = await getCaseFileCandidates(doc.id);
-        } catch {
-          nextCases[doc.id] = [];
-        }
-      }),
-    );
+    try {
+      const bundles = await getInboxCandidates(items.map((doc) => doc.id));
+      for (const doc of items) {
+        const bundle = bundles[doc.id];
+        next[doc.id] = bundle?.extraction ?? [];
+        nextCases[doc.id] = bundle?.cases ?? [];
+      }
+    } catch {
+      for (const doc of items) {
+        next[doc.id] = [];
+        nextCases[doc.id] = [];
+      }
+    }
     setCandidatesByDoc(next);
     setCaseCandidatesByDoc(nextCases);
   }
