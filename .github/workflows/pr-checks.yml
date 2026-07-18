@@ -1,16 +1,18 @@
 name: pr-checks
 
 # Pflicht-Qualitäts-Gate für JEDEN Pull Request gegen main. Läuft VOR dem Merge
-# auf dem self-hosted Runner (Label "dms") und macht rote Änderungen nicht
-# mergebar – sobald der Owner "pr-checks" als Required Status Check setzt
-# (siehe README / docs/ci-cd.md).
+# und macht rote Änderungen nicht mergebar – sobald der Owner "pr-checks" als
+# Required Status Check setzt (siehe README / docs/ci-cd.md).
 #
-# WICHTIG: Dieser Workflow deployt NICHT. Der Deploy läuft unverändert separat
-# beim Push nach main (siehe deploy.yml) und bringt dort sein eigenes Test-Gate
-# als zweites Sicherheitsnetz für direkte Pushes mit.
+# SICHERHEIT: PR-Checks laufen bewusst auf GitHub-HOSTED, wegwerfbaren Runnern
+# (ubuntu-latest), NICHT auf dem self-hosted Runner "dms". Ein PR kann beliebigen
+# Code enthalten (Checkout, Repo-Skripte, Docker-Build); dieser darf niemals auf
+# dem privilegierten Runner laufen, der Docker-Host, Registry und k3s-Cluster
+# erreicht. Der self-hosted Runner ist ausschließlich dem Deploy aus main
+# vorbehalten (deploy.yml). Es werden keine Secrets benötigt (nur lokale Builds
+# aus öffentlichen Basis-Images), daher ist ein isolierter Runner ausreichend.
 #
-# Nur der self-hosted Runner "dms" hat Docker + Registry-Zugriff; deshalb bauen
-# wir die Images lokal und führen die Suiten darin aus. Siehe docs/ci-cd.md.
+# WICHTIG: Dieser Workflow deployt NICHT.
 
 on:
   pull_request:
@@ -23,7 +25,7 @@ concurrency:
 
 jobs:
   manifest-guards:
-    runs-on: [self-hosted, dms]
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -37,20 +39,10 @@ jobs:
   # wiederverwendet – keine Duplizierung). DB-Creds kommen aus dem Skript-Env,
   # nichts ist im Workflow hartkodiert.
   backend-tests:
-    runs-on: [self-hosted, dms]
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      # Vor dem Build aufräumen: der langlebige self-hosted Runner sammelt sonst
-      # ungenutzte Images/Build-Cache an, bis der Build an „Platte voll" scheitert
-      # (noch bevor run-tests.sh mit eigenem Prune drankäme).
-      - name: Runner-Speicher freihalten
-        run: |
-          docker image prune -f || true
-          docker image prune -af --filter "until=48h" || true
-          docker builder prune -f --filter "until=24h" || true
-          df -h . || true
 
       - name: Backend-Image bauen (flüchtiger CI-Tag)
         run: docker build -t "dms-backend-ci:${GITHUB_SHA}" ./backend
@@ -58,39 +50,24 @@ jobs:
       - name: Check + Migrations-Check + Testsuite
         run: backend/ci/run-tests.sh "dms-backend-ci:${GITHUB_SHA}"
 
-      - name: CI-Image aufräumen
-        if: always()
-        run: docker rmi "dms-backend-ci:${GITHUB_SHA}" 2>/dev/null || true
-
   # Frontend-Gate: baut das Frontend-Image, dessen Build-Stufe `npm install`
   # (in frontend/) + `npm run build` (= tsc -b && vite build) ausführt. Ein
   # TS-Fehler oder ein unaufgelöster Merge-Konflikt-Marker lässt den Build – und
   # damit den PR – rot werden, BEVOR gemergt wird (siehe STOAA-85/86).
   frontend-build:
-    runs-on: [self-hosted, dms]
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Runner-Speicher freihalten
-        run: |
-          docker image prune -f || true
-          docker image prune -af --filter "until=48h" || true
-          docker builder prune -f --filter "until=24h" || true
-          df -h . || true
-
       - name: Frontend-Image bauen (flüchtiger CI-Tag)
         run: docker build -t "dms-frontend-ci:${GITHUB_SHA}" ./frontend
-
-      - name: CI-Image aufräumen
-        if: always()
-        run: docker rmi "dms-frontend-ci:${GITHUB_SHA}" 2>/dev/null || true
 
   # Aggregierendes Gate: EIN stabiler Status-Check-Name ("pr-checks"), den der
   # Owner als Required Status Check in der Branch-Protection setzt. Wird nur
   # grün, wenn Backend- UND Frontend-Job grün sind.
   pr-checks:
-    runs-on: [self-hosted, dms]
+    runs-on: ubuntu-latest
     needs: [manifest-guards, backend-tests, frontend-build]
     steps:
       - name: Gate erfüllt
