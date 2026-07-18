@@ -85,8 +85,12 @@ export function DetailTabs({
   );
 }
 
-// Ein Tab-Panel: bleibt im DOM (Zustand/Requests der Panels erhalten) und wird
-// per ``hidden`` ein-/ausgeblendet. ``aria-labelledby`` verweist auf den Tab.
+// Ein Tab-Panel: **lazy + keep-alive** (Perf). Ein Panel wird erst gemountet,
+// wenn es zum ersten Mal aktiv wird – so feuern versteckte/unbesuchte Tabs beim
+// Öffnen eines Dokuments KEINE Requests (früher mounteten alle Panels sofort und
+// lösten Briefing-/Entitäten-/Dubletten-/Similar-/… -Requests aus). Nach dem
+// ersten Besuch bleibt das Panel im DOM (per ``hidden`` ausgeblendet), damit sein
+// Zustand/seine Daten erhalten bleiben und ein erneuter Besuch nicht neu lädt.
 export function TabPanel({
   id,
   active,
@@ -96,6 +100,11 @@ export function TabPanel({
   active: TabId;
   children: ReactNode;
 }) {
+  // Latch: einmal aktiv gewesen -> ab dann gemountet. Das Setzen im Render ist
+  // idempotent (nur false->true) und daher unbedenklich.
+  const activatedRef = useRef(false);
+  if (active === id) activatedRef.current = true;
+
   return (
     <div
       role="tabpanel"
@@ -104,7 +113,7 @@ export function TabPanel({
       tabIndex={0}
       hidden={active !== id}
     >
-      {children}
+      {activatedRef.current ? children : null}
     </div>
   );
 }
