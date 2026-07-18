@@ -1,15 +1,20 @@
-Django==5.1.4
-djangorestframework==3.15.2
-djangorestframework-simplejwt==5.3.1
-django-cors-headers==4.6.0
+# Django 5.2 ist LTS (Sicherheits-Support bis 2028); die 5.1-Serie ist per
+# Kalender EOL – deshalb Wechsel auf 5.2. DRF 3.16 + simplejwt 5.5 tragen die
+# offizielle Django-5.2-Unterstützung; cors-headers 4.7 ebenso.
+Django==5.2.6
+djangorestframework==3.16.1
+djangorestframework-simplejwt==5.5.0
+django-cors-headers==4.7.0
 whitenoise==6.8.2
 psycopg[binary]==3.2.3
 celery==5.4.0
 redis==5.2.1
 python-dotenv==1.0.1
 gunicorn==23.0.0
-# Symmetrische Verschlüsselung für DB-Geheimnisse (MailAccount.password, STOAA-212)
-cryptography==44.0.0
+# Symmetrische Verschlüsselung für DB-Geheimnisse (MailAccount.password, STOAA-212).
+# Innerhalb 44.x gehalten (Sicherheits-Patch); ein Major-Sprung zöge neue
+# Rust/ABI-Anforderungen nach sich – bewusst separat.
+cryptography==44.0.1
 # OCR-Pipeline
 ocrmypdf==16.10.0
 img2pdf==0.6.0
@@ -20,7 +25,11 @@ pikepdf==8.15.1
 # Miniaturbilder (erste Seite → JPEG)
 pdf2image==1.17.0
 # Pillow auf 10.x gepinnt: fastembed 0.3.6 verlangt pillow<11.0.0 (>=10.3.0).
-# 10.4.0 erfüllt zugleich ocrmypdf/pikepdf/pillow-heif (alle nur >=10.x).
+# 10.4.0 ist die LETZTE 10.x und erfüllt zugleich ocrmypdf/pikepdf/pillow-heif
+# (alle nur >=10.x). Damit ist 10.4.0 die Security-Obergrenze; neuere Pillow-CVE-
+# Fixes gibt es nur in 11.x. Das anzuheben erfordert einen fastembed-Upgrade UND
+# eine Neukalibrierung der e5-Schwellwerte (Embeddings können sich ändern) –
+# bewusst als eigener, verifizierter Schritt, nicht in diesem Dep-Bump.
 Pillow==10.4.0
 # HEIC/HEIF-Support für die Mobile-Erfassung (STOAA-513); die Wheels bündeln
 # libheif → i. d. R. kein apt-Paket nötig. Image-Rebuild erforderlich.
