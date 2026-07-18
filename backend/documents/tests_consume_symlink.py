@@ -40,9 +40,14 @@ class ReadRegularNoFollowTests(TestCase):
 
 class IngestSymlinkTests(TestCase):
     def test_symlink_is_dropped_not_ingested(self):
-        with tempfile.TemporaryDirectory() as d:
+        # Das Angriffsziel liegt BEWUSST außerhalb des gescannten Consume-Ordners
+        # (so wie /proc/self/environ o. Ä.). Läge es im Ordner selbst, würde der
+        # Scanner es als eigene reguläre Datei aufnehmen – das ist nicht der zu
+        # prüfende Pfad. Geprüft wird: der Symlink im Eingang wird verworfen
+        # (nur der Link entfernt), und das Ziel bleibt unberührt.
+        with tempfile.TemporaryDirectory() as outside, tempfile.TemporaryDirectory() as d:
             base = Path(d)
-            secret = base / "outside_secret"
+            secret = Path(outside) / "outside_secret"
             secret.write_bytes(b"SECRET-ENV")
             link = base / "evil.pdf"
             link.symlink_to(secret)
