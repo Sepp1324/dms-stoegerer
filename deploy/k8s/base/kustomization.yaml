@@ -37,3 +37,4 @@ resources:
   - frontend.yaml
   - ingress.yaml
   - backup-cronjob.yaml
+  - networkpolicy.yaml

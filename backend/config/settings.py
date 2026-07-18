@@ -261,8 +261,29 @@ if not DEBUG:
     SECURE_HSTS_PRELOAD = env_bool("SECURE_HSTS_PRELOAD", False)
 
 # --- Celery ---
-CELERY_BROKER_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-CELERY_RESULT_BACKEND = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+
+
+def _with_redis_auth(url: str) -> str:
+    """Webt ``REDIS_PASSWORD`` in eine passwortlose redis-URL ein (P2, Redis-Auth).
+
+    So bleibt das Passwort an EINER Stelle (Secret ``REDIS_PASSWORD``); die
+    passwortlose ``REDIS_URL`` (ConfigMap) muss nicht dupliziert werden. Ist die
+    URL bereits mit Zugangsdaten versehen (``@``) oder kein Passwort gesetzt,
+    bleibt sie unverändert.
+    """
+    password = os.getenv("REDIS_PASSWORD", "")
+    if not password or "://" not in url:
+        return url
+    scheme, rest = url.split("://", 1)
+    if "@" in rest:  # bereits Zugangsdaten enthalten
+        return url
+    return f"{scheme}://:{password}@{rest}"
+
+
+REDIS_URL = _with_redis_auth(REDIS_URL)
+CELERY_BROKER_URL = REDIS_URL
+CELERY_RESULT_BACKEND = REDIS_URL
 CELERY_TASK_TRACK_STARTED = True
 CELERY_TIMEZONE = TIME_ZONE
 

@@ -19,6 +19,16 @@ spec:
       containers:
         - name: redis
           image: redis:7-alpine
+          # Auth (P2): requirepass aus dem Secret; k8s substituiert $(REDIS_PASSWORD)
+          # aus der unten deklarierten Env. Ohne Passwort war Redis (Broker +
+          # potentieller Cache) für jeden im Cluster-Netz offen.
+          command: ["redis-server", "--requirepass", "$(REDIS_PASSWORD)"]
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: dms-secrets
+                  key: REDIS_PASSWORD
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

@@ -1,0 +1,45 @@
+# NetworkPolicy (P2): Die Daten-Stores (Postgres, Redis) nehmen Ingress NUR noch
+# von Pods DESSELBEN Namespaces (dms) an. Das kapselt DB + Broker gegen Zugriffe
+# aus anderen Namespaces/Pods im Cluster – die häufigste Lateral-Movement-Route.
+#
+# Bewusst KEIN namespace-weites default-deny und KEINE Egress-Regeln:
+# * Der Web-Tier (frontend/backend) bleibt für den Traefik-Ingress erreichbar
+#   (keine Policy selektiert ihn → er bleibt offen). So kann eine zu enge Regel
+#   die App nicht unerreichbar machen.
+# * Egress bleibt offen (DNS + externe APIs: Anthropic, IMAP, psychosr).
+#
+# k3s erzwingt NetworkPolicies über seinen mitgelieferten Controller.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-allow-namespace
+  namespace: dms
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres
+  policyTypes: ["Ingress"]
+  ingress:
+    # Leerer podSelector = alle Pods im selben Namespace (dms).
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 5432
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-allow-namespace
+  namespace: dms
+spec:
+  podSelector:
+    matchLabels:
+      app: redis
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 6379

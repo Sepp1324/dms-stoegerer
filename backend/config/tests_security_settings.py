@@ -5,11 +5,39 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from unittest import mock
 
 from django.conf import settings
 from django.test import SimpleTestCase
 
+from config.settings import _with_redis_auth
+
 BACKEND_DIR = Path(__file__).resolve().parent.parent  # .../backend
+
+
+class RedisAuthUrlTests(SimpleTestCase):
+    def test_weaves_password_into_url(self):
+        with mock.patch.dict(os.environ, {"REDIS_PASSWORD": "s3cr3t"}):
+            self.assertEqual(
+                _with_redis_auth("redis://redis:6379/0"),
+                "redis://:s3cr3t@redis:6379/0",
+            )
+
+    def test_url_with_existing_auth_unchanged(self):
+        with mock.patch.dict(os.environ, {"REDIS_PASSWORD": "s3cr3t"}):
+            self.assertEqual(
+                _with_redis_auth("redis://:pre@redis:6379/0"),
+                "redis://:pre@redis:6379/0",
+            )
+
+    def test_no_password_leaves_url_unchanged(self):
+        env = dict(os.environ)
+        env.pop("REDIS_PASSWORD", None)
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(
+                _with_redis_auth("redis://redis:6379/0"),
+                "redis://redis:6379/0",
+            )
 
 
 class AlwaysOnSecurityTests(SimpleTestCase):
