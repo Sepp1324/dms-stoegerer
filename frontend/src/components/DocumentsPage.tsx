@@ -8,6 +8,7 @@ import {
   type DragEvent,
   type ReactNode,
 } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import {
   autoFileBatch,
   bulkClassifyDocuments,
@@ -252,8 +253,17 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   const [me, setMe] = useState<Me | null>(null);
   // Wird nach jedem Upload erhöht → löst ein Neuladen der Liste aus.
   const [reloadKey, setReloadKey] = useState(0);
-  // Aktuell geöffnetes Dokument (Detailansicht) oder null (Liste).
-  const [selectedId, setSelectedId] = useState<number | null>(null);
+  // Aktuell geöffnetes Dokument (Detailansicht) oder null (Liste) – jetzt aus der
+  // URL abgeleitet (#7, Stage 1): /dokument/:id ist der Deep-Link. setSelectedId
+  // navigiert nur noch, damit Back-Button + geteilte Links funktionieren; die
+  // vielen bestehenden setSelectedId(...)-Aufrufe bleiben unverändert.
+  const routerNavigate = useNavigate();
+  const routerLocation = useLocation();
+  const _docMatch = routerLocation.pathname.match(/^\/dokument\/(\d+)/);
+  const selectedId = _docMatch ? Number(_docMatch[1]) : null;
+  const setSelectedId = (id: number | null) => {
+    routerNavigate(id == null ? "/" : `/dokument/${id}`);
+  };
   const [selectedPage, setSelectedPage] = useState<number | null>(null);
   const [previewId, setPreviewId] = useState<number | null>(null);
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>(() => {
