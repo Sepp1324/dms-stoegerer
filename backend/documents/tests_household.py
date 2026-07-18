@@ -116,26 +116,73 @@ class HouseholdSharingTests(APITestCase):
 
 
 class HouseholdApiTests(APITestCase):
-    def test_create_add_member_leave(self):
+    def test_join_needs_code_request_and_owner_approval(self):
+        """Vollständiger Consent-Flow: Code → Anfrage → Bestätigung → Mitglied."""
         a = User.objects.create_user("ha", password="pw", role="user")
-        User.objects.create_user("hb", password="pw", role="user")
-        self.client.force_authenticate(a)
+        b = User.objects.create_user("hb", password="pw", role="user")
 
+        # a legt den Haushalt an und ist Owner.
+        self.client.force_authenticate(a)
         created = self.client.post("/api/households/", {"name": "Zuhause"}, format="json")
         self.assertEqual(created.status_code, 201)
+        self.assertTrue(created.data["is_owner"])
         hid = created.data["id"]
 
-        mine = self.client.get("/api/households/")
-        self.assertEqual(mine.data["name"], "Zuhause")
+        # Owner erzeugt einen Beitritts-Code (nur er sieht ihn).
+        code_resp = self.client.post(f"/api/households/{hid}/join-code/", {}, format="json")
+        self.assertEqual(code_resp.status_code, 200)
+        code = code_resp.data["join_code"]
+        self.assertTrue(code)
 
-        added = self.client.post(
-            f"/api/households/{hid}/members/", {"username": "hb"}, format="json"
+        # b stellt mit dem Code eine Anfrage – erzeugt NOCH KEINE Mitgliedschaft.
+        self.client.force_authenticate(b)
+        jr = self.client.post("/api/households/join/", {"code": code}, format="json")
+        self.assertEqual(jr.status_code, 201)
+        self.assertIsNone(self.client.get("/api/households/").data)  # b noch draußen
+
+        # Owner sieht die offene Anfrage und bestätigt sie.
+        self.client.force_authenticate(a)
+        reqs = self.client.get(f"/api/households/{hid}/requests/")
+        self.assertEqual(len(reqs.data), 1)
+        rid = reqs.data[0]["id"]
+        approved = self.client.post(
+            f"/api/households/{hid}/requests/{rid}/decide/",
+            {"decision": "approve"},
+            format="json",
         )
-        self.assertEqual(added.status_code, 200)
-        self.assertEqual(len(added.data["members"]), 2)
+        self.assertEqual(approved.status_code, 200)
+        self.assertEqual(len(approved.data["members"]), 2)
 
-        left = self.client.post(f"/api/households/{hid}/leave/")
-        self.assertEqual(left.status_code, 204)
+        # Jetzt ist b Mitglied und kann verlassen.
+        self.client.force_authenticate(b)
+        self.assertEqual(self.client.get("/api/households/").data["name"], "Zuhause")
+        self.assertEqual(self.client.post(f"/api/households/{hid}/leave/").status_code, 204)
+
+    def test_join_with_invalid_code_is_404(self):
+        a = User.objects.create_user("hc", password="pw", role="user")
+        self.client.force_authenticate(a)
+        resp = self.client.post("/api/households/join/", {"code": "nope"}, format="json")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_reject_keeps_user_out(self):
+        a = User.objects.create_user("hd", password="pw", role="user")
+        b = User.objects.create_user("he", password="pw", role="user")
+        self.client.force_authenticate(a)
+        hid = self.client.post("/api/households/", {"name": "H"}, format="json").data["id"]
+        code = self.client.post(f"/api/households/{hid}/join-code/", {}, format="json").data["join_code"]
+        self.client.force_authenticate(b)
+        self.client.post("/api/households/join/", {"code": code}, format="json")
+        self.client.force_authenticate(a)
+        rid = self.client.get(f"/api/households/{hid}/requests/").data[0]["id"]
+        self.client.post(
+            f"/api/households/{hid}/requests/{rid}/decide/",
+            {"decision": "reject"},
+            format="json",
+        )
+        # Anfrage weg, b kein Mitglied.
+        self.assertEqual(len(self.client.get(f"/api/households/{hid}/requests/").data), 0)
+        self.client.force_authenticate(b)
+        self.assertIsNone(self.client.get("/api/households/").data)
 
     def test_cannot_create_second_household(self):
         a = User.objects.create_user("h2a", password="pw", role="user")
@@ -144,14 +191,15 @@ class HouseholdApiTests(APITestCase):
         second = self.client.post("/api/households/", {"name": "B"}, format="json")
         self.assertEqual(second.status_code, 400)
 
-    def test_add_member_requires_membership(self):
+    def test_only_owner_can_manage(self):
         a = User.objects.create_user("h3a", password="pw", role="user")
         b = User.objects.create_user("h3b", password="pw", role="user")
         self.client.force_authenticate(a)
         hid = self.client.post("/api/households/", {"name": "A"}, format="json").data["id"]
-        # b ist nicht Mitglied → darf niemanden hinzufügen
+        # b ist weder Owner noch Mitglied → keine Verwaltung (404, keine Existenz-Leaks).
         self.client.force_authenticate(b)
-        resp = self.client.post(
-            f"/api/households/{hid}/members/", {"username": "h3a"}, format="json"
+        self.assertEqual(
+            self.client.post(f"/api/households/{hid}/join-code/", {}, format="json").status_code,
+            404,
         )
-        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(self.client.get(f"/api/households/{hid}/requests/").status_code, 404)

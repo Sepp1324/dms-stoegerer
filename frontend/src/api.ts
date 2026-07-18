@@ -2366,6 +2366,18 @@ export interface Household {
   id: number;
   name: string;
   members: HouseholdMember[];
+  owner: { id: number; username: string } | null;
+  is_owner: boolean;
+  /** Nur für den Owner befüllt; sonst null. */
+  join_code: string | null;
+  /** Anzahl offener Beitrittsanfragen (nur für den Owner > 0). */
+  pending_requests: number;
+  created_at: string;
+}
+export interface HouseholdJoinRequest {
+  id: number;
+  user: { id: number; username: string };
+  status: "pending" | "approved" | "rejected";
   created_at: string;
 }
 /** Eigener Haushalt (oder null, wenn in keinem). */
@@ -2377,8 +2389,33 @@ export async function getMyHousehold(): Promise<Household | null> {
 export function createHousehold(name: string): Promise<Household> {
   return postJson<Household>("/households/", { name });
 }
-export function addHouseholdMember(id: number, username: string): Promise<Household> {
-  return postJson<Household>(`/households/${id}/members/`, { username });
+/** Beitritts-Code erzeugen/rotieren (nur Owner). */
+export function generateHouseholdJoinCode(id: number): Promise<Household> {
+  return postJson<Household>(`/households/${id}/join-code/`, {});
+}
+/** Beitritts-Code löschen (nur Owner). */
+export async function clearHouseholdJoinCode(id: number): Promise<Household> {
+  const res = await apiFetch(`/households/${id}/join-code/`, { method: "DELETE" });
+  if (!res.ok) throw new Error(`Code löschen fehlgeschlagen: HTTP ${res.status}`);
+  return res.json();
+}
+/** Mit einem Code eine Beitrittsanfrage stellen (erzeugt noch keine Mitgliedschaft). */
+export function requestHouseholdJoin(code: string): Promise<HouseholdJoinRequest> {
+  return postJson<HouseholdJoinRequest>("/households/join/", { code });
+}
+/** Offene Beitrittsanfragen des eigenen Haushalts (nur Owner). */
+export async function listHouseholdJoinRequests(id: number): Promise<HouseholdJoinRequest[]> {
+  const res = await apiFetch(`/households/${id}/requests/`);
+  if (!res.ok) throw new Error(`Anfragen laden fehlgeschlagen: HTTP ${res.status}`);
+  return res.json();
+}
+/** Eine Beitrittsanfrage bestätigen/ablehnen (nur Owner). */
+export function decideHouseholdJoinRequest(
+  id: number,
+  requestId: number,
+  decision: "approve" | "reject",
+): Promise<Household> {
+  return postJson<Household>(`/households/${id}/requests/${requestId}/decide/`, { decision });
 }
 export async function leaveHousehold(id: number): Promise<void> {
   const res = await apiFetch(`/households/${id}/leave/`, { method: "POST" });
