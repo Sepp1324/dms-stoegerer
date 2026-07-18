@@ -9,6 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
+import { DEFAULT_VIEW, pathToView, viewToPath } from "../viewRoutes";
 import {
   autoFileBatch,
   bulkClassifyDocuments,
@@ -253,16 +254,30 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   const [me, setMe] = useState<Me | null>(null);
   // Wird nach jedem Upload erhöht → löst ein Neuladen der Liste aus.
   const [reloadKey, setReloadKey] = useState(0);
-  // Aktuell geöffnetes Dokument (Detailansicht) oder null (Liste) – jetzt aus der
-  // URL abgeleitet (#7, Stage 1): /dokument/:id ist der Deep-Link. setSelectedId
-  // navigiert nur noch, damit Back-Button + geteilte Links funktionieren; die
-  // vielen bestehenden setSelectedId(...)-Aufrufe bleiben unverändert.
+  // Navigation über die URL (#7, Stage 1 + 1b): sowohl das geöffnete Dokument
+  // (/dokument/:id) als auch die aktive View (/inbox, /dashboard, …) stehen in
+  // der URL. selectedId/view werden daraus abgeleitet; setSelectedId/setView
+  // navigieren nur noch – die bestehenden Aufrufstellen bleiben unverändert.
   const routerNavigate = useNavigate();
   const routerLocation = useLocation();
   const _docMatch = routerLocation.pathname.match(/^\/dokument\/(\d+)/);
   const selectedId = _docMatch ? Number(_docMatch[1]) : null;
+  // Letzte echte View merken: die /dokument/:id-URL trägt selbst keine View, das
+  // Schließen eines Dokuments soll aber dorthin zurückkehren, wo man war.
+  const lastViewRef = useRef<MainView>(DEFAULT_VIEW);
+  const view: MainView =
+    selectedId !== null ? lastViewRef.current : pathToView(routerLocation.pathname);
+  if (selectedId === null) lastViewRef.current = view;
+  const setView = (v: MainView) => {
+    routerNavigate(viewToPath(v));
+  };
   const setSelectedId = (id: number | null) => {
-    routerNavigate(id == null ? "/" : `/dokument/${id}`);
+    if (id == null) {
+      // Nur navigieren, wenn wirklich ein Dokument offen ist → zurück zur View.
+      if (selectedId !== null) routerNavigate(viewToPath(lastViewRef.current));
+    } else {
+      routerNavigate(`/dokument/${id}`);
+    }
   };
   const [selectedPage, setSelectedPage] = useState<number | null>(null);
   const [previewId, setPreviewId] = useState<number | null>(null);
@@ -275,8 +290,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
       return "cards";
     }
   });
-  // Aktive Hauptansicht (persistente linke Navigation).
-  const [view, setView] = useState<MainView>("dashboard");
+  // (Aktive Hauptansicht `view`/`setView` kommen jetzt aus der URL – siehe oben.)
   const [commandOpen, setCommandOpen] = useState(false);
   const [savedViews, setSavedViews] = useState<SavedView[]>([]);
   const [savedViewsBusy, setSavedViewsBusy] = useState(false);
