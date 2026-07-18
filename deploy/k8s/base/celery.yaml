@@ -29,6 +29,11 @@ spec:
       securityContext:
         seccompProfile:
           type: RuntimeDefault
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
       affinity:
         podAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -41,6 +46,9 @@ spec:
           image: registry.stoegerer-home.at/dms-backend:0.1.0
           imagePullPolicy: IfNotPresent
           command: ["celery", "-A", "config", "worker", "-l", "info"]
+          env:
+            - name: HOME
+              value: /tmp
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

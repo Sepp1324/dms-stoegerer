@@ -28,10 +28,18 @@ spec:
       labels:
         app: backend
     spec:
-      # Pod-weite Härtung (P2): Default-seccomp-Profil.
+      # Pod-weite Härtung (P2): seccomp + non-root. runAsUser 1000 (kein
+      # Dockerfile-USER nötig – so bleibt das Backup-Image root). fsGroup macht
+      # das bestehende /data-PVC gruppenschreibbar für uid 1000; OnRootMismatch
+      # führt den (einmaligen) rekursiven chgrp nur aus, wenn nötig.
       securityContext:
         seccompProfile:
           type: RuntimeDefault
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
       # Migrationen einmalig vor dem Start des Web-Prozesses.
       initContainers:
         - name: migrate
@@ -45,6 +53,11 @@ spec:
           resources:
             requests: {cpu: "50m", memory: "256Mi"}
             limits: {cpu: "1", memory: "1Gi"}
+          # HOME auf einen schreibbaren Pfad (uid 1000 hat keinen passwd-Eintrag,
+          # sonst zeigt HOME auf "/" und Tools ohne eigenen Cache-Pfad scheitern).
+          env:
+            - name: HOME
+              value: /tmp
           envFrom:
             - configMapRef:
                 name: dms-config
@@ -68,6 +81,9 @@ spec:
           resources:
             requests: {cpu: "250m", memory: "384Mi"}
             limits: {cpu: "2", memory: "1Gi"}
+          env:
+            - name: HOME
+              value: /tmp
           envFrom:
             - configMapRef:
                 name: dms-config
