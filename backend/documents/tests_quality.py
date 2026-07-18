@@ -3,6 +3,7 @@ import shutil
 import tempfile
 
 from django.contrib.auth import get_user_model
+from django.test import override_settings
 from django.utils import timezone
 from rest_framework.test import APITestCase
 
@@ -25,6 +26,9 @@ class DocumentQualityApiTests(APITestCase):
     """Das Qualitätscenter bleibt deterministisch und owner-gescopet."""
 
     def setUp(self):
+        from django.core.cache import cache
+
+        cache.clear()  # Quality-Status wird gecacht -> Isolation zwischen Tests
         self.tmpdir = tempfile.mkdtemp(prefix="dms-quality-test-")
         self.owner = User.objects.create_user(
             username="quality_owner",
@@ -62,6 +66,25 @@ class DocumentQualityApiTests(APITestCase):
         self.assertIn("metadata", categories)
         self.assertIn("archive", categories)
         self.assertIn("review", categories)
+
+    def test_quality_status_is_cached(self):
+        # Zwei Aufrufe hintereinander: der zweite trifft den Cache -> identischer
+        # generated_at-Zeitstempel (kein Neu-Berechnen).
+        self._weak_document(owner=self.owner)
+        self.client.force_authenticate(self.owner)
+        first = self.client.get("/api/documents/quality-status/")
+        second = self.client.get("/api/documents/quality-status/")
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.data["generated_at"], second.data["generated_at"])
+
+    @override_settings(QUALITY_STATUS_CACHE_TTL=0)
+    def test_quality_status_cache_can_be_disabled(self):
+        self._weak_document(owner=self.owner)
+        self.client.force_authenticate(self.owner)
+        first = self.client.get("/api/documents/quality-status/")
+        second = self.client.get("/api/documents/quality-status/")
+        # TTL=0 -> jede Anfrage rechnet neu -> abweichender Zeitstempel.
+        self.assertNotEqual(first.data["generated_at"], second.data["generated_at"])
 
     def test_quality_status_is_owner_scoped(self):
         own = self._strong_document(owner=self.owner, title="Gute Polizze")

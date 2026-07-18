@@ -1619,8 +1619,27 @@ class DocumentViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"], url_path="quality-status")
     def quality_status(self, request):
-        """Mandantengefiltertes Qualitätscenter für sichtbare Dokumente."""
-        return Response(quality_service.quality_status(self.get_queryset()))
+        """Mandantengefiltertes Qualitätscenter für sichtbare Dokumente.
+
+        Perf (#6): Das Center scored bei jedem Aufruf ALLE sichtbaren Dokumente
+        in Python (Heuristiken – keine DB-Aggregation möglich). Da das Ergebnis
+        nur für Sekunden „frisch" sein muss, wird es kurz gecacht (Default 60 s,
+        ``QUALITY_STATUS_CACHE_TTL``; 0 = aus). Key = Nutzer + Query-String, damit
+        Owner-Scope und Filter sauber getrennt bleiben.
+        """
+        from django.core.cache import cache
+
+        ttl = int(getattr(settings, "QUALITY_STATUS_CACHE_TTL", 60))
+        if ttl <= 0:
+            return Response(quality_service.quality_status(self.get_queryset()))
+
+        raw_key = f"{request.user.id}?{request.META.get('QUERY_STRING', '')}"
+        cache_key = "quality_status:" + hashlib.sha256(raw_key.encode()).hexdigest()
+        data = cache.get(cache_key)
+        if data is None:
+            data = quality_service.quality_status(self.get_queryset())
+            cache.set(cache_key, data, ttl)
+        return Response(data)
 
     @action(detail=True, methods=["get"], url_path="quality")
     def quality(self, request, pk=None):
