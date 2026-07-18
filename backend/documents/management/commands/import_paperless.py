@@ -114,7 +114,10 @@ class Command(BaseCommand):
                 continue
 
             # Idempotenz: identischer Inhalt bereits vorhanden -> überspringen.
-            if pipeline.find_duplicate_version(sha):
+            # Owner-scoped (P1): nur im Bestand des Ziel-Owners (--owner) suchen,
+            # damit ein gleicher Inhalt bei einem anderen Nutzer den Import nicht
+            # blockiert.
+            if pipeline.find_duplicate_version(sha, owner=owner):
                 skipped += 1
                 self.stdout.write(f"  übersprungen (dedup) „{title}“")
                 continue

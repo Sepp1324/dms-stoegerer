@@ -33,15 +33,32 @@ def sha256_of(file_path: str | Path) -> str:
     return h.hexdigest()
 
 
-def find_duplicate_version(sha256_hex: str) -> DocumentVersion | None:
+# Sentinel: „kein Owner-Scope übergeben" ≠ „owner=None" (None = Triage-Bestand).
+_OWNER_UNSET = object()
+
+
+def find_duplicate_version(
+    sha256_hex: str, *, owner=_OWNER_UNSET
+) -> DocumentVersion | None:
     """Existierende Version mit identischem Inhalts-Hash (Dedup beim Ingest).
 
-    Grundlage für den Hash-Dedup der E-Mail-Ingestion: gleiche Bytes → gleicher
+    Grundlage für den Hash-Dedup der Ingest-Pfade: gleiche Bytes → gleicher
     SHA-256 → kein Doppel-Import.
+
+    Owner-Scope (P1, Multi-Tenant-Korrektheit): Wird ``owner`` übergeben, ist die
+    Suche auf Dokumente **dieses** Eigentümers beschränkt. Ohne diesen Scope
+    würde der identische Anhang eines Haushaltsmitglieds den Upload eines
+    anderen still unterdrücken – der zweite Nutzer bekäme sein Dokument nie
+    (tenant-übergreifender Datenverlust). ``owner=None`` scoped bewusst auf den
+    owner-losen Triage-Bestand; ohne ``owner`` bleibt es (abwärtskompatibel)
+    global.
     """
     if not sha256_hex:
         return None
-    return DocumentVersion.objects.filter(sha256=sha256_hex).first()
+    qs = DocumentVersion.objects.filter(sha256=sha256_hex)
+    if owner is not _OWNER_UNSET:
+        qs = qs.filter(document__owner=owner)
+    return qs.first()
 
 
 def create_document_from_file(

@@ -422,7 +422,9 @@ def _ingest_consume_dir(
             # über NFS (siehe ``_move_into``) – im Eingang liegengeblieben ist.
             # Der nächste Scan räumt sie dann still nach ``_processed/`` weg.
             sha256_hex = hashlib.sha256(data).hexdigest()
-            if pipeline.find_duplicate_version(sha256_hex) is not None:
+            # Owner-scoped (P1): nur gegen Dokumente DIESES Owners deduplizieren,
+            # sonst unterdrückt ein Duplikat bei einem anderen Nutzer den Import.
+            if pipeline.find_duplicate_version(sha256_hex, owner=owner) is not None:
                 logger.info(
                     "scan_consume_folder: Duplikat (SHA-256 bereits vorhanden) – "
                     "kein Neu-Import, verschiebe nach _processed/: %s",
