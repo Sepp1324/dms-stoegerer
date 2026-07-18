@@ -16,6 +16,8 @@ import logging
 import os
 from pathlib import Path
 
+from django.db import transaction
+
 from . import storage
 from .models import AuditLogEntry, Document, DocumentVersion
 from .services import page_text
@@ -112,34 +114,45 @@ def create_version_for_document(
     Hash-Kette (``sha256``/``prev_hash``) füllt anschließend ``process_version``.
     """
     path = Path(file_path)
-    last_no = (
-        document.versions.order_by("-version_no")
-        .values_list("version_no", flat=True)
-        .first()
-        or 0
-    )
-    version = DocumentVersion.objects.create(
-        document=document,
-        version_no=last_no + 1,
-        file_path=str(path),
-        mime_type=mime,
-        size=size if size is not None else path.stat().st_size,
-        created_by=created_by,
-    )
-    document.current_version = version
-    document.save(update_fields=["current_version"])
+    size = size if size is not None else path.stat().st_size
+    with transaction.atomic():
+        # Zeilensperre auf das Dokument (P2, Race-Schutz): Ohne sie berechnen zwei
+        # gleichzeitige ``add_version``-Aufrufe für dasselbe Dokument dieselbe
+        # nächste ``version_no``; der zweite Insert kollidiert dann mit
+        # ``unique_together(document, version_no)`` (IntegrityError → 500). Mit der
+        # Sperre wird der zweite Aufruf serialisiert und liest die inzwischen
+        # erhöhte Nummer.
+        locked = Document.objects.select_for_update().get(pk=document.pk)
+        last_no = (
+            locked.versions.order_by("-version_no")
+            .values_list("version_no", flat=True)
+            .first()
+            or 0
+        )
+        version = DocumentVersion.objects.create(
+            document=locked,
+            version_no=last_no + 1,
+            file_path=str(path),
+            mime_type=mime,
+            size=size,
+            created_by=created_by,
+        )
+        locked.current_version = version
+        locked.save(update_fields=["current_version"])
 
-    AuditLogEntry.objects.create(
-        actor=created_by,
-        action="add_version",
-        object_type="Document",
-        object_id=str(document.id),
-        detail={
-            "filename": path.name,
-            "size": version.size,
-            "version_no": version.version_no,
-        },
-    )
+        AuditLogEntry.objects.create(
+            actor=created_by,
+            action="add_version",
+            object_type="Document",
+            object_id=str(locked.id),
+            detail={
+                "filename": path.name,
+                "size": version.size,
+                "version_no": version.version_no,
+            },
+        )
+    # Die übergebene Instanz auf den neuen Stand bringen (Aufrufer nutzt sie ggf.).
+    document.current_version = version
     return version
 
 
