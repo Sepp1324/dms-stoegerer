@@ -43,9 +43,18 @@ jobs:
           ref: ${{ github.event.inputs.git_sha || 'main' }}
 
       - name: Image-Tag bestimmen
+        # Der manuelle Input wird NICHT in Shell-Code interpoliert (Injection),
+        # sondern nur als Env-Variable übergeben und strikt validiert.
+        env:
+          INPUT_GIT_SHA: ${{ github.event.inputs.git_sha }}
         run: |
-          if [ -n "${{ github.event.inputs.git_sha }}" ]; then
-            TAG="${{ github.event.inputs.git_sha }}"
+          set -euo pipefail
+          if [ -n "${INPUT_GIT_SHA}" ]; then
+            if ! printf '%s' "${INPUT_GIT_SHA}" | grep -qE '^[A-Za-z0-9._/-]+$'; then
+              echo "FEHLER: Ungültiger git_sha-Input (nur [A-Za-z0-9._/-] erlaubt)."
+              exit 1
+            fi
+            TAG="${INPUT_GIT_SHA}"
           else
             TAG="$(git rev-parse --short HEAD)"
           fi
