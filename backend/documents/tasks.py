@@ -3,6 +3,7 @@ import hashlib
 import logging
 import os
 import shutil
+import stat
 import time
 from pathlib import Path
 
@@ -15,6 +16,29 @@ from .models import DocumentVersion
 from .owner import log_ingest_owner_audit, resolve_default_owner
 
 logger = logging.getLogger(__name__)
+
+
+def _consume_max_bytes() -> int:
+    return int(getattr(settings, "CONSUME_MAX_FILE_MB", 200)) * 1024 * 1024
+
+
+def _read_regular_nofollow(path: Path, max_bytes: int) -> bytes:
+    """Liest eine reguläre Datei symlink-sicher (Schutz gegen Symlink-Angriffe).
+
+    ``O_NOFOLLOW`` bricht ab, wenn ``path`` ein Symlink ist (TOCTOU-sicher: die
+    Prüfung geschieht beim Öffnen). Nach dem Öffnen wird per ``fstat`` erneut auf
+    „reguläre Datei" und Größe geprüft. Verhindert, dass ein schreibberechtigter
+    NFS-Nutzer via Link auf z. B. ``/proc/self/environ`` Worker-Secrets als
+    Dokument importiert.
+    """
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as fh:
+        st = os.fstat(fh.fileno())
+        if not stat.S_ISREG(st.st_mode):
+            raise OSError("Keine reguläre Datei.")
+        if st.st_size > max_bytes:
+            raise OSError(f"Datei zu groß ({st.st_size} Bytes > {max_bytes}).")
+        return fh.read(max_bytes + 1)[:max_bytes]
 
 
 @shared_task
@@ -338,24 +362,58 @@ def _ingest_consume_dir(
     skipped = 0
     failed = 0
     deduped = 0
+    max_bytes = _consume_max_bytes()
     for entry in sorted(base.iterdir()):
-        if entry.is_dir() or entry.name.startswith("."):
+        if entry.name.startswith("."):
             continue
 
-        # Reife-Check: zu junge (noch nicht fertig geschriebene) Dateien
-        # überspringen. ``stat`` kann fehlschlagen, wenn die Datei zwischen
-        # ``iterdir`` und hier verschwindet – dann ebenfalls überspringen.
+        # Sicherheit (P0): NIE Symlinks dereferenzieren. ``lstat`` folgt dem Link
+        # nicht; ein Symlink im Eingang (z. B. auf /proc/self/environ) wird
+        # verworfen – dabei wird nur der Link selbst entfernt, nie das Ziel
+        # gelesen/kopiert. Nur echte reguläre Dateien werden aufgenommen.
         try:
-            age = now - entry.stat().st_mtime
+            st = os.lstat(entry)
         except OSError:
             skipped += 1
             continue
-        if age < min_age:
+        if stat.S_ISLNK(st.st_mode):
+            logger.warning(
+                "scan_consume_folder: Symlink im Eingang verworfen (Sicherheits-Schutz): %s",
+                entry,
+            )
+            try:
+                entry.unlink()  # entfernt NUR den Link, nie das Ziel
+            except OSError:
+                pass
+            skipped += 1
+            continue
+        if stat.S_ISDIR(st.st_mode):
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            logger.warning(
+                "scan_consume_folder: Nicht-reguläre Datei übersprungen: %s", entry
+            )
             skipped += 1
             continue
 
+        # Reife-Check: zu junge (noch nicht fertig geschriebene) Dateien
+        # überspringen (mtime aus dem lstat oben, kein zweiter, dereferenzierender
+        # stat-Aufruf).
+        if now - st.st_mtime < min_age:
+            skipped += 1
+            continue
+        if st.st_size > max_bytes:
+            logger.warning(
+                "scan_consume_folder: Datei zu groß (%d Bytes) – nach _failed/: %s",
+                st.st_size,
+                entry,
+            )
+            _move_into(entry, failed_dir)
+            failed += 1
+            continue
+
         try:
-            data = entry.read_bytes()
+            data = _read_regular_nofollow(entry, max_bytes)
 
             # Dedup-Schutz (STOAA-408): Ein Inhalt, dessen SHA-256 bereits als
             # Version existiert, wird NICHT erneut als Dokument angelegt. Das
