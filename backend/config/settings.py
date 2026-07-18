@@ -180,6 +180,10 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 BACKUP_ALERT_AFTER_HOURS = float(os.getenv("BACKUP_ALERT_AFTER_HOURS", "36"))
 OCR_ALERT_SUCCESS_RATE = float(os.getenv("OCR_ALERT_SUCCESS_RATE", "95"))
 PROCESSING_STUCK_AFTER_MINUTES = float(os.getenv("PROCESSING_STUCK_AFTER_MINUTES", "30"))
+# Kurzes Caching des Qualitätscenters (#6): Das Center scored bei jedem Aufruf
+# alle sichtbaren Dokumente in Python. Das Ergebnis muss nur Sekunden frisch
+# sein; 0 schaltet das Caching ab.
+QUALITY_STATUS_CACHE_TTL = int(os.getenv("QUALITY_STATUS_CACHE_TTL", "60"))
 
 # --- Cache ---
 # DRF-Throttling (siehe unten) speichert seine Zähler im Django-Cache. Ohne
