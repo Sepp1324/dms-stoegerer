@@ -15,7 +15,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import connection, transaction
 from django.db.models import Case, DecimalField, F, Q, Value, When
-from django.db.models import Count, IntegerField, Max, OuterRef, Subquery
+from django.db.models import Count, IntegerField, Max, OuterRef, Prefetch, Subquery
 from django.db.models.functions import Coalesce
 from django.db.models.functions import Cast
 from django.http import (
@@ -2107,6 +2107,52 @@ class DocumentViewSet(viewsets.ModelViewSet):
             "status", "-score", "-created_at"
         )
         return Response(CaseFileCandidateSerializer(candidates, many=True).data)
+
+    @action(detail=False, methods=["get"], url_path="inbox-candidates")
+    def inbox_candidates(self, request):
+        """Batch (#1): Extraction- + Case-Kandidaten mehrerer Dokumente in EINEM
+        Request. Ersetzt den Pro-Dokument-Request-Storm der Smart-Inbox
+        (früher 2 Requests je Dokument). Owner-Scope über ``get_queryset``.
+
+        ``?ids=1,2,3`` → ``{"1": {"extraction": [...], "cases": [...]}, ...}``.
+        Per ``Prefetch`` gilt exakt dieselbe Sortierung wie in den Einzel-
+        Endpunkten, und die gesamte Antwort kostet nur ~3 Queries statt 2·N.
+        """
+        raw = request.query_params.get("ids", "")
+        ids = [int(x) for x in raw.split(",") if x.strip().isdigit()][:200]
+        if not ids:
+            return Response({})
+
+        documents = (
+            self.get_queryset()
+            .filter(pk__in=ids)
+            .prefetch_related(
+                Prefetch(
+                    "extraction_candidates",
+                    queryset=ExtractionCandidate.objects.order_by(
+                        "status", "field", "-confidence", "source_page"
+                    ),
+                ),
+                Prefetch(
+                    "case_file_candidates",
+                    queryset=CaseFileCandidate.objects.select_related(
+                        "case_file"
+                    ).order_by("status", "-score", "-created_at"),
+                ),
+            )
+        )
+
+        result: dict[str, dict] = {}
+        for document in documents:
+            result[str(document.id)] = {
+                "extraction": ExtractionCandidateSerializer(
+                    document.extraction_candidates.all(), many=True
+                ).data,
+                "cases": CaseFileCandidateSerializer(
+                    document.case_file_candidates.all(), many=True
+                ).data,
+            }
+        return Response(result)
 
     def _get_case_candidate(self, document, candidate_id):
         candidate = (
