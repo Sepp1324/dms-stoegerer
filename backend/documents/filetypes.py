@@ -104,9 +104,20 @@ def detect(header: bytes) -> FileType | None:
 _SAFE_INLINE_EXACT = {t.mime for t in (PDF, JPEG, PNG, GIF, TIFF, BMP, WEBP, HEIC)}
 
 
+# Bild-MIMEs, die trotz ``image/``-Präfix NICHT inline sicher sind: SVG ist
+# XML/aktiv (kann <script> enthalten) und würde im DMS-Origin ausgeführt.
+_UNSAFE_IMAGE_MIMES = {"image/svg+xml", "image/svg"}
+
+
 def is_safe_inline(mime: str | None) -> bool:
-    """True, wenn ``mime`` gefahrlos inline (``as_attachment=False``) taugt."""
+    """True, wenn ``mime`` gefahrlos inline (``as_attachment=False``) taugt.
+
+    Exakte Allowlist (PDF + Raster-Bilder) plus generisches ``image/*`` – aber
+    SVG ist bewusst ausgeschlossen (aktives XML, kein passives Bild).
+    """
     if not mime:
         return False
     m = mime.split(";", 1)[0].strip().lower()
+    if m in _UNSAFE_IMAGE_MIMES:
+        return False
     return m in _SAFE_INLINE_EXACT or m.startswith("image/")
