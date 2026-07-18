@@ -23,10 +23,13 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
-              # nginx muss auf den privilegierten Port 80 binden → NET_BIND_SERVICE
-              # bleibt, alles andere fällt weg.
+              # Gehärteter, aber lauffähiger nginx-Cap-Satz: der Entrypoint läuft
+              # als root und chownt die Cache-/Temp-Dirs (CHOWN) und startet die
+              # Worker als nginx-User (SETUID/SETGID); der Master bindet Port 80
+              # (NET_BIND_SERVICE). Ohne CHOWN scheiterte der Start an
+              # chown("/var/cache/nginx/client_temp") -> CrashLoopBackOff.
               drop: ["ALL"]
-              add: ["NET_BIND_SERVICE"]
+              add: ["CHOWN", "SETGID", "SETUID", "NET_BIND_SERVICE"]
           resources:
             requests: {cpu: "50m", memory: "64Mi"}
             limits: {cpu: "250m", memory: "256Mi"}
