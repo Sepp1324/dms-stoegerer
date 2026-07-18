@@ -529,6 +529,7 @@ def process_version(version: DocumentVersion) -> dict:
     _sync_contract_center(version, result, actor=version.created_by)
     _sync_entity_graph(version, result, actor=version.created_by)
     _sync_semantic_index(version, result, actor=version.created_by)
+    _sync_search_vector(version)
     _sync_auto_file(version, result, actor=version.created_by)
     try:
         from documents.services import review_tasks
@@ -576,6 +577,7 @@ def retry_version(version: DocumentVersion, actor=None) -> dict:
     _sync_contract_center(version, result, actor=actor or version.created_by)
     _sync_entity_graph(version, result, actor=actor or version.created_by)
     _sync_semantic_index(version, result, actor=actor or version.created_by)
+    _sync_search_vector(version)
     _sync_auto_file(version, result, actor=actor or version.created_by)
     try:
         from documents.services import review_tasks
@@ -586,6 +588,21 @@ def retry_version(version: DocumentVersion, actor=None) -> dict:
     except Exception:  # noqa: BLE001 - Review-Tasks dürfen Retry nicht kippen
         logger.exception("Review-Task-Sync für Retry-Version %s fehlgeschlagen", version.id)
     return result
+
+
+def _sync_search_vector(version: DocumentVersion) -> None:
+    """Aktualisiert den materialisierten Suchvektor nach der Verarbeitung.
+
+    Nötig, weil die Pipeline die VERSION (ocr_text) schreibt, nicht zwingend das
+    Dokument – das post_save-Dokumentsignal würde den frischen OCR-Text sonst
+    verpassen. Best-effort: darf die Verarbeitung nie kippen.
+    """
+    try:
+        from documents.services.search_vector import update_search_vector_by_id
+
+        update_search_vector_by_id(version.document_id)
+    except Exception:  # noqa: BLE001 - Vektor-Pflege darf Verarbeitung nicht kippen
+        logger.exception("Suchvektor-Sync für Version %s fehlgeschlagen", version.id)
 
 
 def _sync_contract_center(version: DocumentVersion, result: dict, *, actor=None) -> None:

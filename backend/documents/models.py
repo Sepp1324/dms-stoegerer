@@ -10,6 +10,8 @@ import hashlib
 import os
 
 from django.conf import settings
+from django.contrib.postgres.indexes import GinIndex
+from django.contrib.postgres.search import SearchVectorField
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import Q
@@ -489,10 +491,19 @@ class Document(models.Model):
         unique=True, null=True, blank=True, editable=False, db_index=True
     )
 
+    # Materialisierter Volltext-Suchvektor (P2/Perf). Gepflegt über
+    # ``documents.services.search_vector`` (Signal bei save/Tags + Pipeline-Hook
+    # nach OCR) und einen Backfill-Command. Der GIN-Index macht die Suche
+    # indexgestützt statt den Vektor je Anfrage über Join-Tabellen neu zu bauen.
+    search_vector = SearchVectorField(null=True, editable=False)
+
     class Meta:
         verbose_name = "Dokument"
         verbose_name_plural = "Dokumente"
         ordering = ["-added_at"]
+        indexes = [
+            GinIndex(fields=["search_vector"], name="documents_search_vector_gin"),
+        ]
 
     def __str__(self) -> str:
         return self.title
