@@ -19,6 +19,9 @@ spec:
       securityContext:
         seccompProfile:
           type: RuntimeDefault
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
       containers:
         - name: beat
           image: registry.stoegerer-home.at/dms-backend:0.1.0
@@ -35,6 +38,9 @@ spec:
             - info
             - --schedule
             - /tmp/celerybeat-schedule
+          env:
+            - name: HOME
+              value: /tmp
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
