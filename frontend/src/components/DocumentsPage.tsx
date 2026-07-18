@@ -2812,18 +2812,15 @@ function DocumentCard({
   }, [doc.id]);
 
   return (
+    // a11y (#10): Die Karte ist ein Container (KEIN role="button") – ein Button
+    // darf keine interaktiven Kinder (Checkbox, „Öffnen") enthalten. Die
+    // Primäraktion „Vorschau" trägt der echte Titel-Button unten (tastaturfähig);
+    // der onClick hier bleibt reine Maus-Bequemlichkeit für Klicks auf leere
+    // Kartenflächen (interaktive Kinder stoppen die Propagation).
     <article
       className={`doc-card doc-card--${mode}${selected ? " doc-card--selected" : ""}${previewed ? " doc-card--previewed" : ""}`}
       draggable
-      role="button"
-      tabIndex={0}
       onClick={onPreview}
-      onKeyDown={(event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          onPreview();
-        }
-      }}
       onDragStart={(event) => {
         event.dataTransfer.effectAllowed = "move";
         event.dataTransfer.setData("application/x-dms-document-id", String(doc.id));
@@ -2841,6 +2838,7 @@ function DocumentCard({
         <input
           type="checkbox"
           checked={selected}
+          aria-label={`${doc.title} auswählen`}
           onChange={(event) => onSelectedChange(event.target.checked)}
         />
       </label>
@@ -2863,7 +2861,19 @@ function DocumentCard({
           )}
         </div>
         <div className="doc-card__body">
-          <h3 className="doc-card__title">{doc.title}</h3>
+          <h3 className="doc-card__title">
+            {/* Echter, tastaturfokussierbarer Vorschau-Button (a11y #10). */}
+            <button
+              type="button"
+              className="doc-card__title-btn"
+              onClick={(event) => {
+                event.stopPropagation();
+                onPreview();
+              }}
+            >
+              {doc.title}
+            </button>
+          </h3>
           <p className="doc-card__meta">
             {doc.correspondent_name ?? "Unbekannt"}
             {doc.document_type_name ? ` · ${doc.document_type_name}` : ""}
