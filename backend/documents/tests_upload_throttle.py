@@ -1,18 +1,24 @@
 """Tests: Upload-Endpunkte sind rate-limitiert (P1, DoS-Schutz)."""
 from __future__ import annotations
 
+from unittest import mock
+
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
-from django.test import TestCase, override_settings
+from django.test import TestCase
 from django.urls import reverse
 from rest_framework.test import APIClient
 
-# Enge Rate nur für den Test; die Drossel-KLASSEN hängen fest an den Views,
-# nur die Rate kommt aus den Settings.
-THROTTLED = {"DEFAULT_THROTTLE_RATES": {"upload": "2/min", "capture": "2/min"}}
+from .throttling import UploadRateThrottle
+
+# Enge Rate nur für den Test. Bewusst NICHT über override_settings(REST_FRAMEWORK):
+# SimpleRateThrottle.THROTTLE_RATES ist ein beim Import gebundenes Klassenattribut
+# (Referenz aufs api_settings-Dict) – override_settings erzeugt ein neues Dict,
+# das die Drossel nie sieht. patch.dict mutiert genau das gelesene Dict.
+LOW_RATES = {"upload": "2/min", "capture": "2/min"}
 
 
-@override_settings(REST_FRAMEWORK=THROTTLED)
+@mock.patch.dict(UploadRateThrottle.THROTTLE_RATES, LOW_RATES)
 class UploadThrottleTests(TestCase):
     def setUp(self):
         cache.clear()  # Zähler zwischen Tests isolieren (LocMemCache ist prozessweit)
