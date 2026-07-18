@@ -190,6 +190,18 @@ def ingest_message(account, raw_bytes: bytes) -> int | None:
         or ""
     )
 
+    # Owner-Auflösung (STOAA-295) EINMAL pro Konto – konstant über alle Anhänge:
+    # Konto-Owner hat Vorrang. Ist er leer, greift der konfigurierte
+    # ``MAIL_DEFAULT_OWNER``, sonst wären die Dokumente für Nicht-Admins durch die
+    # Owner-Isolation (STOAA-7) unsichtbar. Bleibt owner=None, ist das bewusstes
+    # Admin-Triage (siehe MailAccount-Docstring). Vorgezogen, weil auch der
+    # owner-scoped Hash-Dedup (P1) den Eigentümer schon braucht.
+    owner = account.owner
+    fallback_used = False
+    if owner is None:
+        owner = resolve_default_owner(getattr(settings, "MAIL_DEFAULT_OWNER", ""))
+        fallback_used = owner is not None
+
     attachment_count = 0
     imported = 0
     attachment_names: list[str] = []
@@ -198,7 +210,9 @@ def ingest_message(account, raw_bytes: bytes) -> int | None:
         attachment_count += 1
         attachment_names.append(filename)
         sha = hashlib.sha256(payload).hexdigest()
-        if pipeline.find_duplicate_version(sha):
+        # Owner-scoped (P1): nur gegen Dokumente DIESES Owners deduplizieren,
+        # sonst unterdrückt der identische Anhang eines anderen Nutzers den Import.
+        if pipeline.find_duplicate_version(sha, owner=owner):
             logger.info("Anhang %s bereits vorhanden (Hash-Dedup) – übersprungen", filename)
             continue
         try:
@@ -211,16 +225,6 @@ def ingest_message(account, raw_bytes: bytes) -> int | None:
             )
             continue
         title = filename.rsplit(".", 1)[0] if "." in filename else filename
-        # Owner-Auflösung (STOAA-295): Konto-Owner hat Vorrang. Ist er leer,
-        # greift der konfigurierte ``MAIL_DEFAULT_OWNER``, sonst wären die
-        # Dokumente für Nicht-Admins durch die Owner-Isolation (STOAA-7)
-        # unsichtbar. Bleibt owner=None, ist das bewusstes Admin-Triage (siehe
-        # MailAccount-Docstring) – ``log_ingest_owner_audit`` macht das explizit.
-        owner = account.owner
-        fallback_used = False
-        if owner is None:
-            owner = resolve_default_owner(getattr(settings, "MAIL_DEFAULT_OWNER", ""))
-            fallback_used = owner is not None
         document, version = pipeline.create_document_from_file(
             str(path),
             title=title or subject or "E-Mail-Anhang",
