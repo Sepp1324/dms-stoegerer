@@ -8,7 +8,8 @@ import {
   type DragEvent,
   type ReactNode,
 } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
+import { buildFilterParams } from "../filterParams";
 import { DEFAULT_VIEW, pathToView, viewToPath } from "../viewRoutes";
 import {
   autoFileBatch,
@@ -192,23 +193,44 @@ function OverflowMenu({
 }
 
 export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
-  const [q, setQ] = useState("");
+  // Filter-Deep-Link (#7, Stage 2): Die Listen-Filter werden EINMALIG aus der URL
+  // initialisiert (Lazy-Init, kein Flash) und – nur auf der Dokumente-Liste –
+  // per Effekt in die Query zurückgeschrieben. So sind gefilterte Listen teil-
+  // und bookmarkbar (?q=…&folder=…). Beim Mount gelesen; danach ist der State
+  // führend und schreibt in die URL.
+  const _urlFilters = new URLSearchParams(window.location.search);
+  const _numFilter = (key: string): number | "" => {
+    const v = _urlFilters.get(key);
+    return v && /^\d+$/.test(v) ? Number(v) : "";
+  };
+  const [q, setQ] = useState(() => _urlFilters.get("q") ?? "");
   const [semanticOpen, setSemanticOpen] = useState(false);
   const [dupReportOpen, setDupReportOpen] = useState(false);
   const [autoFileBusy, setAutoFileBusy] = useState(false);
   const [autoFileNote, setAutoFileNote] = useState<string | null>(null);
-  const [correspondent, setCorrespondent] = useState<number | "">("");
-  const [documentType, setDocumentType] = useState<number | "">("");
-  const [tag, setTag] = useState<number | "">("");
+  const [correspondent, setCorrespondent] = useState<number | "">(() =>
+    _numFilter("correspondent"),
+  );
+  const [documentType, setDocumentType] = useState<number | "">(() =>
+    _numFilter("document_type"),
+  );
+  const [tag, setTag] = useState<number | "">(() => _numFilter("tag"));
   // Speicherpfad-Filter (STOAA-50). Bis der Backend-Query-Param gemergt ist,
   // bleibt der Speicherpfad-Abschnitt in der Sidebar ausgegraut (no-op).
-  const [storagePath, setStoragePath] = useState<number | "">("");
-  const [folder, setFolder] = useState<FolderFilterValue>("");
+  const [storagePath, setStoragePath] = useState<number | "">(() =>
+    _numFilter("storage_path"),
+  );
+  const [folder, setFolder] = useState<FolderFilterValue>(() => {
+    const v = _urlFilters.get("folder");
+    if (v === "none") return "none";
+    if (v && /^\d+$/.test(v)) return Number(v);
+    return "";
+  });
   // Verarbeitungsstatus-Filter (STOAA-249): leer = kein Filter, sonst UI-Bucket.
   const [processingState, setProcessingState] = useState<ProcessingStateFilter | "">("");
   const [sharedScope, setSharedScope] = useState<"" | "with-me" | "by-me">("");
   // Sortierung; "" = Backend-Standard (FTS-Relevanz bei Suche, sonst Datum neu→alt).
-  const [ordering, setOrdering] = useState("");
+  const [ordering, setOrdering] = useState(() => _urlFilters.get("ordering") ?? "");
   // Triage-Ansicht (STOAA-296): zeigt owner-lose Dokumente (?owner=none). Nur für
   // Admins sichtbar/aktivierbar; lädt die Nutzerliste erst bei Bedarf.
   const [triage, setTriage] = useState(false);
@@ -243,7 +265,10 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
   const [count, setCount] = useState(0);
   // Aktuelle Seite (1-basiert, wie das DRF-`page`-Query). Jede Filter-/Such-
   // änderung setzt zurück auf 1 (siehe onSearchChange & Co.).
-  const [page, setPage] = useState(1);
+  const [page, setPage] = useState(() => {
+    const v = _urlFilters.get("page");
+    return v && /^\d+$/.test(v) ? Number(v) : 1;
+  });
   // Ob es eine nächste/vorige Seite gibt – direkt aus der API-Antwort, damit die
   // Rand-Buttons auch ohne PAGE_SIZE-Annahme korrekt deaktiviert werden.
   const [hasNext, setHasNext] = useState(false);
@@ -279,6 +304,30 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
       routerNavigate(`/dokument/${id}`);
     }
   };
+  const [, setSearchParams] = useSearchParams();
+
+  // Filter → URL zurückschreiben (#7, Stage 2). NUR auf der Dokumente-Liste, damit
+  // andere Views (und die /dokument/:id-Route) keine Filter-Query erben. `replace`
+  // vermeidet History-Spam beim Tippen; der Diff-Check verhindert Redundanz-Renders.
+  useEffect(() => {
+    if (view !== "docs") return;
+    const params = buildFilterParams({
+      q,
+      correspondent,
+      documentType,
+      tag,
+      storagePath,
+      folder,
+      ordering,
+      page,
+    });
+    const next = params.toString();
+    if (next !== window.location.search.replace(/^\?/, "")) {
+      setSearchParams(params, { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, q, correspondent, documentType, tag, storagePath, folder, ordering, page]);
+
   const [selectedPage, setSelectedPage] = useState<number | null>(null);
   const [previewId, setPreviewId] = useState<number | null>(null);
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>(() => {
