@@ -36,12 +36,21 @@ spec:
       # Start sicher (idempotent, non-recursive – nur der Mount-Punkt selbst; die
       # pgdata-Inhalte heilt der postgres-Entrypoint als root selbst). Verhindert
       # einen erneuten Crash-Loop bei künftigen Image-/uid-Wechseln.
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       initContainers:
         - name: fix-pgdata-perms
           # Gleiches Image wie der Hauptcontainer -> kein zusätzlicher Pull (bereits
           # auf den Nodes vorhanden); läuft standardmäßig als root (uid 0).
           image: pgvector/pgvector:pg16
           command: ["sh", "-c", "chown 999:999 /var/lib/postgresql/data"]
+          # Kein cap-drop: der chown braucht CHOWN als root. Nur no-priv-escalation.
+          securityContext:
+            allowPrivilegeEscalation: false
+          resources:
+            requests: {cpu: "50m", memory: "64Mi"}
+            limits: {cpu: "250m", memory: "128Mi"}
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data
@@ -51,6 +60,14 @@ spec:
           # Suche. Datenformat identisch zu postgres:16 – bestehendes PVC bleibt
           # kompatibel (gleiche PG-Major-Version).
           image: pgvector/pgvector:pg16
+          # Der postgres-Entrypoint läuft als root (chown + gosu -> uid 999);
+          # daher hier KEIN drop:[ALL] (bräuchte SETUID/SETGID/CHOWN). Volles
+          # non-root (runAsUser/fsGroup) folgt separat. Nur no-priv-escalation.
+          securityContext:
+            allowPrivilegeEscalation: false
+          resources:
+            requests: {cpu: "250m", memory: "512Mi"}
+            limits: {cpu: "2", memory: "2Gi"}
           envFrom:
             - configMapRef:
                 name: dms-config

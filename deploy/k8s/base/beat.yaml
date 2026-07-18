@@ -16,6 +16,9 @@ spec:
       labels:
         app: beat
     spec:
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: beat
           image: registry.stoegerer-home.at/dms-backend:0.1.0
@@ -32,6 +35,13 @@ spec:
             - info
             - --schedule
             - /tmp/celerybeat-schedule
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests: {cpu: "50m", memory: "128Mi"}
+            limits: {cpu: "250m", memory: "256Mi"}
           envFrom:
             - configMapRef:
                 name: dms-config

@@ -26,6 +26,9 @@ spec:
       # Worker + Backend teilen die RWO-PVC dms-data → müssen auf denselben Node.
       # (Ohne local-path gibt es keine automatische Node-Bindung; wir erzwingen
       #  Co-Location. Alternative: RWX-Storage, dann kann diese Affinität weg.)
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       affinity:
         podAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -38,6 +41,16 @@ spec:
           image: registry.stoegerer-home.at/dms-backend:0.1.0
           imagePullPolicy: IfNotPresent
           command: ["celery", "-A", "config", "worker", "-l", "info"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          # OCR (Tesseract/Ghostscript) + e5-Embeddings (ONNX) sind speicherhungrig
+          # und spitzen; das Limit ist bewusst weit gefasst (OOMKill-Schutz mitten
+          # in der Pipeline). Bei Bedarf nach oben tunen.
+          resources:
+            requests: {cpu: "250m", memory: "768Mi"}
+            limits: {cpu: "2", memory: "4Gi"}
           envFrom:
             - configMapRef:
                 name: dms-config

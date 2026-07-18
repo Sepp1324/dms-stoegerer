@@ -28,12 +28,23 @@ spec:
       labels:
         app: backend
     spec:
+      # Pod-weite Härtung (P2): Default-seccomp-Profil.
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       # Migrationen einmalig vor dem Start des Web-Prozesses.
       initContainers:
         - name: migrate
           image: registry.stoegerer-home.at/dms-backend:0.1.0
           imagePullPolicy: IfNotPresent
           command: ["python", "manage.py", "migrate", "--noinput"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests: {cpu: "50m", memory: "256Mi"}
+            limits: {cpu: "1", memory: "1Gi"}
           envFrom:
             - configMapRef:
                 name: dms-config
@@ -50,6 +61,13 @@ spec:
             - 0.0.0.0:8000
             - --workers
             - "3"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests: {cpu: "250m", memory: "384Mi"}
+            limits: {cpu: "2", memory: "1Gi"}
           envFrom:
             - configMapRef:
                 name: dms-config
