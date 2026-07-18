@@ -201,7 +201,15 @@ def ingest_message(account, raw_bytes: bytes) -> int | None:
         if pipeline.find_duplicate_version(sha):
             logger.info("Anhang %s bereits vorhanden (Hash-Dedup) – übersprungen", filename)
             continue
-        path = storage.save_bytes(payload, _ext_of(filename))
+        try:
+            path = storage.save_bytes(payload, _ext_of(filename))
+        except storage.UnsupportedFileType as exc:
+            # Sicherheit (P0-2): Anhänge außerhalb der Allowlist (z. B. HTML)
+            # werden nicht abgelegt – der übrige Abruf läuft weiter.
+            logger.warning(
+                "Anhang %s abgewiesen (Typ nicht erlaubt): %s", filename, exc
+            )
+            continue
         title = filename.rsplit(".", 1)[0] if "." in filename else filename
         # Owner-Auflösung (STOAA-295): Konto-Owner hat Vorrang. Ist er leer,
         # greift der konfigurierte ``MAIL_DEFAULT_OWNER``, sonst wären die

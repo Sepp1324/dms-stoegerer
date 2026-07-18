@@ -15,7 +15,17 @@ export function DetailPreview({
       {pdfError && <p className="status status--warn">Vorschau: {pdfError}</p>}
       {!pdfError && !pdfUrl && <p className="muted">Lade Vorschau …</p>}
       {pdfUrl && (
-        <iframe className="pdf-frame" src={pdfUrl} title={`Vorschau: ${title}`} />
+        // Sicherheit (P0-2): `sandbox` OHNE allow-scripts/allow-same-origin
+        // erzwingt einen opaken Origin ohne Skriptausführung – eine (theoretisch
+        // durchgerutschte) HTML/SVG-Datei kann so nicht auf localStorage/Cookies
+        // des DMS zugreifen. PDFs rendern der native Viewer bzw. pdf.js trotzdem;
+        // allow-downloads erhält den Speichern-Button.
+        <iframe
+          className="pdf-frame"
+          src={pdfUrl}
+          title={`Vorschau: ${title}`}
+          sandbox="allow-downloads"
+        />
       )}
     </section>
   );

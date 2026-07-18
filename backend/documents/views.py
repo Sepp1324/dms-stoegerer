@@ -57,6 +57,7 @@ class IsDmsAdmin(BasePermission):
         return bool(getattr(request.user, "is_dms_admin", False))
 
 from . import classification, pipeline, storage
+from .filetypes import UnsupportedFileType, is_safe_inline
 from .services import version_compare
 from .models import (
     AuditLogEntry,
@@ -1050,7 +1051,13 @@ class DocumentUploadView(APIView):
             )
 
         title = request.data.get("title") or uploaded.name.rsplit(".", 1)[0]
-        file_path, size, mime = storage.save_upload(uploaded)
+        try:
+            file_path, size, mime = storage.save_upload(uploaded)
+        except UnsupportedFileType as exc:
+            return Response(
+                {"detail": str(exc)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         document, version = pipeline.create_document_from_file(
             file_path, title=title, owner=request.user, mime=mime, size=size
@@ -1196,6 +1203,22 @@ class MobileCaptureUploadView(APIView):
         )
 
 
+def _harden_file_response(response):
+    """Setzt Schutz-Header gegen Stored XSS auf einer Datei-Antwort (P0-2).
+
+    * ``X-Content-Type-Options: nosniff`` – der Browser darf den deklarierten
+      ``Content-Type`` nicht überstimmen (kein „HTML-Sniffing" einer als Bild
+      deklarierten Datei).
+    * ``Content-Security-Policy: sandbox`` – die ausgelieferte Datei wird in
+      einen opaken Origin ohne Skriptausführung gezwungen; selbst wenn HTML/SVG
+      durchrutschte, kann es nicht auf ``localStorage``/Cookies des DMS-Origins
+      zugreifen.
+    """
+    response["X-Content-Type-Options"] = "nosniff"
+    response["Content-Security-Policy"] = "sandbox"
+    return response
+
+
 def _serve_version_preview(version):
     """Liefert das Archiv-PDF (Original als Fallback) einer Version inline.
 
@@ -1203,6 +1226,10 @@ def _serve_version_preview(version):
     keine Traversal-Gefahr. Gemeinsam genutzt von ``DocumentViewSet.preview``
     und den Freigabe-Abrufrouten (STOAA-191), damit beide Pfade identisch
     liefern.
+
+    Sicherheit (P0-2): Nur gefahrlos inline-fähige Typen (PDF/Bilder) werden
+    ``inline`` ausgeliefert; alles andere erzwingt einen Download
+    (``as_attachment=True``). Zusätzlich greifen nosniff + CSP-``sandbox``.
     """
     path = version.archive_path or version.file_path
     if not path or not os.path.exists(path):
@@ -1212,8 +1239,13 @@ def _serve_version_preview(version):
         if version.archive_path
         else (version.mime_type or "application/octet-stream")
     )
-    # as_attachment=False → inline anzeigen (PDF-Vorschau im Browser)
-    return FileResponse(open(path, "rb"), content_type=content_type)
+    inline = is_safe_inline(content_type)
+    response = FileResponse(
+        open(path, "rb"),
+        content_type=content_type,
+        as_attachment=not inline,
+    )
+    return _harden_file_response(response)
 
 
 def _serve_version_download(document, version):
@@ -1227,12 +1259,13 @@ def _serve_version_download(document, version):
     if not path or not os.path.exists(path):
         raise Http404("Datei nicht gefunden.")
     filename = f"{document.title}-v{version.version_no}{os.path.splitext(path)[1]}"
-    return FileResponse(
+    response = FileResponse(
         open(path, "rb"),
         as_attachment=True,
         filename=filename,
         content_type=version.mime_type or "application/octet-stream",
     )
+    return _harden_file_response(response)
 
 
 class DocumentViewSet(viewsets.ModelViewSet):
@@ -1777,7 +1810,13 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        file_path, size, mime = storage.save_upload(uploaded)
+        try:
+            file_path, size, mime = storage.save_upload(uploaded)
+        except UnsupportedFileType as exc:
+            return Response(
+                {"detail": str(exc)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         version = pipeline.create_version_for_document(
             document, file_path, created_by=request.user, mime=mime, size=size
         )
