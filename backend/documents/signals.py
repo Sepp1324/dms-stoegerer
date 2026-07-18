@@ -9,12 +9,73 @@ from __future__ import annotations
 import logging
 
 from django.conf import settings
-from django.db.models.signals import m2m_changed
+from django.db.models.signals import m2m_changed, post_save
 from django.dispatch import receiver
 
 from .models import Document
 
 logger = logging.getLogger(__name__)
+
+
+def _refresh_search_vector(document_id: int) -> None:
+    """Suchvektor eines Dokuments neu schreiben – Fehler dürfen nie durchschlagen."""
+    from .services.search_vector import update_search_vector_by_id
+
+    try:
+        update_search_vector_by_id(document_id)
+    except Exception as exc:  # noqa: BLE001 – Vektor-Pflege darf save/Tagging nie brechen
+        logger.warning("Suchvektor-Update fehlgeschlagen (doc %s): %s", document_id, exc)
+
+
+# Felder, die in den Suchvektor einfließen (siehe services/search_vector.py).
+# Ein gezielter ``save(update_fields=…)`` ohne eines dieser Felder muss den
+# Vektor nicht neu schreiben – das spart Queries und vermeidet unnötige
+# Schreiblast bei reinen Status-Updates der Pipeline.
+_VECTOR_FIELDS = frozenset(
+    {
+        "title",
+        "correspondent",
+        "document_type",
+        "mail_subject",
+        "mail_sender",
+        "note",
+        "current_version",
+    }
+)
+
+
+@receiver(post_save, sender=Document)
+def on_document_saved_refresh_vector(
+    sender, instance, created=False, update_fields=None, **kwargs
+):
+    """Hält den materialisierten Suchvektor bei relevanten Änderungen aktuell.
+
+    Der Service nutzt ``.filter().update()`` → löst KEIN post_save aus, daher
+    keine Rekursion. (Der OCR-Text kommt zusätzlich über den Pipeline-Hook, da
+    dieser die Version, nicht zwingend das Dokument, speichert.)
+    """
+    if (
+        not created
+        and update_fields is not None
+        and not (_VECTOR_FIELDS & set(update_fields))
+    ):
+        return
+    _refresh_search_vector(instance.pk)
+
+
+@receiver(m2m_changed, sender=Document.tags.through)
+def on_document_tags_changed_refresh_vector(
+    sender, instance, action, pk_set, reverse, model, **kwargs
+):
+    """Aktualisiert den Suchvektor, wenn sich die Tags eines Dokuments ändern."""
+    if action not in ("post_add", "post_remove", "post_clear"):
+        return
+    if reverse:
+        # instance = Tag; betroffene Dokumente stehen in pk_set (bei clear leer).
+        for document_id in pk_set or ():
+            _refresh_search_vector(document_id)
+    else:
+        _refresh_search_vector(instance.pk)
 
 
 def _trigger_tag() -> str:
