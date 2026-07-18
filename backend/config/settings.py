@@ -130,9 +130,11 @@ CONSUME_FOLDER_PATH = os.getenv("CONSUME_FOLDER_PATH", "")
 # mindestens so viele Sekunden vergangen sind. Verhindert Teil-Reads langsam
 # über NFS geschriebener Scans; zu junge Dateien holt der nächste Scan.
 CONSUME_MIN_AGE = float(os.getenv("CONSUME_MIN_AGE", "15"))
-# Obergrenze pro Consume-Datei (DoS-/Speicher-Schutz). Zu große Dateien werden
-# nach _failed/ verschoben statt eingelesen.
-CONSUME_MAX_FILE_MB = int(os.getenv("CONSUME_MAX_FILE_MB", "200"))
+# Obergrenze pro hochgeladener Datei (P0-2/DoS-Schutz). Greift in
+# ``storage.save_upload``/``save_bytes`` – größere Uploads werden mit 400
+# abgewiesen, bevor die Platte vollläuft. Neue Env-Var: Backend-Deployment-Env
+# ggf. anpassen – KEINE Migration.
+UPLOAD_MAX_FILE_MB = int(os.getenv("UPLOAD_MAX_FILE_MB", "200"))
 # Pro-User-Attribution des Consume-Ingest. Ist das Flag aktiv, iteriert
 # ``scan_consume_folder`` die Top-Level-Unterordner von ``CONSUME_DIR``: der
 # Ordnername ist der Username, alle darin reifen Dateien werden dem passenden

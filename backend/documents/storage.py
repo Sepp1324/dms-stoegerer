@@ -9,13 +9,30 @@ Zwei Bereiche unterhalb von ``DMS_DATA_DIR`` (siehe Settings):
 """
 from __future__ import annotations
 
-import mimetypes
 import uuid
 from pathlib import Path
 
 from django.conf import settings
 from django.utils import timezone
 from django.utils.text import slugify
+
+from .filetypes import SNIFF_BYTES, UnsupportedFileType, detect
+
+
+def _max_upload_bytes() -> int:
+    """Obergrenze pro Upload in Bytes (P0-2/P1-DoS). Env: UPLOAD_MAX_FILE_MB."""
+    return int(getattr(settings, "UPLOAD_MAX_FILE_MB", 200)) * 1024 * 1024
+
+
+def _sniff_or_reject(header: bytes):
+    """Erkennt den Typ am Byte-Header oder wirft ``UnsupportedFileType``."""
+    info = detect(header)
+    if info is None:
+        raise UnsupportedFileType(
+            "Dateityp nicht erlaubt. Zulässig sind PDF und gängige Bildformate "
+            "(JPEG, PNG, GIF, TIFF, BMP, WebP, HEIC)."
+        )
+    return info
 
 DATA_DIR = Path(settings.DMS_DATA_DIR)
 ORIGINALS_DIR = DATA_DIR / "originals"
@@ -37,20 +54,46 @@ def save_upload(uploaded_file) -> tuple[str, int, str]:
     Rückgabe: (Pfad, Größe in Bytes, MIME-Typ).
     Der Dateiname wird randomisiert, um Kollisionen und Pfad-Injektion zu vermeiden;
     der ursprüngliche Name lebt als Dokumenttitel weiter.
+
+    Sicherheit (P0-2): Der Typ wird an den **Magic Bytes** erkannt, nicht am
+    Client-``Content-Type`` oder an der Endung. Nur die Allowlist (PDF + Bilder)
+    ist zulässig; alles andere – v. a. HTML/SVG – löst ``UnsupportedFileType``
+    aus, bevor irgendetwas geschrieben wird. MIME und Endung stammen aus dem
+    erkannten Typ, nicht aus Nutzereingaben. Zusätzlich greift ein Größenlimit.
     """
+    max_bytes = _max_upload_bytes()
+    size = getattr(uploaded_file, "size", None)
+    if size is not None and size > max_bytes:
+        raise UnsupportedFileType(
+            f"Datei zu groß ({size} Bytes > Limit {max_bytes} Bytes)."
+        )
+
+    # Header VOR dem Schreiben prüfen (fail closed), dann Strom zurückspulen.
+    header = uploaded_file.read(SNIFF_BYTES)
+    info = _sniff_or_reject(header)
+    try:
+        uploaded_file.seek(0)
+    except (AttributeError, OSError):
+        pass  # Strom nicht spulbar – Header wird unten vorangestellt.
+
     ORIGINALS_DIR.mkdir(parents=True, exist_ok=True)
-    ext = Path(uploaded_file.name).suffix.lower()
-    dest = ORIGINALS_DIR / f"{uuid.uuid4().hex}{ext}"
+    dest = ORIGINALS_DIR / f"{uuid.uuid4().hex}{info.ext}"
+    written = 0
     with open(dest, "wb") as fh:
+        if uploaded_file.tell() != 0:  # nicht spulbar → Header selbst schreiben
+            fh.write(header)
+            written += len(header)
         for chunk in uploaded_file.chunks():
+            written += len(chunk)
+            if written > max_bytes:
+                fh.close()
+                dest.unlink(missing_ok=True)
+                raise UnsupportedFileType(
+                    f"Datei überschreitet das Limit ({max_bytes} Bytes)."
+                )
             fh.write(chunk)
 
-    mime = (
-        getattr(uploaded_file, "content_type", None)
-        or mimetypes.guess_type(uploaded_file.name)[0]
-        or "application/octet-stream"
-    )
-    return str(dest), dest.stat().st_size, mime
+    return str(dest), dest.stat().st_size, info.mime
 
 
 def save_bytes(data: bytes, ext: str = "") -> Path:
@@ -58,12 +101,18 @@ def save_bytes(data: bytes, ext: str = "") -> Path:
 
     Wie ``save_upload``, aber für bereits im Speicher liegende Bytes. Der
     Dateiname wird randomisiert (Kollisions-/Injektionsschutz).
+
+    Sicherheit (P0-2): Auch hier entscheidet die Magic-Byte-Allowlist – die
+    übergebene ``ext`` ist nur ein Hinweis und wird durch die erkannte Endung
+    ersetzt. Nicht erlaubte Typen lösen ``UnsupportedFileType`` aus.
     """
+    if len(data) > _max_upload_bytes():
+        raise UnsupportedFileType(
+            f"Datei zu groß ({len(data)} Bytes > Limit {_max_upload_bytes()} Bytes)."
+        )
+    info = _sniff_or_reject(data[:SNIFF_BYTES])
     ORIGINALS_DIR.mkdir(parents=True, exist_ok=True)
-    ext = ext.lower()
-    if ext and not ext.startswith("."):
-        ext = "." + ext
-    dest = ORIGINALS_DIR / f"{uuid.uuid4().hex}{ext}"
+    dest = ORIGINALS_DIR / f"{uuid.uuid4().hex}{info.ext}"
     dest.write_bytes(data)
     return dest
 
