@@ -1,4 +1,5 @@
-import { defineConfig } from "vite";
+/// <reference types="vitest/config" />
+import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
 
@@ -50,5 +51,13 @@ export default defineConfig({
         changeOrigin: true,
       },
     },
+  },
+  // Vitest (#9): jsdom-Umgebung + jest-dom-Matcher (setupFiles). Ohne Globals –
+  // Tests importieren describe/it/expect explizit aus "vitest".
+  test: {
+    environment: "jsdom",
+    globals: false,
+    setupFiles: ["./src/test/setup.ts"],
+    css: false,
   },
 });

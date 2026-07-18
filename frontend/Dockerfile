@@ -1,9 +1,13 @@
 # --- Build-Stufe ---
 FROM node:22-alpine AS build
 WORKDIR /app
-COPY package.json ./
-RUN npm install
+COPY package.json package-lock.json ./
+# Deterministische Installation aus dem Lockfile (reproduzierbare CI-Builds).
+RUN npm ci
 COPY . .
+# Vitest-Suite (#9) als Teil des Builds: ein roter Test lässt den Image-Build –
+# und damit den PR-Check (frontend-build) – fehlschlagen, bevor gemergt wird.
+RUN npm run test
 RUN npm run build
 
 # --- Laufzeit: statische Auslieferung via nginx ---
