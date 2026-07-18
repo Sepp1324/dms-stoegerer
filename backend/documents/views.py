@@ -58,6 +58,7 @@ class IsDmsAdmin(BasePermission):
 
 from . import classification, pipeline, storage
 from .filetypes import UnsupportedFileType, is_safe_inline
+from .throttling import CaptureRateThrottle, UploadRateThrottle
 from .services import version_compare
 from .models import (
     AuditLogEntry,
@@ -1035,6 +1036,7 @@ class DocumentUploadView(APIView):
 
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
+    throttle_classes = [UploadRateThrottle]  # DoS-Schutz (P1)
 
     def post(self, request):
         if not request.user.can_write:
@@ -1136,6 +1138,7 @@ class MobileCaptureUploadView(APIView):
 
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
+    throttle_classes = [CaptureRateThrottle]  # DoS-Schutz (P1)
 
     MAX_IMAGES = 30
     MAX_BYTES_PER_IMAGE = 25 * 1024 * 1024  # ~25 MB
@@ -1789,6 +1792,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
         detail=True,
         methods=["post"],
         parser_classes=[MultiPartParser, FormParser],
+        throttle_classes=[UploadRateThrottle],  # DoS-Schutz (P1)
     )
     def add_version(self, request, pk=None):
         """Hängt eine neue Datei als nächste Version an das bestehende Dokument.

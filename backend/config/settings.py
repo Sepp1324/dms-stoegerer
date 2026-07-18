@@ -167,6 +167,29 @@ BACKUP_ALERT_AFTER_HOURS = float(os.getenv("BACKUP_ALERT_AFTER_HOURS", "36"))
 OCR_ALERT_SUCCESS_RATE = float(os.getenv("OCR_ALERT_SUCCESS_RATE", "95"))
 PROCESSING_STUCK_AFTER_MINUTES = float(os.getenv("PROCESSING_STUCK_AFTER_MINUTES", "30"))
 
+# --- Cache ---
+# DRF-Throttling (siehe unten) speichert seine Zähler im Django-Cache. Ohne
+# Konfiguration ist das der prozesslokale LocMemCache – funktioniert überall
+# (auch in CI/Tests ohne Redis), zählt aber pro Gunicorn-Worker/Pod getrennt.
+# In Produktion sollte ``CACHE_URL`` (Redis) gesetzt sein, damit die Limits über
+# alle Worker/Pods hinweg GEMEINSAM gelten. Django 4+ bringt das Redis-Backend
+# ohne Zusatzpaket mit (nutzt das bereits vorhandene ``redis``).
+CACHE_URL = os.getenv("CACHE_URL", "")
+if CACHE_URL:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.redis.RedisCache",
+            "LOCATION": CACHE_URL,
+            "KEY_PREFIX": "dms",
+        }
+    }
+else:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        }
+    }
+
 # --- DRF ---
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
@@ -178,7 +201,20 @@ REST_FRAMEWORK = {
     ),
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 25,
+    # DoS-Schutz (P1): KEIN globaler Default-Throttle – die Drossel wird gezielt
+    # per ``throttle_classes`` an die Upload-Pfade gehängt (documents/throttling.py),
+    # damit Suche/Listen/Polling unangetastet bleiben. Die Raten sind per Env
+    # tunebar (Familien-Bulk-Upload im Blick).
+    "DEFAULT_THROTTLE_RATES": {
+        "upload": os.getenv("THROTTLE_UPLOAD_RATE", "120/minute"),
+        "capture": os.getenv("THROTTLE_CAPTURE_RATE", "60/minute"),
+    },
 }
+
+# Größenobergrenze für Nicht-Datei-Formfelder eines Requests (DoS gegen riesige
+# Metadaten-Payloads). Datei-Uploads werden separat in ``storage.save_upload``
+# per ``UPLOAD_MAX_FILE_MB`` begrenzt. Default 10 MiB.
+DATA_UPLOAD_MAX_MEMORY_SIZE = int(os.getenv("DATA_UPLOAD_MAX_MEMORY_MB", "10")) * 1024 * 1024
 
 # --- CORS (React-Dev-Server spricht die API) ---
 CORS_ALLOWED_ORIGINS = env_list("DJANGO_CORS_ORIGINS", "http://localhost:5173")
