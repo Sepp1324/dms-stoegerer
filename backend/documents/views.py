@@ -1,3 +1,4 @@
+import hashlib
 import io
 import os
 import re
@@ -16,7 +17,12 @@ from django.db import connection, transaction
 from django.db.models import Case, DecimalField, Q, Value, When
 from django.db.models import Count, Max
 from django.db.models.functions import Cast
-from django.http import FileResponse, Http404, HttpResponse
+from django.http import (
+    FileResponse,
+    Http404,
+    HttpResponse,
+    HttpResponseNotModified,
+)
 from django.utils import timezone
 from django.utils.text import slugify
 from rest_framework import status, viewsets
@@ -1850,7 +1856,24 @@ class DocumentViewSet(viewsets.ModelViewSet):
         if not path or not os.path.exists(path):
             raise Http404("Keine Vorschau verfügbar.")
 
-        return FileResponse(open(path, "rb"), content_type="image/jpeg")
+        # HTTP-Caching (Perf): Ohne Validator lud jede Kartenansicht den JPEG-Blob
+        # neu. Der ETag identifiziert Version (id + Inhalts-Hash) und die konkrete
+        # Thumbnail-Datei (mtime/size); ändert sich die aktuelle Version, ändert
+        # sich der ETag. Bei passendem If-None-Match antworten wir mit 304 (kein
+        # Blob). Cache-Control ``private`` (auth-geschützt) mit kurzer Frische.
+        st = os.stat(path)
+        raw = f"{version.id}:{version.sha256}:{int(st.st_mtime)}:{st.st_size}"
+        etag = '"' + hashlib.md5(raw.encode()).hexdigest() + '"'
+        if request.headers.get("If-None-Match") == etag:
+            response = HttpResponseNotModified()
+            response["ETag"] = etag
+            response["Cache-Control"] = "private, max-age=3600"
+            return response
+
+        response = FileResponse(open(path, "rb"), content_type="image/jpeg")
+        response["ETag"] = etag
+        response["Cache-Control"] = "private, max-age=3600"
+        return response
 
     @action(detail=True, methods=["get"])
     def audit(self, request, pk=None):
