@@ -9,7 +9,11 @@ import {
   type ReactNode,
 } from "react";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
-import { buildFilterParams } from "../filterParams";
+import {
+  buildFilterParams,
+  parseProcessingState,
+  parseSharedScope,
+} from "../filterParams";
 import { DEFAULT_VIEW, pathToView, viewToPath } from "../viewRoutes";
 import {
   autoFileBatch,
@@ -227,8 +231,12 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     return "";
   });
   // Verarbeitungsstatus-Filter (STOAA-249): leer = kein Filter, sonst UI-Bucket.
-  const [processingState, setProcessingState] = useState<ProcessingStateFilter | "">("");
-  const [sharedScope, setSharedScope] = useState<"" | "with-me" | "by-me">("");
+  const [processingState, setProcessingState] = useState<ProcessingStateFilter | "">(
+    () => parseProcessingState(_urlFilters.get("processing_state")),
+  );
+  const [sharedScope, setSharedScope] = useState<"" | "with-me" | "by-me">(() =>
+    parseSharedScope(_urlFilters.get("shared")),
+  );
   // Sortierung; "" = Backend-Standard (FTS-Relevanz bei Suche, sonst Datum neu→alt).
   const [ordering, setOrdering] = useState(() => _urlFilters.get("ordering") ?? "");
   // Triage-Ansicht (STOAA-296): zeigt owner-lose Dokumente (?owner=none). Nur für
@@ -318,6 +326,8 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
       tag,
       storagePath,
       folder,
+      processingState,
+      sharedScope,
       ordering,
       page,
     });
@@ -326,7 +336,19 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
       setSearchParams(params, { replace: true });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view, q, correspondent, documentType, tag, storagePath, folder, ordering, page]);
+  }, [
+    view,
+    q,
+    correspondent,
+    documentType,
+    tag,
+    storagePath,
+    folder,
+    processingState,
+    sharedScope,
+    ordering,
+    page,
+  ]);
 
   const [selectedPage, setSelectedPage] = useState<number | null>(null);
   const [previewId, setPreviewId] = useState<number | null>(null);
