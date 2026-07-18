@@ -10,6 +10,7 @@ from django.contrib.auth import get_user_model
 from django.contrib.postgres.search import SearchQuery
 from django.core.management import call_command
 from django.test import TestCase
+from rest_framework.test import APITestCase
 
 from .models import Document, DocumentVersion, Tag
 from .services.search_vector import update_document_search_vector
@@ -62,3 +63,42 @@ class SearchVectorTests(TestCase):
         doc.refresh_from_db()
         self.assertIsNotNone(doc.search_vector)
         self.assertTrue(_matches(doc.pk, "Backfilltest"))
+
+
+class SearchUsesStoredVectorTests(APITestCase):
+    """5b: Die Such-View trifft ausschließlich über die gespeicherte Spalte.
+
+    Beweis: Ein Dokument mit OCR-Treffer, dessen ``search_vector`` künstlich auf
+    NULL gesetzt ist, taucht NICHT auf – die alte Query-Zeit-Logik hätte es
+    gefunden.
+    """
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("sv2", password="pw12345!")
+        self.client.force_authenticate(self.user)
+
+    def _doc_with_ocr(self, title, ocr):
+        doc = Document.objects.create(title=title, owner=self.user)
+        version = DocumentVersion.objects.create(
+            document=doc,
+            version_no=1,
+            file_path="/tmp/x",
+            sha256=f"{doc.id:064d}",
+            ocr_text=ocr,
+        )
+        doc.current_version = version
+        doc.save(update_fields=["current_version"])  # Signal füllt Vektor inkl. OCR
+        return doc
+
+    def test_populated_vector_is_found(self):
+        doc = self._doc_with_ocr("Beleg", "Rechnungsbetrag Sonderzeichenkennung")
+        resp = self.client.get("/api/documents/?q=Sonderzeichenkennung")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn(doc.id, [r["id"] for r in resp.data["results"]])
+
+    def test_null_vector_is_not_found(self):
+        doc = self._doc_with_ocr("Beleg", "Rechnungsbetrag Sonderzeichenkennung")
+        Document.objects.filter(pk=doc.pk).update(search_vector=None)
+        resp = self.client.get("/api/documents/?q=Sonderzeichenkennung")
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotIn(doc.id, [r["id"] for r in resp.data["results"]])

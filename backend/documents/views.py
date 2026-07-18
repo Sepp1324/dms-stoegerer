@@ -14,7 +14,7 @@ from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import connection, transaction
-from django.db.models import Case, DecimalField, Q, Value, When
+from django.db.models import Case, DecimalField, F, Q, Value, When
 from django.db.models import Count, IntegerField, Max, OuterRef, Subquery
 from django.db.models.functions import Coalesce
 from django.db.models.functions import Cast
@@ -1459,38 +1459,22 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 | Q(current_version__ocr_text__icontains=q)
             )
         elif q:
-            from django.contrib.postgres.search import (
-                SearchQuery,
-                SearchRank,
-                SearchVector,
-            )
+            from django.contrib.postgres.search import SearchQuery, SearchRank
 
-            # Gewichteter Vektor (STOAA-256): Titel/Korrespondent (A) ranken vor
-            # Dokumenttyp/Tags/Mail-Feldern (B), OCR-Fließtext (D) am schwächsten.
-            # Query-Zeit-Vektor (keine materialisierte Spalte/GIN) – bewusst, da
-            # der Vektor Join-Tabellen spannt; performant für Familien-Korpus.
-            # Known-Limitation: PostgreSQL-FTS tokenisiert reine E-Mail-Adressen
-            # als EIN atomares Token → Teilstrings der Sender-Domain (z. B. nur
-            # "energieanbieter") sind nicht als Lexeme suchbar. Der From-Header
-            # wird von mail.py als "Anzeigename <adresse>" gespeichert, sodass
-            # über den Anzeigenamen gesucht werden kann. Substring-Domainsuche
-            # bei anzeigenamenlosen Absendern ist ein optionales Folge-Ticket.
-            vector = (
-                SearchVector("title", weight="A", config="german")
-                + SearchVector("correspondent__name", weight="A", config="german")
-                + SearchVector("document_type__name", weight="B", config="german")
-                + SearchVector("tags__name", weight="B", config="german")
-                + SearchVector("mail_subject", weight="B", config="german")
-                + SearchVector("mail_sender", weight="B", config="german")
-                + SearchVector("note", weight="B", config="german")
-                + SearchVector(
-                    "current_version__ocr_text", weight="D", config="german"
-                )
-            )
+            # Indexgestützte Volltextsuche (Perf, P2 Teil 5b): gegen den
+            # materialisierten ``search_vector`` (GIN-Index
+            # ``documents_search_vector_gin``) statt den Vektor je Anfrage über
+            # Join-Tabellen neu zu bauen. Die Gewichte (Titel/Korrespondent = A,
+            # Typ/Tags/Mail/Notiz = B, OCR = D) stecken bereits in der Spalte
+            # (siehe services/search_vector.py; dort gepflegt via Signale +
+            # Pipeline-Hook, Bestand per Backfill/Daten-Migration).
+            # ``filter(search_vector=query)`` nutzt den GIN-Index (``@@``),
+            # ``SearchRank`` rankt auf der gespeicherten Spalte.
+            # Known-Limitation E-Mail-Adressen unverändert (s. search_vector.py).
             query = SearchQuery(q, config="german")
             qs = (
-                qs.annotate(rank=SearchRank(vector, query))
-                .filter(rank__gt=0)
+                qs.annotate(rank=SearchRank(F("search_vector"), query))
+                .filter(search_vector=query)
                 .order_by("-rank", "-added_at")
             )
             # Ergebnis-Snippet (STOAA-368/370): ts_headline über den OCR-Text der
