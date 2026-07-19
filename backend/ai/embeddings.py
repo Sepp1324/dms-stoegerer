@@ -19,7 +19,16 @@ from django.conf import settings
 logger = logging.getLogger(__name__)
 
 _model = None
+# Gecachter Ladefehler: Scheitert das Modell-Laden (z. B. fehlende model.onnx),
+# wird der Fehler EINMAL geloggt und gemerkt – Folgeaufrufe fehlschlagen dann
+# knapp, ohne das (teure) Laden erneut zu versuchen und pro Dokument einen
+# vollen Traceback zu produzieren (Lehre aus dem 0.8.0-Modell-Incident).
+_load_error: str | None = None
 _lock = threading.Lock()
+
+
+class EmbeddingModelUnavailable(RuntimeError):
+    """Das Embedding-Modell konnte nicht geladen werden (Ladefehler gecacht)."""
 
 
 def enabled() -> bool:
@@ -31,23 +40,40 @@ def dim() -> int:
 
 
 def _get_model():
-    """Lazy-Singleton des fastembed-Modells (thread-safe)."""
-    global _model
+    """Lazy-Singleton des fastembed-Modells (thread-safe).
+
+    Bei einem Ladefehler wird dieser gecacht: die erste Ausnahme wird einmal als
+    klare Fehlermeldung geloggt, danach werfen weitere Aufrufe sofort
+    ``EmbeddingModelUnavailable`` – kein erneuter Ladeversuch, keine
+    Traceback-Flut über einen ganzen Reindex-Lauf.
+    """
+    global _model, _load_error
     if _model is not None:
         return _model
+    if _load_error is not None:
+        raise EmbeddingModelUnavailable(_load_error)
     with _lock:
-        if _model is None:
+        if _model is not None:
+            return _model
+        if _load_error is not None:
+            raise EmbeddingModelUnavailable(_load_error)
+        name = getattr(settings, "EMBEDDING_MODEL", "intfloat/multilingual-e5-large")
+        cache = getattr(settings, "EMBEDDING_CACHE_DIR", None)
+        try:
             from fastembed import TextEmbedding
 
-            name = getattr(
-                settings, "EMBEDDING_MODEL", "intfloat/multilingual-e5-large"
-            )
-            cache = getattr(settings, "EMBEDDING_CACHE_DIR", None)
             _model = TextEmbedding(
                 model_name=name,
                 cache_dir=str(cache) if cache else None,
             )
-            logger.info("Embedding-Modell geladen: %s", name)
+        except Exception as exc:  # noqa: BLE001 – Ladefehler einmal klar melden + cachen
+            _load_error = (
+                f"Embedding-Modell '{name}' konnte nicht geladen werden "
+                f"(cache_dir={cache}): {exc}"
+            )
+            logger.error(_load_error)
+            raise EmbeddingModelUnavailable(_load_error) from exc
+        logger.info("Embedding-Modell geladen: %s", name)
     return _model
 
 
