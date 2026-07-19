@@ -1,6 +1,6 @@
 # Embedding-/Pillow-Upgrade — Runbook
 
-Kontext: `fastembed 0.3.6 → 0.5.1` (hebt die `pillow<11`-Decke auf) + `Pillow 10.4.0 → 11.1.0` (schließt offene Pillow-CVEs) + `pillow-heif 0.21.0`.
+Kontext: `fastembed 0.3.6 → 0.8.0` (hebt die `pillow<11`-Decke auf) + `Pillow 10.4.0 → 12.3.0` (schließt offene Pillow-CVEs) + `pillow-heif 0.21.0`. Der fastembed-Sprung ist groß (5 Minor-Versionen), zieht numpy 2.x + onnxruntime 1.27 nach — Schritt 2 (Neu-Einbetten) ist damit **nicht optional**, sondern Pflicht.
 
 Der Code nutzt nur Basis-Pillow-APIs → **kein Code-Fix nötig**. Das Modell bleibt
 `intfloat/multilingual-e5-large` (1024-dim). **Aber:** Die konkreten Embedding-Werte
