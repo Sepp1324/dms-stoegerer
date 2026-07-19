@@ -19,6 +19,7 @@ from html import escape
 from typing import Iterable
 
 from django.conf import settings
+from django.db import transaction
 from django.db.models import F
 from django.utils import timezone
 from pgvector.django import CosineDistance
@@ -121,8 +122,9 @@ def sync_document_embeddings(
         return {"status": "disabled", "created": 0, "deleted": 0, "model": EMBEDDING_MODEL}
 
     texts = chunking.chunk_text(version.ocr_text or "")
-    deleted, _ = DocumentChunk.objects.filter(version=version).delete()
     if not texts:
+        # Kein Text -> es kann keinen Index geben; vorhandene Chunks entfernen.
+        deleted, _ = DocumentChunk.objects.filter(version=version).delete()
         return {
             "status": "empty",
             "created": 0,
@@ -131,6 +133,10 @@ def sync_document_embeddings(
             "model": EMBEDDING_MODEL,
         }
 
+    # Resilienz (Incident-Lehre): ZUERST einbetten, DANN atomar ersetzen. Früher
+    # wurden die alten Chunks vor dem Embedding gelöscht – schlug das Embedding
+    # fehl (z. B. Modell nicht ladbar), blieb der Index LEER. Jetzt bleiben bei
+    # einem Fehlschlag die bestehenden Chunks unangetastet.
     try:
         vectors = embeddings.embed_passages(texts)
     except Exception:  # noqa: BLE001 – Modellfehler darf die Pipeline nicht kippen
@@ -138,23 +144,25 @@ def sync_document_embeddings(
         return {
             "status": "error",
             "created": 0,
-            "deleted": deleted,
+            "deleted": 0,  # alte Chunks bewusst NICHT gelöscht
             "version": version.id,
             "model": EMBEDDING_MODEL,
         }
 
-    DocumentChunk.objects.bulk_create(
-        [
-            DocumentChunk(
-                document=document,
-                version=version,
-                chunk_index=index,
-                text=text,
-                embedding=vector,
-            )
-            for index, (text, vector) in enumerate(zip(texts, vectors))
-        ]
-    )
+    with transaction.atomic():
+        deleted, _ = DocumentChunk.objects.filter(version=version).delete()
+        DocumentChunk.objects.bulk_create(
+            [
+                DocumentChunk(
+                    document=document,
+                    version=version,
+                    chunk_index=index,
+                    text=text,
+                    embedding=vector,
+                )
+                for index, (text, vector) in enumerate(zip(texts, vectors))
+            ]
+        )
     return {
         "status": "indexed",
         "created": len(texts),

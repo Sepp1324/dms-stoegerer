@@ -208,3 +208,28 @@ class SemanticIndexApiTests(APITestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertGreater(resp.data["created"], 0)
         self.assertTrue(DocumentChunk.objects.filter(document=self.base).exists())
+
+
+class SyncResilienceTests(TestCase):
+    """Ein fehlgeschlagenes Embedding darf den bestehenden Index NICHT leeren."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user("res-u", password="pw", role="user")
+
+    def test_embed_failure_preserves_existing_chunks(self):
+        doc = make_doc(self.user, "Vertrag", "Mietvertrag mit Kaution und Kündigungsfrist.")
+        first = semantic_index.sync_document_embeddings(doc)
+        self.assertEqual(first["status"], "indexed")
+        before = DocumentChunk.objects.filter(document=doc).count()
+        self.assertGreater(before, 0)
+
+        # Embedding schlägt fehl -> alte Chunks bleiben erhalten (nicht gelöscht).
+        with mock.patch(
+            "ai.embeddings.embed_passages", side_effect=RuntimeError("Modell weg")
+        ):
+            result = semantic_index.sync_document_embeddings(doc)
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["deleted"], 0)
+        self.assertEqual(DocumentChunk.objects.filter(document=doc).count(), before)
