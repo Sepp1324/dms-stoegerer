@@ -24,15 +24,14 @@ PyMuPDF==1.24.9
 pikepdf==8.15.1
 # Miniaturbilder (erste Seite → JPEG)
 pdf2image==1.17.0
-# Pillow zurück auf 10.4.0 (Rollback von #242): fastembed 0.8.0 lud sein ONNX-Modell
-# über hf-xet nicht (model.onnx fehlte im Cache → semantische Suche fiel aus). Der
-# 0.3.6-Cache liegt bereits im PVC → lädt ohne Download. Pillow bleibt damit an der
-# fastembed-0.3.6-Decke (pillow<11); der Pillow-CVE-Fix ist auf einen späteren
-# Anlauf verschoben (Modell vorab ins Image backen / Egress zum Xet-CDN klären).
-Pillow==10.4.0
-# HEIC/HEIF-Support für die Mobile-Erfassung (STOAA-513); die Wheels bündeln
-# libheif → i. d. R. kein apt-Paket nötig. Image-Rebuild erforderlich.
-pillow-heif==0.18.0
+# Pillow 12.x (Security-Upgrade, zweiter Anlauf): behebt die 10.4.0-Pillow-CVEs.
+# Möglich durch fastembed 0.8.0 (unten). Der erste Anlauf (#242) scheiterte am
+# Laufzeit-Download des ONNX-Modells; das ist jetzt gelöst, indem das Modell zur
+# BUILD-Zeit ins Image gebacken wird (backend/Dockerfile + ci/bake_model.py,
+# EMBEDDING_CACHE_DIR=/opt/models). Code nutzt nur Basis-Pillow-APIs.
+Pillow==12.3.0
+# HEIC/HEIF-Support für die Mobile-Erfassung (STOAA-513); 0.21.x ist Pillow-12-fähig.
+pillow-heif==0.21.0
 # QR-Codes für die Archivnummer (ASN, STOAA-284/285); rendert als PNG via Pillow
 qrcode==7.4.2
 # ASN-Barcode-Erkennung (Code128 + QR) – braucht libzbar0 als System-Lib (STOAA-515)
@@ -48,9 +47,10 @@ pgvector==0.3.6
 # Lokale Text-Embeddings für die semantische Suche: fastembed (ONNX-Runtime,
 # mehrsprachig) – KEIN torch, läuft auf CPU. Modelle werden lazy geladen und
 # unter EMBEDDING_CACHE_DIR (/data/models, persistentes PVC) gecached.
-# Rollback auf 0.3.6 (#242 zurückgerollt): 0.8.0 lädt das Modell über hf-xet in ein
-# neues Cache-Layout und scheiterte im Cluster (model.onnx fehlte → Index leer).
-# 0.3.6 nutzt das bereits im PVC gecachte Modell → sofort lauffähig, kein Download.
-# Ein erneuter Upgrade-Anlauf braucht das 0.8.0-Modell vorab im Image (kein
-# Laufzeit-Download) bzw. gesicherten Egress zum HF-Xet-CDN. Siehe docs/embedding-upgrade.md.
-fastembed==0.3.6
+# fastembed 0.8.0 (zweiter Anlauf, hebt die pillow<11-Decke auf). Das ONNX-Modell
+# wird NICHT mehr zur Laufzeit geladen (das scheiterte im Cluster via hf-xet, #242),
+# sondern zur Build-Zeit ins Image gebacken (backend/Dockerfile, ci/bake_model.py).
+# Modellname unverändert (intfloat/multilingual-e5-large, 1024-dim); die Embedding-
+# Werte können sich ändern -> nach dem Deploy ZWINGEND reindex_embeddings --all +
+# calibrate (docs/embedding-upgrade.md). Zieht numpy 2.x + onnxruntime 1.27.
+fastembed==0.8.0
