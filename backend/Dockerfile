@@ -29,6 +29,16 @@ RUN apt-get update \
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
+# Embedding-Modell zur BUILD-Zeit ins Image backen (kein Laufzeit-Download im
+# Cluster – der schlug via hf-xet fehl). EMBEDDING_CACHE_DIR zeigt auf einen
+# NICHT gemounteten Pfad (/opt/models), damit der /data-PVC ihn zur Laufzeit
+# nicht überdeckt. BAKE_MODEL=0 überspringt den ~1-GB-Download – so bleibt die
+# PR-CI (gemockte Embeddings) schnell; nur der Deploy-Build backt tatsächlich.
+ARG BAKE_MODEL=1
+ENV EMBEDDING_CACHE_DIR=/opt/models
+COPY ci/bake_model.py /tmp/bake_model.py
+RUN if [ "$BAKE_MODEL" = "1" ]; then python /tmp/bake_model.py; fi
+
 COPY . .
 
 # Static-Dateien zur Build-Zeit sammeln → landen im Image, WhiteNoise liefert
