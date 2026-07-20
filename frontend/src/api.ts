@@ -1415,8 +1415,11 @@ export async function deleteSavedView(id: number): Promise<void> {
   if (!res.ok) throw new Error(`Ansicht löschen fehlgeschlagen: HTTP ${res.status}`);
 }
 
-export async function getDocument(id: number): Promise<DocumentDetail> {
-  const res = await apiFetch(`/documents/${id}/`);
+export async function getDocument(
+  id: number,
+  signal?: AbortSignal,
+): Promise<DocumentDetail> {
+  const res = await apiFetch(`/documents/${id}/`, { signal });
   if (!res.ok) throw new Error(`Dokument laden fehlgeschlagen: HTTP ${res.status}`);
   return res.json();
 }
@@ -1629,16 +1632,20 @@ export async function getDocumentAudit(
 export async function getDocumentPreview(
   id: number,
   versionNo?: number,
+  signal?: AbortSignal,
 ): Promise<Blob> {
   const suffix = versionNo ? `?version=${versionNo}` : "";
-  const res = await apiFetch(`/documents/${id}/preview/${suffix}`);
+  const res = await apiFetch(`/documents/${id}/preview/${suffix}`, { signal });
   if (!res.ok) throw new Error(`Vorschau nicht verfügbar (HTTP ${res.status})`);
   return res.blob();
 }
 
 // Integritätsprüfung der Hash-Kette eines Dokuments (rechnet Datei-Hashes nach).
-export async function getDocumentIntegrity(id: number): Promise<DocumentIntegrity> {
-  const res = await apiFetch(`/documents/${id}/integrity/`);
+export async function getDocumentIntegrity(
+  id: number,
+  signal?: AbortSignal,
+): Promise<DocumentIntegrity> {
+  const res = await apiFetch(`/documents/${id}/integrity/`, { signal });
   if (!res.ok) throw new Error(`Integritätsprüfung fehlgeschlagen (HTTP ${res.status})`);
   return res.json();
 }
