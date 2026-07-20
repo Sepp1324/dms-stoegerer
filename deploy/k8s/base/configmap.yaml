@@ -18,6 +18,14 @@ data:
   # Arenen -> e5-large sprengte das Pod-Memory (OOMKill/exit 137). Ergänzt das
   # code-seitige EMBEDDING_THREADS (fastembed intra-op).
   OMP_NUM_THREADS: "2"
+  # Semantische Suche/Embeddings AUS. e5-large (2,2 GB) + onnxruntime 1.27 OOMt
+  # beim Laden selbst mit 8Gi (Graph-Optimierungs-Spike) – für diesen Cluster
+  # nicht tragbar. Der DMS läuft voll auf der Postgres-Volltextsuche (inkl.
+  # GIN-Index). Wiederbelebung als EIGENES Projekt: kleines Modell
+  # (intfloat/multilingual-e5-small, 384-dim -> braucht VectorField-Migration +
+  # Neukalibrierung) ODER onnxruntime-Graph-Optimierung deaktivieren (fastembed
+  # müsste das exponieren). Zum Test lokal auf "true" setzen.
+  EMBEDDING_ENABLED: "false"
   EMBEDDING_THREADS: "2"
   # Consume-Ordner (Scanner-Eingang). Basis-Default = lokaler Pfad im dms-data-PVC.
   # Für NAS-Betrieb überschreibt das Overlay deploy/k8s/overlays/consume-nfs/
