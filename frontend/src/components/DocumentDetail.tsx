@@ -30,6 +30,7 @@ import {
   TabPanel,
   type TabId,
 } from "./documentDetail/DetailTabs";
+import { documentLink } from "../documentLink";
 import { DetailPreview } from "./documentDetail/DetailPreview";
 import { DetailMeta } from "./documentDetail/DetailMeta";
 import { EditForm, type EditFormState } from "./documentDetail/EditForm";
@@ -131,6 +132,7 @@ export default function DocumentDetail({
   const [retryBusy, setRetryBusy] = useState(false);
   const [retryError, setRetryError] = useState<string | null>(null);
   const [archiveBusy, setArchiveBusy] = useState(false);
+  const [linkCopied, setLinkCopied] = useState(false);
   const [archiveError, setArchiveError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -502,6 +504,16 @@ export default function DocumentDetail({
   const visibleTabs = DETAIL_TABS.filter((t) => t.id !== "ai" || canEdit);
   const activeTab: TabId = visibleTabs.some((t) => t.id === tab) ? tab : "overview";
 
+  async function copyDocumentLink() {
+    try {
+      await navigator.clipboard.writeText(documentLink(id));
+      setLinkCopied(true);
+      window.setTimeout(() => setLinkCopied(false), 2000);
+    } catch {
+      // Clipboard nicht verfügbar (z. B. kein HTTPS/Permission) – still ignorieren.
+    }
+  }
+
   return (
     <div className="shell shell--detail">
       <header className="detail-topbar">
@@ -511,6 +523,14 @@ export default function DocumentDetail({
         {doc && (
           <div className="detail-topbar__actions">
             {canEdit && !editing && <button onClick={startEdit}>Bearbeiten</button>}
+            <button
+              type="button"
+              className="secondary"
+              onClick={copyDocumentLink}
+              title="Teilbaren Link zu diesem Dokument kopieren"
+            >
+              {linkCopied ? "Kopiert ✓" : "Link kopieren"}
+            </button>
             <button
               type="button"
               className="secondary"
