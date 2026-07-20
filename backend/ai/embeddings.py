@@ -59,13 +59,15 @@ def _get_model():
             raise EmbeddingModelUnavailable(_load_error)
         name = getattr(settings, "EMBEDDING_MODEL", "intfloat/multilingual-e5-large")
         cache = getattr(settings, "EMBEDDING_CACHE_DIR", None)
+        # onnxruntime-Threads deckeln (Speicher-Arenen) -> kein OOMKill mehr.
+        kwargs = {"model_name": name, "cache_dir": str(cache) if cache else None}
+        threads = int(getattr(settings, "EMBEDDING_THREADS", 0) or 0)
+        if threads > 0:
+            kwargs["threads"] = threads
         try:
             from fastembed import TextEmbedding
 
-            _model = TextEmbedding(
-                model_name=name,
-                cache_dir=str(cache) if cache else None,
-            )
+            _model = TextEmbedding(**kwargs)
         except Exception as exc:  # noqa: BLE001 – Ladefehler einmal klar melden + cachen
             _load_error = (
                 f"Embedding-Modell '{name}' konnte nicht geladen werden "

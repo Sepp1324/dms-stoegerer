@@ -369,6 +369,11 @@ if "test" in sys.argv:
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "intfloat/multilingual-e5-large")
 EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1024"))
 EMBEDDING_CACHE_DIR = os.getenv("EMBEDDING_CACHE_DIR", str(DMS_DATA_DIR / "models"))
+# onnxruntime-Intra-Op-Threads für das Embedding. Default 2 statt „so viele wie
+# Node-CPUs": jeder Thread reserviert Speicher-Arenen -> ungedeckelt sprengte das
+# Laden/Embedden von e5-large das Pod-Memory-Limit (OOMKill/exit 137). Passt zum
+# CPU-Limit "2". 0 = fastembed-Default (nicht deckeln).
+EMBEDDING_THREADS = int(os.getenv("EMBEDDING_THREADS", "2"))
 # Mindest-Cosine-Aehnlichkeit (0..1) fuer semantische Treffer. e5-Embeddings sind
 # normalisiert und liegen fuer relevante Paare hoch/eng beieinander; der Floor
 # schneidet Rauschen ab, ist aber bewusst konservativ (lieber Recall als leere

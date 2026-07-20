@@ -13,6 +13,12 @@ data:
   POSTGRES_PORT: "5432"
   REDIS_URL: "redis://redis:6379/0"
   DMS_DATA_DIR: "/data"
+  # onnxruntime/OpenMP-Threads deckeln: ungedeckelt startet onnxruntime so viele
+  # Threads wie die NODE CPUs (nicht das Container-Limit), jeder mit Speicher-
+  # Arenen -> e5-large sprengte das Pod-Memory (OOMKill/exit 137). Ergänzt das
+  # code-seitige EMBEDDING_THREADS (fastembed intra-op).
+  OMP_NUM_THREADS: "2"
+  EMBEDDING_THREADS: "2"
   # Consume-Ordner (Scanner-Eingang). Basis-Default = lokaler Pfad im dms-data-PVC.
   # Für NAS-Betrieb überschreibt das Overlay deploy/k8s/overlays/consume-nfs/
   # diesen Wert auf den NFS-Mount-Pfad /consume-nfs (siehe README).
