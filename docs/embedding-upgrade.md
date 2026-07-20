@@ -1,12 +1,18 @@
 # Embedding-/Pillow-Upgrade — Runbook
 
-> **STATUS: ZURÜCKGEROLLT.** Der 0.8.0/Pillow-12-Upgrade wurde rückgängig gemacht:
-> fastembed 0.8.0 lud das Modell im Cluster via hf-xet nicht (Incident) und
-> sprengte nach dem Ins-Image-Backen beim Laden (fp32/mean-pooling +
-> onnxruntime-Graph-Optimierung) das Pod-Memory (OOMKill/exit 137) selbst mit 4Gi
-> und gedeckelten Threads. Produktion läuft wieder auf **fastembed 0.3.6 + Pillow
-> 10.4.0**. Ein künftiger Anlauf bräuchte ein **quantisiertes/kleineres Modell**
-> oder deutlich mehr Node-RAM. Das Dokument bleibt als Historie/Anleitung erhalten.
+> **STATUS: Semantische Suche DEAKTIVIERT (`EMBEDDING_ENABLED=false`), FTS-only.**
+> Nachlese der ganzen Kaskade: Das 0.8.0/Pillow-12-Upgrade wurde zurückgerollt
+> (fastembed 0.8.0 lud das Modell via hf-xet nicht, dann OOM). Aber auch mit 0.3.6
+> OOMt das Laden von e5-large (2,2 GB) + onnxruntime 1.27 (Graph-Optimierungs-Spike)
+> **selbst mit 8Gi** – die Node hat zwar ~11Gi frei, der Ladespike ist aber für
+> diesen Cluster nicht tragbar. Daher: Embeddings aus, DMS läuft voll auf der
+> Postgres-Volltextsuche (inkl. GIN-Index).
+>
+> **Wiederbelebung als eigenes Projekt** (nicht am Prod-Cluster erzwingen):
+> kleines Modell `intfloat/multilingual-e5-small` (384-dim → `DocumentChunk.embedding`-
+> VectorField-Migration 1024→384 + Neukalibrierung) **oder** onnxruntime-Graph-
+> Optimierung deaktivieren (braucht fastembed-Support). Vorher in einer Staging-
+> Umgebung testen. Das Dokument bleibt als Historie/Anleitung erhalten.
 
 Kontext: `fastembed 0.3.6 → 0.8.0` (hebt die `pillow<11`-Decke auf) + `Pillow 10.4.0 → 12.3.0` (schließt offene Pillow-CVEs) + `pillow-heif 0.21.0`. Der fastembed-Sprung ist groß (numpy 2.x + onnxruntime 1.27) — Schritt 2 (Neu-Einbetten) ist damit **Pflicht**, nicht optional.
 
