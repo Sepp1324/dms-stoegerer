@@ -78,9 +78,11 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
+          # Memory großzügig: die semantische Suche lädt das e5-large-Modell
+          # (~2,5 GB) in den Backend-Prozess; 1Gi führte zu OOMKill (exit 137).
           resources:
-            requests: {cpu: "250m", memory: "384Mi"}
-            limits: {cpu: "2", memory: "1Gi"}
+            requests: {cpu: "250m", memory: "768Mi"}
+            limits: {cpu: "2", memory: "3Gi"}
           env:
             - name: HOME
               value: /tmp

@@ -32,6 +32,12 @@ kubectl -n dms exec deploy/backend -- python manage.py reindex_embeddings --all
 ```
 (Für den Familien-Korpus Minuten; einmalig.)
 
+> **Speicher:** Das Einbetten lädt das e5-large-Modell (~2,5 GB). Der backend-Pod
+> hat dafür jetzt 3Gi (früher 1Gi → OOMKill/exit 137). Alternativ im worker-Pod
+> laufen lassen (`kubectl -n dms exec deploy/worker -- …`, 4Gi). Das gebackene
+> Modell gehört dem Runtime-User (uid 1000), damit fastembed seinen Cache schreiben
+> kann.
+
 ## 3. Neu kalibrieren
 
 ```bash
