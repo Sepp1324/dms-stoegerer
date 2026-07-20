@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from unittest import mock
 
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 
 import ai.embeddings as emb
 
@@ -34,3 +34,15 @@ class EmbeddingModelLoadTests(SimpleTestCase):
             self.assertIs(emb._get_model(), fake)
             self.assertIs(emb._get_model(), fake)
         self.assertEqual(tm.call_count, 1)
+
+    @override_settings(EMBEDDING_THREADS=2)
+    def test_thread_cap_is_passed_to_fastembed(self):
+        with mock.patch("fastembed.TextEmbedding", return_value=mock.Mock()) as tm:
+            emb._get_model()
+        self.assertEqual(tm.call_args.kwargs.get("threads"), 2)
+
+    @override_settings(EMBEDDING_THREADS=0)
+    def test_thread_cap_omitted_when_zero(self):
+        with mock.patch("fastembed.TextEmbedding", return_value=mock.Mock()) as tm:
+            emb._get_model()
+        self.assertNotIn("threads", tm.call_args.kwargs)
