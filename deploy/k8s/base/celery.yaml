@@ -53,12 +53,13 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
-          # OCR (Tesseract/Ghostscript) + e5-Embeddings (ONNX) sind speicherhungrig
-          # und spitzen; das Limit ist bewusst weit gefasst (OOMKill-Schutz mitten
-          # in der Pipeline). Bei Bedarf nach oben tunen.
+          # OCR (Tesseract/Ghostscript) + e5-Embeddings sind speicherhungrig. Das
+          # Laden von e5-large mit onnxruntime 1.27 (Graph-Optimierung) spikte über
+          # 4Gi (OOMKill/exit 137); die Node hat ~11Gi frei -> Limit auf 8Gi. Hier
+          # laufen Reindex + Pipeline-Embedding (Uploads).
           resources:
-            requests: {cpu: "250m", memory: "768Mi"}
-            limits: {cpu: "2", memory: "4Gi"}
+            requests: {cpu: "250m", memory: "1Gi"}
+            limits: {cpu: "2", memory: "8Gi"}
           envFrom:
             - configMapRef:
                 name: dms-config
