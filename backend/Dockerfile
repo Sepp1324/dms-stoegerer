@@ -37,7 +37,11 @@ RUN pip install -r requirements.txt
 ARG BAKE_MODEL=1
 ENV EMBEDDING_CACHE_DIR=/opt/models
 COPY ci/bake_model.py /tmp/bake_model.py
-RUN if [ "$BAKE_MODEL" = "1" ]; then python /tmp/bake_model.py; fi
+# Nach dem Backen dem Runtime-User (non-root uid 1000, siehe deploy/k8s) gehören:
+# sonst kann fastembed seine Cache-Metadaten nicht schreiben (Permission denied).
+RUN if [ "$BAKE_MODEL" = "1" ]; then \
+      python /tmp/bake_model.py && chown -R 1000:1000 /opt/models; \
+    fi
 
 COPY . .
 
