@@ -1,6 +1,15 @@
 # Embedding-/Pillow-Upgrade — Runbook
 
-> **STATUS: Semantische Suche DEAKTIVIERT (`EMBEDDING_ENABLED=false`), FTS-only.**
+> **STATUS: Semantische Suche REAKTIVIERT mit kleinem Modell.** Umstieg von
+> e5-large (1024-dim, OOMte selbst mit 8Gi) auf
+> `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` (**384-dim**,
+> ~470 MB, mehrsprachig) – lädt problemlos, kein Baking. Migration `0047` stellt
+> `DocumentChunk.embedding` auf 384-dim (leert die alten Chunks). MiniLM braucht
+> KEINE e5-Prefixe (`EMBEDDING_PASSAGE_/QUERY_PREFIX` leer). Nach dem Deploy:
+> `reindex_embeddings --all` (im worker) + `calibrate_embeddings` (neues Modell ->
+> **neue Schwellen** setzen). Das Folgende ist die frühere e5-large-Historie.
+>
+> ~~STATUS: Semantische Suche DEAKTIVIERT (`EMBEDDING_ENABLED=false`), FTS-only.~~
 > Nachlese der ganzen Kaskade: Das 0.8.0/Pillow-12-Upgrade wurde zurückgerollt
 > (fastembed 0.8.0 lud das Modell via hf-xet nicht, dann OOM). Aber auch mit 0.3.6
 > OOMt das Laden von e5-large (2,2 GB) + onnxruntime 1.27 (Graph-Optimierungs-Spike)

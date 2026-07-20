@@ -80,14 +80,16 @@ def _get_model():
 
 
 def embed_passages(texts: list[str]) -> list[list[float]]:
-    """Embeddings für Dokument-Chunks (mit e5-``passage:``-Prefix)."""
+    """Embeddings für Dokument-Chunks (mit modell-spezifischem Passage-Prefix)."""
     model = _get_model()
-    prefixed = [f"passage: {t}" for t in texts]
+    prefix = getattr(settings, "EMBEDDING_PASSAGE_PREFIX", "")
+    prefixed = [f"{prefix}{t}" for t in texts]
     return [list(map(float, vec)) for vec in model.embed(prefixed)]
 
 
 def embed_query(text: str) -> list[float]:
-    """Embedding einer Suchanfrage (mit e5-``query:``-Prefix)."""
+    """Embedding einer Suchanfrage (mit modell-spezifischem Query-Prefix)."""
     model = _get_model()
-    vec = next(iter(model.embed([f"query: {text}"])))
+    prefix = getattr(settings, "EMBEDDING_QUERY_PREFIX", "")
+    vec = next(iter(model.embed([f"{prefix}{text}"])))
     return list(map(float, vec))

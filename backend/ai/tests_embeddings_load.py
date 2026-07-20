@@ -46,3 +46,22 @@ class EmbeddingModelLoadTests(SimpleTestCase):
         with mock.patch("fastembed.TextEmbedding", return_value=mock.Mock()) as tm:
             emb._get_model()
         self.assertNotIn("threads", tm.call_args.kwargs)
+
+
+class EmbeddingPrefixTests(SimpleTestCase):
+    def setUp(self):
+        emb._model = mock.Mock()
+        emb._model.embed.return_value = iter([[0.0, 0.0, 0.0]])
+
+    def tearDown(self):
+        emb._model = None
+
+    @override_settings(EMBEDDING_PASSAGE_PREFIX="")
+    def test_no_prefix_for_minilm(self):
+        emb.embed_passages(["hallo"])
+        emb._model.embed.assert_called_once_with(["hallo"])
+
+    @override_settings(EMBEDDING_PASSAGE_PREFIX="passage: ")
+    def test_e5_prefix_when_configured(self):
+        emb.embed_passages(["hallo"])
+        emb._model.embed.assert_called_once_with(["passage: hallo"])
