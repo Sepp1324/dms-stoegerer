@@ -366,9 +366,20 @@ EMBEDDING_ENABLED = os.getenv("EMBEDDING_ENABLED", "true").strip().lower() in (
 # ``ai.embeddings.enabled``/``embed_*`` und umgehen diesen Default gezielt.
 if "test" in sys.argv:
     EMBEDDING_ENABLED = False
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "intfloat/multilingual-e5-large")
-EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1024"))
+# Default jetzt das kleine mehrsprachige MiniLM (384-dim): e5-large (1024) lud
+# selbst mit 8Gi nicht (onnxruntime-Graph-Optimierungs-Spike, OOMKill). MiniLM
+# (~470 MB) lädt problemlos. MUSS zu EMBEDDING_DIM (384) + models.EMBEDDING_DIM
+# passen. Modell-Cache auf dem persistenten /data-PVC.
+EMBEDDING_MODEL = os.getenv(
+    "EMBEDDING_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+)
+EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "384"))
 EMBEDDING_CACHE_DIR = os.getenv("EMBEDDING_CACHE_DIR", str(DMS_DATA_DIR / "models"))
+# Modell-spezifische Prefixe. e5 verlangt "passage: "/"query: "; MiniLM/andere
+# NICHT (sonst würde das Wort "passage" mit-eingebettet). Default leer (MiniLM);
+# für e5 per Env auf "passage: "/"query: " setzen.
+EMBEDDING_PASSAGE_PREFIX = os.getenv("EMBEDDING_PASSAGE_PREFIX", "")
+EMBEDDING_QUERY_PREFIX = os.getenv("EMBEDDING_QUERY_PREFIX", "")
 # onnxruntime-Intra-Op-Threads für das Embedding. Default 2 statt „so viele wie
 # Node-CPUs": jeder Thread reserviert Speicher-Arenen -> ungedeckelt sprengte das
 # Laden/Embedden von e5-large das Pod-Memory-Limit (OOMKill/exit 137). Passt zum

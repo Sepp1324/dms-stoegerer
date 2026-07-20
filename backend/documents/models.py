@@ -19,8 +19,9 @@ from django.utils import timezone
 from pgvector.django import VectorField
 
 # Embedding-Dimension der semantischen Suche (muss zu settings.EMBEDDING_MODEL
-# passen; als Migrations-Konstante fix, Änderung = neue Migration).
-EMBEDDING_DIM = 1024
+# passen; als Migrations-Konstante fix, Änderung = neue Migration). 384 =
+# paraphrase-multilingual-MiniLM-L12-v2 (Umstieg von e5-large/1024, s. 0047).
+EMBEDDING_DIM = 384
 
 
 class OCRStatus(models.TextChoices):
