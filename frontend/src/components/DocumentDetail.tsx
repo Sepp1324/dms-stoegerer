@@ -148,11 +148,14 @@ export default function DocumentDetail({
     tagIds: new Set<number>(),
   });
 
+  // AbortController (#8): bei schnellem Dokumentwechsel wird die veraltete
+  // Anfrage wirklich abgebrochen (nicht nur ihr Ergebnis verworfen) – spart
+  // Backend-Last und vermeidet Races. Abgebrochene Requests werfen AbortError,
+  // der über ``signal.aborted`` still verworfen wird.
   useEffect(() => {
-    let active = true;
-    getDocument(id)
+    const ctrl = new AbortController();
+    getDocument(id, ctrl.signal)
       .then((d) => {
-        if (!active) return;
         setDoc(d);
         // Vorschau standardmäßig auf die neueste Version stellen.
         const newest = d.versions.reduce(
@@ -161,40 +164,44 @@ export default function DocumentDetail({
         );
         setSelectedVersionNo(newest || null);
       })
-      .catch((e) => active && setError(e instanceof Error ? e.message : String(e)));
-    return () => {
-      active = false;
-    };
+      .catch((e) => {
+        if (ctrl.signal.aborted) return;
+        setError(e instanceof Error ? e.message : String(e));
+      });
+    return () => ctrl.abort();
   }, [id, refresh]);
 
   // Integritätsprüfung der Hash-Kette (rechnet Datei-Hashes serverseitig nach).
   useEffect(() => {
-    let active = true;
+    const ctrl = new AbortController();
     setIntegrity(null);
     setIntegrityError(null);
-    getDocumentIntegrity(id)
-      .then((r) => active && setIntegrity(r))
-      .catch((e) => active && setIntegrityError(e instanceof Error ? e.message : String(e)));
-    return () => {
-      active = false;
-    };
+    getDocumentIntegrity(id, ctrl.signal)
+      .then((r) => setIntegrity(r))
+      .catch((e) => {
+        if (ctrl.signal.aborted) return;
+        setIntegrityError(e instanceof Error ? e.message : String(e));
+      });
+    return () => ctrl.abort();
   }, [id, refresh]);
 
   useEffect(() => {
     if (selectedVersionNo === null) return;
+    const ctrl = new AbortController();
     let url: string | null = null;
-    let active = true;
     setPdfUrl(null);
     setPdfError(null);
-    getDocumentPreview(id, selectedVersionNo)
+    getDocumentPreview(id, selectedVersionNo, ctrl.signal)
       .then((blob) => {
-        if (!active) return;
         url = URL.createObjectURL(blob);
         setPdfUrl(initialPage ? `${url}#page=${initialPage}` : url);
       })
-      .catch((e) => active && setPdfError(e instanceof Error ? e.message : String(e)));
+      .catch((e) => {
+        if (ctrl.signal.aborted) return;
+        setPdfError(e instanceof Error ? e.message : String(e));
+      });
     return () => {
-      active = false;
+      ctrl.abort();
       if (url) URL.revokeObjectURL(url);
     };
   }, [id, initialPage, selectedVersionNo]);
