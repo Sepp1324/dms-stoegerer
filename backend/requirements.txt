@@ -24,14 +24,15 @@ PyMuPDF==1.24.9
 pikepdf==8.15.1
 # Miniaturbilder (erste Seite → JPEG)
 pdf2image==1.17.0
-# Pillow 12.x (Security-Upgrade, zweiter Anlauf): behebt die 10.4.0-Pillow-CVEs.
-# Möglich durch fastembed 0.8.0 (unten). Der erste Anlauf (#242) scheiterte am
-# Laufzeit-Download des ONNX-Modells; das ist jetzt gelöst, indem das Modell zur
-# BUILD-Zeit ins Image gebacken wird (backend/Dockerfile + ci/bake_model.py,
-# EMBEDDING_CACHE_DIR=/opt/models). Code nutzt nur Basis-Pillow-APIs.
-Pillow==12.3.0
-# HEIC/HEIF-Support für die Mobile-Erfassung (STOAA-513); 0.21.x ist Pillow-12-fähig.
-pillow-heif==0.21.0
+# Pillow an der fastembed-0.3.6-Decke (pillow<11). Der 0.8.0-Upgrade-Versuch
+# (Pillow 12) wurde zurückgerollt: das 0.8.0-Modell (fp32/mean-pooling) sprengte
+# beim Laden das Pod-Memory (OOMKill/exit 137) selbst mit 4Gi + gedeckelten
+# Threads – für diesen Selfhost-Cluster nicht tragbar. Die Pillow-CVEs bleiben ein
+# dokumentiertes Restrisiko; der Upload-Vektor ist durch die Magic-Byte-Allowlist
+# (P0-2) stark entschärft.
+Pillow==10.4.0
+# HEIC/HEIF-Support für die Mobile-Erfassung (STOAA-513); die Wheels bündeln libheif.
+pillow-heif==0.18.0
 # QR-Codes für die Archivnummer (ASN, STOAA-284/285); rendert als PNG via Pillow
 qrcode==7.4.2
 # ASN-Barcode-Erkennung (Code128 + QR) – braucht libzbar0 als System-Lib (STOAA-515)
@@ -47,10 +48,9 @@ pgvector==0.3.6
 # Lokale Text-Embeddings für die semantische Suche: fastembed (ONNX-Runtime,
 # mehrsprachig) – KEIN torch, läuft auf CPU. Modelle werden lazy geladen und
 # unter EMBEDDING_CACHE_DIR (/data/models, persistentes PVC) gecached.
-# fastembed 0.8.0 (zweiter Anlauf, hebt die pillow<11-Decke auf). Das ONNX-Modell
-# wird NICHT mehr zur Laufzeit geladen (das scheiterte im Cluster via hf-xet, #242),
-# sondern zur Build-Zeit ins Image gebacken (backend/Dockerfile, ci/bake_model.py).
-# Modellname unverändert (intfloat/multilingual-e5-large, 1024-dim); die Embedding-
-# Werte können sich ändern -> nach dem Deploy ZWINGEND reindex_embeddings --all +
-# calibrate (docs/embedding-upgrade.md). Zieht numpy 2.x + onnxruntime 1.27.
-fastembed==0.8.0
+# fastembed 0.3.6 (bewährt): lädt e5-large klassisch nach EMBEDDING_CACHE_DIR
+# (/data/models, persistentes PVC) und nutzt den dort vorhandenen Cache. Der
+# Upgrade auf 0.8.0 (Pillow-12-Decke) wurde zurückgerollt – 0.8.0 lud das Modell
+# via hf-xet nicht (Incident) und sprengte nach dem Baking beim Laden das
+# Pod-Memory. e5-Schwellwerte bleiben damit auf der alten Kalibrierung (p50≈0.968).
+fastembed==0.3.6

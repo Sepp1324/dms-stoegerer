@@ -1,5 +1,13 @@
 # Embedding-/Pillow-Upgrade — Runbook
 
+> **STATUS: ZURÜCKGEROLLT.** Der 0.8.0/Pillow-12-Upgrade wurde rückgängig gemacht:
+> fastembed 0.8.0 lud das Modell im Cluster via hf-xet nicht (Incident) und
+> sprengte nach dem Ins-Image-Backen beim Laden (fp32/mean-pooling +
+> onnxruntime-Graph-Optimierung) das Pod-Memory (OOMKill/exit 137) selbst mit 4Gi
+> und gedeckelten Threads. Produktion läuft wieder auf **fastembed 0.3.6 + Pillow
+> 10.4.0**. Ein künftiger Anlauf bräuchte ein **quantisiertes/kleineres Modell**
+> oder deutlich mehr Node-RAM. Das Dokument bleibt als Historie/Anleitung erhalten.
+
 Kontext: `fastembed 0.3.6 → 0.8.0` (hebt die `pillow<11`-Decke auf) + `Pillow 10.4.0 → 12.3.0` (schließt offene Pillow-CVEs) + `pillow-heif 0.21.0`. Der fastembed-Sprung ist groß (numpy 2.x + onnxruntime 1.27) — Schritt 2 (Neu-Einbetten) ist damit **Pflicht**, nicht optional.
 
 **Modell wird ins Image gebacken.** Der erste Anlauf (#242) scheiterte, weil fastembed 0.8.0 das ONNX-Modell zur Laufzeit über hf-xet lud und das im Cluster fehlschlug. Jetzt lädt der **Deploy-Build** das Modell (mit `HF_HUB_DISABLE_XET=1`) nach `/opt/models` ins Image (`backend/Dockerfile` + `ci/bake_model.py`), und `EMBEDDING_CACHE_DIR=/opt/models` zeigt darauf. Zur Laufzeit gibt es **keinen Download** mehr. Kann der Runner das Modell nicht laden, schlägt der Build fehl → **kein Deploy** (das laufende Image bleibt).
