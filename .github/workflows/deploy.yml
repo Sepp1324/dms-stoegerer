@@ -43,14 +43,17 @@ jobs:
         run: scripts/verify-stable-secrets.sh
 
       # Der Deploy lässt die gepushten dms-backend/-frontend:<TAG>-Images lokal auf
-      # dem self-hosted Runner liegen. Ohne Aufräumen sammeln die sich über die
-      # Läufe an, bis die Platte voll ist. Vor dem Build ungenutzte Images (ab 48h)
-      # + alten Build-Cache abräumen.
+      # dem self-hosted Runner liegen. Seit das Backend-Image das ~2,5-GB-Embedding-
+      # Modell mitbringt, füllen wenige alte Tags die Platte (No space left on
+      # device). Deshalb ALLE ungenutzten Images entfernen (nicht nur >48h) – die
+      # Registry ist die Quelle der Wahrheit, der Cluster zieht von dort. Der
+      # BUILD-Cache bleibt bewusst unangetastet (`builder prune` nur alter Cache),
+      # damit die Modell-Bake-Layer erhalten bleibt und nicht jeder Deploy das
+      # Modell neu herunterlädt.
       - name: Runner-Speicher freihalten
         run: |
-          docker image prune -f || true
-          docker image prune -af --filter "until=48h" || true
-          docker builder prune -f --filter "until=24h" || true
+          docker image prune -af || true
+          docker builder prune -f --filter "until=72h" || true
           df -h . || true
 
       - name: Images bauen
