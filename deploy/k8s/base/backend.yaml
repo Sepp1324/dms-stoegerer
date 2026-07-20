@@ -72,17 +72,21 @@ spec:
             - config.wsgi:application
             - --bind
             - 0.0.0.0:8000
+            # Nur 2 Worker: die semantische Suche lädt e5-large PRO gunicorn-
+            # Prozess (~2,5 GB); je mehr Worker, desto mehr Modell-Kopien. 2 reichen
+            # für den Familien-Einsatz und deckeln den Speicherbedarf.
             - --workers
-            - "3"
+            - "2"
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
-          # Memory großzügig: die semantische Suche lädt das e5-large-Modell
-          # (~2,5 GB) in den Backend-Prozess; 1Gi führte zu OOMKill (exit 137).
+          # Memory: die semantische Suche lädt e5-large mit onnxruntime 1.27 (Load-
+          # Spike durch Graph-Optimierung). 3Gi reichten nicht (OOMKill/exit 137);
+          # bei 2 gunicorn-Workern deckt 6Gi zwei Modell-Kopien + Web-Overhead.
           resources:
-            requests: {cpu: "250m", memory: "768Mi"}
-            limits: {cpu: "2", memory: "3Gi"}
+            requests: {cpu: "250m", memory: "1Gi"}
+            limits: {cpu: "2", memory: "6Gi"}
           env:
             - name: HOME
               value: /tmp
