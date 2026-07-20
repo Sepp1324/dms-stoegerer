@@ -29,19 +29,9 @@ RUN apt-get update \
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-# Embedding-Modell zur BUILD-Zeit ins Image backen (kein Laufzeit-Download im
-# Cluster – der schlug via hf-xet fehl). EMBEDDING_CACHE_DIR zeigt auf einen
-# NICHT gemounteten Pfad (/opt/models), damit der /data-PVC ihn zur Laufzeit
-# nicht überdeckt. BAKE_MODEL=0 überspringt den ~1-GB-Download – so bleibt die
-# PR-CI (gemockte Embeddings) schnell; nur der Deploy-Build backt tatsächlich.
-ARG BAKE_MODEL=1
-ENV EMBEDDING_CACHE_DIR=/opt/models
-COPY ci/bake_model.py /tmp/bake_model.py
-# Nach dem Backen dem Runtime-User (non-root uid 1000, siehe deploy/k8s) gehören:
-# sonst kann fastembed seine Cache-Metadaten nicht schreiben (Permission denied).
-RUN if [ "$BAKE_MODEL" = "1" ]; then \
-      python /tmp/bake_model.py && chown -R 1000:1000 /opt/models; \
-    fi
+# Kein Modell-Baking mehr (Rollback auf fastembed 0.3.6): 0.3.6 lädt das e5-Modell
+# klassisch nach EMBEDDING_CACHE_DIR (Default /data/models, persistentes PVC) und
+# nutzt den dort bereits vorhandenen Cache – kein Xet, kein ins-Image-Backen.
 
 COPY . .
 

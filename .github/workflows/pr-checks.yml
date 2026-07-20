@@ -45,10 +45,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Backend-Image bauen (flüchtiger CI-Tag)
-        # BAKE_MODEL=0: die PR-CI mockt Embeddings (kein ~1-GB-Modell-Download nötig,
-        # kein HF-Zugriff auf dem ephemeren ubuntu-Runner). Der Deploy-Build backt
-        # das Modell (Default BAKE_MODEL=1, self-hosted Runner).
-        run: docker build --build-arg BAKE_MODEL=0 -t "dms-backend-ci:${GITHUB_SHA}" ./backend
+        run: docker build -t "dms-backend-ci:${GITHUB_SHA}" ./backend
 
       - name: Check + Migrations-Check + Testsuite
         run: backend/ci/run-tests.sh "dms-backend-ci:${GITHUB_SHA}"
