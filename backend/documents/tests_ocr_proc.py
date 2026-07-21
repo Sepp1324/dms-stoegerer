@@ -52,11 +52,12 @@ class RunGroupTests(SimpleTestCase):
         self.assertFalse(os.path.exists(marker), "Kindprozess wurde nicht gekillt")
 
 
-def _write_pdf(path: str) -> None:
+def _write_pdf(path: str, pages: int = 1) -> None:
     import fitz
 
     doc = fitz.open()
-    doc.new_page()
+    for _ in range(pages):
+        doc.new_page()
     doc.save(path)
     doc.close()
 
@@ -96,11 +97,46 @@ class RunOcrArchiveTests(SimpleTestCase):
             result = engine.run_ocr(self.input)
 
         self.assertEqual(result.status, OCRStatusEnum.SUCCESS)
+        self.assertEqual(result.archive_path, self.final)
         self.assertTrue(os.path.exists(self.final))
         self.assertFalse(
             [f for f in os.listdir(self.dir) if f.endswith(".tmp.pdf")],
             "Temp-Datei nicht aufgeräumt",
         )
+
+    def test_unvollstaendige_ocr_wird_verworfen(self):
+        # Original 3 Seiten, OCR-Ausgabe nur 1 Seite -> unvollständig -> KEIN Archiv
+        # (kein os.replace), status FAILED, archive_path leer.
+        import os
+
+        _write_pdf(self.input, pages=3)
+
+        def _partial(cmd, **kw):
+            _write_pdf(cmd[-1], pages=1)  # nur 1 von 3 Seiten
+            return b""
+
+        with mock.patch.object(
+            engine, "extract_text_best_effort", return_value="x" * 100
+        ), mock.patch.object(engine, "run_group", side_effect=_partial):
+            result = engine.run_ocr(self.input)
+
+        self.assertEqual(result.status, OCRStatusEnum.FAILED)
+        self.assertEqual(result.archive_path, "")
+        self.assertFalse(os.path.exists(self.final))
+        self.assertFalse([f for f in os.listdir(self.dir) if f.endswith(".tmp.pdf")])
+
+    def test_fehlerlauf_uebernimmt_kein_altes_archiv(self):
+        # Ein von einem FRÜHEREN Lauf übrig gebliebenes .ocr.pdf existiert bereits.
+        # Ein fehlgeschlagener Lauf darf es NICHT als aktuelles Archiv liefern.
+        _write_pdf(self.final)  # altes Archiv auf der Platte
+
+        with mock.patch.object(
+            engine, "extract_text_best_effort", return_value="x" * 100
+        ), mock.patch.object(engine, "run_group", side_effect=RuntimeError("boom")):
+            result = engine.run_ocr(self.input)
+
+        self.assertEqual(result.status, OCRStatusEnum.FAILED)
+        self.assertEqual(result.archive_path, "", "altes Archiv fälschlich übernommen")
 
     def test_fehler_hinterlaesst_kein_archiv_und_keine_tempdatei(self):
         import os

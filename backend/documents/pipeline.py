@@ -319,8 +319,11 @@ def ocr_version(version: DocumentVersion) -> dict:
     result = run_ocr(version.file_path)
 
     finished_at = timezone.now()
-    archive_candidate = Path(version.file_path).with_suffix(".ocr.pdf")
-    archive_path = str(archive_candidate) if archive_candidate.exists() else ""
+    # NUR das Artefakt des aktuellen erfolgreichen Laufs übernehmen (result.
+    # archive_path), NIE ein per exists() gefundenes .ocr.pdf – das könnte von
+    # einem früheren Versuch stammen und würde sonst fälschlich als aktuelles
+    # Archiv versiegelt.
+    archive_path = result.archive_path
 
     version.archive_path = archive_path
     version.ocr_text = result.text

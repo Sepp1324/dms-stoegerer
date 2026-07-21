@@ -67,11 +67,11 @@ def run_ocr(input_path: str, force: bool = False) -> OCRResult:
     # 1. Erst versuchen: nur Text extrahieren
     text = extract_text_best_effort(input_path)
 
-    # Seitenzahl aus dem PDF selbst; die Zeilenumbruch-Schätzung ist nur Fallback.
-    # Wichtig für is_valid_ocr unten: eine zu KLEINE Seitenzahl täuscht „genug Text
-    # pro Seite" vor und ließe lückenhafte OCR (nur 1 von 3 Seiten erkannt)
-    # fälschlich als SUCCESS gelten.
-    pages = _pdf_page_count(input_path) or _estimate_pages(text)
+    # Original-Seitenzahl aus dem PDF (None bei Bild-Input). Dient (a) der
+    # is_valid_ocr-Heuristik und (b) dem Vollständigkeits-Check: die OCR-Ausgabe
+    # MUSS gleich viele Seiten haben, sonst ist sie unvollständig (z. B. 1 von 3).
+    original_pages = _pdf_page_count(input_path)
+    pages = original_pages or _estimate_pages(text)
 
     # 2. Skip OCR wenn bereits genug qualitativer Text vorhanden ist.
     if _should_skip_ocr(text, pages, force=force):
@@ -101,22 +101,49 @@ def run_ocr(input_path: str, force: bool = False) -> OCRResult:
             ]
         )
 
-        # Ausgabe validieren: lesbares, nicht-leeres PDF? Sonst NICHT übernehmen.
-        real_pages = _pdf_page_count(str(tmp))
-        if real_pages is None:
-            raise RuntimeError("OCR-Ausgabe ist kein lesbares PDF")
-        text = extract_text_best_effort(str(tmp))
-        pages = real_pages
-        valid = is_valid_ocr(text, pages)
+        # Ausgabe VALIDIEREN, bevor sie veröffentlicht wird:
+        #  * lesbares PDF (page_count != None),
+        #  * KEINE fehlenden Seiten ggü. dem Original (Vollständigkeit),
+        #  * genug Text pro Seite (is_valid_ocr).
+        # Nur ein valides Ergebnis wird atomar zum Archiv. Ungültige/partielle
+        # Ausgaben werden verworfen (kein Archiv) -> Vorschau/Siegel nutzen weiter
+        # das Original; ocr_status=failed macht es im Monitoring/Retry sichtbar.
+        ocr_pages = _pdf_page_count(str(tmp))
+        ocr_text = extract_text_best_effort(str(tmp))
+        pages_complete = original_pages is None or ocr_pages == original_pages
+        valid = (
+            ocr_pages is not None
+            and pages_complete
+            and is_valid_ocr(ocr_text, ocr_pages)
+        )
+
+        if not valid:
+            _remove_quietly(tmp)
+            if ocr_pages is None:
+                reason = "kein lesbares PDF"
+            elif not pages_complete:
+                reason = f"unvollständig: {ocr_pages} statt {original_pages} Seiten"
+            else:
+                reason = "zu wenig erkannter Text pro Seite"
+            return OCRResult(
+                text=ocr_text or text,
+                pages=ocr_pages or pages,
+                status=OCRStatusEnum.FAILED,
+                error=f"OCR-Ausgabe verworfen ({reason})",
+                duration_ms=int((time.time() - start) * 1000),
+                engine="ocrmypdf",
+                archive_path="",
+            )
 
         os.replace(str(tmp), str(output_final))  # atomar: erst bei Erfolg Archiv
 
         return OCRResult(
-            text=text,
-            pages=pages,
-            status=OCRStatusEnum.SUCCESS if valid else OCRStatusEnum.FAILED,
+            text=ocr_text,
+            pages=ocr_pages,
+            status=OCRStatusEnum.SUCCESS,
             duration_ms=int((time.time() - start) * 1000),
             engine="ocrmypdf",
+            archive_path=str(output_final),
         )
 
     except SoftTimeLimitExceeded:
@@ -137,4 +164,5 @@ def run_ocr(input_path: str, force: bool = False) -> OCRResult:
             error=str(e),
             duration_ms=int((time.time() - start) * 1000),
             engine="ocrmypdf",
+            archive_path="",
         )

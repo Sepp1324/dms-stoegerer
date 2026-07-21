@@ -47,11 +47,21 @@ def run_group(cmd: list[str], *, timeout: int | None = None, capture: bool = Fal
 
 
 def _kill_group(proc: "subprocess.Popen") -> None:
+    # Wegen start_new_session=True IST proc der Gruppenführer -> PGID == proc.pid.
+    # Direkt proc.pid nehmen (kein getpgid, das selbst fehlschlagen könnte).
     try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        os.killpg(proc.pid, signal.SIGKILL)
     except (ProcessLookupError, OSError):
         pass
+    # Fallback: den Hauptprozess direkt hart killen (falls killpg nicht griff).
     try:
-        proc.communicate(timeout=5)  # Zombie einsammeln, aber nicht ewig hängen
+        proc.kill()
+    except (ProcessLookupError, OSError):
+        pass
+    # Verbindlich (aber begrenzt) einsammeln, damit Popen.__exit__ nicht in ein
+    # unbegrenztes wait() läuft. Nach SIGKILL an Prozess UND Gruppe beendet sich
+    # der Prozess praktisch sofort.
+    try:
+        proc.communicate(timeout=5)
     except Exception:
         pass
