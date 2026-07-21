@@ -26,8 +26,10 @@ from django.http import (
 )
 from django.utils import timezone
 from django.utils.text import slugify
+from kombu.exceptions import OperationalError as BrokerOperationalError
 from rest_framework import status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
+from rest_framework.exceptions import APIException
 from rest_framework.filters import OrderingFilter
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import (
@@ -145,6 +147,38 @@ from .tasks import (
     process_document_version,
     retry_document_version,
 )
+
+
+class _ProcessingUnavailable(APIException):
+    """HTTP 503: der Celery-Broker (Redis) ist gerade nicht erreichbar.
+
+    DRF wandelt eine geworfene ``APIException`` selbst in eine saubere Antwort –
+    hier 503 statt eines kryptischen 500. Bewusst KEIN 500: das Dokument/die
+    Version wurde bereits erzeugt und ist per Retry nachverarbeitbar, sobald der
+    Broker wieder da ist; der Client soll das als „später erneut" verstehen.
+    """
+
+    status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    default_detail = (
+        "Hintergrundverarbeitung ist derzeit nicht erreichbar. Das Dokument "
+        "wurde gespeichert; bitte die Verarbeitung in Kürze erneut anstoßen."
+    )
+    default_code = "processing_unavailable"
+
+
+def _enqueue_processing(version_id) -> None:
+    """``process_document_version`` anstoßen; Broker-Ausfall → sauberes 503.
+
+    Ohne diese Kapselung schlägt ein nicht erreichbarer Redis-Broker (Down oder
+    MISCONF, z. B. wenn bgsave scheitert) beim ``.delay()`` als HTTP 500 durch –
+    obwohl die neue Version längst committet ist und nur der Enqueue scheitert.
+    IMMER erst NACH der Versions-Erzeugung aufrufen: das erzeugte Objekt bleibt
+    bestehen, die Verarbeitung ist per Retry nachholbar.
+    """
+    try:
+        process_document_version.delay(version_id)
+    except BrokerOperationalError as exc:
+        raise _ProcessingUnavailable() from exc
 
 # Erkennt Bereichsfilter auf Zusatzfeldern: ``custom_field_<id>_gte`` / ``_lte``.
 _CUSTOM_FIELD_PARAM_RE = re.compile(r"^custom_field_(\d+)_(gte|lte)$")
@@ -1072,7 +1106,7 @@ class DocumentUploadView(APIView):
             file_path, title=title, owner=request.user, mime=mime, size=size
         )
         # OCR/Hash-Kette asynchron im Celery-Worker.
-        process_document_version.delay(version.id)
+        _enqueue_processing(version.id)
 
         return Response(
             DocumentSerializer(document).data,
@@ -1205,7 +1239,7 @@ class MobileCaptureUploadView(APIView):
             ingest_source="mobile",
         )
         # OCR/Hash-Kette asynchron im Celery-Worker.
-        process_document_version.delay(version.id)
+        _enqueue_processing(version.id)
 
         return Response(
             DocumentSerializer(document).data,
@@ -1864,7 +1898,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
             document, file_path, created_by=request.user, mime=mime, size=size
         )
         # OCR/Hash-Kette asynchron im Celery-Worker.
-        process_document_version.delay(version.id)
+        _enqueue_processing(version.id)
 
         document.refresh_from_db()
         return Response(
@@ -3382,7 +3416,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
         except Exception as exc:  # noqa: BLE001
             return Response({"detail": str(exc)}, status=400)
 
-        process_document_version.delay(version.id)
+        _enqueue_processing(version.id)
         document.refresh_from_db()
         return Response(self.get_serializer(document).data, status=status.HTTP_201_CREATED)
 
@@ -3434,7 +3468,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
         except Exception as exc:  # noqa: BLE001
             return Response({"detail": str(exc)}, status=400)
 
-        process_document_version.delay(version.id)
+        _enqueue_processing(version.id)
         document.refresh_from_db()
         return Response(self.get_serializer(document).data, status=status.HTTP_201_CREATED)
 
@@ -3470,7 +3504,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
             return Response({"detail": str(exc)}, status=400)
 
         for _created_document, version in created:
-            process_document_version.delay(version.id)
+            _enqueue_processing(version.id)
         serializer = self.get_serializer([item[0] for item in created], many=True)
         return Response({"documents": serializer.data}, status=status.HTTP_201_CREATED)
 
