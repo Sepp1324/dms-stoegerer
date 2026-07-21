@@ -12,6 +12,8 @@ from __future__ import annotations
 import fnmatch
 import logging
 
+from celery.exceptions import SoftTimeLimitExceeded
+
 logger = logging.getLogger(__name__)
 
 
@@ -177,6 +179,8 @@ def run_workflows(document, *, trigger_type: str, source: str, text: str | None 
             try:
                 changed = _apply_action(action, document)
                 applied.update(changed)
+            except SoftTimeLimitExceeded:
+                raise  # Soft-Time-Limit nicht verschlucken (läuft ggf. im Task).
             except Exception:
                 logger.exception("Workflow-Aktion %s fehlgeschlagen (Workflow: %s)", action.pk, wf.name)
 

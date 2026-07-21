@@ -24,6 +24,7 @@ from email.header import decode_header, make_header
 from email.message import Message
 from email.utils import parsedate_to_datetime, parseaddr
 
+from celery.exceptions import SoftTimeLimitExceeded
 from django.conf import settings
 from django.db import connection
 from django.utils import timezone
@@ -299,6 +300,8 @@ def fetch_account(account) -> dict:
 
     try:
         conn = connect(account)
+    except SoftTimeLimitExceeded:
+        raise  # Soft-Time-Limit nicht verschlucken.
     except Exception as exc:
         logger.exception("IMAP-Verbindung fehlgeschlagen für %s", account)
         account.last_error = f"{type(exc).__name__}: {exc}"
@@ -323,6 +326,8 @@ def fetch_account(account) -> dict:
                     stats["mails"] += 1
                     stats["imported"] += result
                 conn.store(uid, "+FLAGS", "\\Seen")
+            except SoftTimeLimitExceeded:
+                raise  # Soft-Time-Limit nicht verschlucken (Mail-Abruf-Loop).
             except Exception:
                 stats["errors"] += 1
                 logger.exception("Fehler beim Verarbeiten einer Mail (uid=%s, %s)", uid, account)
