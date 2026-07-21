@@ -1,4 +1,4 @@
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 
 from documents.models import Document, DocumentChunk
 from documents.services import semantic_index
@@ -62,11 +62,21 @@ class Command(BaseCommand):
                 self.stderr.write(f"FEHLER {doc.id}: {exc}")
                 continue
             created += int(result.get("created", 0))
-            if result.get("status") == "empty":
+            status = result.get("status")
+            if status == "empty":
                 empty += 1
+            elif status == "error":
+                # sync_document_embeddings meldet Modellfehler als RÜCKGABE (nicht
+                # als Exception). Ohne diese Zweig erschiene ein fehlgeschlagener
+                # Reindex als „0 Chunks, 0 Fehler" mit Exitcode 0.
+                failed += 1
+                self.stderr.write(
+                    f"FEHLER {doc.id}: Embedding fehlgeschlagen (Modell nicht ladbar?)."
+                )
 
-        self.stdout.write(
-            self.style.SUCCESS(
-                f"Fertig: {created} Chunks erstellt, {empty} leer, {failed} Fehler."
-            )
-        )
+        summary = f"Fertig: {created} Chunks erstellt, {empty} leer, {failed} Fehler."
+        if failed:
+            # Non-zero Exitcode, damit CI/Automatik den Fehlschlag bemerkt
+            # (CommandError -> Ausgabe auf stderr, Exit 1).
+            raise CommandError(summary)
+        self.stdout.write(self.style.SUCCESS(summary))
