@@ -1,5 +1,6 @@
 from django.core.management.base import BaseCommand, CommandError
 
+from ai import embeddings
 from documents.models import Document, DocumentChunk
 from documents.services import semantic_index
 
@@ -14,6 +15,15 @@ class Command(BaseCommand):
         parser.add_argument("--dry-run", action="store_true", help="Nur anzeigen, was passieren wuerde.")
 
     def handle(self, *args, **options):
+        # Sind Embeddings global deaktiviert, liefert sync_document_embeddings für
+        # JEDES Dokument status="disabled" (kein Chunk) – der Lauf wäre wirkungslos.
+        # Fail-fast mit non-zero Exit, sonst meldete eine Automatisierung Erfolg
+        # (Exit 0), obwohl nichts indexiert wurde.
+        if not embeddings.enabled():
+            raise CommandError(
+                "Embeddings sind deaktiviert (EMBEDDING_ENABLED=false) – "
+                "Reindex nicht möglich."
+            )
         qs = (
             Document.objects.select_related(
                 "current_version",
@@ -65,13 +75,13 @@ class Command(BaseCommand):
             status = result.get("status")
             if status == "empty":
                 empty += 1
-            elif status == "error":
-                # sync_document_embeddings meldet Modellfehler als RÜCKGABE (nicht
-                # als Exception). Ohne diese Zweig erschiene ein fehlgeschlagener
-                # Reindex als „0 Chunks, 0 Fehler" mit Exitcode 0.
+            elif status in ("error", "disabled"):
+                # sync_document_embeddings meldet Modellfehler/„deaktiviert" als
+                # RÜCKGABE (nicht als Exception). Ohne diesen Zweig erschiene ein
+                # wirkungsloser Reindex als „0 Chunks, 0 Fehler" mit Exitcode 0.
                 failed += 1
                 self.stderr.write(
-                    f"FEHLER {doc.id}: Embedding fehlgeschlagen (Modell nicht ladbar?)."
+                    f"FEHLER {doc.id}: kein Chunk erzeugt (status={status})."
                 )
 
         summary = f"Fertig: {created} Chunks erstellt, {empty} leer, {failed} Fehler."
