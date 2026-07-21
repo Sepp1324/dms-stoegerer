@@ -24,7 +24,7 @@ concurrency:
   group: deploy-frontend-only
   cancel-in-progress: false
 
-# Pflegt den frontend-newTag in main zurück → Schreibrecht nötig.
+# Pflegt den frontend-newTag auf dem GitOps-Branch cluster-state → Schreibrecht.
 permissions:
   contents: write
 
@@ -98,15 +98,17 @@ jobs:
       - name: Frontend-Rollout abwarten
         run: kubectl -n dms rollout status deploy/frontend --timeout=180s
 
-      - name: Frontend-newTag in main pflegen (nur dms-frontend)
-        # Hält deploy/k8s/base/kustomization.yaml ehrlich, ohne das Backend-Tag
-        # anzufassen (Entkopplung bleibt). Arbeitet auf frischem origin/main, damit
-        # auch bei workflow_dispatch mit abweichendem git_sha korrekt nach main
-        # committet wird. `[skip ci]` verhindert erneutes Triggern.
+      - name: Frontend-newTag auf GitOps-Branch cluster-state pflegen (nur Frontend)
+        # Setzt AUF cluster-state auf (dort steht der ECHTE, zuletzt deployte
+        # Backend-Tag) und bumpt NUR den Frontend-Tag -> das Backend-Tag bleibt
+        # erhalten (Entkopplung). Existiert cluster-state noch nicht, von main
+        # starten. main bleibt unangetastet/geschützt. `[skip ci]` verhindert
+        # erneutes Triggern.
         run: |
           set -euo pipefail
-          git fetch origin main
-          git checkout -B _fe_tagbump origin/main
+          git fetch origin cluster-state main || git fetch origin main
+          git checkout -B _fe_tagbump origin/cluster-state 2>/dev/null \
+            || git checkout -B _fe_tagbump origin/main
           f=deploy/k8s/base/kustomization.yaml
           python3 - "$f" "$TAG" <<'PY'
           import re, sys
@@ -125,11 +127,12 @@ jobs:
           git config user.email "deploy-bot@stoegerer-dms.local"
           git add "$f"
           git commit -m "chore(deploy): frontend newTag -> ${TAG} [skip ci]"
-          # NON-FATAL (Branch-Protection): Frontend-Rollout war bereits erfolgreich.
-          if git push origin _fe_tagbump:main; then
-            echo "frontend newTag -> ${TAG} nach main committet."
+          # NON-FATAL: Frontend-Rollout war bereits erfolgreich. cluster-state ist
+          # bot-verwaltet -> Force-Push (aufsetzend, daher meist FF).
+          if git push -f origin _fe_tagbump:cluster-state; then
+            echo "cluster-state Frontend-Tag -> ${TAG}."
           else
-            echo "::warning::frontend-newTag-Bump konnte nicht nach main gepusht werden (Branch-Protection?). Rollout war erfolgreich."
+            echo "::warning::Push nach cluster-state fehlgeschlagen. Rollout war erfolgreich; vor apply -k deploy/k8s/verify-image-tags.sh laufen lassen."
           fi
 
       - name: Rollout-Diagnose (bei Timeout/Fehler)
