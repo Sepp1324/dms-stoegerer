@@ -337,6 +337,13 @@ CELERY_BEAT_SCHEDULE = {
         "task": "documents.tasks.check_due_reminders",
         "schedule": float(os.getenv("REMINDER_CHECK_INTERVAL", "86400")),
     },
+    # Stuck-Task-Watchdog: hängende Versionen (Worker-Crash, acks_late ist aus)
+    # nach PROCESSING_STUCK_AFTER_MINUTES automatisch FAILED (retry-fähig) bzw.
+    # hängendes SEALED nach READY abschließen.
+    "reap-stuck-versions": {
+        "task": "documents.tasks.reap_stuck_versions",
+        "schedule": float(os.getenv("STUCK_REAP_INTERVAL", "600")),
+    },
 }
 
 # --- E-Mail-Versand (SMTP) ---
