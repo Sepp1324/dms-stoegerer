@@ -53,11 +53,18 @@ class RunGroupTests(SimpleTestCase):
 
 
 def _write_pdf(path: str, pages: int = 1) -> None:
+    # Jede Seite mit ausreichend Text, damit die Pro-Seite-Deckung erfüllt ist.
+    _write_pdf_texts(path, ["Seite mit genug erkennbarem Text " * 3] * pages)
+
+
+def _write_pdf_texts(path: str, per_page_texts: list[str]) -> None:
     import fitz
 
     doc = fitz.open()
-    for _ in range(pages):
-        doc.new_page()
+    for body in per_page_texts:
+        page = doc.new_page()
+        if body:
+            page.insert_text((72, 72), body)
     doc.save(path)
     doc.close()
 
@@ -124,6 +131,29 @@ class RunOcrArchiveTests(SimpleTestCase):
         self.assertEqual(result.archive_path, "")
         self.assertFalse(os.path.exists(self.final))
         self.assertFalse([f for f in os.listdir(self.dir) if f.endswith(".tmp.pdf")])
+
+    def test_leere_seiten_trotz_richtiger_seitenzahl_verworfen(self):
+        # Original 3 Seiten, OCR-Ausgabe 3 Seiten – aber nur Seite 1 hat Text
+        # (2–3 leer). Seitenzahl stimmt und der Ø > 20 Zeichen/Seite, trotzdem
+        # unbrauchbar -> Pro-Seite-Deckung verwirft es (kein Archiv).
+        import os
+
+        _write_pdf(self.input, pages=3)
+
+        def _mostly_blank(cmd, **kw):
+            _write_pdf_texts(
+                cmd[-1], ["Nur hier steht genug erkennbarer Text " * 2, "", ""]
+            )
+            return b""
+
+        with mock.patch.object(
+            engine, "extract_text_best_effort", return_value="x" * 100
+        ), mock.patch.object(engine, "run_group", side_effect=_mostly_blank):
+            result = engine.run_ocr(self.input)
+
+        self.assertEqual(result.status, OCRStatusEnum.FAILED)
+        self.assertEqual(result.archive_path, "")
+        self.assertFalse(os.path.exists(self.final))
 
     def test_fehlerlauf_uebernimmt_kein_altes_archiv(self):
         # Ein von einem FRÜHEREN Lauf übrig gebliebenes .ocr.pdf existiert bereits.
