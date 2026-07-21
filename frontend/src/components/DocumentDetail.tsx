@@ -31,6 +31,7 @@ import {
   type TabId,
 } from "./documentDetail/DetailTabs";
 import { documentLink } from "../documentLink";
+import { shouldCloseOnEscape } from "../detailKeyboard";
 import { DetailPreview } from "./documentDetail/DetailPreview";
 import { DetailMeta } from "./documentDetail/DetailMeta";
 import { EditForm, type EditFormState } from "./documentDetail/EditForm";
@@ -147,6 +148,27 @@ export default function DocumentDetail({
     folder: "" as number | "",
     tagIds: new Set<number>(),
   });
+
+  // Escape schließt die Detailansicht (zurück zur Liste) – erwartbares
+  // Tastatur-Verhalten. Guards: nicht im Edit-Modus (dort gehört Escape dem
+  // Formular/Abbrechen) und nicht während man in einem Eingabefeld tippt.
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      const el = document.activeElement as HTMLElement | null;
+      if (
+        shouldCloseOnEscape(
+          event.key,
+          editing,
+          el?.tagName,
+          el?.isContentEditable,
+        )
+      ) {
+        onBack();
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [editing, onBack]);
 
   // AbortController (#8): bei schnellem Dokumentwechsel wird die veraltete
   // Anfrage wirklich abgebrochen (nicht nur ihr Ergebnis verworfen) – spart
