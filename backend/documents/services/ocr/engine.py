@@ -32,6 +32,19 @@ def _pdf_page_count(path: str) -> int | None:
         return None
 
 
+def _pdf_page_texts(path: str) -> list[str]:
+    """Text PRO SEITE via PyMuPDF (leere Liste, wenn nicht lesbar)."""
+    try:
+        import fitz
+
+        with fitz.open(path) as doc:
+            return [page.get_text() or "" for page in doc]
+    except SoftTimeLimitExceeded:
+        raise  # Soft-Time-Limit nie verschlucken
+    except Exception:
+        return []
+
+
 def _estimate_pages(text: str) -> int:
     """Grobe Notfall-Schätzung, falls die echte Seitenzahl nicht lesbar ist."""
     return max(text.count("\n") // 50, 1)
@@ -108,21 +121,40 @@ def run_ocr(input_path: str, force: bool = False) -> OCRResult:
         # Nur ein valides Ergebnis wird atomar zum Archiv. Ungültige/partielle
         # Ausgaben werden verworfen (kein Archiv) -> Vorschau/Siegel nutzen weiter
         # das Original; ocr_status=failed macht es im Monitoring/Retry sichtbar.
-        ocr_pages = _pdf_page_count(str(tmp))
-        ocr_text = extract_text_best_effort(str(tmp))
+        page_texts = _pdf_page_texts(str(tmp))
+        ocr_pages = len(page_texts) or _pdf_page_count(str(tmp))
+        ocr_text = "\n".join(page_texts) if page_texts else extract_text_best_effort(str(tmp))
         pages_complete = original_pages is None or ocr_pages == original_pages
+
+        # PRO-SEITE-Deckung statt nur Durchschnitt: sonst besteht ein 3-seitiges PDF,
+        # bei dem NUR Seite 1 genug Text hat (Ø > 20 Zeichen/Seite), obwohl 2–3 leer
+        # sind. Der Anteil der Seiten mit ausreichend Text muss eine Schwelle
+        # erreichen; einzelne bewusst leere Seiten bleiben tolerierbar.
+        from django.conf import settings as _settings
+
+        min_chars = 20
+        min_cov = float(getattr(_settings, "OCR_MIN_PAGE_COVERAGE", 0.6))
+        if page_texts:
+            with_text = sum(1 for t in page_texts if len(t.strip()) >= min_chars)
+            coverage_ok = (with_text / len(page_texts)) >= min_cov
+        else:
+            coverage_ok = False
+
         valid = (
             ocr_pages is not None
             and pages_complete
+            and coverage_ok
             and is_valid_ocr(ocr_text, ocr_pages)
         )
 
         if not valid:
             _remove_quietly(tmp)
-            if ocr_pages is None:
+            if not ocr_pages:
                 reason = "kein lesbares PDF"
             elif not pages_complete:
                 reason = f"unvollständig: {ocr_pages} statt {original_pages} Seiten"
+            elif not coverage_ok:
+                reason = "zu viele (fast) leere Seiten"
             else:
                 reason = "zu wenig erkannter Text pro Seite"
             return OCRResult(

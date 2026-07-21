@@ -324,6 +324,11 @@ CELERY_TASK_TIME_LIMIT = int(os.getenv("CELERY_TASK_TIME_LIMIT", "2100"))
 # Prozessgruppen-Kill hart beendet, bevor der Task selbst ins Limit läuft (sonst
 # könnten Kindprozesse nach einem Worker-Kill weiterlaufen und Ressourcen belegen).
 OCR_SUBPROCESS_TIMEOUT = int(os.getenv("OCR_SUBPROCESS_TIMEOUT", "1200"))
+# OCR-Qualität: Mindestanteil der Seiten mit ausreichend Text, damit eine
+# OCR-Ausgabe als Archiv veröffentlicht wird (Pro-Seite-Deckung statt nur
+# Durchschnitt). 0.6 = mind. 60% der Seiten müssen Text tragen; einzelne bewusst
+# leere Seiten (z. B. Rückseiten) bleiben tolerierbar.
+OCR_MIN_PAGE_COVERAGE = float(os.getenv("OCR_MIN_PAGE_COVERAGE", "0.6"))
 
 # Periodische Aufgaben (benötigt einen laufenden ``celery beat``-Prozess, siehe
 # deploy/k8s/beat.yaml). Intervalle in Sekunden, per Env übersteuerbar.
