@@ -123,6 +123,40 @@ def process_document_version(version_id: int) -> dict:
     return result
 
 
+def enqueue_processing(version) -> bool:
+    """Stößt ``process_document_version`` an; ``True`` bei erfolgreichem Enqueue.
+
+    Gemeinsamer Enqueue-Pfad für ALLE Ingest-Quellen (Upload/Mail/Consume/Import/
+    Workbench). Bei einem Broker-Ausfall (Redis down/MISCONF) wird die – bereits
+    committete – Version als FAILED am ersten Pipeline-Schritt (``hashing``)
+    markiert und ``False`` zurückgegeben, statt sie für immer in UPLOADED hängen
+    zu lassen: nur so greift der Retry-Endpoint (der ausschließlich FAILED
+    akzeptiert), und ein erneuter Ingest würde sonst an der Dublettenprüfung
+    scheitern. Hintergrund-Aufrufer (Mail/Consume) loggen den False-Fall und
+    laufen weiter; interaktive Aufrufer (Views) wandeln ihn in ein HTTP 503.
+    """
+    from kombu.exceptions import OperationalError
+
+    try:
+        process_document_version.delay(version.id)
+        return True
+    except OperationalError:
+        from django.core.exceptions import ValidationError
+
+        try:
+            version.mark_processing_failed(
+                step="hashing", error="Broker nicht erreichbar (Enqueue)"
+            )
+        except ValidationError:
+            pass  # SEALED/READY o. Ä. – Status bleibt unangetastet.
+        logger.warning(
+            "Enqueue fehlgeschlagen (Broker nicht erreichbar) – Version %s als "
+            "FAILED markiert, Retry möglich.",
+            version.id,
+        )
+        return False
+
+
 @shared_task
 def embed_document_version(version_id: int) -> dict:
     """Baut den semantischen Index einer Version neu (Backfill/Async-Reindex).
@@ -454,7 +488,7 @@ def _ingest_consume_dir(
                 source="consume",
                 reason="consume_flat_ohne_owner",
             )
-            process_document_version.delay(version.id)
+            enqueue_processing(version)
             _move_into(entry, processed_dir)
             ingested.append({"document_id": document.id, "title": title})
         except Exception:
