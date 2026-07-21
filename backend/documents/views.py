@@ -1283,11 +1283,23 @@ def _serve_version_preview(version):
         if version.archive_path
         else (version.mime_type or "application/octet-stream")
     )
-    inline = is_safe_inline(content_type)
+    # Vorschau NUR für gefahrlos inline-fähige Typen (PDF/Raster-Bilder). Alles
+    # andere – insbesondere ein als text/html gespeicherter Altbestand – wird mit
+    # 415 abgelehnt, NICHT als Attachment ausgeliefert: das Frontend macht aus der
+    # Antwort ohnehin eine same-origin Blob-URL, für die Content-Disposition nicht
+    # mehr greift; ein text/html-Blob im (un-sandboxed) Vorschau-iframe würde im
+    # DMS-Origin ausgeführt (Stored XSS). Neue Uploads/Mails speichern dank
+    # save_bytes/save_upload immer den erkannten Typ – das hier deckt Alt-/Edge-Daten.
+    if not is_safe_inline(content_type):
+        return HttpResponse(
+            "Vorschau für diesen Dateityp nicht verfügbar.",
+            status=415,
+            content_type="text/plain; charset=utf-8",
+        )
     response = FileResponse(
         open(path, "rb"),
         content_type=content_type,
-        as_attachment=not inline,
+        as_attachment=False,
     )
     return _harden_file_response(response)
 

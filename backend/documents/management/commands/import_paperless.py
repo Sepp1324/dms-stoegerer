@@ -184,13 +184,14 @@ class Command(BaseCommand):
         # Original in den storage-Bereich kopieren (wie consume/mail), damit die
         # Quelle unberührt bleibt und die Pipeline auf einer eigenen Datei arbeitet.
         data = src_file.read_bytes()
-        target = storage.save_bytes(data, src_file.suffix)
+        target, detected_mime = storage.save_bytes(data, src_file.suffix)
 
         with transaction.atomic():
             document, version = pipeline.create_document_from_file(
                 str(target),
                 title=title,
                 owner=owner,
+                mime=detected_mime,
                 size=len(data),
                 ingest_source="paperless_import",
             )
