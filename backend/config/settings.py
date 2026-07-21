@@ -319,6 +319,11 @@ CELERY_WORKER_PREFETCH_MULTIPLIER = 1
 # durchlassen (sonst läuft der Task bis zum Hard-Limit weiter).
 CELERY_TASK_SOFT_TIME_LIMIT = int(os.getenv("CELERY_TASK_SOFT_TIME_LIMIT", "1800"))
 CELERY_TASK_TIME_LIMIT = int(os.getenv("CELERY_TASK_TIME_LIMIT", "2100"))
+# OCR-Subprozess-Timeout (ocrmypdf/pdftotext) – BEWUSST unter dem Celery-Soft-
+# Limit (1800 s): ein hängender OCR-Prozess inkl. tesseract-Kinder wird per
+# Prozessgruppen-Kill hart beendet, bevor der Task selbst ins Limit läuft (sonst
+# könnten Kindprozesse nach einem Worker-Kill weiterlaufen und Ressourcen belegen).
+OCR_SUBPROCESS_TIMEOUT = int(os.getenv("OCR_SUBPROCESS_TIMEOUT", "1200"))
 
 # Periodische Aufgaben (benötigt einen laufenden ``celery beat``-Prozess, siehe
 # deploy/k8s/beat.yaml). Intervalle in Sekunden, per Env übersteuerbar.

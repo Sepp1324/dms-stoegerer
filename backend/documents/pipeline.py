@@ -857,45 +857,49 @@ def _seal_version(version: DocumentVersion) -> None:
         base = ref.date() if hasattr(ref, "date") else date.today()
         retention_until = _add_months(base, doc_type.retention_months)
 
-    # Metadaten-Snapshot beim Sealing schreiben (Versionsvergleich Stufe 2,
-    # STOAA-312/Option A). Write-once, vor dem WORM-Flag – der Snapshot fließt in
-    # die Siegelkette (seal_hash) ein. Best effort: ein Snapshot-Fehler darf das
-    # eigentliche WORM-Siegel nicht verhindern (Integrität der Datei-Hash-Kette
-    # hat Vorrang; der Snapshot ist additiv).
+    # ALLE Siegel-DB-Änderungen (Snapshot, WORM-Flag, Doc-Retention), der
+    # immutable_set-Audit UND der Abschlussmarker laufen in EINER Transaktion mit
+    # Zeilensperre. Damit ist der Marker garantiert die letzte Wirkung und atomar
+    # mit dem Audit: ein Crash vor Commit rollt ALLES zurück -> die Version bleibt
+    # „SEALED, nicht finalisiert", und der Watchdog vervollständigt sie erneut
+    # (kein Siegel ohne Audit, kein Marker ohne vollständiges Siegel).
+    from django.db import transaction
+
     from documents.services import version_snapshot
 
-    try:
-        version_snapshot.write_snapshot_on_seal(version, actor=version.created_by)
-    except SoftTimeLimitExceeded:
-        raise  # Soft-Time-Limit nie als Best-Effort-Teilfehler verschlucken
-    except Exception:  # noqa: BLE001 – Snapshot ist additiv, blockiert das Siegel nicht
-        logger.exception("Metadaten-Snapshot für Version %s fehlgeschlagen", version.id)
-
-    # Direkt auf DB-Ebene setzen, ohne save()-Guard auszulösen
-    DocumentVersion.objects.filter(pk=version.pk).update(
-        is_immutable=True,
-        retention_until=retention_until,
-    )
-    version.is_immutable = True
-    version.retention_until = retention_until
-
-    # Retention auch am Dokument speichern (längste Frist gewinnt)
-    doc = version.document
-    if retention_until and (doc.retention_until is None or retention_until > doc.retention_until):
-        from .models import Document
-        Document.objects.filter(pk=doc.pk).update(retention_until=retention_until)
-        doc.retention_until = retention_until
-
-    # ALLERLETZTE Operation: Abschlussmarker per CAS setzen. Nur der Gewinner
-    # (genau eine Zeile) schreibt den immutable_set-Audit – so entstehen bei
-    # parallelen Seal-/Watchdog-Läufen keine Doppel-Audits, und der Marker
-    # signalisiert erst NACH Retention-Sync ein wirklich vollständiges Siegel.
     finalized_at = timezone.now()
-    finalized = DocumentVersion.objects.filter(
-        pk=version.pk, seal_finalized_at__isnull=True
-    ).update(seal_finalized_at=finalized_at)
-    version.seal_finalized_at = finalized_at
-    if finalized:
+    with transaction.atomic():
+        locked = DocumentVersion.objects.select_for_update().get(pk=version.pk)
+        if locked.seal_finalized_at is not None:
+            # Ein paralleler Lauf hat bereits vollständig gesiegelt.
+            version.refresh_from_db()
+            return
+
+        # Metadaten-Snapshot (write-once, additiv, vor dem WORM-Flag – fließt in
+        # seal_hash ein). Ein Snapshot-Fehler darf das WORM-Siegel nicht verhindern.
+        try:
+            version_snapshot.write_snapshot_on_seal(version, actor=version.created_by)
+        except SoftTimeLimitExceeded:
+            raise
+        except Exception:  # noqa: BLE001 – Snapshot ist additiv, blockiert das Siegel nicht
+            logger.exception(
+                "Metadaten-Snapshot für Version %s fehlgeschlagen", version.id
+            )
+
+        DocumentVersion.objects.filter(pk=version.pk).update(
+            is_immutable=True, retention_until=retention_until
+        )
+
+        # Retention auch am Dokument speichern (längste Frist gewinnt)
+        doc = version.document
+        if retention_until and (
+            doc.retention_until is None or retention_until > doc.retention_until
+        ):
+            from .models import Document
+
+            Document.objects.filter(pk=doc.pk).update(retention_until=retention_until)
+            doc.retention_until = retention_until
+
         AuditLogEntry.objects.create(
             actor=version.created_by,
             action="immutable_set",
@@ -903,3 +907,11 @@ def _seal_version(version: DocumentVersion) -> None:
             object_id=str(version.id),
             detail={"archive_path": archive, "retention_until": str(retention_until)},
         )
+        # ALLERLETZTE Wirkung – innerhalb derselben Transaktion, atomar mit Audit:
+        DocumentVersion.objects.filter(pk=version.pk).update(
+            seal_finalized_at=finalized_at
+        )
+
+    version.is_immutable = True
+    version.retention_until = retention_until
+    version.seal_finalized_at = finalized_at

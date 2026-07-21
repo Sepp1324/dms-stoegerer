@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import threading
 
+from celery.exceptions import SoftTimeLimitExceeded
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
@@ -68,6 +69,8 @@ def _get_model():
             from fastembed import TextEmbedding
 
             _model = TextEmbedding(**kwargs)
+        except SoftTimeLimitExceeded:
+            raise  # Timeout NICHT als permanenten Ladefehler cachen
         except Exception as exc:  # noqa: BLE001 – Ladefehler einmal klar melden + cachen
             _load_error = (
                 f"Embedding-Modell '{name}' konnte nicht geladen werden "

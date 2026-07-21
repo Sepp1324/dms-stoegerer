@@ -1,7 +1,9 @@
 import time
-import subprocess
 from pathlib import Path
 
+from celery.exceptions import SoftTimeLimitExceeded
+
+from ._proc import run_group
 from .types import OCRResult, OCRStatusEnum
 from .extract import extract_text_best_effort
 from .validate import is_valid_ocr
@@ -14,6 +16,8 @@ def _pdf_page_count(path: str) -> int | None:
 
         with fitz.open(path) as doc:
             return doc.page_count or None
+    except SoftTimeLimitExceeded:
+        raise  # Soft-Time-Limit nie verschlucken
     except Exception:
         return None
 
@@ -73,14 +77,15 @@ def run_ocr(input_path: str, force: bool = False) -> OCRResult:
     try:
         output = Path(input_path).with_suffix(".ocr.pdf")
 
-        subprocess.run(
+        # Hartes Prozess-Timeout + Prozessgruppen-Kill: ocrmypdf startet tesseract-
+        # Kinder; ohne das könnten sie beim Celery-Hard-Limit weiterlaufen.
+        run_group(
             [
                 "ocrmypdf",
                 "--force-ocr" if force else "--skip-text",
                 input_path,
                 str(output),
-            ],
-            check=True,
+            ]
         )
 
         text = extract_text_best_effort(str(output))
@@ -97,6 +102,8 @@ def run_ocr(input_path: str, force: bool = False) -> OCRResult:
             engine="ocrmypdf",
         )
 
+    except SoftTimeLimitExceeded:
+        raise  # Soft-Time-Limit propagieren (Task bricht ab), NICHT als FAILED tarnen
     except Exception as e:
         return OCRResult(
             text=text,

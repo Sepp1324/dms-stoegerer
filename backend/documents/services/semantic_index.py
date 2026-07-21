@@ -18,6 +18,7 @@ import re
 from html import escape
 from typing import Iterable
 
+from celery.exceptions import SoftTimeLimitExceeded
 from django.conf import settings
 from django.db import transaction
 from django.db.models import F
@@ -139,6 +140,8 @@ def sync_document_embeddings(
     # einem Fehlschlag die bestehenden Chunks unangetastet.
     try:
         vectors = embeddings.embed_passages(texts)
+    except SoftTimeLimitExceeded:
+        raise  # Soft-Time-Limit nie als status="error" tarnen (Task muss abbrechen)
     except Exception:  # noqa: BLE001 – Modellfehler darf die Pipeline nicht kippen
         logger.exception("Embedding fehlgeschlagen für Version %s", version.id)
         return {
