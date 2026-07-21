@@ -66,7 +66,7 @@ class IsDmsAdmin(BasePermission):
         return bool(getattr(request.user, "is_dms_admin", False))
 
 from . import classification, pipeline, storage
-from .filetypes import UnsupportedFileType, is_safe_inline
+from .filetypes import SNIFF_BYTES, UnsupportedFileType, detect, is_safe_inline
 from .throttling import CaptureRateThrottle, UploadRateThrottle
 from .services import version_compare
 from .models import (
@@ -1271,23 +1271,36 @@ def _serve_version_preview(version):
     und den Freigabe-Abrufrouten (STOAA-191), damit beide Pfade identisch
     liefern.
 
-    Sicherheit (P0-2): Nur gefahrlos inline-fähige Typen (PDF/Bilder) werden
-    ``inline`` ausgeliefert; alles andere erzwingt einen Download
-    (``as_attachment=True``). Zusätzlich greifen nosniff + CSP-``sandbox``.
+    Sicherheit (P0): Der Content-Type wird aus den **Magic Bytes** der Datei
+    bestimmt, NICHT aus dem gespeicherten ``mime_type`` (der falsch/leer sein
+    kann). Nur erkannte, inline-sichere Typen (PDF/Raster-Bild) werden
+    ausgeliefert; unerkannter oder aktiver Inhalt → 415. Damit wird ein
+    ``%PDF-…<script>``-Polyglot als ``application/pdf`` serviert (nativer
+    PDF-Viewer, KEIN HTML) statt als ``text/html`` – das Frontend macht aus der
+    Antwort eine same-origin Blob-URL, die im (un-sandboxed) iframe rendert;
+    ein text/html-Blob würde dort im DMS-Origin ausgeführt (Stored XSS).
     """
     path = version.archive_path or version.file_path
     if not path or not os.path.exists(path):
         raise Http404("Datei nicht gefunden.")
-    content_type = (
-        "application/pdf"
-        if version.archive_path
-        else (version.mime_type or "application/octet-stream")
-    )
-    inline = is_safe_inline(content_type)
+    # Archiv-PDF ist per Konstruktion ein von uns erzeugtes PDF; das Original
+    # wird am Byte-Header verifiziert (nie am gespeicherten mime_type).
+    if version.archive_path:
+        content_type = "application/pdf"
+    else:
+        with open(path, "rb") as fh:
+            info = detect(fh.read(SNIFF_BYTES))
+        if info is None or not is_safe_inline(info.mime):
+            return HttpResponse(
+                "Vorschau für diesen Dateityp nicht verfügbar.",
+                status=415,
+                content_type="text/plain; charset=utf-8",
+            )
+        content_type = info.mime
     response = FileResponse(
         open(path, "rb"),
         content_type=content_type,
-        as_attachment=not inline,
+        as_attachment=False,
     )
     return _harden_file_response(response)
 

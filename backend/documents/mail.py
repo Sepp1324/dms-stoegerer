@@ -216,7 +216,7 @@ def ingest_message(account, raw_bytes: bytes) -> int | None:
             logger.info("Anhang %s bereits vorhanden (Hash-Dedup) – übersprungen", filename)
             continue
         try:
-            path = storage.save_bytes(payload, _ext_of(filename))
+            path, safe_mime = storage.save_bytes(payload, _ext_of(filename))
         except storage.UnsupportedFileType as exc:
             # Sicherheit (P0-2): Anhänge außerhalb der Allowlist (z. B. HTML)
             # werden nicht abgelegt – der übrige Abruf läuft weiter.
@@ -230,7 +230,11 @@ def ingest_message(account, raw_bytes: bytes) -> int | None:
             title=title or subject or "E-Mail-Anhang",
             # ``owner`` setzt auch DocumentVersion.created_by + AuditLogEntry.actor.
             owner=owner,
-            mime=ctype,
+            # Sicherheit: den per Magic-Byte ERKANNTEN Typ speichern, NIE den
+            # Absender-``ctype`` – sonst landet ein %PDF-…<script>-Polyglot mit
+            # Content-Type text/html als text/html im Bestand und würde in der
+            # (un-sandboxed) Vorschau im DMS-Origin ausgeführt (Stored XSS).
+            mime=safe_mime,
             size=len(payload),
             ingest_source="mail",
         )

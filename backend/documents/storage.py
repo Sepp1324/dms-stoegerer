@@ -96,7 +96,7 @@ def save_upload(uploaded_file) -> tuple[str, int, str]:
     return str(dest), dest.stat().st_size, info.mime
 
 
-def save_bytes(data: bytes, ext: str = "") -> Path:
+def save_bytes(data: bytes, ext: str = "") -> tuple[Path, str]:
     """Schreibt Roh-Bytes (z. B. einen E-Mail-Anhang) nach ``originals/``.
 
     Wie ``save_upload``, aber für bereits im Speicher liegende Bytes. Der
@@ -105,6 +105,11 @@ def save_bytes(data: bytes, ext: str = "") -> Path:
     Sicherheit (P0-2): Auch hier entscheidet die Magic-Byte-Allowlist – die
     übergebene ``ext`` ist nur ein Hinweis und wird durch die erkannte Endung
     ersetzt. Nicht erlaubte Typen lösen ``UnsupportedFileType`` aus.
+
+    Gibt ``(Pfad, erkannter MIME)`` zurück. Aufrufer MÜSSEN diesen erkannten
+    MIME speichern – NIE einen vom Absender/Client gemeldeten Typ. Sonst könnte
+    ein ``%PDF-…<script>``-Polyglot als ``text/html`` abgelegt und in der
+    (un-sandboxed) Vorschau im DMS-Origin ausgeführt werden (Stored XSS).
     """
     if len(data) > _max_upload_bytes():
         raise UnsupportedFileType(
@@ -114,7 +119,7 @@ def save_bytes(data: bytes, ext: str = "") -> Path:
     ORIGINALS_DIR.mkdir(parents=True, exist_ok=True)
     dest = ORIGINALS_DIR / f"{uuid.uuid4().hex}{info.ext}"
     dest.write_bytes(data)
-    return dest
+    return dest, info.mime
 
 
 def build_archive_path(document) -> Path:

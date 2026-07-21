@@ -248,7 +248,8 @@ def _write_pdf_from_specs(sources: list[tuple[DocumentVersion, list[PageSpec]]])
 
         buffer = io.BytesIO()
         out.save(buffer)
-        return storage.save_bytes(buffer.getvalue(), ".pdf")
+        dest, _mime = storage.save_bytes(buffer.getvalue(), ".pdf")
+        return dest
     finally:
         out.close()
         for pdf in opened:

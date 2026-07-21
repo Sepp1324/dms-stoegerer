@@ -1637,7 +1637,20 @@ export async function getDocumentPreview(
   const suffix = versionNo ? `?version=${versionNo}` : "";
   const res = await apiFetch(`/documents/${id}/preview/${suffix}`, { signal });
   if (!res.ok) throw new Error(`Vorschau nicht verfügbar (HTTP ${res.status})`);
-  return res.blob();
+  const blob = await res.blob();
+  // Sicherheit (Defense-in-depth zusätzlich zur Backend-415-Prüfung): Nur
+  // PDF/Raster-Bilder dürfen als Blob in das (un-sandboxed) Vorschau-iframe.
+  // Ein als text/html gespeicherter Polyglot dürfte NIE gerendert werden – die
+  // same-origin Blob-URL würde ihn sonst im DMS-Origin ausführen (JWT-Diebstahl).
+  // SVG ist zwar image/*, aber aktives XML → explizit ausgeschlossen.
+  const type = (blob.type || "").split(";", 1)[0].trim().toLowerCase();
+  const allowed =
+    type === "application/pdf" ||
+    (type.startsWith("image/") && type !== "image/svg+xml" && type !== "image/svg");
+  if (!allowed) {
+    throw new Error("Vorschau: nicht unterstützter Dateityp.");
+  }
+  return blob;
 }
 
 // Integritätsprüfung der Hash-Kette eines Dokuments (rechnet Datei-Hashes nach).
