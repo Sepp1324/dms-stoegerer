@@ -178,6 +178,17 @@ def _enqueue_processing(version_id) -> None:
     try:
         process_document_version.delay(version_id)
     except BrokerOperationalError as exc:
+        # Die (bereits committete) Version NICHT unverarbeitbar in UPLOADED
+        # zurücklassen: der Retry-Endpoint akzeptiert nur processing_state=FAILED,
+        # sonst hinge sie für immer fest und ein erneuter Upload erzeugte ein
+        # Duplikat. Als FAILED am ersten Pipeline-Schritt ("hashing") markieren,
+        # damit der bestehende Retry sie aufgreift, sobald der Broker zurück ist.
+        version = DocumentVersion.objects.filter(pk=version_id).first()
+        if version is not None:
+            try:
+                version.mark_processing_failed(step="hashing", error=exc)
+            except DjangoValidationError:
+                pass  # SEALED/READY o. Ä. – Status bleibt dann unangetastet.
         raise _ProcessingUnavailable() from exc
 
 # Erkennt Bereichsfilter auf Zusatzfeldern: ``custom_field_<id>_gte`` / ``_lte``.
