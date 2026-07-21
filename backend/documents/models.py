@@ -606,6 +606,14 @@ class DocumentVersion(models.Model):
     processing_failed_step = models.CharField(max_length=40, blank=True, default="")
     processing_failed_at = models.DateTimeField(null=True, blank=True)
     processing_attempts = models.PositiveIntegerField(default=0)
+    # Zeitpunkt des letzten processing_state-Wechsels. Wird von transition_to/
+    # mark_processing_failed/begin_retry gesetzt (die per QuerySet.update laufen –
+    # ``auto_now`` würde dabei NICHT greifen). Basis für den Stuck-Task-Watchdog:
+    # hängt eine Version zu lange in einem Zwischenzustand (Worker-Crash ohne
+    # Redelivery), wird sie automatisch FAILED (retry-fähig).
+    processing_state_changed_at = models.DateTimeField(
+        default=timezone.now, db_index=True
+    )
 
     # Ingest-Quelle für die Workflow-Engine (STOAA-263)
     ingest_source = models.CharField(
@@ -712,15 +720,17 @@ class DocumentVersion(models.Model):
         # doppelt ausführen (und danach OCR/Workflows parallel laufen). Der
         # Verlierer bekommt 0 aktualisierte Zeilen -> ConcurrentProcessingTransition,
         # abgefangen in pipeline._run_from (Abbruch ohne FAILED).
+        now = timezone.now()
         updated = DocumentVersion.objects.filter(
             pk=self.pk, processing_state=old_state
-        ).update(processing_state=new_state)
+        ).update(processing_state=new_state, processing_state_changed_at=now)
         if updated == 0:
             raise ConcurrentProcessingTransition(
                 f"Übergang {old_state} → {new_state} verloren "
                 f"(Zustand nebenläufig geändert), Version {self.pk}."
             )
         self.processing_state = new_state
+        self.processing_state_changed_at = now
 
         AuditLogEntry.objects.create(
             actor=actor,
@@ -765,6 +775,7 @@ class DocumentVersion(models.Model):
                 processing_error=error_text,
                 processing_failed_step=step,
                 processing_failed_at=failed_at,
+                processing_state_changed_at=failed_at,
             )
         )
         if updated == 0:
@@ -777,6 +788,7 @@ class DocumentVersion(models.Model):
         self.processing_error = error_text
         self.processing_failed_step = step
         self.processing_failed_at = failed_at
+        self.processing_state_changed_at = failed_at
 
         AuditLogEntry.objects.create(
             actor=actor,
@@ -806,6 +818,7 @@ class DocumentVersion(models.Model):
         ).update(
             processing_state=self.ProcessingState.RETRY_PENDING,
             processing_attempts=models.F("processing_attempts") + 1,
+            processing_state_changed_at=timezone.now(),
         )
         if updated == 0:
             raise ConcurrentProcessingTransition(

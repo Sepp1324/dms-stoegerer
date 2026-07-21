@@ -126,6 +126,72 @@ def process_document_version(version_id: int) -> dict:
     return result
 
 
+@shared_task
+def reap_stuck_versions() -> dict:
+    """Macht Versionen wieder verarbeitbar, die zu lange in einem Zwischenzustand
+    hängen.
+
+    Nötig, weil ``acks_late`` bewusst AUS ist (s. settings): ein bei Worker-Crash/
+    OOM/Hard-Timeout verlorener Task hinterlässt die Version z. B. in OCR_RUNNING.
+    Ohne diesen Watchdog blieb sie dort (das Monitoring zeigte sie nur; der
+    Retry-Endpoint akzeptiert nur FAILED). Ab hier gilt „per Retry holbar" wirklich.
+
+    * Zwischenzustände (nicht terminal, nicht SEALED) älter als
+      ``PROCESSING_STUCK_AFTER_MINUTES`` -> FAILED (retry-fähig).
+    * Hängendes SEALED -> READY: das Dokument IST gesiegelt, nur der letzte
+      Übergang fehlte – FAILED wäre falsch (WORM).
+    """
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    PS = DocumentVersion.ProcessingState
+    minutes = float(getattr(settings, "PROCESSING_STUCK_AFTER_MINUTES", 30))
+    threshold = timezone.now() - timedelta(minutes=minutes)
+
+    terminal = {PS.READY, PS.FAILED, PS.SEALED}
+    stuck_states = [s for s in PS.values if s not in terminal]
+
+    reaped = 0
+    for version in DocumentVersion.objects.filter(
+        processing_state__in=stuck_states,
+        processing_state_changed_at__lt=threshold,
+    ):
+        try:
+            version.mark_processing_failed(
+                step="watchdog",
+                error=f"Verarbeitung hängt seit >{minutes:.0f} min (Worker-Crash?).",
+            )
+            reaped += 1
+        except Exception:  # noqa: BLE001 – Watchdog darf pro Version nicht kippen
+            logger.exception(
+                "reap_stuck_versions: FAILED-Markierung fehlgeschlagen für %s",
+                version.id,
+            )
+
+    completed = 0
+    for version in DocumentVersion.objects.filter(
+        processing_state=PS.SEALED,
+        processing_state_changed_at__lt=threshold,
+    ):
+        try:
+            version.transition_to(PS.READY, detail={"watchdog": True})
+            completed += 1
+        except Exception:  # noqa: BLE001 – ConcurrentProcessingTransition tolerieren
+            logger.exception(
+                "reap_stuck_versions: SEALED->READY fehlgeschlagen für %s",
+                version.id,
+            )
+
+    if reaped or completed:
+        logger.warning(
+            "reap_stuck_versions: %d hängende -> FAILED, %d SEALED -> READY.",
+            reaped,
+            completed,
+        )
+    return {"reaped": reaped, "completed": completed, "threshold_minutes": minutes}
+
+
 def enqueue_processing(version) -> bool:
     """Stößt ``process_document_version`` an; ``True`` bei erfolgreichem Enqueue.
 
