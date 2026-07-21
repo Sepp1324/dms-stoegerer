@@ -34,6 +34,9 @@ class ReindexEmbeddingsExitTests(TestCase):
 
     def test_status_error_wird_als_fehler_gewertet_und_exit_nonzero(self):
         with mock.patch(
+            "documents.management.commands.reindex_embeddings.embeddings.enabled",
+            return_value=True,
+        ), mock.patch(
             "documents.services.semantic_index.sync_document_embeddings",
             return_value={"status": "error", "created": 0},
         ):
@@ -42,8 +45,20 @@ class ReindexEmbeddingsExitTests(TestCase):
 
     def test_erfolg_wirft_nicht(self):
         with mock.patch(
+            "documents.management.commands.reindex_embeddings.embeddings.enabled",
+            return_value=True,
+        ), mock.patch(
             "documents.services.semantic_index.sync_document_embeddings",
             return_value={"status": "indexed", "created": 3},
         ):
             # Kein CommandError -> Exitcode 0.
             call_command("reindex_embeddings", "--all")
+
+    def test_deaktivierte_embeddings_fail_fast_nonzero(self):
+        # Embeddings global aus -> sofort CommandError (kein irreführender Exit 0).
+        with mock.patch(
+            "documents.management.commands.reindex_embeddings.embeddings.enabled",
+            return_value=False,
+        ):
+            with self.assertRaises(CommandError):
+                call_command("reindex_embeddings", "--all")
