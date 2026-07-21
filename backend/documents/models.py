@@ -657,6 +657,13 @@ class DocumentVersion(models.Model):
         default=False,
         help_text="WORM-Flag – nach erfolgreichem process_version() gesetzt",
     )
+    # Verlässlicher Siegel-ABSCHLUSSmarker: wird in _seal_version() als ALLERLETZTE
+    # Operation gesetzt (nach Snapshot, is_immutable, Doc-Retention, Audit).
+    # is_immutable allein taugt NICHT als „fertig"-Signal, weil es vor Retention-
+    # Sync/Audit gesetzt wird – ein Crash dazwischen ließe finalize_sealed_version
+    # die Finalisierung überspringen. Ist dieser Marker gesetzt, ist das Siegel
+    # garantiert vollständig.
+    seal_finalized_at = models.DateTimeField(null=True, blank=True)
 
     retention_until = models.DateField(
         null=True,

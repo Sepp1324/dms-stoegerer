@@ -16,6 +16,7 @@ import logging
 import os
 from pathlib import Path
 
+from celery.exceptions import SoftTimeLimitExceeded
 from django.db import transaction
 
 from . import storage
@@ -217,6 +218,8 @@ def extract_text(pdf_path: str | Path) -> str:
             timeout=180,
         )
         return result.stdout.decode("utf-8", errors="ignore")
+    except SoftTimeLimitExceeded:
+        raise  # Soft-Time-Limit nie als Best-Effort-Teilfehler verschlucken
     except Exception:  # pragma: no cover - Textextraktion ist best effort
         return ""
 
@@ -250,6 +253,8 @@ def generate_thumbnail(version, *, max_width: int = 700) -> str | None:
             img = Image.open(src).convert("RGB")
             img.thumbnail((max_width, max_width * 4))
         img.save(dest, "JPEG", quality=80)
+    except SoftTimeLimitExceeded:
+        raise  # Soft-Time-Limit nie als Best-Effort-Teilfehler verschlucken
     except Exception:  # pragma: no cover - Vorschau ist optional
         return None
 
@@ -264,6 +269,8 @@ def _page_count(pdf_path: Path) -> int | None:
 
         with pikepdf.open(pdf_path) as pdf:
             return len(pdf.pages)
+    except SoftTimeLimitExceeded:
+        raise  # Soft-Time-Limit nie als Best-Effort-Teilfehler verschlucken
     except Exception:  # pragma: no cover - Seitenzahl ist optional
         return None
 
@@ -394,6 +401,8 @@ def classify_version(version: DocumentVersion) -> dict:
         result["extraction_candidates"] = extraction.generate_candidates(
             version.document
         )
+    except SoftTimeLimitExceeded:
+        raise  # Soft-Time-Limit nie als Best-Effort-Teilfehler verschlucken
     except Exception:  # noqa: BLE001
         logger.exception(
             "Extraktionskandidaten für Dokument %s fehlgeschlagen",
@@ -408,6 +417,8 @@ def classify_version(version: DocumentVersion) -> dict:
         result["case_file_candidates"] = case_matching.generate_candidates(
             version.document
         )
+    except SoftTimeLimitExceeded:
+        raise  # Soft-Time-Limit nie als Best-Effort-Teilfehler verschlucken
     except Exception:  # noqa: BLE001
         logger.exception(
             "Aktenvorschläge für Dokument %s fehlgeschlagen",
@@ -466,7 +477,10 @@ def finalize_sealed_version(version: DocumentVersion) -> bool:
     version.refresh_from_db()
     if version.processing_state != DocumentVersion.ProcessingState.SEALED:
         return False  # nicht (mehr) SEALED – nichts zu tun
-    if not version.is_immutable:
+    # Am ABSCHLUSSmarker prüfen, nicht an is_immutable: letzteres wird VOR dem
+    # Retention-Sync/Audit gesetzt, ein Crash dazwischen ließe die Finalisierung
+    # sonst überspringen. _seal_version ist idempotent (No-Op wenn schon fertig).
+    if version.seal_finalized_at is None:
         _seal_version(version)
     try:
         version.transition_to(
@@ -490,6 +504,27 @@ PIPELINE_STEPS = [
     ("thumbnail",      generate_version_thumbnail, DocumentVersion.ProcessingState.CLASSIFIED),
     ("sealing",        seal_version,               DocumentVersion.ProcessingState.THUMBNAIL_DONE),
 ]
+
+
+def resume_step_for_state(state) -> str | None:
+    """PIPELINE_STEP-Name, ab dem ein bei ``state`` hängengebliebener Lauf wieder
+    aufsetzen soll.
+
+    Der Watchdog speichert das als ``processing_failed_step`` – retry_version
+    setzt dann die Vorbedingung dieses Schritts und läuft ab dort weiter, statt
+    (bei einem unbekannten Namen wie „watchdog") auf Schritt 0/Hashing
+    zurückzufallen und das ganze Dokument erneut zu verarbeiten. ``None`` für
+    Zustände ohne eindeutigen Schritt (z. B. RETRY_PENDING)."""
+    PS = DocumentVersion.ProcessingState
+    return {
+        PS.UPLOADED: "hashing",
+        PS.HASHED: "ocr",
+        PS.OCR_RUNNING: "ocr",
+        PS.OCR_DONE: "classification",
+        PS.CLASSIFICATION_RUNNING: "classification",
+        PS.CLASSIFIED: "thumbnail",
+        PS.THUMBNAIL_DONE: "sealing",
+    }.get(state)
 
 
 def _run_from(version: DocumentVersion, start_index: int) -> dict:
@@ -518,6 +553,8 @@ def _run_from(version: DocumentVersion, start_index: int) -> dict:
                 "step": name,
                 "processing_state": version.processing_state,
             }
+        except SoftTimeLimitExceeded:
+            raise  # Soft-Time-Limit nie als Best-Effort-Teilfehler verschlucken
         except Exception as exc:  # noqa: BLE001 – jeder Schritt darf fehlschlagen
             version.mark_processing_failed(
                 step=name, error=exc, actor=version.created_by
@@ -561,6 +598,8 @@ def _run_from(version: DocumentVersion, start_index: int) -> dict:
 
             try:
                 asn_service.match_and_reconcile(version, actor=version.created_by)
+            except SoftTimeLimitExceeded:
+                raise  # Soft-Time-Limit nie als Best-Effort-Teilfehler verschlucken
             except Exception:  # noqa: BLE001 – Zuordnung ist optional/best effort
                 logger.exception(
                     "ASN-Reconcile für Version %s fehlgeschlagen", version.id
@@ -596,6 +635,8 @@ def process_version(version: DocumentVersion) -> dict:
         result["review_tasks"] = review_tasks.sync_document_review_tasks(
             version.document
         )
+    except SoftTimeLimitExceeded:
+        raise  # Soft-Time-Limit nie als Best-Effort-Teilfehler verschlucken
     except Exception:  # noqa: BLE001 - Review-Tasks dürfen Verarbeitung nicht kippen
         logger.exception("Review-Task-Sync für Version %s fehlgeschlagen", version.id)
     return result
@@ -656,6 +697,8 @@ def retry_version(version: DocumentVersion, actor=None) -> dict:
         result["review_tasks"] = review_tasks.sync_document_review_tasks(
             version.document
         )
+    except SoftTimeLimitExceeded:
+        raise  # Soft-Time-Limit nie als Best-Effort-Teilfehler verschlucken
     except Exception:  # noqa: BLE001 - Review-Tasks dürfen Retry nicht kippen
         logger.exception("Review-Task-Sync für Retry-Version %s fehlgeschlagen", version.id)
     return result
@@ -672,6 +715,8 @@ def _sync_search_vector(version: DocumentVersion) -> None:
         from documents.services.search_vector import update_search_vector_by_id
 
         update_search_vector_by_id(version.document_id)
+    except SoftTimeLimitExceeded:
+        raise  # Soft-Time-Limit nie als Best-Effort-Teilfehler verschlucken
     except Exception:  # noqa: BLE001 - Vektor-Pflege darf Verarbeitung nicht kippen
         logger.exception("Suchvektor-Sync für Version %s fehlgeschlagen", version.id)
 
@@ -686,6 +731,8 @@ def _sync_contract_center(version: DocumentVersion, result: dict, *, actor=None)
         result["contract"] = contracts.sync_contract_record(
             version.document, actor=actor
         )
+    except SoftTimeLimitExceeded:
+        raise  # Soft-Time-Limit nie als Best-Effort-Teilfehler verschlucken
     except Exception:  # noqa: BLE001 - Vertrags-Cockpit darf Pipeline nie kippen
         logger.exception("Contract-Center-Sync für Version %s fehlgeschlagen", version.id)
         result["contract"] = {"status": "failed"}
@@ -701,6 +748,8 @@ def _sync_entity_graph(version: DocumentVersion, result: dict, *, actor=None) ->
         result["entity_graph"] = entity_graph.sync_document_entities(
             version.document, actor=actor
         )
+    except SoftTimeLimitExceeded:
+        raise  # Soft-Time-Limit nie als Best-Effort-Teilfehler verschlucken
     except Exception:  # noqa: BLE001 - Graph darf Pipeline nie kippen
         logger.exception("Entity-Graph-Sync für Version %s fehlgeschlagen", version.id)
         result["entity_graph"] = {"status": "failed"}
@@ -716,6 +765,8 @@ def _sync_semantic_index(version: DocumentVersion, result: dict, *, actor=None) 
         result["semantic_index"] = semantic_index.sync_document_embeddings(
             version.document, version=version
         )
+    except SoftTimeLimitExceeded:
+        raise  # Soft-Time-Limit nie als Best-Effort-Teilfehler verschlucken
     except Exception:  # noqa: BLE001 - Semantik darf Pipeline nie kippen
         logger.exception("Semantic-Index-Sync für Version %s fehlgeschlagen", version.id)
         result["semantic_index"] = {"status": "failed"}
@@ -757,6 +808,8 @@ def _sync_auto_file(version: DocumentVersion, result: dict, *, actor=None) -> No
                     "min_confidence": settings.AUTO_FILE_MIN_CONFIDENCE,
                 },
             )
+    except SoftTimeLimitExceeded:
+        raise  # Soft-Time-Limit nie als Best-Effort-Teilfehler verschlucken
     except Exception:  # noqa: BLE001 - Autopilot darf Pipeline nie kippen
         logger.exception("Auto-Ablage für Version %s fehlgeschlagen", version.id)
         result["auto_file"] = {"status": "failed"}
@@ -774,9 +827,19 @@ def _add_months(d, months: int):
 
 
 def _seal_version(version: DocumentVersion) -> None:
-    """Setzt is_immutable=True und schützt die Archiv-Datei (chmod 0444)."""
+    """Versiegelt die Version vollständig (idempotent).
+
+    Setzt is_immutable, Retention, Metadaten-Snapshot/seal_hash, Dateirechte und
+    – als ALLERLETZTE Operation – ``seal_finalized_at`` (der verlässliche
+    Abschlussmarker). Bereits vollständig gesiegelte Versionen sind ein No-Op.
+    """
     import os as _os
     from datetime import date
+
+    from django.utils import timezone
+
+    if version.seal_finalized_at is not None:
+        return  # bereits vollständig gesiegelt – nichts zu tun
 
     # Archiv-Datei schreibschützen
     archive = version.archive_path or version.file_path
@@ -803,6 +866,8 @@ def _seal_version(version: DocumentVersion) -> None:
 
     try:
         version_snapshot.write_snapshot_on_seal(version, actor=version.created_by)
+    except SoftTimeLimitExceeded:
+        raise  # Soft-Time-Limit nie als Best-Effort-Teilfehler verschlucken
     except Exception:  # noqa: BLE001 – Snapshot ist additiv, blockiert das Siegel nicht
         logger.exception("Metadaten-Snapshot für Version %s fehlgeschlagen", version.id)
 
@@ -821,10 +886,20 @@ def _seal_version(version: DocumentVersion) -> None:
         Document.objects.filter(pk=doc.pk).update(retention_until=retention_until)
         doc.retention_until = retention_until
 
-    AuditLogEntry.objects.create(
-        actor=version.created_by,
-        action="immutable_set",
-        object_type="DocumentVersion",
-        object_id=str(version.id),
-        detail={"archive_path": archive, "retention_until": str(retention_until)},
-    )
+    # ALLERLETZTE Operation: Abschlussmarker per CAS setzen. Nur der Gewinner
+    # (genau eine Zeile) schreibt den immutable_set-Audit – so entstehen bei
+    # parallelen Seal-/Watchdog-Läufen keine Doppel-Audits, und der Marker
+    # signalisiert erst NACH Retention-Sync ein wirklich vollständiges Siegel.
+    finalized_at = timezone.now()
+    finalized = DocumentVersion.objects.filter(
+        pk=version.pk, seal_finalized_at__isnull=True
+    ).update(seal_finalized_at=finalized_at)
+    version.seal_finalized_at = finalized_at
+    if finalized:
+        AuditLogEntry.objects.create(
+            actor=version.created_by,
+            action="immutable_set",
+            object_type="DocumentVersion",
+            object_id=str(version.id),
+            detail={"archive_path": archive, "retention_until": str(retention_until)},
+        )
