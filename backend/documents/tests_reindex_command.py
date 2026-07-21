@@ -62,3 +62,12 @@ class ReindexEmbeddingsExitTests(TestCase):
         ):
             with self.assertRaises(CommandError):
                 call_command("reindex_embeddings", "--all")
+
+    def test_dry_run_funktioniert_trotz_deaktivierter_embeddings(self):
+        # --dry-run zeigt nur an und braucht keine aktivierten Embeddings.
+        with mock.patch(
+            "documents.management.commands.reindex_embeddings.embeddings.enabled",
+            return_value=False,
+        ):
+            # Kein CommandError.
+            call_command("reindex_embeddings", "--all", "--dry-run")

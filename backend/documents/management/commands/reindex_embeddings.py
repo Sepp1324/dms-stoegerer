@@ -15,11 +15,12 @@ class Command(BaseCommand):
         parser.add_argument("--dry-run", action="store_true", help="Nur anzeigen, was passieren wuerde.")
 
     def handle(self, *args, **options):
-        # Sind Embeddings global deaktiviert, liefert sync_document_embeddings für
-        # JEDES Dokument status="disabled" (kein Chunk) – der Lauf wäre wirkungslos.
-        # Fail-fast mit non-zero Exit, sonst meldete eine Automatisierung Erfolg
-        # (Exit 0), obwohl nichts indexiert wurde.
-        if not embeddings.enabled():
+        # Fail-fast NUR beim echten Lauf: bei deaktivierten Embeddings liefert
+        # sync_document_embeddings für jedes Dokument status="disabled" (kein
+        # Chunk) – ein echter Lauf wäre wirkungslos und soll non-zero enden (sonst
+        # meldete eine Automatisierung Exit 0 ohne Indexierung). ``--dry-run``
+        # („nur anzeigen") braucht dagegen weder Modell noch aktivierte Embeddings.
+        if not options["dry_run"] and not embeddings.enabled():
             raise CommandError(
                 "Embeddings sind deaktiviert (EMBEDDING_ENABLED=false) – "
                 "Reindex nicht möglich."
