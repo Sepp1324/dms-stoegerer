@@ -740,8 +740,24 @@ class DocumentVersion(models.Model):
             detail={"from": old_state, "to": new_state, **(detail or {})},
         )
 
-    def mark_processing_failed(self, *, step, error, actor=None) -> None:
+    def mark_processing_failed(
+        self,
+        *,
+        step,
+        error,
+        actor=None,
+        expected_state=None,
+        expected_changed_at=None,
+    ) -> bool:
         """Markiert die Version als fehlgeschlagen (Fehler-Layer, STOAA-228).
+
+        ``expected_state``/``expected_changed_at`` (optional): zusätzliche
+        Compare-and-Swap-Bedingung. Der Watchdog liest eine hängende Version und
+        will sie nur dann auf FAILED setzen, wenn sie GENAU im gelesenen Zustand
+        UND mit dem gelesenen Zeitstempel geblieben ist – sonst hat der Worker
+        zwischenzeitlich Fortschritt gemacht (z. B. OCR_RUNNING→OCR_DONE) und darf
+        nicht zurückgesetzt werden. Rückgabe: ``True``, wenn die Version wirklich
+        auf FAILED gesetzt wurde (genau eine Zeile), sonst ``False``.
 
         WORM/READY werden NIE auf FAILED gesetzt – eine gesiegelte oder final
         freigegebene Version bleibt unangetastet. Der Schreibvorgang läuft wie
@@ -762,28 +778,32 @@ class DocumentVersion(models.Model):
         # WORM-Guard atomar IM UPDATE: eine nebenläufig gesiegelte/READY gewordene
         # Version wird nicht überschrieben (die Prüfung oben und das UPDATE waren
         # zuvor nicht atomar). Bei 0 Zeilen: nichts tun (kein FAILED erzwingen).
-        updated = (
-            DocumentVersion.objects.filter(pk=self.pk)
-            .exclude(
-                processing_state__in=[
-                    self.ProcessingState.SEALED,
-                    self.ProcessingState.READY,
-                ]
-            )
-            .update(
-                processing_state=self.ProcessingState.FAILED,
-                processing_error=error_text,
-                processing_failed_step=step,
-                processing_failed_at=failed_at,
-                processing_state_changed_at=failed_at,
-            )
+        qs = DocumentVersion.objects.filter(pk=self.pk).exclude(
+            processing_state__in=[
+                self.ProcessingState.SEALED,
+                self.ProcessingState.READY,
+            ]
+        )
+        # Optionaler Watchdog-CAS: nur setzen, wenn Zustand + Zeitstempel exakt die
+        # gelesenen sind (sonst gab es zwischenzeitlich Fortschritt).
+        if expected_state is not None:
+            qs = qs.filter(processing_state=expected_state)
+        if expected_changed_at is not None:
+            qs = qs.filter(processing_state_changed_at=expected_changed_at)
+        updated = qs.update(
+            processing_state=self.ProcessingState.FAILED,
+            processing_error=error_text,
+            processing_failed_step=step,
+            processing_failed_at=failed_at,
+            processing_state_changed_at=failed_at,
         )
         if updated == 0:
             logger.warning(
-                "Version %s nicht auf FAILED gesetzt (nebenläufig SEALED/READY).",
+                "Version %s nicht auf FAILED gesetzt (nebenläufig geändert/"
+                "gesiegelt oder Fortschritt gemacht).",
                 self.pk,
             )
-            return
+            return False
         self.processing_state = self.ProcessingState.FAILED
         self.processing_error = error_text
         self.processing_failed_step = step
@@ -797,6 +817,7 @@ class DocumentVersion(models.Model):
             object_id=str(self.id),
             detail={"from": old_state, "step": step, "error": str(error)[:1000]},
         )
+        return True
 
     def begin_retry(self, *, actor=None) -> None:
         """Startet einen Retry aus dem FAILED-Zustand (Retry-Layer, STOAA-228).
@@ -813,8 +834,13 @@ class DocumentVersion(models.Model):
         # FAILED-Version wird auf RETRY_PENDING gehoben; jeder andere Zustand
         # (RETRY_PENDING/SEALED/READY/…) ergibt 0 Zeilen -> ConcurrentProcessing-
         # Transition, die retry_version als "superseded" behandelt.
+        # WORM-Guard IM CAS: nur eine NICHT-immutable FAILED-Version darf reaktiviert
+        # werden. Sonst könnte eine inkonsistente immutable/FAILED-Version über
+        # QuerySet.update() den save()-Guard umgehen und wieder in Bearbeitung gehen.
         updated = DocumentVersion.objects.filter(
-            pk=self.pk, processing_state=self.ProcessingState.FAILED
+            pk=self.pk,
+            processing_state=self.ProcessingState.FAILED,
+            is_immutable=False,
         ).update(
             processing_state=self.ProcessingState.RETRY_PENDING,
             processing_attempts=models.F("processing_attempts") + 1,
@@ -822,7 +848,8 @@ class DocumentVersion(models.Model):
         )
         if updated == 0:
             raise ConcurrentProcessingTransition(
-                f"Retry für Version {self.pk} bereits nebenläufig gestartet."
+                f"Retry für Version {self.pk} nicht möglich "
+                f"(nicht FAILED, gesiegelt oder nebenläufig gestartet)."
             )
         self.refresh_from_db(fields=["processing_state", "processing_attempts"])
 

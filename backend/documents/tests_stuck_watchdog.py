@@ -53,11 +53,38 @@ class ReapStuckVersionsTests(TestCase):
         v.refresh_from_db()
         self.assertEqual(v.processing_state, PS.OCR_RUNNING)
 
-    def test_haengendes_sealed_wird_ready(self):
+    def test_haengendes_sealed_wird_gesiegelt_und_ready(self):
+        # SEALED, aber (Crash in seal_version) NICHT gesiegelt: is_immutable=False.
+        # Der Watchdog darf NICHT einfach READY setzen, sondern muss das Siegel
+        # vervollständigen (is_immutable=True) und erst dann READY.
         v = self._version(PS.SEALED, changed_ago_min=60)
+        self.assertFalse(v.is_immutable)
         tasks.reap_stuck_versions()
         v.refresh_from_db()
         self.assertEqual(v.processing_state, PS.READY)
+        self.assertTrue(v.is_immutable)
+
+    def test_mark_failed_cas_ueberschreibt_fortschritt_nicht(self):
+        # Watchdog liest OCR_RUNNING, danach macht der Worker OCR_DONE. Der
+        # nachgelagerte mark_processing_failed-CAS (expected_state/-changed_at)
+        # darf den Fortschritt NICHT auf FAILED zurücksetzen.
+        v = self._version(PS.OCR_RUNNING, changed_ago_min=60)
+        read_state = v.processing_state
+        read_changed = v.processing_state_changed_at
+        # Zwischenzeitlicher Fortschritt in der DB.
+        DocumentVersion.objects.filter(pk=v.pk).update(
+            processing_state=PS.OCR_DONE,
+            processing_state_changed_at=timezone.now(),
+        )
+        ok = v.mark_processing_failed(
+            step="watchdog",
+            error="x",
+            expected_state=read_state,
+            expected_changed_at=read_changed,
+        )
+        self.assertFalse(ok)
+        v.refresh_from_db()
+        self.assertEqual(v.processing_state, PS.OCR_DONE)
 
     def test_terminale_zustaende_unberuehrt(self):
         ready = self._version(PS.READY, changed_ago_min=60)

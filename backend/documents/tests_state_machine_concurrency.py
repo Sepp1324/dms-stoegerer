@@ -79,6 +79,15 @@ class TransitionCasTests(TestCase):
         self.assertEqual(v.processing_state, PS.RETRY_PENDING)
         self.assertEqual(v.processing_attempts, 1)
 
+    def test_begin_retry_auf_immutable_failed_wirft(self):
+        # WORM-Guard im CAS: eine (inkonsistente) immutable+FAILED-Version darf
+        # NICHT reaktiviert werden – sonst umginge der Retry den save()-Guard.
+        v = self._version(PS.FAILED)
+        DocumentVersion.objects.filter(pk=v.pk).update(is_immutable=True)
+        v.refresh_from_db()
+        with self.assertRaises(ConcurrentProcessingTransition):
+            v.begin_retry(actor=self.user)
+
     def test_begin_retry_auf_frisch_geladenem_retry_pending_wirft_concurrent(self):
         # Paralleler zweiter Retry: die Version wird bereits als RETRY_PENDING
         # geladen (In-Memory-Zustand != FAILED). Ohne die entfernte Vorprüfung
