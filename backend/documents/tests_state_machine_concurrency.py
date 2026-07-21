@@ -79,6 +79,15 @@ class TransitionCasTests(TestCase):
         self.assertEqual(v.processing_state, PS.RETRY_PENDING)
         self.assertEqual(v.processing_attempts, 1)
 
+    def test_begin_retry_auf_frisch_geladenem_retry_pending_wirft_concurrent(self):
+        # Paralleler zweiter Retry: die Version wird bereits als RETRY_PENDING
+        # geladen (In-Memory-Zustand != FAILED). Ohne die entfernte Vorprüfung
+        # käme sonst eine ValidationError, die retry_version NICHT fängt.
+        # Erwartet: ConcurrentProcessingTransition (-> superseded).
+        v = self._version(PS.RETRY_PENDING)
+        with self.assertRaises(ConcurrentProcessingTransition):
+            v.begin_retry(actor=self.user)
+
     def test_mark_failed_ueberschreibt_sealed_nicht(self):
         v = self._version(PS.OCR_RUNNING)
         # Nebenläufig gesiegelt (WORM). mark_processing_failed darf das nicht
