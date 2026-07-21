@@ -698,6 +698,19 @@ class DocumentVersion(models.Model):
         help_text="sha256(sha256 · prev_hash · Snapshot-Bytes) – Metadaten-Siegel",
     )
 
+    # psychosr-Sync (STOAA-…): EINMALIG generierte MC-Lernkarten dieser Version
+    # samt Pro-Karte-Sync-Status. Ohne diese Persistenz würde ein Teil-Retry
+    # (einige Karten gepusht, andere nicht) die LLM-Generierung erneut anstoßen –
+    # nichtdeterministisch, also ANDERE Karten – und die bereits gepushten Karten
+    # als Dubletten erneut senden. Mit persistierten Einträgen re-sendet ein Retry
+    # exakt dieselben Karten und NUR die noch offenen (``pushed=false``).
+    # Form: ``[{"frage": str, "aussagen": [...], "kap": int, "pushed": bool}, …]``.
+    flashcards_sync = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Persistierte MC-Lernkarten + Pro-Karte-Push-Status (psychosr)",
+    )
+
     class Meta:
         verbose_name = "Dokumentversion"
         verbose_name_plural = "Dokumentversionen"
