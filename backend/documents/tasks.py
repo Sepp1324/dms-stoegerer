@@ -11,6 +11,7 @@ from celery import shared_task
 from celery.exceptions import SoftTimeLimitExceeded
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.db import transaction
 
 from . import pipeline, storage
 from .models import DocumentVersion
@@ -74,24 +75,59 @@ def push_document_flashcards(document_id: int) -> dict:
         return {"status": "no_text", "document_id": document_id}
 
     max_q = getattr(settings, "PSYCHOSR_MAX_QUESTIONS", 8)
-    result = generate_flashcards(text, max_questions=max_q)
-    questions = result.get("questions") or []
-    if result.get("source") != "ai" or not questions:
-        return {
-            "status": result.get("source", "unavailable"),
-            "document_id": document_id,
-            "generated": 0,
-        }
 
-    push = psychosr_client.push_flashcards(
-        questions, source_title=document.title or f"Dokument {document_id}"
-    )
+    # Karten EINMALIG generieren und pro Version persistieren. Bei einem Teil-Retry
+    # (einige Karten gepusht, andere nicht) darf NICHT neu generiert werden – die
+    # LLM-Generierung ist nichtdeterministisch, ergäbe also ANDERE Karten und die
+    # bereits gepushten würden als Dubletten erneut gesendet. Deshalb: unter Zeilen-
+    # Lock prüfen, ob schon Karten persistiert sind; nur wenn nicht, generieren und
+    # speichern (der Lock serialisiert doppelte Trigger -> keine Doppel-Generierung).
+    with transaction.atomic():
+        ver = DocumentVersion.objects.select_for_update().get(pk=version.pk)
+        entries = list(ver.flashcards_sync or [])
+        if not entries:
+            result = generate_flashcards(text, max_questions=max_q)
+            questions = result.get("questions") or []
+            if result.get("source") != "ai" or not questions:
+                # Nichts persistieren -> ein späterer Retry generiert erneut.
+                return {
+                    "status": result.get("source", "unavailable"),
+                    "document_id": document_id,
+                    "generated": 0,
+                }
+            entries = [
+                {
+                    "frage": q["frage"],
+                    "aussagen": q["aussagen"],
+                    "kap": q["kap"],
+                    "pushed": False,
+                }
+                for q in questions
+            ]
+            ver.flashcards_sync = entries
+            ver.save(update_fields=["flashcards_sync"])
 
-    # Nur als "synced" markieren, wenn ALLE Karten gepusht wurden. Sonst würde ein
-    # einziger Erfolg das Dokument als fertig markieren und die fehlgeschlagenen
-    # Karten (der Marker-Tag verhindert einen erneuten Lauf) würden nie erneut
-    # versucht.
-    if push.get("pushed") and not push.get("failed"):
+    # Nur die noch NICHT gepushten Karten senden (Retry re-sendet keine Dubletten).
+    pending_idx = [i for i, e in enumerate(entries) if not e.get("pushed")]
+    push = {"pushed": 0, "failed": 0}
+    if pending_idx:
+        pending = [entries[i] for i in pending_idx]
+        push = psychosr_client.push_flashcards(
+            pending, source_title=document.title or f"Dokument {document_id}"
+        )
+        for i, ok in zip(pending_idx, push.get("results", [])):
+            if ok:
+                entries[i]["pushed"] = True
+        # Pro-Karte-Status persistieren, damit der nächste Retry die bereits
+        # erfolgreichen Karten überspringt.
+        with transaction.atomic():
+            ver = DocumentVersion.objects.select_for_update().get(pk=version.pk)
+            ver.flashcards_sync = entries
+            ver.save(update_fields=["flashcards_sync"])
+
+    # Marker-Tag (überspringt künftige Läufe) NUR, wenn ALLE Karten gepusht sind.
+    all_pushed = bool(entries) and all(e.get("pushed") for e in entries)
+    if all_pushed:
         marker = Tag.objects.filter(name=synced_name).first()
         if marker is None:
             marker = Tag.objects.create(name=synced_name, color="#6366F1")
@@ -100,9 +136,10 @@ def push_document_flashcards(document_id: int) -> dict:
     return {
         "status": "done",
         "document_id": document_id,
-        "generated": len(questions),
+        "generated": len(entries),
         "pushed": push.get("pushed", 0),
         "failed": push.get("failed", 0),
+        "synced_total": sum(1 for e in entries if e.get("pushed")),
     }
 
 

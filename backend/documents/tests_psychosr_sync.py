@@ -140,7 +140,13 @@ class PushDocumentFlashcardsTaskTests(TestCase):
         doc = self._doc()
         with patch("ai.services.get_provider", return_value=_FakeProvider()), patch(
             "documents.psychosr_client.push_flashcards",
-            return_value={"pushed": 1, "failed": 0, "errors": [], "skipped": False},
+            return_value={
+                "pushed": 1,
+                "failed": 0,
+                "errors": [],
+                "results": [True],
+                "skipped": False,
+            },
         ) as push:
             result = push_document_flashcards(doc.id)
 
@@ -150,14 +156,20 @@ class PushDocumentFlashcardsTaskTests(TestCase):
         self.assertTrue(doc.tags.filter(name="psychosr-synced").exists())
 
     def test_teilfehler_markiert_nicht_synced(self):
-        # Mind. eine Karte scheiterte (failed>0): NICHT als synced markieren, sonst
-        # würde der Marker-Tag einen erneuten Versuch der Restkarten verhindern.
+        # Mind. eine Karte scheiterte: NICHT als synced markieren, sonst würde der
+        # Marker-Tag einen erneuten Versuch der Restkarten verhindern.
         from .tasks import push_document_flashcards
 
         doc = self._doc()
         with patch("ai.services.get_provider", return_value=_FakeProvider()), patch(
             "documents.psychosr_client.push_flashcards",
-            return_value={"pushed": 1, "failed": 1, "errors": ["boom"], "skipped": False},
+            return_value={
+                "pushed": 0,
+                "failed": 1,
+                "errors": ["boom"],
+                "results": [False],
+                "skipped": False,
+            },
         ):
             result = push_document_flashcards(doc.id)
 
@@ -182,6 +194,117 @@ class PushDocumentFlashcardsTaskTests(TestCase):
         _make_version(doc, ocr_text="")
         result = push_document_flashcards(doc.id)
         self.assertEqual(result["status"], "no_text")
+
+
+_TWO_CARDS = [
+    {"frage": "F1", "aussagen": [{"text": "a", "richtig": True}], "kap": 1},
+    {"frage": "F2", "aussagen": [{"text": "b", "richtig": True}], "kap": 2},
+]
+
+
+@override_settings(
+    PSYCHOSR_URL="http://psychosr.test",
+    PSYCHOSR_TOKEN="secret-token",
+    PSYCHOSR_DECK="mc",
+    PSYCHOSR_TRIGGER_TAG="Psychologie",
+    PSYCHOSR_SYNCED_TAG="psychosr-synced",
+)
+class PartialRetryIdempotencyTests(TestCase):
+    """Ein Teil-Retry darf NUR die offenen Karten senden und NICHT neu generieren."""
+
+    def _doc(self):
+        doc = Document.objects.create(title="Kapitel 1")
+        _make_version(doc, ocr_text="genug Text für die Kartengenerierung.")
+        return doc
+
+    def test_retry_resendet_nur_offene_karten_ohne_neu_zu_generieren(self):
+        from .tasks import push_document_flashcards
+
+        doc = self._doc()
+        gen = MagicMock(return_value={"source": "ai", "questions": list(_TWO_CARDS)})
+        pushes: list[list] = []
+
+        def _push(questions, *, source_title):
+            pushes.append(questions)
+            if len(pushes) == 1:
+                # Erster Lauf: Karte 1 ok, Karte 2 scheitert.
+                return {"pushed": 1, "failed": 1, "errors": ["x"],
+                        "results": [True, False], "skipped": False}
+            # Zweiter Lauf: die verbliebene Karte 2 geht durch.
+            return {"pushed": 1, "failed": 0, "errors": [],
+                    "results": [True], "skipped": False}
+
+        with patch("ai.services.generate_flashcards", gen), patch(
+            "documents.psychosr_client.push_flashcards", side_effect=_push
+        ):
+            first = push_document_flashcards(doc.id)
+            second = push_document_flashcards(doc.id)
+
+        # Nur EINMAL generiert (keine nichtdeterministische Neugenerierung).
+        gen.assert_called_once()
+        # Erster Push: beide Karten; zweiter Push: NUR die offene Karte (F2).
+        self.assertEqual(len(pushes[0]), 2)
+        self.assertEqual(len(pushes[1]), 1)
+        self.assertEqual(pushes[1][0]["frage"], "F2")
+        # Erster Lauf: eine Karte offen (kein Marker); zweiter Lauf: alles gepusht.
+        self.assertEqual(first["failed"], 1)
+        self.assertEqual(second["status"], "done")
+        self.assertTrue(doc.tags.filter(name="psychosr-synced").exists())
+        doc.refresh_from_db()
+        entries = doc.current_version.flashcards_sync
+        self.assertEqual([e["pushed"] for e in entries], [True, True])
+
+    def test_kompletter_fehlschlag_persistiert_karten_fuer_retry(self):
+        # Alle Karten scheitern: Karten sind trotzdem persistiert, damit ein Retry
+        # exakt dieselben (nicht neu generierte) Karten erneut sendet.
+        from .tasks import push_document_flashcards
+
+        doc = self._doc()
+        gen = MagicMock(return_value={"source": "ai", "questions": list(_TWO_CARDS)})
+        with patch("ai.services.generate_flashcards", gen), patch(
+            "documents.psychosr_client.push_flashcards",
+            return_value={"pushed": 0, "failed": 2, "errors": ["a", "b"],
+                          "results": [False, False], "skipped": False},
+        ):
+            push_document_flashcards(doc.id)
+
+        doc.refresh_from_db()
+        entries = doc.current_version.flashcards_sync
+        self.assertEqual(len(entries), 2)
+        self.assertEqual([e["pushed"] for e in entries], [False, False])
+        self.assertFalse(doc.tags.filter(name="psychosr-synced").exists())
+
+
+class PushFlashcardsResultsTests(TestCase):
+    @override_settings(PSYCHOSR_URL="http://psychosr.test", PSYCHOSR_TOKEN="t")
+    def test_results_pro_karte_in_reihenfolge(self):
+        from . import psychosr_client
+
+        class _FakeClient:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def post(self, url, json=None, headers=None):
+                # Karte mit kap==2 scheitert, Rest ok.
+                ok = json["kap"] != 2
+                return MagicMock(
+                    raise_for_status=(lambda: None) if ok
+                    else MagicMock(side_effect=RuntimeError("boom"))
+                )
+
+        qs = [
+            {"frage": f"F{i}", "aussagen": [{"text": "a", "richtig": True}], "kap": i}
+            for i in (1, 2, 3)
+        ]
+        with patch("documents.psychosr_client.httpx.Client", return_value=_FakeClient()):
+            res = psychosr_client.push_flashcards(qs, source_title="T")
+
+        self.assertEqual(res["results"], [True, False, True])
+        self.assertEqual(res["pushed"], 2)
+        self.assertEqual(res["failed"], 1)
 
 
 @override_settings(
