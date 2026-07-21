@@ -140,9 +140,16 @@ class PdfWorkbenchTests(APITestCase):
             )
 
         self.assertEqual(resp.status_code, 503)
-        # Version wurde trotz Enqueue-Fehler erzeugt (per Retry nachverarbeitbar).
+        # Version wurde trotz Enqueue-Fehler erzeugt UND als FAILED markiert, damit
+        # der Retry-Endpoint sie aufgreifen kann (sonst hinge sie in UPLOADED und
+        # wäre nicht reparierbar).
         doc.refresh_from_db()
         self.assertEqual(doc.versions.count(), 2)
+        self.assertEqual(
+            doc.current_version.processing_state,
+            DocumentVersion.ProcessingState.FAILED,
+        )
+        self.assertEqual(doc.current_version.processing_failed_step, "hashing")
 
     def test_rewrite_invalid_page_returns_400_without_version(self):
         doc = self._doc("invalid", self.user, pages=2)
