@@ -19,7 +19,12 @@ from pathlib import Path
 from django.db import transaction
 
 from . import storage
-from .models import AuditLogEntry, Document, DocumentVersion
+from .models import (
+    AuditLogEntry,
+    ConcurrentProcessingTransition,
+    Document,
+    DocumentVersion,
+)
 from .services import page_text
 from documents.services.ocr.engine import run_ocr
 
@@ -471,6 +476,21 @@ def _run_from(version: DocumentVersion, start_index: int) -> dict:
     for name, func, _precond in PIPELINE_STEPS[start_index:]:
         try:
             step_result = func(version)
+        except ConcurrentProcessingTransition:
+            # Ein anderer Task/Retry hat diese Version übernommen (CAS-Miss beim
+            # Übergang). NICHT als FAILED markieren – der andere Lauf verarbeitet
+            # sie. Still abbrechen (Doppelverarbeitung vermieden).
+            logger.info(
+                "Version %s: Schritt %r nebenläufig übernommen – Task bricht ab.",
+                version.id,
+                name,
+            )
+            return {
+                "version_id": version.id,
+                "status": "superseded",
+                "step": name,
+                "processing_state": version.processing_state,
+            }
         except Exception as exc:  # noqa: BLE001 – jeder Schritt darf fehlschlagen
             version.mark_processing_failed(
                 step=name, error=exc, actor=version.created_by
@@ -557,7 +577,16 @@ def retry_version(version: DocumentVersion, actor=None) -> dict:
     gesetzt, damit der Schritt seine eigene ``transition_to(RUNNING)`` ausführen
     kann.
     """
-    version.begin_retry(actor=actor)
+    try:
+        version.begin_retry(actor=actor)
+    except ConcurrentProcessingTransition:
+        # Zweiter Retry-Klick/Task: der erste hat FAILED bereits übernommen.
+        # Still abbrechen, kein zweiter Pipeline-Lauf.
+        logger.info(
+            "Retry für Version %s bereits nebenläufig gestartet – Task bricht ab.",
+            version.id,
+        )
+        return {"version_id": version.id, "status": "superseded"}
 
     failed_step = version.processing_failed_step
     start_index = 0
