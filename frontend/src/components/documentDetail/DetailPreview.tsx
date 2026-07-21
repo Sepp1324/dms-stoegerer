@@ -15,26 +15,26 @@ export function DetailPreview({
       {pdfError && <p className="status status--warn">Vorschau: {pdfError}</p>}
       {!pdfError && !pdfUrl && <p className="muted">Lade Vorschau …</p>}
       {pdfUrl && (
-        // Chromes nativer PDF-Viewer braucht Scripting UND same-origin – sonst
-        // rendert das iframe eine LEERE Seite (verifiziert: `allow-downloads`
-        // allein blieb leer, ebenso `allow-scripts allow-downloads`; erst mit
-        // allow-same-origin erscheint das PDF). Bilder bräuchten kein Scripting,
-        // PDFs schon – deshalb war die Vorschau für PDF-Dokumente komplett leer.
+        // BEWUSST KEIN `sandbox`: Chromes nativer PDF-Viewer rendert nur in einem
+        // komplett un-sandboxed iframe. Verifiziert im Browser – JEDE Sandbox-
+        // Variante (`allow-downloads`, `allow-scripts allow-downloads`, sogar
+        // `allow-scripts allow-same-origin allow-downloads`) ließ die PDF-Vorschau
+        // LEER; erst ohne das Attribut erscheint das Dokument.
         //
-        // Die XSS-Härtung (P0-2) ruht damit auf der Ebene DAVOR, nicht auf dem
-        // iframe-sandbox: Die Magic-Byte-Allowlist beim Ingest lässt NUR echte
-        // PDFs/Bilder in den Bestand, und die Auslieferung setzt
-        // `Content-Type: application/pdf` + `X-Content-Type-Options: nosniff`.
-        // Eine getarnte HTML/SVG-Datei wird so gar nicht erst gespeichert bzw.
-        // nie als HTML interpretiert; PDF-eigenes JavaScript führt Chrome ohnehin
-        // nicht aus. `allow-downloads` erhält den Speichern-Button.
+        // Sicherheit: Die XSS-Abwehr (P0-2) sitzt eine Ebene davor, nicht am
+        // iframe. Das Vorschau-iframe kann NUR echte PDFs/Raster-Bilder laden,
+        // weil (1) die Magic-Byte-Allowlist beim Ingest HTML/SVG/XML gar nicht
+        // erst speichert, (2) `is_safe_inline` alles außer PDF/Raster-Bild als
+        // Download erzwingt und SVG explizit ausschließt, und (3) die Auslieferung
+        // `Content-Type: application/pdf|image/*` + `X-Content-Type-Options:
+        // nosniff` setzt. Aktiver Inhalt (Script/HTML/SVG) erreicht dieses iframe
+        // also nicht; PDF-eigenes JS führt Chrome ohnehin nicht aus.
         // (Spätere Härtung möglich: Vorschau aus separatem Origin ausliefern oder
         // clientseitig via pdf.js zu Canvas rendern statt nativem Viewer.)
         <iframe
           className="pdf-frame"
           src={pdfUrl}
           title={`Vorschau: ${title}`}
-          sandbox="allow-scripts allow-same-origin allow-downloads"
         />
       )}
     </section>
