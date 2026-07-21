@@ -22,7 +22,17 @@ spec:
           # Auth (P2): requirepass aus dem Secret; k8s substituiert $(REDIS_PASSWORD)
           # aus der unten deklarierten Env. Ohne Passwort war Redis (Broker +
           # potentieller Cache) für jeden im Cluster-Netz offen.
-          command: ["redis-server", "--requirepass", "$(REDIS_PASSWORD)"]
+          command:
+            - redis-server
+            - --requirepass
+            - $(REDIS_PASSWORD)
+            # Broker-Resilienz: ein fehlgeschlagener RDB-Snapshot darf NICHT alle
+            # Writes blockieren. Sonst kippt ein Persistenz-Hänger (z. B. /data nicht
+            # schreibbar) Redis in MISCONF und JEDER Celery-Enqueue → 500 (rewrite/
+            # merge/split der PDF-Werkbank, Ingest, Reindex …). Persistenz ist hier
+            # ohnehin ephemer (kein Volume gemountet), daher unkritisch.
+            - --stop-writes-on-bgsave-error
+            - "no"
           env:
             - name: REDIS_PASSWORD
               valueFrom:
@@ -31,6 +41,14 @@ spec:
                   key: REDIS_PASSWORD
           securityContext:
             allowPrivilegeEscalation: false
+            # Als 'redis'-User des Images (UID/GID 999) laufen – genau dem gehört
+            # /data. Ohne explizites runAsUser startete der Pod (Cluster-Non-Root-
+            # Default) unter einer FREMDEN UID → redis-server konnte sein eigenes
+            # /data nicht beschreiben → bgsave 'Permission denied' → MISCONF →
+            # Writes blockiert. 999 = deterministischer Schreibzugriff.
+            runAsNonRoot: true
+            runAsUser: 999
+            runAsGroup: 999
             capabilities:
               drop: ["ALL"]
           resources:
