@@ -112,12 +112,32 @@ def write_snapshot_on_seal(version: "DocumentVersion", *, taken_at=None, actor=N
         snapshot=snapshot,
     )
 
-    DocumentVersion.objects.filter(pk=version.pk).update(
+    # Atomar write-once (CAS): nur setzen, wenn NOCH kein Snapshot existiert. Zwei
+    # parallele Seal-/Watchdog-Läufe könnten sonst beide ``metadata_snapshot is
+    # None`` lesen und danach Snapshot + seal_hash nacheinander überschreiben –
+    # fatal für einen WORM-Nachweis. Nur der Gewinner (genau eine Zeile) schreibt
+    # lokale Attribute und Audit; der Verlierer lädt den bestehenden Snapshot neu.
+    updated = DocumentVersion.objects.filter(
+        pk=version.pk, metadata_snapshot__isnull=True
+    ).update(
         metadata_snapshot=snapshot,
         snapshot_schema_version=SNAPSHOT_SCHEMA_VERSION,
         snapshot_taken_at=taken_at,
         seal_hash=seal_hash,
     )
+    if updated == 0:
+        # Ein paralleler Lauf war schneller – den verbindlichen, bereits
+        # gesiegelten Stand übernehmen (nicht den lokal berechneten).
+        version.refresh_from_db(
+            fields=[
+                "metadata_snapshot",
+                "snapshot_schema_version",
+                "snapshot_taken_at",
+                "seal_hash",
+            ]
+        )
+        return False
+
     version.metadata_snapshot = snapshot
     version.snapshot_schema_version = SNAPSHOT_SCHEMA_VERSION
     version.snapshot_taken_at = taken_at
