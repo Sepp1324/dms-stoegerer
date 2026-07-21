@@ -552,6 +552,12 @@ def _run_from(version: DocumentVersion, start_index: int) -> dict:
 def process_version(version: DocumentVersion) -> dict:
     """Vollständige Verarbeitung einer Version entlang der State Machine."""
     result = _run_from(version, 0)
+    if result.get("status") != "done":
+        # Fehlgeschlagen (FAILED) oder nebenläufig verdrängt (superseded): KEINE
+        # Folgeaktionen. Sonst entstehen verfrühte KI-Vorschläge, inkonsistente
+        # Review-Aufgaben und unnötige API-Kosten für ein Dokument, das (noch)
+        # nicht fertig verarbeitet ist.
+        return result
     _sync_contract_center(version, result, actor=version.created_by)
     _sync_entity_graph(version, result, actor=version.created_by)
     _sync_semantic_index(version, result, actor=version.created_by)
@@ -609,6 +615,9 @@ def retry_version(version: DocumentVersion, actor=None) -> dict:
     )
 
     result = _run_from(version, start_index)
+    if result.get("status") != "done":
+        # Wie process_version: bei FAILED/superseded keine Folgeaktionen.
+        return result
     _sync_contract_center(version, result, actor=actor or version.created_by)
     _sync_entity_graph(version, result, actor=actor or version.created_by)
     _sync_semantic_index(version, result, actor=actor or version.created_by)

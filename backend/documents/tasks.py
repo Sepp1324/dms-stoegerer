@@ -112,10 +112,12 @@ def process_document_version(version_id: int) -> dict:
     version = DocumentVersion.objects.select_related("document").get(pk=version_id)
     result = pipeline.process_version(version)
 
-    # KI-Vorschläge nach dem OCR (eigener Task, damit OCR nicht daran hängt).
-    from ai.tasks import suggest_document_metadata
+    # KI-Vorschläge NUR bei erfolgreichem Lauf (done). Bei FAILED/superseded keine
+    # verfrühten Vorschläge / unnötigen API-Kosten.
+    if result.get("status") == "done":
+        from ai.tasks import suggest_document_metadata
 
-    suggest_document_metadata.delay(version.document_id)
+        suggest_document_metadata.delay(version.document_id)
 
     # Der semantische Index (Bedeutungssuche + Copilot-RAG) wird bereits innerhalb
     # von pipeline.process_version() über _sync_semantic_index() synchron
@@ -193,10 +195,11 @@ def retry_document_version(version_id: int, actor_id: int | None = None) -> dict
 
     result = pipeline.retry_version(version, actor=actor)
 
-    # KI-Vorschläge nach dem OCR neu anstoßen (eigener Task, s. process_document_version).
-    from ai.tasks import suggest_document_metadata
+    # KI-Vorschläge nur bei erfolgreichem Retry (done); s. process_document_version.
+    if result.get("status") == "done":
+        from ai.tasks import suggest_document_metadata
 
-    suggest_document_metadata.delay(version.document_id)
+        suggest_document_metadata.delay(version.document_id)
     return result
 
 
