@@ -7,6 +7,7 @@ dass die Seitenzahl das Ergebnis tatsächlich kippt.
 """
 from django.test import SimpleTestCase
 
+from documents.services.ocr.engine import _should_skip_ocr
 from documents.services.ocr.validate import is_valid_ocr
 
 
@@ -28,3 +29,19 @@ class IsValidOcrTests(SimpleTestCase):
         text = "x" * 60
         self.assertTrue(is_valid_ocr(text, 1))
         self.assertFalse(is_valid_ocr(text, 4))
+
+
+class ShouldSkipOcrTests(SimpleTestCase):
+    def test_viel_guter_text_wird_uebersprungen(self):
+        self.assertTrue(_should_skip_ocr("x" * 1000, 1, force=False))
+
+    def test_501_zeichen_auf_50_seiten_wird_nicht_uebersprungen(self):
+        # >500 Zeichen gesamt, aber ~10/Seite -> keine brauchbare Textschicht ->
+        # OCR muss laufen (Kern von P1: nicht nur len(text) > 500 prüfen).
+        self.assertFalse(_should_skip_ocr("x" * 501, 50, force=False))
+
+    def test_wenig_text_wird_nicht_uebersprungen(self):
+        self.assertFalse(_should_skip_ocr("x" * 100, 1, force=False))
+
+    def test_force_ueberspringt_nie(self):
+        self.assertFalse(_should_skip_ocr("x" * 1000, 1, force=True))
