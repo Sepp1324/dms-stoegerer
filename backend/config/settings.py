@@ -297,22 +297,26 @@ CELERY_RESULT_BACKEND = REDIS_URL
 CELERY_TASK_TRACK_STARTED = True
 CELERY_TIMEZONE = TIME_ZONE
 
-# Zuverlässigkeit bei Worker-Crash (P2): Tasks werden ERST nach erfolgreicher
-# Ausführung bestätigt (acks_late) und bei verlorenem Worker (Crash/OOM/SIGKILL,
-# Hard-Timeout) neu eingereiht (reject_on_worker_lost). Ein Task kann dadurch
-# doppelt laufen – das ist sicher, weil die Verarbeitungs-State-Machine
-# nebenläufigkeitssicher ist (Compare-and-Swap in transition_to/begin_retry): ein
-# doppelt ausgeführter Task bricht am CAS-Miss ab (status="superseded"), statt
-# OCR/Workflows parallel laufen zu lassen. OHNE diese Idempotenz wären die
-# folgenden Settings gefährlich.
-CELERY_TASK_ACKS_LATE = True
-CELERY_TASK_REJECT_ON_WORKER_LOST = True
-# Mit acks_late nur EINEN Task pro Worker vorab ziehen (kein Horten): sonst
+# acks_late/reject_on_worker_lost BEWUSST NICHT global (zurückgenommen):
+# * process_document_version ist (noch) NICHT wiederaufnahmefähig – es startet
+#   immer bei Schritt 0. Ein nach Worker-Crash wiederzugestellter Task auf
+#   Zustand HASHED/OCR_RUNNING erzeugt einen ungültigen Übergang -> die Version
+#   würde fälschlich FAILED (und ein noch laufender Originaltask gestört).
+# * Viele Tasks sind NICHT idempotent (push_document_flashcards sendet an
+#   psychosr, KI-Aufrufe, E-Mail-Versand) – eine Wiederholung sendet doppelt.
+# Sicheres Wieder-Aktivieren erfordert (a) pro-Task-Scoping auf echt idempotente
+# Tasks und (b) einen wiederaufnahmefähigen process_document_version mit
+# atomarem Task-Claim (Lease/Run-ID). Bis dahin bleibt es aus (Task geht bei
+# Crash verloren -> Version bleibt in einem Zwischenzustand, per Retry holbar).
+
+# Fairness/Speicher: jeder Worker zieht nur EINEN Task vorab (kein Horten), sonst
 # blockiert ein langer OCR-Task die vorgezogenen und der COW-Speicher steigt.
 CELERY_WORKER_PREFETCH_MULTIPLIER = 1
 # Ein einzelner Task darf nicht ewig hängen (z. B. OCR an einem kaputten PDF):
-# Soft-Limit wirft SoftTimeLimitExceeded (Task kann aufräumen/FAILED markieren),
-# Hard-Limit killt hart. Großzügig für große Scans, per Env justierbar.
+# Soft-Limit wirft SoftTimeLimitExceeded (Task bricht sauber ab -> FAILED/retry),
+# Hard-Limit killt hart. Großzügig für große Scans, per Env justierbar. WICHTIG:
+# breite ``except Exception`` in Loop-Tasks müssen SoftTimeLimitExceeded
+# durchlassen (sonst läuft der Task bis zum Hard-Limit weiter).
 CELERY_TASK_SOFT_TIME_LIMIT = int(os.getenv("CELERY_TASK_SOFT_TIME_LIMIT", "1800"))
 CELERY_TASK_TIME_LIMIT = int(os.getenv("CELERY_TASK_TIME_LIMIT", "2100"))
 

@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from celery import shared_task
+from celery.exceptions import SoftTimeLimitExceeded
 from django.conf import settings
 from django.contrib.auth import get_user_model
 
@@ -491,6 +492,10 @@ def _ingest_consume_dir(
             enqueue_processing(version)
             _move_into(entry, processed_dir)
             ingested.append({"document_id": document.id, "title": title})
+        except SoftTimeLimitExceeded:
+            # Das Soft-Time-Limit darf NICHT vom breiten Catch verschluckt werden
+            # (sonst liefe der Task bis zum Hard-Limit weiter). Sauber abbrechen.
+            raise
         except Exception:
             # Eine fehlerhafte Datei darf weder den Scan abbrechen noch
             # verschluckt werden: nach ``_failed/`` verschieben + loggen.
@@ -612,6 +617,8 @@ def check_due_reminders() -> dict:
                 fail_silently=True,
             )
             emailed += 1
+        except SoftTimeLimitExceeded:
+            raise  # Soft-Time-Limit nicht verschlucken (s. scan_consume_folder).
         except Exception:
             # E-Mail ist Best-Effort – ein Fehler darf den Beat nicht abbrechen.
             logger.exception(
