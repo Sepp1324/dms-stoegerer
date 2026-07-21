@@ -68,22 +68,65 @@ Der Runner nutzt das, was auf dem Node schon da ist:
 | **Kubeconfig lesbar** für den Runner-Nutzer | siehe unten |
 | **git** installiert | `git --version` |
 
-### Kubeconfig-Zugriff
+### Kubeconfig-Zugriff (least privilege)
 
-Der Workflow setzt `KUBECONFIG=/etc/rancher/k3s/k3s.yaml`. Diese Datei gehört
-`root` (Mode 600). Dem Runner-Nutzer Lesezugriff geben – am einfachsten k3s
-anweisen, sie gruppenlesbar zu schreiben:
+`/etc/rancher/k3s/k3s.yaml` enthält **cluster-admin-Credentials** und gehört
+`root` (Mode 600).
+
+> ⚠️ **NICHT `write-kubeconfig-mode: "0644"` setzen.** Das macht die Admin-
+> Credentials des gesamten Clusters **für jeden lokalen Nutzer und Dienst
+> weltlesbar** – ein einzelnes kompromittiertes Programm auf dem Node hätte
+> damit vollen cluster-admin. Der Runner braucht das nicht.
+
+**Empfohlen: eigener namespacebeschränkter ServiceAccount.** Der Runner deployt
+nur in `dms` und braucht kein cluster-admin. Einmalig als Admin anwenden und
+eine eigene **0600**-Kubeconfig mit einem SA-Token erzeugen:
 
 ```bash
-# k3s dauerhaft konfigurieren
-echo "write-kubeconfig-mode: \"0644\"" | sudo tee -a /etc/rancher/k3s/config.yaml
-sudo systemctl restart k3s
-ls -l /etc/rancher/k3s/k3s.yaml     # sollte -rw-r--r-- sein
+# 1) ServiceAccount + namespace-scoped Role/RoleBinding (Rechte nur auf die vom
+#    Deploy angefassten Ressourcen im Namespace dms):
+kubectl apply -f deploy/k8s/deploy-serviceaccount.yaml
+
+# 2) Kurzlebiges (hier 1 Jahr) Token + eigene Kubeconfig NUR für den Runner (0600):
+RUNNER_HOME=$(eval echo "~<runner-user>")
+sudo install -d -m 700 -o <runner-user> "$RUNNER_HOME/.kube"
+TOKEN=$(kubectl -n dms create token dms-deployer --duration=8760h)
+SERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
+CA=$(sudo awk '/certificate-authority-data:/{print $2; exit}' /etc/rancher/k3s/k3s.yaml)
+KCFG="$RUNNER_HOME/.kube/dms-deployer.yaml"
+cat <<EOF | sudo tee "$KCFG" >/dev/null
+apiVersion: v1
+kind: Config
+clusters:
+- name: dms
+  cluster: {server: $SERVER, certificate-authority-data: $CA}
+users:
+- name: dms-deployer
+  user: {token: $TOKEN}
+contexts:
+- name: dms
+  context: {cluster: dms, user: dms-deployer, namespace: dms}
+current-context: dms
+EOF
+sudo chown <runner-user> "$KCFG"
+sudo chmod 600 "$KCFG"
 ```
 
-> Alternativen: Runner als `root` laufen lassen (einfach, aber mehr Rechte) oder
-> die Kubeconfig in das Home des Runner-Nutzers kopieren und `KUBECONFIG` im
-> Workflow entsprechend anpassen.
+Dann in beiden Workflows (`deploy.yml`, `deploy-frontend.yml`) das `KUBECONFIG`
+im `env`-Block auf `/home/<runner-user>/.kube/dms-deployer.yaml` zeigen lassen.
+Den Namespace `dms` legt der Admin einmalig an (er ist cluster-scoped und wird
+bewusst nicht vom SA verwaltet). Läuft ein Token ab, Schritt 2 erneut ausführen.
+
+**Mindestens (falls die admin-Kubeconfig vorerst bleibt): NIE 0644.** Nur der
+Runner-Nutzer darf lesen – eigene Gruppe + `0640`, nicht weltlesbar:
+
+```bash
+sudo groupadd -f dms-deploy
+sudo usermod -aG dms-deploy <runner-user>          # NUR der Runner-Nutzer
+sudo chgrp dms-deploy /etc/rancher/k3s/k3s.yaml
+sudo chmod 640 /etc/rancher/k3s/k3s.yaml
+ls -l /etc/rancher/k3s/k3s.yaml                    # -rw-r----- root dms-deploy
+```
 
 ---
 
