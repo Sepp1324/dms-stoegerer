@@ -7,6 +7,7 @@ Jede Version trägt einen SHA-256-Hash und den Hash der Vorgängerversion
 """
 
 import hashlib
+import logging
 import os
 
 from django.conf import settings
@@ -17,6 +18,19 @@ from django.db import models
 from django.db.models import Q
 from django.utils import timezone
 from pgvector.django import VectorField
+
+logger = logging.getLogger(__name__)
+
+
+class ConcurrentProcessingTransition(Exception):
+    """Ein Zustandsübergang schlug fehl, weil der DB-Zustand nebenläufig bereits
+    geändert wurde (Compare-and-Swap-Miss).
+
+    Wird von ``DocumentVersion.transition_to``/``begin_retry`` geworfen, wenn zwei
+    Tasks/Retries denselben Übergang gleichzeitig versuchen. Der Verlierer bricht
+    ab, ohne die Version fälschlich als FAILED zu markieren – abgefangen in
+    ``pipeline._run_from``/``pipeline.retry_version``.
+    """
 
 # Embedding-Dimension der semantischen Suche (muss zu settings.EMBEDDING_MODEL
 # passen; als Migrations-Konstante fix, Änderung = neue Migration). 384 =
@@ -693,7 +707,19 @@ class DocumentVersion(models.Model):
                 f"Ungültiger Verarbeitungsübergang: {old_state} → {new_state}"
             )
 
-        DocumentVersion.objects.filter(pk=self.pk).update(processing_state=new_state)
+        # Compare-and-Swap: nur setzen, wenn der Zustand in der DB noch old_state
+        # ist. Verhindert, dass zwei nebenläufige Tasks/Retries denselben Übergang
+        # doppelt ausführen (und danach OCR/Workflows parallel laufen). Der
+        # Verlierer bekommt 0 aktualisierte Zeilen -> ConcurrentProcessingTransition,
+        # abgefangen in pipeline._run_from (Abbruch ohne FAILED).
+        updated = DocumentVersion.objects.filter(
+            pk=self.pk, processing_state=old_state
+        ).update(processing_state=new_state)
+        if updated == 0:
+            raise ConcurrentProcessingTransition(
+                f"Übergang {old_state} → {new_state} verloren "
+                f"(Zustand nebenläufig geändert), Version {self.pk}."
+            )
         self.processing_state = new_state
 
         AuditLogEntry.objects.create(
@@ -723,12 +749,30 @@ class DocumentVersion(models.Model):
         old_state = self.processing_state
         failed_at = timezone.now()
         error_text = str(error)[:4000]
-        DocumentVersion.objects.filter(pk=self.pk).update(
-            processing_state=self.ProcessingState.FAILED,
-            processing_error=error_text,
-            processing_failed_step=step,
-            processing_failed_at=failed_at,
+        # WORM-Guard atomar IM UPDATE: eine nebenläufig gesiegelte/READY gewordene
+        # Version wird nicht überschrieben (die Prüfung oben und das UPDATE waren
+        # zuvor nicht atomar). Bei 0 Zeilen: nichts tun (kein FAILED erzwingen).
+        updated = (
+            DocumentVersion.objects.filter(pk=self.pk)
+            .exclude(
+                processing_state__in=[
+                    self.ProcessingState.SEALED,
+                    self.ProcessingState.READY,
+                ]
+            )
+            .update(
+                processing_state=self.ProcessingState.FAILED,
+                processing_error=error_text,
+                processing_failed_step=step,
+                processing_failed_at=failed_at,
+            )
         )
+        if updated == 0:
+            logger.warning(
+                "Version %s nicht auf FAILED gesetzt (nebenläufig SEALED/READY).",
+                self.pk,
+            )
+            return
         self.processing_state = self.ProcessingState.FAILED
         self.processing_error = error_text
         self.processing_failed_step = step
@@ -759,10 +803,20 @@ class DocumentVersion(models.Model):
                 "Gesiegelte/READY-Version kann nicht erneut verarbeitet werden."
             )
 
-        DocumentVersion.objects.filter(pk=self.pk).update(
+        # CAS FAILED → RETRY_PENDING: zwei Retry-Klicks/Tasks dürfen nicht beide
+        # den Versuch hochzählen und die Pipeline doppelt starten. Nur der erste
+        # trifft FAILED; der zweite bekommt 0 Zeilen -> Abbruch (in retry_version
+        # abgefangen).
+        updated = DocumentVersion.objects.filter(
+            pk=self.pk, processing_state=self.ProcessingState.FAILED
+        ).update(
             processing_state=self.ProcessingState.RETRY_PENDING,
             processing_attempts=models.F("processing_attempts") + 1,
         )
+        if updated == 0:
+            raise ConcurrentProcessingTransition(
+                f"Retry für Version {self.pk} bereits nebenläufig gestartet."
+            )
         self.refresh_from_db(fields=["processing_state", "processing_attempts"])
 
         AuditLogEntry.objects.create(
