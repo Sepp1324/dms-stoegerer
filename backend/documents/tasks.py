@@ -159,13 +159,25 @@ def reap_stuck_versions() -> dict:
             processing_state_changed_at__lt=threshold,
         )
     ):
+        # Resume-Schritt aus dem HÄNGENDEN Zustand ableiten und als
+        # processing_failed_step speichern, damit der Retry ab dort weiterläuft
+        # (nicht wieder bei Hashing). Für Zustände ohne eindeutigen Schritt
+        # (RETRY_PENDING) den bestehenden Schritt behalten, sonst „hashing".
+        resume_step = (
+            pipeline.resume_step_for_state(version.processing_state)
+            or version.processing_failed_step
+            or "hashing"
+        )
         try:
             # CAS auf den GELESENEN Zustand+Zeitstempel: hat der Worker inzwischen
             # Fortschritt gemacht (z. B. OCR_RUNNING->OCR_DONE), trifft das Update
             # 0 Zeilen und wir überschreiben den Fortschritt NICHT (-> False).
             if version.mark_processing_failed(
-                step="watchdog",
-                error=f"Verarbeitung hängt seit >{minutes:.0f} min (Worker-Crash?).",
+                step=resume_step,
+                error=(
+                    f"Watchdog: Verarbeitung hängt seit >{minutes:.0f} min "
+                    f"(Worker-Crash?), Wiederaufnahme ab '{resume_step}'."
+                ),
                 expected_state=version.processing_state,
                 expected_changed_at=version.processing_state_changed_at,
             ):

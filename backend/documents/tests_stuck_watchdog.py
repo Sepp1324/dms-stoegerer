@@ -10,7 +10,7 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 from django.utils import timezone
 
-from . import tasks
+from . import pipeline, tasks
 from .models import Document, DocumentVersion
 
 User = get_user_model()
@@ -45,7 +45,17 @@ class ReapStuckVersionsTests(TestCase):
         tasks.reap_stuck_versions()
         v.refresh_from_db()
         self.assertEqual(v.processing_state, PS.FAILED)
-        self.assertEqual(v.processing_failed_step, "watchdog")
+        # OCR_RUNNING -> Wiederaufnahme ab "ocr" (nicht "watchdog"/Hashing).
+        self.assertEqual(v.processing_failed_step, "ocr")
+
+    def test_resume_step_aus_haengendem_zustand(self):
+        # Ein bei THUMBNAIL_DONE hängendes Dokument soll ab "sealing" retryen,
+        # nicht wieder Hashing/OCR/Klassifizierung durchlaufen.
+        v = self._version(PS.THUMBNAIL_DONE, changed_ago_min=60)
+        tasks.reap_stuck_versions()
+        v.refresh_from_db()
+        self.assertEqual(v.processing_state, PS.FAILED)
+        self.assertEqual(v.processing_failed_step, "sealing")
 
     def test_frische_version_bleibt_unberuehrt(self):
         v = self._version(PS.OCR_RUNNING, changed_ago_min=5)
@@ -63,6 +73,22 @@ class ReapStuckVersionsTests(TestCase):
         v.refresh_from_db()
         self.assertEqual(v.processing_state, PS.READY)
         self.assertTrue(v.is_immutable)
+        self.assertIsNotNone(v.seal_finalized_at)
+
+    def test_finalize_vervollstaendigt_trotz_gesetztem_immutable(self):
+        # Crash NACH is_immutable, aber VOR seal_finalized_at: is_immutable taugt
+        # dann NICHT als „fertig". finalize muss _seal_version nachziehen (Marker
+        # setzen) und erst dann READY erreichen.
+        v = self._version(PS.SEALED, changed_ago_min=60)
+        DocumentVersion.objects.filter(pk=v.pk).update(is_immutable=True)
+        v.refresh_from_db()
+        self.assertIsNone(v.seal_finalized_at)
+
+        pipeline.finalize_sealed_version(v)
+
+        v.refresh_from_db()
+        self.assertEqual(v.processing_state, PS.READY)
+        self.assertIsNotNone(v.seal_finalized_at)
 
     def test_mark_failed_cas_ueberschreibt_fortschritt_nicht(self):
         # Watchdog liest OCR_RUNNING, danach macht der Worker OCR_DONE. Der
