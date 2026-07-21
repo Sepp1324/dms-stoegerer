@@ -23,6 +23,20 @@ def _estimate_pages(text: str) -> int:
     return max(text.count("\n") // 50, 1)
 
 
+def _should_skip_ocr(text: str, pages: int, *, force: bool) -> bool:
+    """OCR überspringen, wenn bereits genug QUALITATIVER Text vorhanden ist.
+
+    Nicht nur ``len(text) > 500``: ein 50-seitiges PDF mit 501 Zeichen gesamt hat
+    zwar >500 Zeichen, aber nur ~10/Seite – das ist keine brauchbare Textschicht
+    und würde ohne diese Prüfung fälschlich als SKIPPED (ohne OCR) durchgehen.
+    Deshalb zusätzlich die Pro-Seite-Qualität via ``is_valid_ocr`` (mind. 20
+    Zeichen/Seite). ``force`` überspringt nie.
+    """
+    if force:
+        return False
+    return len(text) > 500 and is_valid_ocr(text, pages)
+
+
 def run_ocr(input_path: str, force: bool = False) -> OCRResult:
     """
     Stufe-2 OCR Engine
@@ -45,8 +59,8 @@ def run_ocr(input_path: str, force: bool = False) -> OCRResult:
     # fälschlich als SUCCESS gelten.
     pages = _pdf_page_count(input_path) or _estimate_pages(text)
 
-    # 2. Skip OCR wenn gut genug
-    if not force and len(text) > 500:
+    # 2. Skip OCR wenn bereits genug qualitativer Text vorhanden ist.
+    if _should_skip_ocr(text, pages, force=force):
         return OCRResult(
             text=text,
             pages=pages,
