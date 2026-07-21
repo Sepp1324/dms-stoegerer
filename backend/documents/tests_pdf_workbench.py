@@ -120,6 +120,30 @@ class PdfWorkbenchTests(APITestCase):
             ).exists()
         )
 
+    def test_rewrite_broker_down_returns_503_not_500(self):
+        # Broker-Ausfall beim Enqueue darf NICHT als 500 durchschlagen: die
+        # Version ist bereits erzeugt, der Client soll ein sauberes 503 („später
+        # erneut") sehen. Regression zum PDF-Werkbank-500 (Redis MISCONF).
+        from kombu.exceptions import OperationalError
+
+        doc = self._doc("broker", self.user, pages=2)
+        self.client.force_authenticate(self.user)
+
+        with mock.patch(
+            "documents.views.process_document_version.delay",
+            side_effect=OperationalError("broker down"),
+        ):
+            resp = self.client.post(
+                f"/api/documents/{doc.id}/pdf-workbench/rewrite/",
+                {"pages": [{"page": 1}]},
+                format="json",
+            )
+
+        self.assertEqual(resp.status_code, 503)
+        # Version wurde trotz Enqueue-Fehler erzeugt (per Retry nachverarbeitbar).
+        doc.refresh_from_db()
+        self.assertEqual(doc.versions.count(), 2)
+
     def test_rewrite_invalid_page_returns_400_without_version(self):
         doc = self._doc("invalid", self.user, pages=2)
         self.client.force_authenticate(self.user)
