@@ -11,9 +11,12 @@ on:
   push:
     branches: [main]
 
-# Nie zwei Deploys gleichzeitig (kein Cancel – laufendes Rollout fertigmachen).
+# GEMEINSAME Concurrency-Gruppe mit deploy-frontend.yml: serialisiert ALLE
+# Deploys (Voll + Frontend-only), damit sie den GitOps-Branch cluster-state nie
+# gleichzeitig schreiben (sonst gewinnt der letzte Force-Push, evtl. mit älterem
+# Ausgangsstand). Kein Cancel – laufendes Rollout fertigmachen.
 concurrency:
-  group: deploy-main
+  group: dms-deploy
   cancel-in-progress: false
 
 # Der Deploy-Job pusht den gepflegten kustomization-newTag auf den GitOps-Branch
@@ -159,15 +162,31 @@ jobs:
           # Push auf den dedizierten, UNGESCHÜTZTEN GitOps-Branch cluster-state –
           # NICHT auf das branch-protected main. HEAD ist der gerade deployte
           # main-Commit + dieser Bump; cluster-state spiegelt damit IMMER den
-          # zuletzt erfolgreich deployten Stand (die Cluster-Wahrheit). Force-Push,
-          # weil der Bump auf main aufsetzt (nicht auf dem vorherigen cluster-state)
-          # -> lineare, rein bot-verwaltete Historie. main bleibt unverändert und
-          # geschützt; kein Branch-Protection-Bypass/Secret nötig.
-          if git push -f origin HEAD:cluster-state; then
-            echo "cluster-state auf ${TAG} aktualisiert (deployter main + newTag-Bump)."
-          else
-            echo "::warning::Push nach cluster-state fehlgeschlagen. Deploy war erfolgreich; GitOps-Branch NICHT aktualisiert – vor `apply -k` deploy/k8s/verify-image-tags.sh laufen lassen."
+          # zuletzt erfolgreich deployten Stand (die Cluster-Wahrheit). main bleibt
+          # unverändert/geschützt; kein Branch-Protection-Bypass/Secret nötig.
+          #
+          # --force-with-lease statt -f: überschreibt cluster-state nur, wenn er
+          # noch dem erwarteten Stand entspricht (Netz gegen einen konkurrierenden
+          # Push, den die gemeinsame Concurrency-Gruppe zusätzlich verhindert). Der
+          # Inhalt ist base-unabhängig (deployter main + beide Tags), daher genügt
+          # bei einem Lease-Konflikt Neuladen + erneut. Scheitert es endgültig,
+          # ist der GitOps-Stand veraltet -> FEHLER (exit 1), nicht nur Warnung.
+          git fetch origin cluster-state || true
+          pushed=0
+          for attempt in 1 2 3; do
+            if git ls-remote --exit-code origin cluster-state >/dev/null 2>&1; then
+              git push --force-with-lease origin HEAD:cluster-state && { pushed=1; break; }
+            else
+              git push origin HEAD:cluster-state && { pushed=1; break; }  # erstmalig anlegen
+            fi
+            echo "cluster-state-Push (Versuch ${attempt}) abgelehnt – neu laden und erneut..."
+            git fetch origin cluster-state || true
+          done
+          if [ "$pushed" -ne 1 ]; then
+            echo "::error::cluster-state konnte nicht auf ${TAG} aktualisiert werden – GitOps-Stand veraltet (Deploy lief, aber apply -k würde alte Tags nutzen)."
+            exit 1
           fi
+          echo "cluster-state auf ${TAG} aktualisiert (deployter main + newTag-Bump)."
 
       - name: Rollout-Diagnose (bei Timeout/Fehler)
         if: failure()

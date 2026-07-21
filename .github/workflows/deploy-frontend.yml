@@ -20,8 +20,10 @@ on:
         required: false
         default: ''
 
+# GEMEINSAME Concurrency-Gruppe mit deploy.yml – serialisiert Voll- und
+# Frontend-Deploys, damit cluster-state nie gleichzeitig geschrieben wird.
 concurrency:
-  group: deploy-frontend-only
+  group: dms-deploy
   cancel-in-progress: false
 
 # Pflegt den frontend-newTag auf dem GitOps-Branch cluster-state → Schreibrecht.
@@ -43,23 +45,18 @@ jobs:
           ref: ${{ github.event.inputs.git_sha || 'main' }}
 
       - name: Image-Tag bestimmen
-        # Der manuelle Input wird NICHT in Shell-Code interpoliert (Injection),
-        # sondern nur als Env-Variable übergeben und strikt validiert.
+        # Als Docker-Tag IMMER den aufgelösten kurzen Git-SHA des ausgecheckten
+        # Commits nehmen – NIE den rohen git_sha-Input. Ein gültiger Git-Ref wie
+        # `release/1.2` enthält `/` und wäre KEIN gültiger Docker-Tag (scheiterte
+        # sonst erst bei `docker build`). Der Input steuert nur, WAS ausgecheckt
+        # wurde (im Checkout-`ref:`, kein Shell-Interpol -> keine Injection).
         env:
           INPUT_GIT_SHA: ${{ github.event.inputs.git_sha }}
         run: |
           set -euo pipefail
-          if [ -n "${INPUT_GIT_SHA}" ]; then
-            if ! printf '%s' "${INPUT_GIT_SHA}" | grep -qE '^[A-Za-z0-9._/-]+$'; then
-              echo "FEHLER: Ungültiger git_sha-Input (nur [A-Za-z0-9._/-] erlaubt)."
-              exit 1
-            fi
-            TAG="${INPUT_GIT_SHA}"
-          else
-            TAG="$(git rev-parse --short HEAD)"
-          fi
+          TAG="$(git rev-parse --short HEAD)"
           echo "TAG=$TAG" >> "$GITHUB_ENV"
-          echo "Deploying frontend with tag: $TAG"
+          echo "Deploying frontend with tag: $TAG (checkout ref: ${INPUT_GIT_SHA:-main})"
 
       - name: Runner-Speicher freihalten
         run: |
@@ -106,11 +103,25 @@ jobs:
         # erneutes Triggern.
         run: |
           set -euo pipefail
-          git fetch origin cluster-state main || git fetch origin main
-          git checkout -B _fe_tagbump origin/cluster-state 2>/dev/null \
-            || git checkout -B _fe_tagbump origin/main
+          git config user.name  "dms-deploy-bot"
+          git config user.email "deploy-bot@stoegerer-dms.local"
           f=deploy/k8s/base/kustomization.yaml
-          python3 - "$f" "$TAG" <<'PY'
+          # Setzt AUF den aktuellen cluster-state auf und bumpt NUR den Frontend-Tag.
+          # Bei einem --force-with-lease-Konflikt (parallel geänderter cluster-state,
+          # den die gemeinsame Concurrency-Gruppe zusätzlich verhindert) wird auf dem
+          # FRISCHEN cluster-state neu aufgesetzt und der Bump erneut angewandt – so
+          # bleibt ein zwischenzeitlich geänderter Backend-Tag erhalten. Endgültiger
+          # Fehlschlag -> FEHLER (exit 1), damit der GitOps-Stand nicht still veraltet.
+          pushed=0
+          for attempt in 1 2 3; do
+            git fetch origin cluster-state main || git fetch origin main || true
+            if git rev-parse --verify -q origin/cluster-state >/dev/null; then
+              base=origin/cluster-state; exists=1
+            else
+              base=origin/main; exists=0
+            fi
+            git checkout -B _fe_tagbump "$base"
+            python3 - "$f" "$TAG" <<'PY'
           import re, sys
           path, tag = sys.argv[1], sys.argv[2]
           s = open(path).read()
@@ -119,21 +130,24 @@ jobs:
               r'\g<1>"' + tag + '"', s)
           open(path, "w").write(s)
           PY
-          if git diff --quiet -- "$f"; then
-            echo "frontend-newTag bereits ${TAG} – kein Commit nötig."
-            exit 0
+            if git diff --quiet -- "$f"; then
+              echo "frontend-newTag bereits ${TAG} – kein Commit nötig."
+              pushed=1; break
+            fi
+            git add "$f"
+            git commit -m "chore(deploy): frontend newTag -> ${TAG} [skip ci]"
+            if [ "$exists" -eq 1 ]; then
+              git push --force-with-lease origin _fe_tagbump:cluster-state && { pushed=1; break; }
+            else
+              git push origin _fe_tagbump:cluster-state && { pushed=1; break; }
+            fi
+            echo "cluster-state-Push (Versuch ${attempt}) abgelehnt – neu aufsetzen und erneut..."
+          done
+          if [ "$pushed" -ne 1 ]; then
+            echo "::error::cluster-state Frontend-Tag konnte nicht auf ${TAG} aktualisiert werden – GitOps-Stand veraltet."
+            exit 1
           fi
-          git config user.name  "dms-deploy-bot"
-          git config user.email "deploy-bot@stoegerer-dms.local"
-          git add "$f"
-          git commit -m "chore(deploy): frontend newTag -> ${TAG} [skip ci]"
-          # NON-FATAL: Frontend-Rollout war bereits erfolgreich. cluster-state ist
-          # bot-verwaltet -> Force-Push (aufsetzend, daher meist FF).
-          if git push -f origin _fe_tagbump:cluster-state; then
-            echo "cluster-state Frontend-Tag -> ${TAG}."
-          else
-            echo "::warning::Push nach cluster-state fehlgeschlagen. Rollout war erfolgreich; vor apply -k deploy/k8s/verify-image-tags.sh laufen lassen."
-          fi
+          echo "cluster-state Frontend-Tag -> ${TAG}."
 
       - name: Rollout-Diagnose (bei Timeout/Fehler)
         if: failure()
