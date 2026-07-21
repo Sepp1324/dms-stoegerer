@@ -1,4 +1,7 @@
+import os
+import subprocess
 import time
+import uuid
 from pathlib import Path
 
 from celery.exceptions import SoftTimeLimitExceeded
@@ -7,6 +10,13 @@ from ._proc import run_group
 from .types import OCRResult, OCRStatusEnum
 from .extract import extract_text_best_effort
 from .validate import is_valid_ocr
+
+
+def _remove_quietly(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _pdf_page_count(path: str) -> int | None:
@@ -73,10 +83,13 @@ def run_ocr(input_path: str, force: bool = False) -> OCRResult:
             engine="text-extraction",
         )
 
-    # 3. OCRmyPDF Versuch
+    # 3. OCRmyPDF Versuch. Ausgabe zuerst in eine EINDEUTIGE Temp-Datei; erst nach
+    # Validierung atomar per os.replace zum endgültigen ``.ocr.pdf`` machen. Sonst
+    # könnte ein teilweise geschriebenes (Timeout/Kill) oder ein von einem früheren
+    # Versuch übrig gebliebenes .ocr.pdf als Archiv versiegelt werden.
+    output_final = Path(input_path).with_suffix(".ocr.pdf")
+    tmp = output_final.with_name(f"{output_final.stem}.{uuid.uuid4().hex}.tmp.pdf")
     try:
-        output = Path(input_path).with_suffix(".ocr.pdf")
-
         # Hartes Prozess-Timeout + Prozessgruppen-Kill: ocrmypdf startet tesseract-
         # Kinder; ohne das könnten sie beim Celery-Hard-Limit weiterlaufen.
         run_group(
@@ -84,15 +97,19 @@ def run_ocr(input_path: str, force: bool = False) -> OCRResult:
                 "ocrmypdf",
                 "--force-ocr" if force else "--skip-text",
                 input_path,
-                str(output),
+                str(tmp),
             ]
         )
 
-        text = extract_text_best_effort(str(output))
-        # Seitenzahl aus dem erzeugten PDF (autoritativ) für die Qualitätsheuristik.
-        pages = _pdf_page_count(str(output)) or pages
-
+        # Ausgabe validieren: lesbares, nicht-leeres PDF? Sonst NICHT übernehmen.
+        real_pages = _pdf_page_count(str(tmp))
+        if real_pages is None:
+            raise RuntimeError("OCR-Ausgabe ist kein lesbares PDF")
+        text = extract_text_best_effort(str(tmp))
+        pages = real_pages
         valid = is_valid_ocr(text, pages)
+
+        os.replace(str(tmp), str(output_final))  # atomar: erst bei Erfolg Archiv
 
         return OCRResult(
             text=text,
@@ -103,8 +120,16 @@ def run_ocr(input_path: str, force: bool = False) -> OCRResult:
         )
 
     except SoftTimeLimitExceeded:
+        _remove_quietly(tmp)
         raise  # Soft-Time-Limit propagieren (Task bricht ab), NICHT als FAILED tarnen
+    except subprocess.TimeoutExpired:
+        # OCR-Prozess-Timeout ist ein HARTER, retryfähiger Verarbeitungsfehler:
+        # weiterwerfen -> _run_from markiert FAILED (Schritt "ocr"); Watchdog/Retry
+        # greifen. NICHT als weicher OCRStatus.FAILED tarnen (sonst Pipeline -> READY).
+        _remove_quietly(tmp)
+        raise
     except Exception as e:
+        _remove_quietly(tmp)
         return OCRResult(
             text=text,
             pages=pages,

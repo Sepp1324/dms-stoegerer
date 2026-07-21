@@ -32,13 +32,26 @@ def run_group(cmd: list[str], *, timeout: int | None = None, capture: bool = Fal
     with subprocess.Popen(cmd, stdout=stdout, start_new_session=True) as proc:
         try:
             out, _ = proc.communicate(timeout=to)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except (ProcessLookupError, OSError):
-                pass
-            proc.communicate()  # Zombie einsammeln
+        except BaseException:
+            # Timeout (TimeoutExpired) ODER externer Abbruch während communicate –
+            # insbesondere Celerys SoftTimeLimitExceeded. In ALLEN Fällen die
+            # GESAMTE Prozessgruppe hart beenden (sonst liefen tesseract-Kinder
+            # weiter, und der Popen-Context-Manager würde beim __exit__ unbegrenzt
+            # auf den Prozess warten), Zombie einsammeln, dann Ausnahme
+            # unverändert weiterreichen.
+            _kill_group(proc)
             raise
         if proc.returncode != 0:
             raise subprocess.CalledProcessError(proc.returncode, cmd, output=out)
         return out or b""
+
+
+def _kill_group(proc: "subprocess.Popen") -> None:
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, OSError):
+        pass
+    try:
+        proc.communicate(timeout=5)  # Zombie einsammeln, aber nicht ewig hängen
+    except Exception:
+        pass

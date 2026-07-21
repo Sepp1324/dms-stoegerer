@@ -4,6 +4,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from celery.exceptions import SoftTimeLimitExceeded
+
 
 def extract_page_texts(path: str | Path, *, fallback_text: str = "") -> list[dict]:
     """Extrahiert Text pro Seite.
@@ -28,6 +30,8 @@ def extract_page_texts(path: str | Path, *, fallback_text: str = "") -> list[dic
             pages = [page for page in pages if page["text"].strip()]
             if pages:
                 return pages
+        except SoftTimeLimitExceeded:
+            raise  # Soft-Time-Limit nie verschlucken
         except Exception:
             pass
 

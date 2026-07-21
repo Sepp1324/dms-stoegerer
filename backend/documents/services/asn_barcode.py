@@ -15,6 +15,7 @@ import logging
 import re
 
 from django.conf import settings
+from celery.exceptions import SoftTimeLimitExceeded
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +82,8 @@ def scan_pdf_for_asn(pdf_path: str) -> int | None:
 
     try:
         from pyzbar.pyzbar import ZBarSymbol, decode as pyzbar_decode
+    except SoftTimeLimitExceeded:
+        raise
     except Exception:
         logger.warning(
             "pyzbar nicht verfügbar – ASN-Barcode-Erkennung deaktiviert. "
@@ -90,6 +93,8 @@ def scan_pdf_for_asn(pdf_path: str) -> int | None:
 
     try:
         from pdf2image import convert_from_path
+    except SoftTimeLimitExceeded:
+        raise
     except Exception:
         logger.warning("pdf2image nicht verfügbar – ASN-Barcode-Erkennung übersprungen.")
         return None
@@ -100,6 +105,8 @@ def scan_pdf_for_asn(pdf_path: str) -> int | None:
 
     try:
         images = convert_from_path(pdf_path, dpi=dpi, fmt="ppm")
+    except SoftTimeLimitExceeded:
+        raise
     except Exception as exc:
         logger.warning("pdf2image Fehler für %s: %s", pdf_path, exc)
         return None
@@ -117,6 +124,8 @@ def scan_pdf_for_asn(pdf_path: str) -> int | None:
                     variant,
                     symbols=[ZBarSymbol.QRCODE, ZBarSymbol.CODE128],
                 )
+            except SoftTimeLimitExceeded:
+                raise
             except Exception as exc:
                 logger.warning("pyzbar decode Fehler Seite %d: %s", idx + 1, exc)
                 continue
@@ -124,6 +133,8 @@ def scan_pdf_for_asn(pdf_path: str) -> int | None:
             for barcode in barcodes:
                 try:
                     payload = barcode.data.decode("utf-8", errors="ignore")
+                except SoftTimeLimitExceeded:
+                    raise
                 except Exception:
                     continue
                 asn = _extract_asn_from_payload(payload, prefix)
@@ -157,6 +168,8 @@ def _decode_variants(image):
         variants.append(gray)
         variants.append(ImageOps.autocontrast(gray))
         variants.append(gray.point(lambda px: 0 if px < 128 else 255))
+    except SoftTimeLimitExceeded:
+        raise
     except Exception:  # pragma: no cover - Pillow-Fehler nie fatal
         pass
     return variants

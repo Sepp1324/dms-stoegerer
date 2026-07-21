@@ -11,6 +11,8 @@ import logging
 import re
 from html import escape
 
+from celery.exceptions import SoftTimeLimitExceeded
+
 from . import flashcards
 from .providers import get_provider
 
@@ -95,6 +97,8 @@ def suggest_metadata(ocr_text: str, *, max_chars: int = 6000) -> dict:
     prompt = f"Hier ist der OCR-Text des Dokuments:\n\n{excerpt}"
     try:
         raw = provider.complete(prompt, system=system)
+    except SoftTimeLimitExceeded:
+        raise  # Soft-Time-Limit nie als {"source":"error"} tarnen (Task muss abbrechen)
     except Exception as exc:  # noqa: BLE001 – Provider-Fehler sprechend surfacen statt 500
         # Provider konfiguriert, aber Aufruf schlägt fehl (falscher/abgelaufener
         # Key, falsches Modell, Netzwerk, Rate-Limit). WARN loggen, damit Ops die
