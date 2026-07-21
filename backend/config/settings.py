@@ -297,6 +297,25 @@ CELERY_RESULT_BACKEND = REDIS_URL
 CELERY_TASK_TRACK_STARTED = True
 CELERY_TIMEZONE = TIME_ZONE
 
+# Zuverlässigkeit bei Worker-Crash (P2): Tasks werden ERST nach erfolgreicher
+# Ausführung bestätigt (acks_late) und bei verlorenem Worker (Crash/OOM/SIGKILL,
+# Hard-Timeout) neu eingereiht (reject_on_worker_lost). Ein Task kann dadurch
+# doppelt laufen – das ist sicher, weil die Verarbeitungs-State-Machine
+# nebenläufigkeitssicher ist (Compare-and-Swap in transition_to/begin_retry): ein
+# doppelt ausgeführter Task bricht am CAS-Miss ab (status="superseded"), statt
+# OCR/Workflows parallel laufen zu lassen. OHNE diese Idempotenz wären die
+# folgenden Settings gefährlich.
+CELERY_TASK_ACKS_LATE = True
+CELERY_TASK_REJECT_ON_WORKER_LOST = True
+# Mit acks_late nur EINEN Task pro Worker vorab ziehen (kein Horten): sonst
+# blockiert ein langer OCR-Task die vorgezogenen und der COW-Speicher steigt.
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+# Ein einzelner Task darf nicht ewig hängen (z. B. OCR an einem kaputten PDF):
+# Soft-Limit wirft SoftTimeLimitExceeded (Task kann aufräumen/FAILED markieren),
+# Hard-Limit killt hart. Großzügig für große Scans, per Env justierbar.
+CELERY_TASK_SOFT_TIME_LIMIT = int(os.getenv("CELERY_TASK_SOFT_TIME_LIMIT", "1800"))
+CELERY_TASK_TIME_LIMIT = int(os.getenv("CELERY_TASK_TIME_LIMIT", "2100"))
+
 # Periodische Aufgaben (benötigt einen laufenden ``celery beat``-Prozess, siehe
 # deploy/k8s/beat.yaml). Intervalle in Sekunden, per Env übersteuerbar.
 CELERY_BEAT_SCHEDULE = {
