@@ -24,3 +24,8 @@ class OCRResult:
     error: str | None = None
     duration_ms: int = 0
     engine: str = "ocrmypdf"
+    # Pfad des in DIESEM Lauf erfolgreich erzeugten Archiv-PDFs (leer, wenn keins
+    # veröffentlicht wurde: SKIPPED/FAILED). Die Pipeline übernimmt AUSSCHLIESSLICH
+    # diesen Wert – nie ein per exists() gefundenes .ocr.pdf, das von einem früheren
+    # Versuch stammen könnte.
+    archive_path: str = ""
