@@ -1044,6 +1044,12 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
       <>
         <Suspense fallback={<div className="muted">Lade Dokument …</div>}>
           <DocumentDetail
+            // key erzwingt einen Remount bei ID-Wechsel: sonst bliebe der alte
+            // doc-State sichtbar, während Aktionen (Speichern etc.) bereits die
+            // neue id nutzen -> Metadaten könnten dem falschen Dokument
+            // zugeschrieben werden. Remount setzt allen dokumentbezogenen State
+            // synchron zurück (doc=null -> Ladeanzeige bis zum neuen Fetch).
+            key={selectedId}
             id={selectedId}
           initialPage={selectedPage}
           onBack={() => {
