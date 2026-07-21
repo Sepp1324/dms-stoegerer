@@ -15,16 +15,26 @@ export function DetailPreview({
       {pdfError && <p className="status status--warn">Vorschau: {pdfError}</p>}
       {!pdfError && !pdfUrl && <p className="muted">Lade Vorschau …</p>}
       {pdfUrl && (
-        // Sicherheit (P0-2): `sandbox` OHNE allow-scripts/allow-same-origin
-        // erzwingt einen opaken Origin ohne Skriptausführung – eine (theoretisch
-        // durchgerutschte) HTML/SVG-Datei kann so nicht auf localStorage/Cookies
-        // des DMS zugreifen. PDFs rendern der native Viewer bzw. pdf.js trotzdem;
-        // allow-downloads erhält den Speichern-Button.
+        // Chromes nativer PDF-Viewer braucht Scripting UND same-origin – sonst
+        // rendert das iframe eine LEERE Seite (verifiziert: `allow-downloads`
+        // allein blieb leer, ebenso `allow-scripts allow-downloads`; erst mit
+        // allow-same-origin erscheint das PDF). Bilder bräuchten kein Scripting,
+        // PDFs schon – deshalb war die Vorschau für PDF-Dokumente komplett leer.
+        //
+        // Die XSS-Härtung (P0-2) ruht damit auf der Ebene DAVOR, nicht auf dem
+        // iframe-sandbox: Die Magic-Byte-Allowlist beim Ingest lässt NUR echte
+        // PDFs/Bilder in den Bestand, und die Auslieferung setzt
+        // `Content-Type: application/pdf` + `X-Content-Type-Options: nosniff`.
+        // Eine getarnte HTML/SVG-Datei wird so gar nicht erst gespeichert bzw.
+        // nie als HTML interpretiert; PDF-eigenes JavaScript führt Chrome ohnehin
+        // nicht aus. `allow-downloads` erhält den Speichern-Button.
+        // (Spätere Härtung möglich: Vorschau aus separatem Origin ausliefern oder
+        // clientseitig via pdf.js zu Canvas rendern statt nativem Viewer.)
         <iframe
           className="pdf-frame"
           src={pdfUrl}
           title={`Vorschau: ${title}`}
-          sandbox="allow-downloads"
+          sandbox="allow-scripts allow-same-origin allow-downloads"
         />
       )}
     </section>
