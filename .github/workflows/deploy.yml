@@ -16,8 +16,8 @@ concurrency:
   group: deploy-main
   cancel-in-progress: false
 
-# Der Deploy-Job committet den gepflegten kustomization-newTag zurück nach main
-# (damit `apply -k` nie auf ein Geister-Image zeigt) → Schreibrecht nötig.
+# Der Deploy-Job pusht den gepflegten kustomization-newTag auf den GitOps-Branch
+# cluster-state (damit `apply -k` nie auf ein Geister-Image zeigt) → Schreibrecht.
 permissions:
   contents: write
 
@@ -128,13 +128,13 @@ jobs:
           kubectl -n dms rollout status deploy/beat     --timeout=180s
           kubectl -n dms rollout status deploy/frontend --timeout=180s
 
-      - name: kustomization newTag auf verifizierten SHA setzen + zurückcommitten
+      - name: kustomization newTag setzen + auf GitOps-Branch cluster-state pushen
         # Läuft NUR nach erfolgreichem, verifiziertem Rollout. Setzt beide
         # dms-*-newTags in der Basis-kustomization auf den frisch gebauten,
-        # gepushten und verifizierten $TAG. Damit spiegelt die kustomization den
-        # echten Cluster-Stand → ein manuelles `kubectl apply -k` kann nie mehr
-        # auf ein nicht existierendes Image zeigen. `[skip ci]` verhindert, dass
-        # der Bump-Commit diesen Workflow erneut auslöst (Endlosschleife).
+        # gepushten und verifizierten $TAG und pusht das Ergebnis auf den
+        # DEDIZIERTEN GitOps-Branch ``cluster-state`` (nicht auf branch-protected
+        # main). Dieser Branch ist die Cluster-Wahrheit; `apply -k` MUSS von dort
+        # erfolgen (docs/ci-cd.md) -> kein Rückroll auf ein Geister-/altes Image.
         run: |
           set -euo pipefail
           f=deploy/k8s/base/kustomization.yaml
@@ -156,18 +156,17 @@ jobs:
           git config user.email "deploy-bot@stoegerer-dms.local"
           git add "$f"
           git commit -m "chore(deploy): kustomization newTag -> ${TAG} [skip ci]"
-          # HEAD ist der gerade deployte main-Commit (+ dieser Bump); dank
-          # concurrency-Serialisierung ist main-Tip == deployter Commit → FF-Push.
-          # NON-FATAL: Der Deploy (Rollout) war bereits erfolgreich. Scheitert der
-          # Rückcommit (z. B. Branch-Protection auf main), darf der Job NICHT rot
-          # werden – wir warnen nur. Damit die kustomization automatisch gepflegt
-          # wird, muss der Owner "dms-deploy-bot"/GitHub-Actions in den
-          # Branch-Protection-Bypass aufnehmen; sonst bleibt newTag manuell
-          # (Preflight: deploy/k8s/verify-image-tags.sh vor `apply -k`).
-          if git push origin HEAD:main; then
-            echo "kustomization newTag -> ${TAG} nach main committet."
+          # Push auf den dedizierten, UNGESCHÜTZTEN GitOps-Branch cluster-state –
+          # NICHT auf das branch-protected main. HEAD ist der gerade deployte
+          # main-Commit + dieser Bump; cluster-state spiegelt damit IMMER den
+          # zuletzt erfolgreich deployten Stand (die Cluster-Wahrheit). Force-Push,
+          # weil der Bump auf main aufsetzt (nicht auf dem vorherigen cluster-state)
+          # -> lineare, rein bot-verwaltete Historie. main bleibt unverändert und
+          # geschützt; kein Branch-Protection-Bypass/Secret nötig.
+          if git push -f origin HEAD:cluster-state; then
+            echo "cluster-state auf ${TAG} aktualisiert (deployter main + newTag-Bump)."
           else
-            echo "::warning::newTag-Bump konnte nicht nach main gepusht werden (Branch-Protection?). Deploy war erfolgreich; kustomization.newTag bleibt unverändert."
+            echo "::warning::Push nach cluster-state fehlgeschlagen. Deploy war erfolgreich; GitOps-Branch NICHT aktualisiert – vor `apply -k` deploy/k8s/verify-image-tags.sh laufen lassen."
           fi
 
       - name: Rollout-Diagnose (bei Timeout/Fehler)

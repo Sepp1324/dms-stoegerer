@@ -1,4 +1,8 @@
-# Anwenden mit:  kubectl apply -k deploy/k8s
+# Anwenden mit:  kubectl apply -k deploy/k8s   -- ABER vom GitOps-Branch
+# ``cluster-state`` auschecken, NICHT von main! Der Deploy-Workflow pusht die
+# CI-gepflegten newTags nach jedem erfolgreichen Rollout auf cluster-state (main
+# ist branch-protected und bleibt beim alten Tag stehen). Nur cluster-state
+# spiegelt die echten, in der Registry liegenden Cluster-Images. Siehe docs/ci-cd.md.
 # Voraussetzung: zuvor secret.yaml aus secret.example.yaml erstellen und anwenden
 # (oder hier temporär in resources aufnehmen – nicht ins Repo committen).
 apiVersion: kustomize.config.k8s.io/v1beta1
@@ -9,11 +13,12 @@ namespace: dms
 # --- Bild-Tags: von CI automatisch gepflegt --------------------------------
 # Die beiden newTags werden vom Deploy-Workflow NACH erfolgreichem, in der
 # Registry verifiziertem Push automatisch auf den gebauten Git-SHA gesetzt und
-# nach main zurückcommittet ([skip ci]):
-#   - .github/workflows/deploy.yml        → Backend + Frontend (Push nach main)
+# auf den GitOps-Branch ``cluster-state`` gepusht ([skip ci]):
+#   - .github/workflows/deploy.yml        → Backend + Frontend
 #   - .github/workflows/deploy-frontend.yml → nur Frontend (workflow_dispatch)
-# Dadurch zeigt `kubectl apply -k deploy/k8s` IMMER auf real vorhandene Images –
-# nie mehr auf ein Geister-Tag (Ursache der ErrImagePull-Ausfälle 2026-07-05).
+# In main (hier) bleiben die Werte bewusst „veraltet" – NUR cluster-state ist die
+# GitOps-Wahrheit für `apply -k`. So zeigt der Cluster-Apply immer auf real
+# vorhandene Images – nie auf ein Geister-Tag (ErrImagePull-Ausfälle 2026-07-05).
 #
 # Manuelles Editieren nur im Notfall und NUR auf einen Tag, der wirklich in der
 # Registry liegt. Prüfen:

@@ -140,6 +140,35 @@ vorherigen Stand. (Alternativ einen älteren Lauf erneut ausführen.)
 
 ---
 
+## 3b. GitOps-Branch `cluster-state` (Bild-Tags)
+
+`main` ist branch-protected – der Deploy-Bot kann die CI-gepflegten Image-Tags
+(`kustomization.newTag`) daher **nicht** nach `main` zurückcommitten. Damit der
+GitOps-Stand trotzdem den echten Cluster widerspiegelt, pusht der Workflow den
+Tag-Bump nach jedem **erfolgreichen, verifizierten Rollout** auf den dedizierten,
+ungeschützten Branch **`cluster-state`**:
+
+- `deploy.yml` (Backend+Frontend): setzt beide Tags auf den neuen SHA, Force-Push
+  `HEAD → cluster-state` (deployter `main`-Commit + Bump).
+- `deploy-frontend.yml` (nur Frontend): setzt AUF `cluster-state` auf und bumpt
+  nur den Frontend-Tag (Backend-Tag bleibt erhalten).
+
+**Konsequenz für manuelles Anwenden:** `kubectl apply -k` IMMER vom Branch
+`cluster-state` ausführen, nie von `main` (dort sind die Tags bewusst „veraltet"):
+
+```bash
+git fetch origin cluster-state
+git checkout cluster-state
+kubectl apply -k deploy/k8s
+```
+
+`cluster-state` ist rein bot-verwaltet (nie manuell entwickeln). Vor jedem Apply
+zusätzlich als Netz: `deploy/k8s/verify-image-tags.sh` (prüft, dass die Tags real
+in der Registry liegen). `main` bleibt die Entwicklungs-/PR-Wahrheit; `cluster-
+state` die Deploy-/Cluster-Wahrheit.
+
+---
+
 ## 4. Sicherheitshinweis
 
 Der Runner kann **Images bauen** (Docker ≈ root) und **ins Cluster deployen**
