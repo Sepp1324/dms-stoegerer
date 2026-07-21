@@ -153,16 +153,25 @@ def reap_stuck_versions() -> dict:
     stuck_states = [s for s in PS.values if s not in terminal]
 
     reaped = 0
-    for version in DocumentVersion.objects.filter(
-        processing_state__in=stuck_states,
-        processing_state_changed_at__lt=threshold,
+    for version in list(
+        DocumentVersion.objects.filter(
+            processing_state__in=stuck_states,
+            processing_state_changed_at__lt=threshold,
+        )
     ):
         try:
-            version.mark_processing_failed(
+            # CAS auf den GELESENEN Zustand+Zeitstempel: hat der Worker inzwischen
+            # Fortschritt gemacht (z. B. OCR_RUNNING->OCR_DONE), trifft das Update
+            # 0 Zeilen und wir überschreiben den Fortschritt NICHT (-> False).
+            if version.mark_processing_failed(
                 step="watchdog",
                 error=f"Verarbeitung hängt seit >{minutes:.0f} min (Worker-Crash?).",
-            )
-            reaped += 1
+                expected_state=version.processing_state,
+                expected_changed_at=version.processing_state_changed_at,
+            ):
+                reaped += 1
+        except SoftTimeLimitExceeded:
+            raise  # Soft-Time-Limit nicht verschlucken.
         except Exception:  # noqa: BLE001 – Watchdog darf pro Version nicht kippen
             logger.exception(
                 "reap_stuck_versions: FAILED-Markierung fehlgeschlagen für %s",
@@ -170,16 +179,23 @@ def reap_stuck_versions() -> dict:
             )
 
     completed = 0
-    for version in DocumentVersion.objects.filter(
-        processing_state=PS.SEALED,
-        processing_state_changed_at__lt=threshold,
+    for version in list(
+        DocumentVersion.objects.filter(
+            processing_state=PS.SEALED,
+            processing_state_changed_at__lt=threshold,
+        )
     ):
         try:
-            version.transition_to(PS.READY, detail={"watchdog": True})
-            completed += 1
-        except Exception:  # noqa: BLE001 – ConcurrentProcessingTransition tolerieren
+            # NICHT direkt SEALED->READY: eine bei seal_version gecrashte Version
+            # ist SEALED, aber evtl. NICHT gesiegelt. finalize vervollständigt das
+            # Siegel (idempotent) und wechselt erst dann nach READY.
+            if pipeline.finalize_sealed_version(version):
+                completed += 1
+        except SoftTimeLimitExceeded:
+            raise  # Soft-Time-Limit nicht verschlucken.
+        except Exception:  # noqa: BLE001 – pro Version tolerieren
             logger.exception(
-                "reap_stuck_versions: SEALED->READY fehlgeschlagen für %s",
+                "reap_stuck_versions: SEALED-Finalisierung fehlgeschlagen für %s",
                 version.id,
             )
 

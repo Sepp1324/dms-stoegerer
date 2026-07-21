@@ -450,6 +450,33 @@ def seal_version(version: DocumentVersion) -> None:
     )
 
 
+def finalize_sealed_version(version: DocumentVersion) -> bool:
+    """Stellt eine SEALED-Version vollständig her (idempotent) und erreicht READY.
+
+    Für den Watchdog: crasht der Worker in ``seal_version`` zwischen
+    ``transition_to(SEALED)`` und ``_seal_version()``/``READY``, ist die Version
+    zwar SEALED, aber NICHT gesiegelt – ``is_immutable``/``seal_hash``/Retention/
+    Dateirechte fehlen. Ein reiner SEALED→READY würde diese lückenhafte Version
+    freigeben. Deshalb hier zuerst das Siegel vervollständigen (``_seal_version``
+    ist write-once und setzt ``is_immutable`` erst NACH Snapshot/seal_hash – der
+    Marker ist also verlässlich), dann READY.
+
+    Gibt ``True`` zurück, wenn tatsächlich nach READY gewechselt wurde.
+    """
+    version.refresh_from_db()
+    if version.processing_state != DocumentVersion.ProcessingState.SEALED:
+        return False  # nicht (mehr) SEALED – nichts zu tun
+    if not version.is_immutable:
+        _seal_version(version)
+    try:
+        version.transition_to(
+            DocumentVersion.ProcessingState.READY, actor=version.created_by
+        )
+    except ConcurrentProcessingTransition:
+        return False  # ein anderer Lauf hat abgeschlossen
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Pipeline-Schritte als Daten: Name, Funktion und Vorbedingung (der Startzustand,
 # den der Schritt selbst per transition_to erwartet). Die Namen MÜSSEN zu
