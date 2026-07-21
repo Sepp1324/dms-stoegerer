@@ -1,3 +1,16 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-data
+  namespace: dms
+spec:
+  accessModes: ["ReadWriteOnce"]
+  # Kein storageClassName -> Cluster-Default (k3s: local-path). Broker + AOF eines
+  # Familien-DMS sind winzig; 1Gi ist reichlich.
+  resources:
+    requests:
+      storage: 1Gi
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -5,6 +18,11 @@ metadata:
   namespace: dms
 spec:
   replicas: 1
+  # Recreate statt RollingUpdate: Single-Replica + RWO-PVC. Beim Rolling-Update
+  # liefen kurz zwei Pods, die beide dasselbe ReadWriteOnce-PVC mounten wollten
+  # -> Multi-Attach-Fehler. Recreate fährt den alten Pod ZUERST herunter.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: redis
@@ -16,6 +34,10 @@ spec:
       securityContext:
         seccompProfile:
           type: RuntimeDefault
+        # Das PVC gehört sonst root; fsGroup 999 macht den Mount für den
+        # redis-User (GID 999, s. runAsUser unten) gruppen-schreibbar. Ohne das
+        # scheitert AOF/RDB an 'Permission denied' -> MISCONF -> Writes blockiert.
+        fsGroup: 999
       containers:
         - name: redis
           image: redis:7-alpine
@@ -26,11 +48,15 @@ spec:
             - redis-server
             - --requirepass
             - $(REDIS_PASSWORD)
+            # Durabilität: AOF (append-only file) protokolliert jeden Write und
+            # überlebt Pod-Neustarts/Node-Ausfall -> wartende Celery-Aufträge gehen
+            # nicht mehr verloren (P2). Liegt zusammen mit RDB im gemounteten /data.
+            - --appendonly
+            - "yes"
             # Broker-Resilienz: ein fehlgeschlagener RDB-Snapshot darf NICHT alle
-            # Writes blockieren. Sonst kippt ein Persistenz-Hänger (z. B. /data nicht
-            # schreibbar) Redis in MISCONF und JEDER Celery-Enqueue → 500 (rewrite/
-            # merge/split der PDF-Werkbank, Ingest, Reindex …). Persistenz ist hier
-            # ohnehin ephemer (kein Volume gemountet), daher unkritisch.
+            # Writes blockieren (sonst MISCONF -> jeder Celery-Enqueue 500/503).
+            # Mit schreibbarem PVC tritt das zwar nicht mehr auf, bleibt aber als
+            # Sicherheitsnetz gegen transiente Persistenz-Hänger.
             - --stop-writes-on-bgsave-error
             - "no"
           env:
@@ -56,6 +82,13 @@ spec:
             limits: {cpu: "500m", memory: "512Mi"}
           ports:
             - containerPort: 6379
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
+      volumes:
+        - name: redis-data
+          persistentVolumeClaim:
+            claimName: redis-data
 ---
 apiVersion: v1
 kind: Service
