@@ -793,20 +793,14 @@ class DocumentVersion(models.Model):
         hoch. Der eigentliche Wiedereinstieg (Vorbedingung setzen + Pipeline ab
         dem fehlgeschlagenen Schritt) übernimmt ``pipeline.retry_version``.
         """
-        if self.processing_state != self.ProcessingState.FAILED:
-            raise ValidationError("Retry ist nur aus dem Zustand FAILED möglich.")
-        if self.is_immutable or self.processing_state in {
-            self.ProcessingState.SEALED,
-            self.ProcessingState.READY,
-        }:
-            raise ValidationError(
-                "Gesiegelte/READY-Version kann nicht erneut verarbeitet werden."
-            )
-
-        # CAS FAILED → RETRY_PENDING: zwei Retry-Klicks/Tasks dürfen nicht beide
-        # den Versuch hochzählen und die Pipeline doppelt starten. Nur der erste
-        # trifft FAILED; der zweite bekommt 0 Zeilen -> Abbruch (in retry_version
-        # abgefangen).
+        # KEINE vorgelagerte In-Memory-Prüfung auf FAILED: bei parallelen Retries
+        # lädt der zweite Task die Version evtl. erst NACH RETRY_PENDING, hätte
+        # also self.processing_state != FAILED und würde eine normale
+        # ValidationError werfen (die retry_version NICHT fängt -> Task scheitert).
+        # Stattdessen entscheidet ausschließlich das CAS unten: nur eine
+        # FAILED-Version wird auf RETRY_PENDING gehoben; jeder andere Zustand
+        # (RETRY_PENDING/SEALED/READY/…) ergibt 0 Zeilen -> ConcurrentProcessing-
+        # Transition, die retry_version als "superseded" behandelt.
         updated = DocumentVersion.objects.filter(
             pk=self.pk, processing_state=self.ProcessingState.FAILED
         ).update(

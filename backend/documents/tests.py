@@ -3167,11 +3167,14 @@ class DocumentProcessingFailureRetryTests(TestCase):
             version.mark_processing_failed(step="ocr", error="darf nicht")
 
     def test_begin_retry_nur_aus_failed(self):
-        from django.core.exceptions import ValidationError
+        from documents.models import ConcurrentProcessingTransition
 
         _, version = self._version()
-        # Frische Version ist UPLOADED, nicht FAILED → begin_retry wirft.
-        with self.assertRaises(ValidationError):
+        # Frische Version ist UPLOADED, nicht FAILED. begin_retry entscheidet rein
+        # per CAS (keine In-Memory-Vorprüfung mehr) -> ConcurrentProcessing-
+        # Transition, damit parallele Retries als "superseded" behandelt werden
+        # statt (vorher) eine ValidationError zu werfen.
+        with self.assertRaises(ConcurrentProcessingTransition):
             version.begin_retry()
 
     def test_ocr_fehler_fuehrt_zu_failed(self):
