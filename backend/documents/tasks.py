@@ -87,7 +87,11 @@ def push_document_flashcards(document_id: int) -> dict:
         questions, source_title=document.title or f"Dokument {document_id}"
     )
 
-    if push.get("pushed"):
+    # Nur als "synced" markieren, wenn ALLE Karten gepusht wurden. Sonst würde ein
+    # einziger Erfolg das Dokument als fertig markieren und die fehlgeschlagenen
+    # Karten (der Marker-Tag verhindert einen erneuten Lauf) würden nie erneut
+    # versucht.
+    if push.get("pushed") and not push.get("failed"):
         marker = Tag.objects.filter(name=synced_name).first()
         if marker is None:
             marker = Tag.objects.create(name=synced_name, color="#6366F1")
