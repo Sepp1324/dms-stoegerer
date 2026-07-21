@@ -145,9 +145,9 @@ class MailIngestMimeTests(TestCase):
 
 
 class PreviewUnsafeTypeTests(TestCase):
-    """Der Preview-Endpoint liefert nur inline-sichere Typen (PDF/Bild); ein als
-    text/html gespeicherter Altbestand wird mit 415 abgelehnt (nicht als
-    Attachment – die Frontend-Blob-URL umginge Content-Disposition)."""
+    """Der Preview-Endpoint bestimmt den Content-Type aus den Magic Bytes der
+    Datei (nicht aus dem gespeicherten mime_type). Nur erkannte inline-sichere
+    Typen werden ausgeliefert; unerkannter/aktiver Inhalt -> 415."""
 
     def setUp(self):
         self.client = APIClient()
@@ -155,15 +155,15 @@ class PreviewUnsafeTypeTests(TestCase):
         self.user = User.objects.create_user(username="prev", password="pw12345!")
         self.client.force_authenticate(self.user)
 
-    def _version_with_mime(self, mime: str):
+    def _version(self, *, content: bytes, mime: str):
         import os
         import tempfile
 
         from . import pipeline
         from .models import Document, DocumentVersion
 
-        tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
-        tmp.write(PDF_BYTES)
+        tmp = tempfile.NamedTemporaryFile(suffix=".bin", delete=False)
+        tmp.write(content)
         tmp.close()
         self.addCleanup(lambda: os.path.exists(tmp.name) and os.remove(tmp.name))
         doc = Document.objects.create(title="doc", owner=self.user)
@@ -179,13 +179,18 @@ class PreviewUnsafeTypeTests(TestCase):
         doc.save(update_fields=["current_version"])
         return doc
 
-    def test_unsafe_mime_rejected_415(self):
-        doc = self._version_with_mime("text/html")
+    def test_nicht_erkennbarer_inhalt_wird_abgelehnt_415(self):
+        # Datei-Inhalt ist HTML (weder PDF noch Bild) -> 415, egal welcher
+        # mime_type gespeichert ist.
+        doc = self._version(content=HTML_BYTES, mime="application/pdf")
         resp = self.client.get(f"/api/documents/{doc.id}/preview/")
         self.assertEqual(resp.status_code, 415)
 
-    def test_pdf_served_inline_200(self):
-        doc = self._version_with_mime("application/pdf")
+    def test_pdf_inhalt_wird_trotz_falschem_mime_als_pdf_serviert(self):
+        # KERN des P0-Fixes: gespeicherter mime_type ist text/html (Alt-Mail-Bug),
+        # Inhalt ist ein PDF-Polyglot -> serviert als application/pdf (PDF-Viewer,
+        # kein HTML), Status 200. So ist der Polyglot in der Vorschau harmlos.
+        doc = self._version(content=POLYGLOT_PDF_HTML, mime="text/html")
         resp = self.client.get(f"/api/documents/{doc.id}/preview/")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp["Content-Type"], "application/pdf")
