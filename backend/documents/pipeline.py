@@ -312,7 +312,13 @@ def ocr_version(version: DocumentVersion) -> dict:
 
     version.archive_path = archive_path
     version.ocr_text = result.text
-    version.page_count = result.pages
+    # Seitenzahl aus dem PDF selbst lesen (pikepdf), nicht aus der groben
+    # Zeilenumbruch-Schätzung in run_ocr (``text.count("\n") // 50``): die lieferte
+    # für Bild-Scans mit wenig/keinem Text immer 1 – egal wie viele Seiten. Fällt
+    # auf die Schätzung zurück, falls die Quelle kein lesbares PDF ist (z. B. ein
+    # Bild-Original, für das kein Archiv-PDF erzeugt wurde).
+    real_pages = _page_count(Path(archive_path or version.file_path))
+    version.page_count = real_pages if real_pages else result.pages
     version.ocr_status = result.status.value
     version.ocr_error = result.error or ""
     version.ocr_engine = result.engine
