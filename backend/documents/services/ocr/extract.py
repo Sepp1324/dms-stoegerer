@@ -1,11 +1,16 @@
-import subprocess
 import fitz  # PyMuPDF
+from celery.exceptions import SoftTimeLimitExceeded
+
+from ._proc import run_group
 
 
 def extract_text_poppler(path: str) -> str:
     """Standard PDF text extraction (schnell)"""
     try:
-        return subprocess.check_output(["pdftotext", path, "-"]).decode()
+        # Timeout + Prozessgruppen-Kill (pdftotext kann bei kaputten PDFs hängen).
+        return run_group(["pdftotext", path, "-"], capture=True).decode()
+    except SoftTimeLimitExceeded:
+        raise  # Soft-Time-Limit nie verschlucken
     except Exception:
         return ""
 
@@ -15,6 +20,8 @@ def extract_text_pymupdf(path: str) -> str:
     try:
         doc = fitz.open(path)
         return "\n".join(page.get_text() for page in doc)
+    except SoftTimeLimitExceeded:
+        raise  # Soft-Time-Limit nie verschlucken
     except Exception:
         return ""
 

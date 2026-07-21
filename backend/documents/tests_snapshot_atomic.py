@@ -26,6 +26,18 @@ class WriteSnapshotOnSealTests(TestCase):
             mime_type="application/pdf",
         )
 
+    def test_snapshot_und_audit_atomar_beide_da(self):
+        # CAS-Update und Audit laufen in EINER Transaktion -> nach erfolgreichem
+        # Schreiben existieren Snapshot UND Audit (nie das eine ohne das andere).
+        from .models import AuditLogEntry
+
+        self.assertTrue(version_snapshot.write_snapshot_on_seal(self.version))
+        self.assertTrue(
+            AuditLogEntry.objects.filter(
+                object_id=str(self.version.id), action="metadata_snapshot"
+            ).exists()
+        )
+
     def test_erster_schreibt_zweiter_nicht(self):
         self.assertTrue(version_snapshot.write_snapshot_on_seal(self.version))
         self.assertIsNotNone(self.version.metadata_snapshot)

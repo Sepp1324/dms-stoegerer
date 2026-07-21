@@ -99,6 +99,8 @@ def write_snapshot_on_seal(version: "DocumentVersion", *, taken_at=None, actor=N
         ``True``, wenn ein Snapshot geschrieben wurde, sonst ``False`` (bereits
         vorhanden → kein Doppelschreiben).
     """
+    from django.db import transaction
+
     from documents.models import AuditLogEntry, DocumentVersion
 
     if version.metadata_snapshot is not None:
@@ -117,43 +119,48 @@ def write_snapshot_on_seal(version: "DocumentVersion", *, taken_at=None, actor=N
     # None`` lesen und danach Snapshot + seal_hash nacheinander überschreiben –
     # fatal für einen WORM-Nachweis. Nur der Gewinner (genau eine Zeile) schreibt
     # lokale Attribute und Audit; der Verlierer lädt den bestehenden Snapshot neu.
-    updated = DocumentVersion.objects.filter(
-        pk=version.pk, metadata_snapshot__isnull=True
-    ).update(
-        metadata_snapshot=snapshot,
-        snapshot_schema_version=SNAPSHOT_SCHEMA_VERSION,
-        snapshot_taken_at=taken_at,
-        seal_hash=seal_hash,
-    )
-    if updated == 0:
-        # Ein paralleler Lauf war schneller – den verbindlichen, bereits
-        # gesiegelten Stand übernehmen (nicht den lokal berechneten).
-        version.refresh_from_db(
-            fields=[
-                "metadata_snapshot",
-                "snapshot_schema_version",
-                "snapshot_taken_at",
-                "seal_hash",
-            ]
+    # CAS-Update UND Audit in EINER Transaktion: sonst existierte bei einem Crash
+    # zwischen beiden ein Snapshot ohne Audit, und ein Wiederholungsaufruf sähe den
+    # vorhandenen Snapshot (fast path oben) und ergänzte den Audit NIE. Atomar ->
+    # entweder Snapshot+Audit oder nichts (dann schreibt der Retry beides).
+    with transaction.atomic():
+        updated = DocumentVersion.objects.filter(
+            pk=version.pk, metadata_snapshot__isnull=True
+        ).update(
+            metadata_snapshot=snapshot,
+            snapshot_schema_version=SNAPSHOT_SCHEMA_VERSION,
+            snapshot_taken_at=taken_at,
+            seal_hash=seal_hash,
         )
-        return False
+        if updated == 0:
+            # Ein paralleler Lauf war schneller – den verbindlichen, bereits
+            # gesiegelten Stand übernehmen (nicht den lokal berechneten).
+            version.refresh_from_db(
+                fields=[
+                    "metadata_snapshot",
+                    "snapshot_schema_version",
+                    "snapshot_taken_at",
+                    "seal_hash",
+                ]
+            )
+            return False
 
-    version.metadata_snapshot = snapshot
-    version.snapshot_schema_version = SNAPSHOT_SCHEMA_VERSION
-    version.snapshot_taken_at = taken_at
-    version.seal_hash = seal_hash
+        version.metadata_snapshot = snapshot
+        version.snapshot_schema_version = SNAPSHOT_SCHEMA_VERSION
+        version.snapshot_taken_at = taken_at
+        version.seal_hash = seal_hash
 
-    AuditLogEntry.objects.create(
-        actor=actor,
-        action="metadata_snapshot",
-        object_type="DocumentVersion",
-        object_id=str(version.id),
-        detail={
-            "snapshot_schema_version": SNAPSHOT_SCHEMA_VERSION,
-            "seal_hash": seal_hash,
-            "taken_at": taken_at.isoformat(),
-        },
-    )
+        AuditLogEntry.objects.create(
+            actor=actor,
+            action="metadata_snapshot",
+            object_type="DocumentVersion",
+            object_id=str(version.id),
+            detail={
+                "snapshot_schema_version": SNAPSHOT_SCHEMA_VERSION,
+                "seal_hash": seal_hash,
+                "taken_at": taken_at.isoformat(),
+            },
+        )
     return True
 
 
