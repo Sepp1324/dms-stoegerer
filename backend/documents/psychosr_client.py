@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 
 import httpx
+from celery.exceptions import SoftTimeLimitExceeded
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,8 @@ def push_flashcards(questions: list[dict], *, source_title: str) -> dict:
                 resp = client.post(f"{base}/api/mc/add", json=body, headers=headers)
                 resp.raise_for_status()
                 pushed += 1
+            except SoftTimeLimitExceeded:
+                raise  # Soft-Time-Limit nie verschlucken (Task muss abbrechen)
             except Exception as exc:  # noqa: BLE001 – einzelne Karte scheitert, Rest weiter
                 failed += 1
                 errors.append(str(exc))

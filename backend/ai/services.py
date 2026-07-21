@@ -125,6 +125,8 @@ def generate_flashcards(ocr_text: str, *, max_questions: int = 8) -> dict:
     prompt = flashcards.build_prompt(ocr_text, max_questions)
     try:
         raw = provider.complete(prompt, system=flashcards.SYSTEM, max_tokens=8192)
+    except SoftTimeLimitExceeded:
+        raise  # Soft-Time-Limit nie verschlucken (Task muss abbrechen)
     except Exception as exc:  # noqa: BLE001 – Provider-Fehler sprechend surfacen
         logger.warning(
             "Flashcard-Generierung fehlgeschlagen (Provider %s): %s",

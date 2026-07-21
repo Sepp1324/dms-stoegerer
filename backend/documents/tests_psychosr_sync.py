@@ -149,6 +149,21 @@ class PushDocumentFlashcardsTaskTests(TestCase):
         push.assert_called_once()
         self.assertTrue(doc.tags.filter(name="psychosr-synced").exists())
 
+    def test_teilfehler_markiert_nicht_synced(self):
+        # Mind. eine Karte scheiterte (failed>0): NICHT als synced markieren, sonst
+        # würde der Marker-Tag einen erneuten Versuch der Restkarten verhindern.
+        from .tasks import push_document_flashcards
+
+        doc = self._doc()
+        with patch("ai.services.get_provider", return_value=_FakeProvider()), patch(
+            "documents.psychosr_client.push_flashcards",
+            return_value={"pushed": 1, "failed": 1, "errors": ["boom"], "skipped": False},
+        ):
+            result = push_document_flashcards(doc.id)
+
+        self.assertEqual(result["failed"], 1)
+        self.assertFalse(doc.tags.filter(name="psychosr-synced").exists())
+
     def test_idempotent_when_already_synced(self):
         from .tasks import push_document_flashcards
 
