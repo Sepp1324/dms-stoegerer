@@ -3,26 +3,24 @@ import { describe, expect, it } from "vitest";
 
 import { DetailPreview } from "./DetailPreview";
 
-// Vorschau-Sandbox: Chromes nativer PDF-Viewer rendert im iframe NUR mit
-// allow-scripts UND allow-same-origin – fehlt eines, bleibt die PDF-Vorschau
-// komplett leer (verifiziert im Browser). Die frühere P0-2-Variante ohne diese
-// Flags brach daher jede PDF-Vorschau.
+// Vorschau-iframe: Chromes nativer PDF-Viewer rendert NUR in einem komplett
+// un-sandboxed iframe – jede Sandbox-Variante (auch allow-scripts+allow-same-
+// origin+allow-downloads) ließ die PDF-Vorschau leer (im Browser verifiziert).
+// Daher trägt das iframe bewusst KEIN sandbox-Attribut.
 //
-// Die XSS-Härtung ist deshalb eine Ebene nach vorn gezogen (nicht mehr der
-// iframe-sandbox): Die Magic-Byte-Allowlist beim Ingest lässt NUR echte PDFs/
-// Bilder in den Bestand, und die Auslieferung setzt Content-Type=application/pdf
-// + X-Content-Type-Options=nosniff. Dieser Test zementiert die render-fähige
-// Sandbox, damit sie nicht versehentlich wieder auf einen leeren Wert
-// "gehärtet" wird.
+// Sicherheit sitzt eine Ebene davor: Die Magic-Byte-Allowlist beim Ingest lässt
+// nur echte PDFs/Raster-Bilder in den Bestand (HTML/SVG/XML werden abgewiesen),
+// is_safe_inline erzwingt für alles andere Download (SVG explizit ausgeschlossen)
+// und die Auslieferung setzt nosniff + expliziten Content-Type. Dieser Test
+// hält das iframe sandbox-frei, damit nicht versehentlich wieder eine (nicht
+// rendernde) Sandbox "gehärtet" wird und die Vorschau erneut leer bleibt.
 describe("DetailPreview – iframe sandbox", () => {
-  it("erlaubt allow-scripts + allow-same-origin + allow-downloads (sonst leere PDF-Vorschau)", () => {
+  it("rendert das Vorschau-iframe OHNE sandbox (sonst leere PDF-Vorschau)", () => {
     render(<DetailPreview pdfUrl="blob:test-url" pdfError={null} title="Rechnung" />);
     const frame = screen.getByTitle("Vorschau: Rechnung");
     expect(frame.tagName).toBe("IFRAME");
-    const tokens = (frame.getAttribute("sandbox") ?? "").split(/\s+/);
-    expect(tokens).toContain("allow-scripts");
-    expect(tokens).toContain("allow-same-origin");
-    expect(tokens).toContain("allow-downloads");
+    expect(frame.getAttribute("src")).toBe("blob:test-url");
+    expect(frame.hasAttribute("sandbox")).toBe(false);
   });
 
   it("zeigt bei Fehler eine Warnung und KEIN iframe", () => {
