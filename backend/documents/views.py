@@ -635,12 +635,16 @@ class OCRHealthView(APIView):
             processing_state=PS.RETRY_PENDING
         ).count()
         processing_ready = current_versions.filter(processing_state=PS.READY).count()
+        # „Hängend" am ZUSTANDS-Zeitstempel messen, nicht an created_at: sonst
+        # gilt eine alte Version, deren Retry gerade frisch gestartet wurde, sofort
+        # als hängend. processing_state_changed_at ist derselbe Wert, den der
+        # Watchdog nutzt (konsistent).
         stuck_qs = current_versions.filter(
             processing_state__in=inflight_states,
-            created_at__lt=stuck_before,
+            processing_state_changed_at__lt=stuck_before,
         )
         stuck_count = stuck_qs.count()
-        oldest_stuck = stuck_qs.order_by("created_at").first()
+        oldest_stuck = stuck_qs.order_by("processing_state_changed_at").first()
 
         success_rate = (
             round((ocr_success / denominator) * 100, 1) if denominator else 100.0
@@ -657,7 +661,11 @@ class OCRHealthView(APIView):
         ):
             status_value = "warn"
 
-        issues = self._issue_rows(current_versions)
+        issues = self._issue_rows(
+            current_versions,
+            stuck_before=stuck_before,
+            inflight_states=inflight_states,
+        )
 
         return Response(
             {
@@ -698,15 +706,21 @@ class OCRHealthView(APIView):
         )
 
     @classmethod
-    def _issue_rows(cls, current_versions, *, limit=25):
+    def _issue_rows(cls, current_versions, *, stuck_before, inflight_states, limit=25):
         PS = DocumentVersion.ProcessingState
         issue_filter = (
             Q(processing_state=PS.FAILED)
             | Q(ocr_status=OCRStatus.FAILED)
             | (Q(ocr_text="") & ~Q(ocr_status=OCRStatus.SKIPPED))
+            # Hängende Versionen (Zwischenzustand länger als der Schwellwert)
+            # gehören ebenfalls in die Issue-Liste, auch OHNE OCR-Fehler.
+            | (
+                Q(processing_state__in=inflight_states)
+                & Q(processing_state_changed_at__lt=stuck_before)
+            )
         )
         return current_versions.filter(issue_filter).order_by(
-            "-processing_failed_at", "-ocr_finished_at", "-created_at"
+            "-processing_failed_at", "-ocr_finished_at", "-processing_state_changed_at"
         )[:limit]
 
     @staticmethod
@@ -724,6 +738,11 @@ class OCRHealthView(APIView):
             "processing_failed_at": version.processing_failed_at.isoformat()
             if version.processing_failed_at
             else None,
+            "processing_state_changed_at": (
+                version.processing_state_changed_at.isoformat()
+                if version.processing_state_changed_at
+                else None
+            ),
             "processing_attempts": version.processing_attempts,
             "ocr_status": version.ocr_status,
             "ocr_error": version.ocr_error,

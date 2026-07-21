@@ -205,6 +205,38 @@ class OCRHealthApiTests(APITestCase):
 
         self.assertEqual(resp.status_code, 403)
 
+    @override_settings(PROCESSING_STUCK_AFTER_MINUTES=30)
+    def test_stuck_nutzt_state_changed_at_und_landet_in_issues(self):
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        # Hängend: Zwischenzustand, Zustands-Zeitstempel 2 h alt.
+        stuck = self._doc_with_version(
+            "Haengend",
+            processing_state=DocumentVersion.ProcessingState.OCR_RUNNING,
+            ocr_status=OCRStatus.RUNNING,
+        )
+        DocumentVersion.objects.filter(pk=stuck.current_version_id).update(
+            processing_state_changed_at=timezone.now() - timedelta(hours=2)
+        )
+        # Frisch im selben Zustand -> NICHT hängend (state_changed_at = jetzt),
+        # obwohl es (wie ein frischer Retry einer alten Version) sonst als alt
+        # gälte.
+        self._doc_with_version(
+            "Frisch",
+            processing_state=DocumentVersion.ProcessingState.OCR_RUNNING,
+            ocr_status=OCRStatus.RUNNING,
+        )
+
+        self.client.force_authenticate(self.admin)
+        resp = self.client.get("/api/system/ocr-health/")
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["summary"]["stuck_processing"], 1)
+        issue_versions = {row["version_id"] for row in resp.data["issues"]}
+        self.assertIn(stuck.current_version_id, issue_versions)
+
     def test_ocr_health_summary_and_issues(self):
         self.client.force_authenticate(self.admin)
 
