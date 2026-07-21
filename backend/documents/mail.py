@@ -167,7 +167,7 @@ def ingest_message(account, raw_bytes: bytes) -> int | None:
     from . import pipeline, storage
     from .models import ProcessedMail
     from .owner import log_ingest_owner_audit, resolve_default_owner
-    from .tasks import process_document_version
+    from .tasks import enqueue_processing
 
     msg = email_mod.message_from_bytes(raw_bytes)
     message_id = (msg.get("Message-ID") or "").strip()
@@ -258,7 +258,10 @@ def ingest_message(account, raw_bytes: bytes) -> int | None:
         document.mail_sender = display_sender[:512]
         document.save(update_fields=["mail_subject", "mail_sender"])
         _apply_sender_hint(document, sender_name, sender_addr)
-        process_document_version.delay(version.id)
+        # Gemeinsamer Enqueue-Pfad: bei Broker-Ausfall wird die Version FAILED
+        # (retry-fähig) markiert statt in UPLOADED zu hängen; der Abruf läuft
+        # weiter (nächste Anhänge/Mails).
+        enqueue_processing(version)
         imported_documents.append(document)
         imported += 1
 

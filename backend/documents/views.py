@@ -144,6 +144,7 @@ from .services import semantic_index as semantic_index_service
 from .services import timeline as timeline_service
 from .tasks import (
     bulk_classify_documents,
+    enqueue_processing,
     process_document_version,
     retry_document_version,
 )
@@ -169,27 +170,23 @@ class _ProcessingUnavailable(APIException):
 def _enqueue_processing(version_id) -> None:
     """``process_document_version`` anstoßen; Broker-Ausfall → sauberes 503.
 
-    Ohne diese Kapselung schlägt ein nicht erreichbarer Redis-Broker (Down oder
-    MISCONF, z. B. wenn bgsave scheitert) beim ``.delay()`` als HTTP 500 durch –
-    obwohl die neue Version längst committet ist und nur der Enqueue scheitert.
-    IMMER erst NACH der Versions-Erzeugung aufrufen: das erzeugte Objekt bleibt
-    bestehen, die Verarbeitung ist per Retry nachholbar.
+    Delegiert an den gemeinsamen ``tasks.enqueue_processing`` (derselbe Pfad wie
+    Mail/Consume): der markiert die – bereits committete – Version bei einem
+    Broker-Ausfall als FAILED (retry-fähig) statt sie in UPLOADED hängen zu
+    lassen. Für den interaktiven Request wird der Fehlschlag hier in ein HTTP 503
+    übersetzt (statt eines kryptischen 500). IMMER erst NACH der Versions-
+    Erzeugung aufrufen.
     """
-    try:
-        process_document_version.delay(version_id)
-    except BrokerOperationalError as exc:
-        # Die (bereits committete) Version NICHT unverarbeitbar in UPLOADED
-        # zurücklassen: der Retry-Endpoint akzeptiert nur processing_state=FAILED,
-        # sonst hinge sie für immer fest und ein erneuter Upload erzeugte ein
-        # Duplikat. Als FAILED am ersten Pipeline-Schritt ("hashing") markieren,
-        # damit der bestehende Retry sie aufgreift, sobald der Broker zurück ist.
-        version = DocumentVersion.objects.filter(pk=version_id).first()
-        if version is not None:
-            try:
-                version.mark_processing_failed(step="hashing", error=exc)
-            except DjangoValidationError:
-                pass  # SEALED/READY o. Ä. – Status bleibt dann unangetastet.
-        raise _ProcessingUnavailable() from exc
+    version = DocumentVersion.objects.filter(pk=version_id).first()
+    if version is None:
+        # Kein Objekt (Race o. Ä.): best-effort Enqueue; Broker-Fehler → 503.
+        try:
+            process_document_version.delay(version_id)
+        except BrokerOperationalError as exc:
+            raise _ProcessingUnavailable() from exc
+        return
+    if not enqueue_processing(version):
+        raise _ProcessingUnavailable()
 
 # Erkennt Bereichsfilter auf Zusatzfeldern: ``custom_field_<id>_gte`` / ``_lte``.
 _CUSTOM_FIELD_PARAM_RE = re.compile(r"^custom_field_(\d+)_(gte|lte)$")
