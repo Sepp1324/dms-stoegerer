@@ -978,9 +978,12 @@ def check_due_reminders() -> dict:
         for pk in email_candidates:
             try:
                 with transaction.atomic():
+                    # KEIN select_related hier: select_for_update + Outer Join auf
+                    # die NULLBARE FK created_by scheitert auf Postgres („FOR UPDATE
+                    # cannot be applied to the nullable side of an outer join"). Die
+                    # wenigen Felder (created_by.email, document_id) laden wir direkt.
                     reminder = (
                         DocumentReminder.objects.select_for_update(skip_locked=True)
-                        .select_related("document", "created_by")
                         .filter(pk=pk, email_sent_at__isnull=True)
                         .first()
                     )
