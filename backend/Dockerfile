@@ -42,6 +42,13 @@ RUN python manage.py collectstatic --noinput
 # Datenverzeichnis für die revisionssichere Ablage
 RUN mkdir -p /data
 
+# Version/Commit für den Health-Endpoint (spät im Build -> bricht keinen Cache
+# der schweren Layer). Werden vom CI-Build als --build-arg=<Git-SHA> gesetzt.
+ARG GIT_SHA=""
+ARG APP_VERSION="dev"
+ENV GIT_SHA=${GIT_SHA} \
+    APP_VERSION=${APP_VERSION}
+
 EXPOSE 8000
 
 # Standard: Gunicorn. Migrationen laufen über den k8s-Init-Container bzw.

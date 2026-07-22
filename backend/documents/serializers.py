@@ -449,7 +449,10 @@ class CaseFileSerializer(serializers.ModelSerializer):
         return obj.get_status_display()
 
     def get_document_count(self, obj) -> int:
-        return getattr(obj, "document_count", None) or obj.documents.count()
+        annotated = getattr(obj, "document_count", None)
+        if annotated is not None:
+            return annotated
+        return obj.documents.count()
 
     def get_latest_document_at(self, obj):
         annotated = getattr(obj, "latest_document_at", None)
@@ -515,7 +518,10 @@ class DossierSerializer(serializers.ModelSerializer):
         return obj.get_generated_source_display()
 
     def get_document_count(self, obj) -> int:
-        return getattr(obj, "document_count", None) or obj.documents.count()
+        annotated = getattr(obj, "document_count", None)
+        if annotated is not None:
+            return annotated
+        return obj.documents.count()
 
     def get_documents(self, obj):
         docs = obj.documents.all().select_related(
@@ -843,9 +849,10 @@ class KnowledgeEntitySerializer(serializers.ModelSerializer):
         return obj.get_source_display()
 
     def get_document_count(self, obj) -> int:
-        return getattr(obj, "document_count", None) or obj.document_links.values(
-            "document_id"
-        ).distinct().count()
+        annotated = getattr(obj, "document_count", None)
+        if annotated is not None:
+            return annotated
+        return obj.document_links.values("document_id").distinct().count()
 
     def get_relation_count(self, obj) -> int:
         annotated = getattr(obj, "relation_count", None)

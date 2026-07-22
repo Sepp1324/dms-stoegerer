@@ -74,7 +74,9 @@ jobs:
       - name: Images bauen
         run: |
           set -euo pipefail
-          docker build -t "$REGISTRY/dms-backend:$TAG"  ./backend
+          # GIT_SHA/APP_VERSION ins Backend-Image (Health-Endpoint meldet den echten Commit).
+          docker build -t "$REGISTRY/dms-backend:$TAG" \
+            --build-arg GIT_SHA="$TAG" --build-arg APP_VERSION="$TAG" ./backend
           docker build -t "$REGISTRY/dms-frontend:$TAG" ./frontend
 
       - name: Django-Check (im frischen Backend-Image)
