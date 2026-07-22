@@ -5,13 +5,16 @@ import os
 import shutil
 import stat
 import time
+from datetime import timedelta
 from pathlib import Path
 
 from celery import shared_task
 from celery.exceptions import SoftTimeLimitExceeded
 from django.conf import settings
 from django.contrib.auth import get_user_model
-from django.db import transaction
+from django.db import models, transaction
+from django.db.models import Q
+from django.utils import timezone
 
 from . import pipeline, storage
 from .models import DocumentVersion
@@ -43,19 +46,108 @@ def _read_regular_nofollow(path: Path, max_bytes: int) -> bytes:
         return fh.read(max_bytes + 1)[:max_bytes]
 
 
-@shared_task
-def push_document_flashcards(document_id: int) -> dict:
-    """Erzeugt aus einem Dokument MC-Lernkarten und pusht sie an **psychosr**.
+def _ensure_flashcard_entries(version, *, text, max_q):
+    """Generiert die MC-Karten der Version EINMALIG und persistiert sie als
+    FlashcardSyncEntry-Zeilen. Gibt ``(created: bool, reason: str|None)`` zurück.
 
-    Ausgelöst, sobald ein Dokument den Trigger-Tag (Default „Psychologie")
-    erhält (siehe ``documents/signals.py``). Idempotent: Dokumente mit dem
-    Marker-Tag (``PSYCHOSR_SYNCED_TAG``) werden übersprungen, damit erneutes
-    Taggen keine Dubletten erzeugt.
+    Läuft unter ``select_for_update`` auf der Version, sodass doppelte Trigger
+    serialisiert werden und nur EINER generiert (die LLM-Generierung ist nicht-
+    deterministisch – erneutes Generieren ergäbe andere Karten). Schreibt NICHT
+    auf die Version selbst (die kann WORM/immutable sein), nur eigene Zeilen.
     """
     from ai.services import generate_flashcards
 
+    from .models import FlashcardSyncEntry
+
+    with transaction.atomic():
+        # Lock auf die Versionszeile (nur als Serialisierungspunkt; die Version
+        # wird NICHT verändert -> kein Konflikt mit dem WORM-save()-Guard).
+        DocumentVersion.objects.select_for_update().get(pk=version.pk)
+        if FlashcardSyncEntry.objects.filter(version_id=version.pk).exists():
+            return True, None  # bereits generiert -> unverändert weiterverwenden
+
+        result = generate_flashcards(text, max_questions=max_q)
+        questions = result.get("questions") or []
+        if result.get("source") != "ai" or not questions:
+            # Nichts persistieren -> ein späterer Lauf generiert erneut.
+            return False, result.get("source", "unavailable")
+
+        FlashcardSyncEntry.objects.bulk_create(
+            [
+                FlashcardSyncEntry(
+                    version_id=version.pk,
+                    ordinal=i,
+                    idempotency_key=f"dms-v{version.pk}-c{i}",
+                    payload={"frage": q["frage"], "aussagen": q["aussagen"], "kap": q["kap"]},
+                )
+                for i, q in enumerate(questions)
+            ]
+        )
+        return True, None
+
+
+def _claim_flashcard_entries(version_id, *, stale_after):
+    """Claimt offene (``pending``) und verwaiste (``in_progress`` älter als
+    ``stale_after``) Karten atomar per CAS-Update auf ``in_progress`` und gibt die
+    selbst gewonnenen Einträge zurück.
+
+    Zwei parallele Tasks können so nie dieselbe Karte senden: nur der Task, dessen
+    ``update`` die Zeile trifft (Rowcount 1), besitzt sie. Verwaiste in_progress
+    (Worker-Crash mitten im Push) werden nach Ablauf reklamiert; ein evtl. bereits
+    erfolgter POST wird von psychosr über den stabilen ``ext_id`` dedupliziert.
+    """
+    from .models import FlashcardSyncEntry
+
+    now = timezone.now()
+    cutoff = now - stale_after
+    claimable = Q(state=FlashcardSyncEntry.State.PENDING) | Q(
+        state=FlashcardSyncEntry.State.IN_PROGRESS, claimed_at__lt=cutoff
+    )
+    candidate_pks = list(
+        FlashcardSyncEntry.objects.filter(version_id=version_id)
+        .filter(claimable)
+        .values_list("pk", flat=True)
+    )
+    won: list[int] = []
+    for pk in candidate_pks:
+        updated = (
+            FlashcardSyncEntry.objects.filter(pk=pk)
+            .filter(claimable)  # CAS: nur wenn immer noch claimbar
+            .update(
+                state=FlashcardSyncEntry.State.IN_PROGRESS,
+                claimed_at=now,
+                attempts=models.F("attempts") + 1,
+            )
+        )
+        if updated:
+            won.append(pk)
+    return list(FlashcardSyncEntry.objects.filter(pk__in=won).order_by("ordinal"))
+
+
+def _set_synced_marker(document, name, *, present):
+    """Marker-Tag NUR als Anzeige – spiegelt den Zustand der AKTUELLEN Version.
+    Gesetzt, wenn alle Karten gepusht sind; sonst entfernt (neue/offene Version).
+    """
+    from .models import Tag
+
+    if present:
+        marker = Tag.objects.filter(name=name).first() or Tag.objects.create(
+            name=name, color="#6366F1"
+        )
+        document.tags.add(marker)
+    else:
+        document.tags.remove(*document.tags.filter(name=name))
+
+
+def _sync_document_flashcards(document_id: int) -> dict:
+    """Kern der psychosr-Synchronisation (ohne Celery-Retry-Steuerung).
+
+    Maßgeblich ist der Zustand der **aktuellen Version** (FlashcardSyncEntry),
+    NICHT ein dokumentweiter Tag: eine neue Version wird eigenständig generiert
+    und gepusht, auch wenn eine frühere Version bereits „synced" war.
+    """
     from . import psychosr_client
-    from .models import Document, Tag
+    from .models import Document, FlashcardSyncEntry
 
     if not psychosr_client.is_configured():
         return {"status": "disabled", "document_id": document_id}
@@ -65,82 +157,83 @@ def push_document_flashcards(document_id: int) -> dict:
     except Document.DoesNotExist:
         return {"status": "missing", "document_id": document_id}
 
-    synced_name = getattr(settings, "PSYCHOSR_SYNCED_TAG", "psychosr-synced")
-    if document.tags.filter(name=synced_name).exists():
-        return {"status": "already_synced", "document_id": document_id}
-
     version = document.current_version
     text = (version.ocr_text if version else "") or ""
-    if not text.strip():
+    if not version or not text.strip():
         return {"status": "no_text", "document_id": document_id}
 
+    synced_name = getattr(settings, "PSYCHOSR_SYNCED_TAG", "psychosr-synced")
     max_q = getattr(settings, "PSYCHOSR_MAX_QUESTIONS", 8)
 
-    # Karten EINMALIG generieren und pro Version persistieren. Bei einem Teil-Retry
-    # (einige Karten gepusht, andere nicht) darf NICHT neu generiert werden – die
-    # LLM-Generierung ist nichtdeterministisch, ergäbe also ANDERE Karten und die
-    # bereits gepushten würden als Dubletten erneut gesendet. Deshalb: unter Zeilen-
-    # Lock prüfen, ob schon Karten persistiert sind; nur wenn nicht, generieren und
-    # speichern (der Lock serialisiert doppelte Trigger -> keine Doppel-Generierung).
-    with transaction.atomic():
-        ver = DocumentVersion.objects.select_for_update().get(pk=version.pk)
-        entries = list(ver.flashcards_sync or [])
-        if not entries:
-            result = generate_flashcards(text, max_questions=max_q)
-            questions = result.get("questions") or []
-            if result.get("source") != "ai" or not questions:
-                # Nichts persistieren -> ein späterer Retry generiert erneut.
-                return {
-                    "status": result.get("source", "unavailable"),
-                    "document_id": document_id,
-                    "generated": 0,
-                }
-            entries = [
-                {
-                    "frage": q["frage"],
-                    "aussagen": q["aussagen"],
-                    "kap": q["kap"],
-                    "pushed": False,
-                }
-                for q in questions
-            ]
-            ver.flashcards_sync = entries
-            ver.save(update_fields=["flashcards_sync"])
+    created, reason = _ensure_flashcard_entries(version, text=text, max_q=max_q)
+    if not created:
+        return {"status": reason, "document_id": document_id, "generated": 0}
 
-    # Nur die noch NICHT gepushten Karten senden (Retry re-sendet keine Dubletten).
-    pending_idx = [i for i, e in enumerate(entries) if not e.get("pushed")]
-    push = {"pushed": 0, "failed": 0}
-    if pending_idx:
-        pending = [entries[i] for i in pending_idx]
-        push = psychosr_client.push_flashcards(
-            pending, source_title=document.title or f"Dokument {document_id}"
+    stale = timedelta(minutes=getattr(settings, "PSYCHOSR_CLAIM_STALE_MINUTES", 15))
+    claimed = _claim_flashcard_entries(version.pk, stale_after=stale)
+
+    pushed = 0
+    failed = 0
+    title = document.title or f"Dokument {document_id}"
+    for entry in claimed:
+        try:
+            psychosr_client.push_flashcard(
+                entry.payload, source_title=title, idempotency_key=entry.idempotency_key
+            )
+        except SoftTimeLimitExceeded:
+            raise  # Soft-Time-Limit nie verschlucken (Task muss abbrechen)
+        except Exception as exc:  # noqa: BLE001 – einzelne Karte scheitert, Rest weiter
+            failed += 1
+            logger.warning(
+                "psychosr push (v%s c%s) fehlgeschlagen: %s", version.pk, entry.ordinal, exc
+            )
+            # Claim freigeben -> nächster (Retry-)Lauf nimmt die Karte erneut.
+            FlashcardSyncEntry.objects.filter(
+                pk=entry.pk, state=FlashcardSyncEntry.State.IN_PROGRESS
+            ).update(state=FlashcardSyncEntry.State.PENDING)
+            continue
+        # Erfolg SOFORT einzeln durabel machen (Crash danach -> psychosr dedupt via ext_id).
+        FlashcardSyncEntry.objects.filter(pk=entry.pk).update(
+            state=FlashcardSyncEntry.State.PUSHED, pushed_at=timezone.now()
         )
-        for i, ok in zip(pending_idx, push.get("results", [])):
-            if ok:
-                entries[i]["pushed"] = True
-        # Pro-Karte-Status persistieren, damit der nächste Retry die bereits
-        # erfolgreichen Karten überspringt.
-        with transaction.atomic():
-            ver = DocumentVersion.objects.select_for_update().get(pk=version.pk)
-            ver.flashcards_sync = entries
-            ver.save(update_fields=["flashcards_sync"])
+        pushed += 1
 
-    # Marker-Tag (überspringt künftige Läufe) NUR, wenn ALLE Karten gepusht sind.
-    all_pushed = bool(entries) and all(e.get("pushed") for e in entries)
-    if all_pushed:
-        marker = Tag.objects.filter(name=synced_name).first()
-        if marker is None:
-            marker = Tag.objects.create(name=synced_name, color="#6366F1")
-        document.tags.add(marker)
+    qs = FlashcardSyncEntry.objects.filter(version_id=version.pk)
+    total = qs.count()
+    open_count = qs.exclude(state=FlashcardSyncEntry.State.PUSHED).count()
+    _set_synced_marker(document, synced_name, present=(total > 0 and open_count == 0))
 
     return {
         "status": "done",
         "document_id": document_id,
-        "generated": len(entries),
-        "pushed": push.get("pushed", 0),
-        "failed": push.get("failed", 0),
-        "synced_total": sum(1 for e in entries if e.get("pushed")),
+        "version_id": version.pk,
+        "generated": total,
+        "pushed": pushed,
+        "failed": failed,
+        "open": open_count,
     }
+
+
+@shared_task(bind=True, max_retries=5)
+def push_document_flashcards(self, document_id: int) -> dict:
+    """Erzeugt aus der aktuellen Dokumentversion MC-Lernkarten und pusht sie an
+    **psychosr**. Ausgelöst durch den Trigger-Tag (siehe ``documents/signals.py``).
+
+    Idempotent über :class:`FlashcardSyncEntry`: Karten werden pro Version einmalig
+    generiert, atomar geclaimt und einzeln nach Erfolg als ``pushed`` markiert –
+    ein (Teil-)Retry sendet nur die noch offenen. Bleiben nach einem Lauf Karten
+    offen (psychosr-Ausfall), wird der Task mit begrenztem exponentiellem Backoff
+    erneut eingeplant (der Tag-Trigger feuert nur einmal).
+    """
+    result = _sync_document_flashcards(document_id)
+    open_count = result.get("open", 0)
+    if open_count and self.request.retries < self.max_retries:
+        countdown = min(600, 30 * (2 ** self.request.retries))  # 30s,60,120,240,480→max 600
+        raise self.retry(
+            countdown=countdown,
+            exc=RuntimeError(f"{open_count} psychosr-Karten offen (Dok {document_id})"),
+        )
+    return result
 
 
 @shared_task

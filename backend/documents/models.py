@@ -698,19 +698,6 @@ class DocumentVersion(models.Model):
         help_text="sha256(sha256 · prev_hash · Snapshot-Bytes) – Metadaten-Siegel",
     )
 
-    # psychosr-Sync (STOAA-…): EINMALIG generierte MC-Lernkarten dieser Version
-    # samt Pro-Karte-Sync-Status. Ohne diese Persistenz würde ein Teil-Retry
-    # (einige Karten gepusht, andere nicht) die LLM-Generierung erneut anstoßen –
-    # nichtdeterministisch, also ANDERE Karten – und die bereits gepushten Karten
-    # als Dubletten erneut senden. Mit persistierten Einträgen re-sendet ein Retry
-    # exakt dieselben Karten und NUR die noch offenen (``pushed=false``).
-    # Form: ``[{"frage": str, "aussagen": [...], "kap": int, "pushed": bool}, …]``.
-    flashcards_sync = models.JSONField(
-        default=list,
-        blank=True,
-        help_text="Persistierte MC-Lernkarten + Pro-Karte-Push-Status (psychosr)",
-    )
-
     class Meta:
         verbose_name = "Dokumentversion"
         verbose_name_plural = "Dokumentversionen"
@@ -914,6 +901,61 @@ class DocumentVersion(models.Model):
                 f"Aufbewahrungsfrist läuft bis {self.retention_until} – Löschen gesperrt."
             )
         super().delete(*args, **kwargs)
+
+
+class FlashcardSyncEntry(models.Model):
+    """Pro-Karte-Sync-Zustand zu **psychosr** – getrennt von der DocumentVersion.
+
+    Die Version kann ``is_immutable=True`` (WORM) sein; ihr ``save()`` ist dann
+    gesperrt. Der Sync-Zustand (welche generierte MC-Karte schon gepusht wurde)
+    ist aber veränderlich und darf die Version NICHT anfassen – deshalb ein
+    eigenes, veränderliches Modell mit FK auf die (unveränderliche) Version.
+
+    Zwei Eigenschaften machen den Push idempotent (Review fe6b945):
+    * **Atomarer Claim**: ``pending`` (bzw. verwaiste ``in_progress``) → ``in_progress``
+      per CAS-Update. Nur der Task, der die Zeile gewinnt, sendet sie – zwei
+      parallele Tasks können dieselbe Karte nicht doppelt senden.
+    * **Stabiler ``idempotency_key``** (``dms-v<versionId>-c<ordinal>``), der an
+      psychosr übertragen wird: ein Crash NACH erfolgreichem POST, aber VOR dem
+      DB-Commit, wird beim Retry serverseitig dedupliziert.
+    """
+
+    class State(models.TextChoices):
+        PENDING = "pending", "Ausstehend"
+        IN_PROGRESS = "in_progress", "Wird gesendet"
+        PUSHED = "pushed", "Gesendet"
+
+    version = models.ForeignKey(
+        DocumentVersion, on_delete=models.CASCADE, related_name="flashcard_entries"
+    )
+    ordinal = models.PositiveIntegerField(
+        help_text="Stabile Karten-Nr. innerhalb der Version (Basis des Idempotency-Keys)"
+    )
+    idempotency_key = models.CharField(
+        max_length=80,
+        unique=True,
+        help_text="Stabiler Schlüssel dms-v<versionId>-c<ordinal> – an psychosr übertragen",
+    )
+    payload = models.JSONField(help_text="Kartendaten: {frage, aussagen, kap}")
+    state = models.CharField(
+        max_length=16,
+        choices=State.choices,
+        default=State.PENDING,
+        db_index=True,
+    )
+    attempts = models.PositiveIntegerField(default=0)
+    claimed_at = models.DateTimeField(null=True, blank=True)
+    pushed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        verbose_name = "Flashcard-Sync-Eintrag"
+        verbose_name_plural = "Flashcard-Sync-Einträge"
+        ordering = ["version_id", "ordinal"]
+        unique_together = ("version", "ordinal")
+
+    def __str__(self) -> str:
+        return f"{self.idempotency_key} [{self.state}]"
 
 
 class DocumentPageText(models.Model):
