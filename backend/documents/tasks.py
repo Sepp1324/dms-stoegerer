@@ -937,59 +937,87 @@ def check_due_reminders() -> dict:
     übersprungen – **kein** Fehler. Die In-App-Benachrichtigung (``notified_at``
     + due-Liste) funktioniert unabhängig davon.
     """
-    from django.utils import timezone
+    from django.core.mail import send_mail
 
     from .models import DocumentReminder
 
     today = timezone.localdate()
-    due = list(
-        DocumentReminder.objects.select_related("document", "created_by").filter(
-            done=False, remind_on__lte=today, notified_at__isnull=True
-        )
-    )
-
     smtp_configured = bool(getattr(settings, "EMAIL_HOST", ""))
     now = timezone.now()
+
+    # --- In-App-Benachrichtigung: notified_at GENAU EINMAL setzen -------------
+    # Atomarer CAS (filter+update): zwei parallele Beat-Läufe können dieselbe
+    # Erinnerung nicht doppelt benachrichtigen – nur der Lauf, dessen UPDATE die
+    # Zeile trifft, zählt.
+    due_ids = list(
+        DocumentReminder.objects.filter(
+            done=False, remind_on__lte=today, notified_at__isnull=True
+        ).values_list("pk", flat=True)
+    )
     notified = 0
+    for pk in due_ids:
+        claimed = DocumentReminder.objects.filter(
+            pk=pk, notified_at__isnull=True
+        ).update(notified_at=now)
+        if claimed:
+            notified += 1
+
+    # --- E-Mail: eigener Versandstatus + atomarer Claim ----------------------
+    # email_sent_at ist GETRENNT von notified_at: ein fehlgeschlagener Versand
+    # bleibt email_sent_at=NULL und wird beim nächsten Lauf erneut versucht (das
+    # In-App-Dedupe blockiert das nicht mehr). Der Claim per select_for_update
+    # (skip_locked) verhindert, dass zwei parallele Beats dieselbe Mail senden;
+    # email_sent_at wird ERST nach BESTÄTIGTEM Versand (send_mail > 0) gesetzt.
     emailed = 0
-    for reminder in due:
-        # In-App-Benachrichtigung: notified_at genau einmal setzen (Dedupe).
-        reminder.notified_at = now
-        reminder.save(update_fields=["notified_at", "updated_at"])
-        notified += 1
+    if smtp_configured:
+        email_candidates = list(
+            DocumentReminder.objects.filter(
+                done=False, remind_on__lte=today, email_sent_at__isnull=True
+            ).values_list("pk", flat=True)
+        )
+        for pk in email_candidates:
+            try:
+                with transaction.atomic():
+                    # KEIN select_related hier: select_for_update + Outer Join auf
+                    # die NULLBARE FK created_by scheitert auf Postgres („FOR UPDATE
+                    # cannot be applied to the nullable side of an outer join"). Die
+                    # wenigen Felder (created_by.email, document_id) laden wir direkt.
+                    reminder = (
+                        DocumentReminder.objects.select_for_update(skip_locked=True)
+                        .filter(pk=pk, email_sent_at__isnull=True)
+                        .first()
+                    )
+                    if reminder is None:
+                        continue  # anderer Worker hat die Zeile (oder schon versendet)
+                    recipient = getattr(reminder.created_by, "email", "") or ""
+                    if not recipient:
+                        continue  # kein Empfänger -> nichts zu senden (kein Retry nötig)
+                    sent = send_mail(
+                        subject=f"Wiedervorlage fällig: Dokument #{reminder.document_id}",
+                        message=(
+                            f"Die Wiedervorlage für Dokument #{reminder.document_id} ist "
+                            f"seit {reminder.remind_on.isoformat()} fällig.\n\n"
+                            f"{reminder.note}".strip()
+                        ),
+                        from_email=getattr(settings, "DEFAULT_FROM_EMAIL", None),
+                        recipient_list=[recipient],
+                        fail_silently=False,  # Fehler wirft -> email_sent_at bleibt NULL (Retry)
+                    )
+                    if sent:
+                        reminder.email_sent_at = now
+                        reminder.save(update_fields=["email_sent_at", "updated_at"])
+                        emailed += 1
+                    # sent == 0: nicht als versendet markieren -> nächster Lauf versucht erneut.
+            except SoftTimeLimitExceeded:
+                raise  # Soft-Time-Limit nicht verschlucken (s. scan_consume_folder).
+            except Exception:
+                # Versand best-effort: Fehler loggen, email_sent_at bleibt NULL
+                # (Retry beim nächsten Lauf). Der Beat läuft weiter.
+                logger.exception(
+                    "check_due_reminders: E-Mail-Versand fehlgeschlagen für Reminder %s", pk
+                )
 
-        # E-Mail nur bei konfiguriertem SMTP und vorhandener Empfängeradresse;
-        # sonst still überspringen (kein Fehler).
-        if not smtp_configured:
-            continue
-        recipient = getattr(reminder.created_by, "email", "") or ""
-        if not recipient:
-            continue
-        try:
-            from django.core.mail import send_mail
-
-            send_mail(
-                subject=f"Wiedervorlage fällig: Dokument #{reminder.document_id}",
-                message=(
-                    f"Die Wiedervorlage für Dokument #{reminder.document_id} ist "
-                    f"seit {reminder.remind_on.isoformat()} fällig.\n\n"
-                    f"{reminder.note}".strip()
-                ),
-                from_email=getattr(settings, "DEFAULT_FROM_EMAIL", None),
-                recipient_list=[recipient],
-                fail_silently=True,
-            )
-            emailed += 1
-        except SoftTimeLimitExceeded:
-            raise  # Soft-Time-Limit nicht verschlucken (s. scan_consume_folder).
-        except Exception:
-            # E-Mail ist Best-Effort – ein Fehler darf den Beat nicht abbrechen.
-            logger.exception(
-                "check_due_reminders: E-Mail-Versand fehlgeschlagen für Reminder %s",
-                reminder.id,
-            )
-
-    return {"due": len(due), "notified": notified, "emailed": emailed}
+    return {"notified": notified, "emailed": emailed}
 
 
 @shared_task

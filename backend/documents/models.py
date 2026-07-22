@@ -1898,6 +1898,15 @@ class DocumentReminder(models.Model):
             "(genau einmal gesetzt – Dedupe gegen Mehrfach-Benachrichtigung)."
         ),
     )
+    email_sent_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Wann die Erinnerungs-E-Mail BESTÄTIGT versendet wurde. Getrennt von "
+            "notified_at (In-App), damit ein fehlgeschlagener Versand erneut "
+            "versucht wird und nicht am In-App-Dedupe hängen bleibt."
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
