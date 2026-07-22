@@ -110,6 +110,7 @@ from .serializers import (
     CustomFieldSerializer,
     DocumentReminderSerializer,
     DocumentReviewTaskSerializer,
+    DocumentListSerializer,
     DocumentSerializer,
     DossierSerializer,
     DocumentFolderSerializer,
@@ -1425,10 +1426,6 @@ class DocumentViewSet(viewsets.ModelViewSet):
             )
             .prefetch_related(
                 "tags",
-                "versions",
-                # Versionsersteller (created_by) für die nested versions-Liste –
-                # sonst 1 Query je Version.
-                "versions__created_by",
                 "custom_field_values__field",
                 "review_tasks",
             )
@@ -1606,7 +1603,20 @@ class DocumentViewSet(viewsets.ModelViewSet):
         # Zusatzfeld-Bereichsfilter (Spec §7.3): custom_field_<id>_gte/_lte
         qs = _apply_custom_field_filters(qs, params)
 
+        # Die vollständige Versionshistorie NUR laden, wenn sie auch serialisiert
+        # wird (Detail/Einzel-Serializer). Die Liste (DocumentListSerializer) kommt
+        # ohne aus – sonst lädt jede Listenseite alle Versionen jedes Dokuments.
+        if self.action != "list":
+            qs = qs.prefetch_related("versions", "versions__created_by")
+
         return qs.distinct()
+
+    def get_serializer_class(self):
+        # Liste: schlanker Serializer ohne nested ``versions`` (Perf/Payload).
+        # Detail & alle übrigen Aktionen: voller DocumentSerializer inkl. Historie.
+        if self.action == "list":
+            return DocumentListSerializer
+        return DocumentSerializer
 
     def _resolve_version(self, document):
         """Wählt die Version aus ``?version=<nr>`` oder fällt auf die aktuelle zurück.

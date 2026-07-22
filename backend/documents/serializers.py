@@ -1098,6 +1098,22 @@ class DocumentSerializer(serializers.ModelSerializer):
         return document
 
 
+class DocumentListSerializer(DocumentSerializer):
+    """Schlanke Variante für die LISTE: OHNE die vollständige ``versions``-Historie.
+
+    Die Paginierung begrenzt nur die Dokumente, nicht deren Versionen – ein stark
+    versioniertes Dokument blähte jede Listenseite auf (Query + Payload). Fürs
+    Listen-Rendering reichen die Rollup-Felder der aktuellen Version
+    (``processing_state``/``ocr_status``/``page_count``). Die volle Historie liefert
+    weiterhin die Detailansicht (``DocumentSerializer`` bei ``retrieve``).
+    """
+
+    versions = None  # geerbtes Feld entfernen (nicht serialisieren)
+
+    class Meta(DocumentSerializer.Meta):
+        fields = tuple(f for f in DocumentSerializer.Meta.fields if f != "versions")
+
+
 class MailAccountSerializer(serializers.ModelSerializer):
     """CRUD-Serializer für IMAP-Postfächer (STOAA-212).
 
