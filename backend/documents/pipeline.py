@@ -797,10 +797,14 @@ def _sync_semantic_index(version: DocumentVersion, result: dict, *, actor=None) 
     try:
         from documents.services import semantic_index
 
-        result["semantic_index"] = semantic_index.sync_document_embeddings(
-            version.document, version=version
-        )
-        return True
+        outcome = semantic_index.sync_document_embeddings(version.document, version=version)
+        result["semantic_index"] = outcome
+        # ``sync_document_embeddings`` WIRFT bei Modellfehlern nicht, sondern liefert
+        # ``status="error"`` (alte Chunks bleiben, Index unvollständig). Das ist KEIN
+        # Erfolg -> False, damit indexed_at NICHT gesetzt wird und der Reconciler es
+        # erneut versucht. ``empty``/``indexed``/``disabled``/``missing_version`` sind
+        # legitime Endzustände (kein Retry nötig).
+        return (outcome or {}).get("status") != "error"
     except SoftTimeLimitExceeded:
         raise  # Soft-Time-Limit nie als Best-Effort-Teilfehler verschlucken
     except Exception:  # noqa: BLE001 - Semantik darf Pipeline nie kippen

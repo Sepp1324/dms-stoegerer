@@ -50,6 +50,25 @@ class EnsureFindabilityIndexTests(TestCase):
         v.refresh_from_db()
         self.assertIsNone(v.indexed_at)  # -> Reconciler holt nach
 
+    def test_semantik_status_error_ist_kein_erfolg(self):
+        # sync_document_embeddings WIRFT bei Modellfehlern nicht, liefert
+        # status="error" -> darf indexed_at NICHT setzen (sonst nie ein Retry).
+        v = _ready_version(immutable=True)
+        with mock.patch(SEARCH), mock.patch(SEM, return_value={"status": "error"}):
+            ok = pipeline.ensure_findability_index(v)
+        self.assertFalse(ok)
+        v.refresh_from_db()
+        self.assertIsNone(v.indexed_at)
+
+    def test_leerer_text_status_empty_ist_erfolg(self):
+        # Kein Text -> status="empty" ist ein legitimer Endzustand (kein Retry).
+        v = _ready_version(immutable=True)
+        with mock.patch(SEARCH), mock.patch(SEM, return_value={"status": "empty"}):
+            ok = pipeline.ensure_findability_index(v)
+        self.assertTrue(ok)
+        v.refresh_from_db()
+        self.assertIsNotNone(v.indexed_at)
+
 
 @override_settings(INDEX_RECONCILE_AFTER_MINUTES=15, INDEX_RECONCILE_BATCH=50)
 class ReapUnindexedVersionsTests(TestCase):
