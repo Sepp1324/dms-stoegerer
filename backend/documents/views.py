@@ -69,7 +69,7 @@ class IsDmsAdmin(BasePermission):
 
 from . import classification, pipeline, storage
 from .filetypes import SNIFF_BYTES, UnsupportedFileType, detect, is_safe_inline
-from .throttling import CaptureRateThrottle, UploadRateThrottle
+from .throttling import AiRateThrottle, CaptureRateThrottle, UploadRateThrottle
 from .services import version_compare
 from .models import (
     AuditLogEntry,
@@ -831,6 +831,7 @@ class AskView(APIView):
     """Dokumenten-Copilot: beantwortet Fragen anhand sichtbarer OCR-Quellen."""
 
     permission_classes = [IsAuthenticated]
+    throttle_classes = [AiRateThrottle]  # KI-Kosten/Last begrenzen (P2)
 
     def post(self, request):
         question = str(request.data.get("question", "")).strip()
@@ -953,6 +954,7 @@ class SemanticSearchView(APIView):
     """
 
     permission_classes = [IsAuthenticated]
+    throttle_classes = [AiRateThrottle]  # KI-Kosten/Last begrenzen (P2)
 
     def get(self, request):
         return self._run(request, request.query_params)

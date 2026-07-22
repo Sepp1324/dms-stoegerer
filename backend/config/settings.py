@@ -241,6 +241,8 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_RATES": {
         "upload": os.getenv("THROTTLE_UPLOAD_RATE", "120/minute"),
         "capture": os.getenv("THROTTLE_CAPTURE_RATE", "60/minute"),
+        # KI-Endpunkte (Copilot/semantische Suche): teuer (Provider-Kosten, CPU/RAM).
+        "ai": os.getenv("THROTTLE_AI_RATE", "30/minute"),
     },
 }
 
