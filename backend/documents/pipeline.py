@@ -629,8 +629,9 @@ def process_version(version: DocumentVersion) -> dict:
         return result
     _sync_contract_center(version, result, actor=version.created_by)
     _sync_entity_graph(version, result, actor=version.created_by)
-    _sync_semantic_index(version, result, actor=version.created_by)
-    _sync_search_vector(version)
+    # Pflicht-Findbarkeitsindizes: bei vollständigem Erfolg wird indexed_at gesetzt;
+    # bei Fehler bleibt es NULL -> reap_unindexed_versions holt die Indizierung nach.
+    result["indexed"] = ensure_findability_index(version, actor=version.created_by)
     _sync_auto_file(version, result, actor=version.created_by)
     try:
         from documents.services import review_tasks
@@ -691,8 +692,7 @@ def retry_version(version: DocumentVersion, actor=None) -> dict:
         return result
     _sync_contract_center(version, result, actor=actor or version.created_by)
     _sync_entity_graph(version, result, actor=actor or version.created_by)
-    _sync_semantic_index(version, result, actor=actor or version.created_by)
-    _sync_search_vector(version)
+    result["indexed"] = ensure_findability_index(version, actor=actor or version.created_by)
     _sync_auto_file(version, result, actor=actor or version.created_by)
     try:
         from documents.services import review_tasks
@@ -707,21 +707,51 @@ def retry_version(version: DocumentVersion, actor=None) -> dict:
     return result
 
 
-def _sync_search_vector(version: DocumentVersion) -> None:
+def _sync_search_vector(version: DocumentVersion) -> bool:
     """Aktualisiert den materialisierten Suchvektor nach der Verarbeitung.
 
     Nötig, weil die Pipeline die VERSION (ocr_text) schreibt, nicht zwingend das
     Dokument – das post_save-Dokumentsignal würde den frischen OCR-Text sonst
-    verpassen. Best-effort: darf die Verarbeitung nie kippen.
+    verpassen. Best-effort: darf die Verarbeitung nie kippen. Gibt ``True`` zurück,
+    wenn der Aufbau ohne Fehler durchlief (sonst ``False`` -> Reconciler holt nach).
     """
     try:
         from documents.services.search_vector import update_search_vector_by_id
 
         update_search_vector_by_id(version.document_id)
+        return True
     except SoftTimeLimitExceeded:
         raise  # Soft-Time-Limit nie als Best-Effort-Teilfehler verschlucken
     except Exception:  # noqa: BLE001 - Vektor-Pflege darf Verarbeitung nicht kippen
         logger.exception("Suchvektor-Sync für Version %s fehlgeschlagen", version.id)
+        return False
+
+
+def _mark_findability_indexed(version: DocumentVersion) -> None:
+    """Setzt ``indexed_at`` per ``update`` (NICHT ``save`` – die Version ist nach
+    READY WORM-immutable; ``indexed_at`` ist Betriebs-Metadatum wie processing_state)."""
+    from django.utils import timezone
+
+    DocumentVersion.objects.filter(pk=version.pk).update(indexed_at=timezone.now())
+    version.indexed_at = timezone.now()
+
+
+def ensure_findability_index(version: DocumentVersion, *, actor=None) -> bool:
+    """Baut die PFLICHT-Findbarkeitsindizes (semantischer Index + Volltext-Such-
+    vektor) idempotent auf und markiert bei vollständigem Erfolg ``indexed_at``.
+
+    Gemeinsamer Pfad für die Pipeline (nach READY) UND den Reconciler
+    (``tasks.reap_unindexed_versions``). Gibt ``True`` zurück, wenn BEIDE Indizes
+    ohne Fehler durchliefen; sonst bleibt ``indexed_at`` NULL und der Reconciler
+    versucht es erneut.
+    """
+    result = {"status": "done"}
+    semantic_ok = _sync_semantic_index(version, result, actor=actor or version.created_by)
+    search_ok = _sync_search_vector(version)
+    if semantic_ok and search_ok:
+        _mark_findability_indexed(version)
+        return True
+    return False
 
 
 def _sync_contract_center(version: DocumentVersion, result: dict, *, actor=None) -> None:
@@ -758,21 +788,25 @@ def _sync_entity_graph(version: DocumentVersion, result: dict, *, actor=None) ->
         result["entity_graph"] = {"status": "failed"}
 
 
-def _sync_semantic_index(version: DocumentVersion, result: dict, *, actor=None) -> None:
-    """Best-effort-Aufbau des semantischen Index nach READY."""
+def _sync_semantic_index(version: DocumentVersion, result: dict, *, actor=None) -> bool:
+    """Best-effort-Aufbau des semantischen Index nach READY. Gibt ``True`` zurück,
+    wenn der Sync ohne Fehler durchlief (auch bei 0 Embeddings, z. B. leerer Text),
+    ``False`` bei einem Fehler (-> Reconciler holt nach)."""
     if result.get("status") != "done":
-        return
+        return False
     try:
         from documents.services import semantic_index
 
         result["semantic_index"] = semantic_index.sync_document_embeddings(
             version.document, version=version
         )
+        return True
     except SoftTimeLimitExceeded:
         raise  # Soft-Time-Limit nie als Best-Effort-Teilfehler verschlucken
     except Exception:  # noqa: BLE001 - Semantik darf Pipeline nie kippen
         logger.exception("Semantic-Index-Sync für Version %s fehlgeschlagen", version.id)
         result["semantic_index"] = {"status": "failed"}
+        return False
 
 
 def _sync_auto_file(version: DocumentVersion, result: dict, *, actor=None) -> None:

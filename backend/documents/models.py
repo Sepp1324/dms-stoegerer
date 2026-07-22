@@ -710,6 +710,15 @@ class DocumentVersion(models.Model):
     # die Finalisierung überspringen. Ist dieser Marker gesetzt, ist das Siegel
     # garantiert vollständig.
     seal_finalized_at = models.DateTimeField(null=True, blank=True)
+    # Zeitpunkt, zu dem die PFLICHT-Findbarkeitsindizes (Volltext-Suchvektor +
+    # semantischer Index) zuletzt ERFOLGREICH aufgebaut wurden. READY allein
+    # garantiert das NICHT: die Indizierung läuft best-effort nach READY; schlägt
+    # sie fehl (nur geloggt), ist das Dokument READY, aber nicht auffindbar. Ist
+    # ``indexed_at`` NULL an einer READY-Version, holt der Reconciler
+    # (``tasks.reap_unindexed_versions``) die Indizierung nach. Wird per
+    # ``QuerySet.update`` gesetzt (Betriebs-Metadatum – umgeht bewusst den
+    # WORM-``save()``-Guard, wie ``processing_state``), NICHT über ``save()``.
+    indexed_at = models.DateTimeField(null=True, blank=True, db_index=True)
 
     retention_until = models.DateField(
         null=True,
