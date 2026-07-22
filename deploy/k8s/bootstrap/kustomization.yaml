@@ -1,0 +1,20 @@
+# Einmaliger Bootstrap – NUR vom Cluster-Admin anzuwenden, NICHT von der CD:
+#
+#   kubectl apply -k deploy/k8s/bootstrap
+#
+# Enthält die cluster-scoped bzw. rechte-vergebenden Objekte, die der
+# namespacebeschränkte Deploy-ServiceAccount (dms-deployer) selbst NICHT anlegen
+# darf/soll:
+#   * namespace.yaml     – der Namespace dms (cluster-scoped)
+#   * serviceaccount.yaml – dms-deployer + Role/RoleBinding (Deploy-Rechte in dms)
+#
+# Bewusst NICHT Teil von deploy/k8s/base: die laufende CD rendert & applied base
+# (bzw. das consume-nfs-Overlay) mit der SA-Kubeconfig. Läge der Namespace dort,
+# enthielte jedes `apply -k` ein cluster-scoped Objekt, für das die namespace-
+# beschränkte Role keine Rechte hat -> der Deploy schlüge fehl (Review fe6b945).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml

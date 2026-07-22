@@ -31,8 +31,11 @@ images:
   - name: registry.stoegerer-home.at/dms-frontend
     newTag: "df8abf1"  # CI-gepflegt – nächster Deploy setzt den echten SHA
 
+# Der Namespace dms ist BEWUSST NICHT hier, sondern im einmaligen Bootstrap
+# (deploy/k8s/bootstrap, Admin-only). Sonst enthielte jedes von der CD gerenderte
+# `apply -k` ein cluster-scoped Namespace-Objekt, für das die namespacebeschränkte
+# Deploy-Role (dms-deployer) keine Rechte hat -> Deploy schlägt fehl.
 resources:
-  - namespace.yaml
   - configmap.yaml
   - postgres.yaml
   - redis.yaml
