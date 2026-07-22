@@ -36,9 +36,23 @@ from .models import (
 )
 
 
-class DocumentVersionInline(admin.TabularInline):
+class _WormDeleteLockMixin:
+    """Sperrt Löschen im Django-Admin (Einzel UND Massenaktion „delete_selected").
+
+    Der Admin löscht über den Collector – das umgeht ``DocumentVersion.delete()``/
+    ``Document.delete()`` und deren WORM-/Retention-/Legal-Hold-Guards, und ein
+    Dokument-Löschen entfernt Versionen per Cascade ganz ohne deren ``delete()``.
+    Zuverlässig ist daher nur, die Löschung im Admin komplett zu unterbinden;
+    Löschungen laufen über die API (``perform_destroy``, richtliniengeprüft)."""
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+class DocumentVersionInline(_WormDeleteLockMixin, admin.TabularInline):
     model = DocumentVersion
     extra = 0
+    can_delete = False  # keine Versionslöschung über das Dokument-Formular
     fields = (
         "version_no",
         "file_path",
@@ -65,7 +79,7 @@ class ASNScanInline(admin.TabularInline):
 
 
 @admin.register(Document)
-class DocumentAdmin(admin.ModelAdmin):
+class DocumentAdmin(_WormDeleteLockMixin, admin.ModelAdmin):
     # ASN (STOAA-284/285): read-only anzeigen, filter-/suchbar und sortierbar.
     list_display = (
         "asn",
@@ -107,7 +121,7 @@ class ASNScanAdmin(admin.ModelAdmin):
 
 
 @admin.register(DocumentVersion)
-class DocumentVersionAdmin(admin.ModelAdmin):
+class DocumentVersionAdmin(_WormDeleteLockMixin, admin.ModelAdmin):
     list_display = (
         "document",
         "version_no",

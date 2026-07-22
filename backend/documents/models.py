@@ -533,6 +533,38 @@ class Document(models.Model):
         """
         super().save(*args, **kwargs)
 
+    def delete_block_reason(self):
+        """Zentrale Löschsperre (WORM / Aufbewahrung / Legal Hold) – EINE Quelle
+        für API, Django-Admin und programmatische Pfade. Gibt einen Grund-Text
+        zurück, wenn das Dokument NICHT gelöscht werden darf, sonst ``None``."""
+        if self.legal_hold:
+            return "Dokument steht unter Legal Hold."
+        if self.versions.filter(is_immutable=True).exists():
+            return "Dokument enthält unveränderliche (WORM-)Versionen."
+        today = timezone.now().date()
+        if self.retention_until and today < self.retention_until:
+            return f"Aufbewahrungsfrist bis {self.retention_until} aktiv."
+        for version in self.versions.all():
+            if version.retention_until and today < version.retention_until:
+                return (
+                    f"Version {version.version_no}: Aufbewahrungsfrist bis "
+                    f"{version.retention_until} aktiv."
+                )
+        return None
+
+    def delete(self, *args, **kwargs):
+        """Guard gegen programmatisches Löschen WORM-/retention-/legal-hold-
+        geschützter Dokumente. Der Django-Admin umgeht ``delete()`` bewusst über
+        den Collector – dort greift stattdessen ``has_delete_permission`` (gesperrt,
+        siehe admin.py). Die API prüft zusätzlich in ``perform_destroy`` (Audit)."""
+        reason = self.delete_block_reason()
+        if reason:
+            from .audit import log_immutable_block
+
+            log_immutable_block("Document", self.pk)
+            raise ValidationError(f"Löschen gesperrt: {reason}")
+        super().delete(*args, **kwargs)
+
 
 class DocumentVersion(models.Model):
     """Eine konkrete Fassung eines Dokuments – der Träger von Datei & Hash-Kette."""
