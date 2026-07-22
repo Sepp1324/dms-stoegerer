@@ -9,9 +9,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tempfile
 import zipfile
 from dataclasses import dataclass
-from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -26,19 +26,27 @@ from documents.services.asn import format_asn
 @dataclass(frozen=True)
 class RevisionPackage:
     filename: str
-    content: bytes
+    path: str  # Pfad zur fertigen ZIP-Datei auf der Platte (per FileResponse streamen)
     manifest: dict[str, Any]
 
 
 def build_document_revision_package(document: Document) -> RevisionPackage:
-    """Baut ein ZIP-Revisionspaket für ein sichtbares Dokument."""
+    """Baut ein ZIP-Revisionspaket für ein sichtbares Dokument.
+
+    Das ZIP wird direkt in eine temporäre Datei auf der Platte geschrieben (nicht
+    in den RAM) und per :class:`~django.http.FileResponse` gestreamt. Große oder
+    stark versionierte Dokumente blockieren so nicht den Web-Prozess durch
+    mehrfaches Vollkopieren im Speicher. Der Aufrufer ist für das Aufräumen der
+    Datei zuständig (``path``); die View entfernt sie nach dem Öffnen (unlink).
+    """
     generated_at = timezone.now()
     archive_report = archive_service.verify_document_archive(document, persist=False)
     manifest_entries: list[dict[str, Any]] = []
     missing_files: list[dict[str, Any]] = []
 
-    buffer = BytesIO()
-    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+    fd, tmp_path = tempfile.mkstemp(prefix="dms-revpkg-", suffix=".zip")
+    os.close(fd)
+    with zipfile.ZipFile(tmp_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         _write_json(
             zf,
             "metadata.json",
@@ -112,7 +120,7 @@ def build_document_revision_package(document: Document) -> RevisionPackage:
     filename = f"{slugify(document.title) or 'dokument'}-{document.id}-revisionspaket.zip"
     return RevisionPackage(
         filename=filename,
-        content=buffer.getvalue(),
+        path=tmp_path,
         manifest=manifest,
     )
 
