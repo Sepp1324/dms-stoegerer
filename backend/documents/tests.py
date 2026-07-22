@@ -4088,6 +4088,19 @@ class WorkflowAPITests(APITestCase):
         self.assertEqual(resp.status_code, 204)
         self.assertFalse(Workflow.objects.filter(id=wf.id).exists())
 
+    def test_gast_darf_nicht_schreiben(self):
+        self.client.force_authenticate(self.guest)
+        resp = self.client.post("/api/workflows/", {"name": "X", "order": 1}, format="json")
+        self.assertEqual(resp.status_code, 403)
+
+    def test_create_ohne_trigger_und_aktionen_moeglich(self):
+        """Minimaler Workflow (nur name/order) ist zulässig – Trigger folgt per Update."""
+        self.client.force_authenticate(self.user)
+        resp = self.client.post("/api/workflows/", {"name": "Leer", "order": 99}, format="json")
+        self.assertEqual(resp.status_code, 201, resp.content)
+        from .models import Workflow
+        self.assertTrue(Workflow.objects.filter(name="Leer").exists())
+
 
 class WorkflowOwnerScopingTests(APITestCase):
     """P1: Workflows sind owner-gescopt – sie wirken nur auf Dokumente ihres
@@ -4169,19 +4182,6 @@ class WorkflowOwnerScopingTests(APITestCase):
             ).status_code,
             200,
         )
-
-    def test_gast_darf_nicht_schreiben(self):
-        self.client.force_authenticate(self.guest)
-        resp = self.client.post("/api/workflows/", {"name": "X", "order": 1}, format="json")
-        self.assertEqual(resp.status_code, 403)
-
-    def test_create_ohne_trigger_und_aktionen_moeglich(self):
-        """Minimaler Workflow (nur name/order) ist zulässig – Trigger folgt per Update."""
-        self.client.force_authenticate(self.user)
-        resp = self.client.post("/api/workflows/", {"name": "Leer", "order": 99}, format="json")
-        self.assertEqual(resp.status_code, 201, resp.content)
-        from .models import Workflow
-        self.assertTrue(Workflow.objects.filter(name="Leer").exists())
 
 
 class VersionCompareServiceTests(TestCase):
