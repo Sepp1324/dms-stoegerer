@@ -13,7 +13,7 @@ class Migration(migrations.Migration):
     """
 
     dependencies = [
-        ("documents", "0052_flashcardsyncentry_last_error"),
+        ("documents", "0053_documentreminder_email_sent_at"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
