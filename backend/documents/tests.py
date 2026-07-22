@@ -4044,7 +4044,7 @@ class WorkflowAPITests(APITestCase):
     def test_retrieve_liefert_verschachtelte_struktur(self):
         self.client.force_authenticate(self.user)
         from .models import Workflow, WorkflowAction, WorkflowTrigger
-        wf = Workflow.objects.create(name="WF-Get", order=1)
+        wf = Workflow.objects.create(name="WF-Get", order=1, owner=self.user)
         WorkflowTrigger.objects.create(workflow=wf, trigger_type="document_added", sources="upload")
         WorkflowAction.objects.create(workflow=wf, order=10, action_type="assign", assign_correspondent=self.corr)
         resp = self.client.get(f"/api/workflows/{wf.id}/")
@@ -4058,7 +4058,7 @@ class WorkflowAPITests(APITestCase):
     def test_update_ersetzt_aktionen(self):
         self.client.force_authenticate(self.user)
         from .models import Workflow, WorkflowAction, WorkflowTrigger
-        wf = Workflow.objects.create(name="WF-Update", order=1)
+        wf = Workflow.objects.create(name="WF-Update", order=1, owner=self.user)
         WorkflowTrigger.objects.create(workflow=wf, trigger_type="document_added")
         WorkflowAction.objects.create(workflow=wf, order=10, action_type="assign", assign_correspondent=self.corr)
         payload = {
@@ -4082,11 +4082,93 @@ class WorkflowAPITests(APITestCase):
     def test_delete_workflow(self):
         self.client.force_authenticate(self.user)
         from .models import Workflow, WorkflowTrigger
-        wf = Workflow.objects.create(name="WF-Del", order=1)
+        wf = Workflow.objects.create(name="WF-Del", order=1, owner=self.user)
         WorkflowTrigger.objects.create(workflow=wf, trigger_type="document_added")
         resp = self.client.delete(f"/api/workflows/{wf.id}/")
         self.assertEqual(resp.status_code, 204)
         self.assertFalse(Workflow.objects.filter(id=wf.id).exists())
+
+
+class WorkflowOwnerScopingTests(APITestCase):
+    """P1: Workflows sind owner-gescopt – sie wirken nur auf Dokumente ihres
+    Owners (oder global bei owner=null), und Nicht-Admins dürfen weder globale
+    noch fremde Workflows verwalten."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.alice = User.objects.create_user("wfo_alice", password="pw", role="user")
+        cls.bob = User.objects.create_user("wfo_bob", password="pw", role="user")
+        cls.admin = User.objects.create_user("wfo_admin", password="pw", role="admin")
+        cls.tag = Tag.objects.create(name="AutoTag")
+
+    def _wf(self, *, owner, name):
+        from .models import Workflow, WorkflowAction, WorkflowTrigger
+
+        wf = Workflow.objects.create(name=name, order=1, owner=owner)
+        WorkflowTrigger.objects.create(
+            workflow=wf, trigger_type="document_added", sources="upload"
+        )
+        action = WorkflowAction.objects.create(workflow=wf, order=10, action_type="assign")
+        action.assign_tags.add(self.tag)
+        return wf
+
+    def _doc(self, owner):
+        return Document.objects.create(title="D", owner=owner)
+
+    # --- Engine ---------------------------------------------------------
+    def test_eigener_workflow_wirkt_nur_auf_eigene_dokumente(self):
+        from .workflows import run_workflows
+
+        self._wf(owner=self.alice, name="AliceWF")
+        alice_doc, bob_doc = self._doc(self.alice), self._doc(self.bob)
+        run_workflows(alice_doc, trigger_type="document_added", source="upload", text="")
+        run_workflows(bob_doc, trigger_type="document_added", source="upload", text="")
+        self.assertIn(self.tag, alice_doc.tags.all())      # eigenes Doc: Workflow lief
+        self.assertNotIn(self.tag, bob_doc.tags.all())     # fremdes Doc: NICHT
+
+    def test_globaler_workflow_wirkt_auf_alle(self):
+        from .workflows import run_workflows
+
+        self._wf(owner=None, name="GlobalWF")
+        bob_doc = self._doc(self.bob)
+        run_workflows(bob_doc, trigger_type="document_added", source="upload", text="")
+        self.assertIn(self.tag, bob_doc.tags.all())
+
+    # --- API-Verwaltung -------------------------------------------------
+    def test_nichtadmin_kann_globalen_workflow_nicht_editieren(self):
+        wf = self._wf(owner=None, name="GlobalEdit")
+        self.client.force_authenticate(self.alice)
+        self.assertEqual(self.client.delete(f"/api/workflows/{wf.id}/").status_code, 403)
+        self.assertEqual(
+            self.client.patch(
+                f"/api/workflows/{wf.id}/", {"enabled": False}, format="json"
+            ).status_code,
+            403,
+        )
+
+    def test_nichtadmin_sieht_fremden_workflow_nicht(self):
+        wf = self._wf(owner=self.bob, name="BobWF")
+        self.client.force_authenticate(self.alice)
+        self.assertEqual(self.client.get(f"/api/workflows/{wf.id}/").status_code, 404)
+        self.assertEqual(self.client.delete(f"/api/workflows/{wf.id}/").status_code, 404)
+
+    def test_create_erzwingt_owner_auf_nutzer(self):
+        from .models import Workflow
+
+        self.client.force_authenticate(self.alice)
+        resp = self.client.post("/api/workflows/", {"name": "Mein", "order": 1}, format="json")
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertEqual(Workflow.objects.get(name="Mein").owner, self.alice)
+
+    def test_admin_darf_global_verwalten(self):
+        wf = self._wf(owner=None, name="GlobalAdmin")
+        self.client.force_authenticate(self.admin)
+        self.assertEqual(
+            self.client.patch(
+                f"/api/workflows/{wf.id}/", {"enabled": False}, format="json"
+            ).status_code,
+            200,
+        )
 
     def test_gast_darf_nicht_schreiben(self):
         self.client.force_authenticate(self.guest)

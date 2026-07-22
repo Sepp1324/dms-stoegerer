@@ -1425,6 +1425,16 @@ class ClassificationRule(models.Model):
     name = models.CharField(max_length=255)
     priority = models.IntegerField(default=100, help_text="Kleiner = zuerst geprüft")
     enabled = models.BooleanField(default=True)
+    # Eigentümer: eine Regel wirkt NUR auf Dokumente dieses Owners. ``null`` =
+    # globale Regel (wirkt auf alle) – nur von Admins verwaltbar.
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="owned_classification_rules",
+        help_text="Eigentümer – wirkt nur auf dessen Dokumente; null = global (Admin).",
+    )
 
     # Bedingungen und Zuweisungen bewusst als JSON – flexibel, ohne Schema-Migrationen.
     # match: z. B. {"text_contains": "Rechnung", "correspondent": "Stadtwerke"}
@@ -1749,6 +1759,18 @@ class Workflow(models.Model):
     name = models.CharField(max_length=255)
     order = models.IntegerField(default=100, help_text="Kleiner = früher ausgeführt")
     enabled = models.BooleanField(default=True)
+    # Eigentümer: ein Workflow wirkt NUR auf Dokumente dieses Owners. ``null`` =
+    # globaler Workflow (wirkt auf alle) – nur von Admins verwaltbar. So kann ein
+    # Haushaltsmitglied nicht über einen globalen Workflow fremde Dokumente
+    # (Titel/Tags/Metadaten) verändern.
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="owned_workflows",
+        help_text="Eigentümer – wirkt nur auf dessen Dokumente; null = global (Admin).",
+    )
 
     class Meta:
         verbose_name = "Workflow"

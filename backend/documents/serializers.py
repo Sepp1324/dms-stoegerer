@@ -203,9 +203,13 @@ class SavedViewSerializer(serializers.ModelSerializer):
 
 
 class ClassificationRuleSerializer(serializers.ModelSerializer):
+    # Owner server-seitig gesetzt (read-only); null = globale Regel (admin-only).
+    owner = serializers.PrimaryKeyRelatedField(read_only=True)
+    owner_username = serializers.CharField(source="owner.username", read_only=True, default=None)
+
     class Meta:
         model = ClassificationRule
-        fields = ("id", "name", "priority", "enabled", "match", "then")
+        fields = ("id", "name", "priority", "enabled", "match", "then", "owner", "owner_username")
 
 
 class CustomFieldSerializer(serializers.ModelSerializer):
@@ -1281,10 +1285,13 @@ class WorkflowSerializer(serializers.ModelSerializer):
 
     trigger = WorkflowTriggerSerializer(required=False)
     actions = WorkflowActionSerializer(many=True, required=False)
+    # Owner server-seitig gesetzt (read-only); null = globaler Workflow (admin-only).
+    owner = serializers.PrimaryKeyRelatedField(read_only=True)
+    owner_username = serializers.CharField(source="owner.username", read_only=True, default=None)
 
     class Meta:
         model = Workflow
-        fields = ("id", "name", "order", "enabled", "trigger", "actions")
+        fields = ("id", "name", "order", "enabled", "trigger", "actions", "owner", "owner_username")
 
     def _write_nested(self, workflow, trigger_data, actions_data):
         # Trigger (OneToOne) – ersetzen/aktualisieren

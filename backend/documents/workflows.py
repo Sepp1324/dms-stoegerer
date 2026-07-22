@@ -139,6 +139,8 @@ def run_workflows(document, *, trigger_type: str, source: str, text: str | None 
     source:       "upload" | "consume" | "mail" | "api"
     text:         OCR-Text (optional, wird aus document ermittelt wenn None)
     """
+    from django.db.models import Q
+
     from .models import AuditLogEntry, Workflow
 
     if text is None:
@@ -148,8 +150,12 @@ def run_workflows(document, *, trigger_type: str, source: str, text: str | None 
 
     fired: list[str] = []
 
+    # Owner-Scoping (P1): NUR globale (owner=null, admin-verwaltete) Workflows ODER
+    # Workflows, die dem Eigentümer DIESES Dokuments gehören. So kann ein fremder
+    # Nutzer nicht über einen eigenen Workflow fremde Dokumente verändern.
     workflows = (
         Workflow.objects.filter(enabled=True)
+        .filter(Q(owner__isnull=True) | Q(owner_id=document.owner_id))
         .prefetch_related(
             "trigger",
             "trigger__filter_has_tags",
