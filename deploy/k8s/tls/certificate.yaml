@@ -1,0 +1,21 @@
+# Leaf-Zertifikat für den Ingress-Host, signiert von der internen CA (dms-ca).
+# cert-manager legt/erneuert es automatisch im Secret ``dms-tls`` im Namespace dms
+# ab; der Ingress referenziert genau dieses Secret (deploy/k8s/base/ingress.yaml).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: dms-tls
+  namespace: dms
+spec:
+  secretName: dms-tls
+  duration: 2160h       # 90 Tage
+  renewBefore: 360h     # 15 Tage vorher erneuern
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  dnsNames:
+    - dms.stoegerer-home.at
+  issuerRef:
+    name: dms-ca
+    kind: ClusterIssuer
+    group: cert-manager.io

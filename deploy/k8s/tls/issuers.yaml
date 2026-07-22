@@ -1,0 +1,44 @@
+# Interne Cluster-CA für HTTPS (cert-manager) – einmalig als Admin anwenden:
+#   kubectl apply -k deploy/k8s/tls
+#
+# Voraussetzung: cert-manager ist im Cluster installiert (CRDs vorhanden), z. B.
+#   kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
+#
+# Kette: selbstsignierter Bootstrap-Issuer -> Root-CA-Zertifikat (im Secret
+# dms-ca-root) -> CA-ClusterIssuer, der die Leaf-Zertifikate signiert. Die Root-CA
+# einmalig auf den Familien-Geräten als vertrauenswürdig importieren, dann ist die
+# Verbindung ohne Browser-Warnung gültig (LAN-tauglich, keine externe DNS-API).
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: dms-selfsigned-bootstrap
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: dms-ca-root
+  namespace: cert-manager  # CA-Secret liegt bei cert-manager (ClusterIssuer liest von dort)
+spec:
+  isCA: true
+  commonName: DMS Stoegerer interne CA
+  secretName: dms-ca-root
+  duration: 87600h      # 10 Jahre Root-CA
+  renewBefore: 720h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: dms-selfsigned-bootstrap
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: dms-ca
+spec:
+  ca:
+    secretName: dms-ca-root

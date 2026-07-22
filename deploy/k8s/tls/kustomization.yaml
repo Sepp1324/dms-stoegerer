@@ -1,0 +1,19 @@
+# HTTPS-Einrichtung (interne CA) – EINMALIG als Cluster-Admin, NICHT von der CD:
+#   kubectl apply -k deploy/k8s/tls
+#
+# Voraussetzung: cert-manager ist installiert (CRDs cert-manager.io/v1). Enthält:
+#   * issuers.yaml         – selbstsignierter Bootstrap + Root-CA + CA-ClusterIssuer
+#   * certificate.yaml     – Leaf-Zertifikat -> Secret dms-tls (Namespace dms)
+#   * traefik-redirect.yaml – globaler HTTP->HTTPS-Redirect (k3s Traefik, kube-system)
+#
+# Danach den Ingress (deploy/k8s/base) anwenden/rollen – er referenziert dms-tls.
+# Die Root-CA (Secret dms-ca-root im Namespace cert-manager) einmalig exportieren
+# und auf den Geräten als vertrauenswürdig importieren:
+#   kubectl -n cert-manager get secret dms-ca-root -o jsonpath='{.data.tls\.crt}' | base64 -d > dms-ca.crt
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - issuers.yaml
+  - certificate.yaml
+  - traefik-redirect.yaml

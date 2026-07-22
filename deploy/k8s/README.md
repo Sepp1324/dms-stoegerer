@@ -476,15 +476,39 @@ Backup-Monitoring:
 
 ---
 
-## 14. TLS (optional, empfohlen für externen Zugriff)
+## 14. TLS/HTTPS (interne CA – empfohlen fürs LAN)
 
-Für HTTPS statt reinem HTTP:
+Ohne TLS gehen Login & JWT **unverschlüsselt** durchs LAN. Der Ingress hört
+bereits auf `web` **und** `websecure` und referenziert das Secret `dms-tls`
+(`deploy/k8s/base/ingress.yaml`). Zertifikat + Redirect kommen aus
+`deploy/k8s/tls/` (interne Cluster-CA via cert-manager – LAN-tauglich, keine
+externe DNS-API nötig):
 
-1. `cert-manager` installieren und einen `ClusterIssuer` (z. B. Let's Encrypt)
-   anlegen.
-2. Im `ingress.yaml` einen `tls`-Block und die Cert-Manager-Annotation ergänzen,
-   den Traefik-Entrypoint auf `websecure` stellen.
-3. Voraussetzung: ein echter, öffentlich auflösbarer DNS-Name (kein `.local`).
+```bash
+# 1) cert-manager installieren (einmalig, als Admin)
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
+kubectl -n cert-manager rollout status deploy/cert-manager-webhook
+
+# 2) Interne CA + Leaf-Zertifikat (dms-tls) + HTTP->HTTPS-Redirect anwenden
+kubectl apply -k deploy/k8s/tls
+
+# 3) Ingress rollen (falls noch nicht) – nutzt jetzt dms-tls
+kubectl apply -k deploy/k8s/bootstrap   # Namespace/SA (falls neu)
+kubectl apply -k deploy/k8s
+
+# 4) Root-CA exportieren und auf den Familien-Geräten als vertrauenswürdig
+#    importieren (dann keine Browser-Warnung):
+kubectl -n cert-manager get secret dms-ca-root \
+  -o jsonpath='{.data.tls\.crt}' | base64 -d > dms-ca.crt
+```
+
+Danach leitet `http://dms.stoegerer-home.at` automatisch auf `https://…` um. Der
+CD-Deploy fasst `deploy/k8s/tls` **nicht** an (Admin-/One-time-Ressourcen, u. a.
+im `kube-system`/`cert-manager`-Namespace – außerhalb der SA-Rechte).
+
+> Alternative öffentlich-vertraute Zertifikate: statt der internen CA einen
+> Let's-Encrypt-`ClusterIssuer` (DNS-01) verwenden und in `certificate.yaml` den
+> `issuerRef` darauf zeigen lassen (braucht ein DNS-Provider-API-Token als Secret).
 
 ---
 
