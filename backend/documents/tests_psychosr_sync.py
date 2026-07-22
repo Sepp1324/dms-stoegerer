@@ -240,16 +240,23 @@ class SyncDocumentFlashcardsTests(TestCase):
             first = tasks._sync_document_flashcards(doc.id)
 
         self.assertEqual(first["open"], 1)
+        # Die fehlgeschlagene Karte F2 ist wieder freigegeben (pending), F1 pushed.
+        states = dict(
+            FlashcardSyncEntry.objects.filter(version_id=doc.current_version_id).values_list(
+                "payload__frage", "state"
+            )
+        )
+        self.assertEqual(states, {"F1": "pushed", "F2": "pending"})
 
         # Zweiter Lauf: nur die offene Karte F2 wird gesendet, KEINE Neugenerierung.
-        sent.clear()
         with patch("ai.services.generate_flashcards", gen), patch(
-            "documents.psychosr_client.push_flashcard", return_value=None
-        ):
+            "documents.psychosr_client.push_flashcard"
+        ) as push2:
             second = tasks._sync_document_flashcards(doc.id)
 
         gen.assert_called_once()  # nur im ersten Lauf generiert
-        self.assertEqual([f for f, _ in sent], ["F2"])
+        self.assertEqual(push2.call_count, 1)
+        self.assertEqual(push2.call_args.args[0]["frage"], "F2")  # nur die offene Karte
         self.assertEqual(second["open"], 0)
         self.assertTrue(doc.tags.filter(name="psychosr-synced").exists())
 
