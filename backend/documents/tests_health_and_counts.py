@@ -25,15 +25,16 @@ class HealthVersionTests(SimpleTestCase):
 
 
 class LivezTests(SimpleTestCase):
-    """Liveness (P2): antwortet 200 ohne DB-Zugriff – auch wenn die DB weg ist,
-    darf Liveness NICHT fehlschlagen (sonst Neustart-Loop)."""
+    """Liveness (P2): antwortet 200 OHNE DB-Zugriff.
+
+    Bewusst ``SimpleTestCase`` OHNE ``databases`` – hier ist jeder DB-Zugriff
+    verboten. Dass ``livez`` trotzdem 200 liefert, BEWEIST damit, dass es die DB
+    nicht anfasst (würde es die DB berühren, schlüge der Test hier fehl). Kein
+    ``connection.cursor``-Mock nötig (der kollidiert mit dem DB-Guard von
+    SimpleTestCase)."""
 
     def test_livez_ohne_db_200(self):
-        from unittest import mock
-
-        # DB-Verbindung „kaputt": livez darf trotzdem 200 liefern (nutzt sie nicht).
-        with mock.patch("documents.views.connection.cursor", side_effect=Exception("db down")):
-            resp = APIClient().get(reverse("livez"))
+        resp = APIClient().get(reverse("livez"))
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json()["status"], "alive")
 
