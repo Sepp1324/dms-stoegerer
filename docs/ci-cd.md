@@ -119,7 +119,10 @@ Dann die **Actions-Variable `DMS_KUBECONFIG`** auf diesen Pfad setzen (Repo →
 `/home/<runner-user>/.kube/dms-deployer.yaml`). Beide Workflows lesen sie bereits
 (`KUBECONFIG: ${{ vars.DMS_KUBECONFIG }}`) und brechen **hart ab**, wenn sie fehlt
 oder auf `/etc/rancher/k3s/…` (Admin-Kubeconfig) zeigt – kein stiller Admin-
-Fallback. Den Namespace `dms` legt Schritt 1 (Bootstrap) an; er ist cluster-scoped
+Fallback. Zusätzlich prüft `scripts/verify-deploy-identity.sh` die **echte**
+Identität serverseitig (`kubectl auth whoami` muss exakt
+`system:serviceaccount:dms:dms-deployer` liefern) und lehnt cluster-admin ab –
+eine anderswohin kopierte Admin-Kubeconfig kommt so nicht durch. Den Namespace `dms` legt Schritt 1 (Bootstrap) an; er ist cluster-scoped
 und bewusst nicht Teil von `deploy/k8s/base` (sonst enthielte jedes CI-`apply -k`
 ein Objekt, für das die SA-Role keine Rechte hat). Läuft ein Token ab, Schritt 2
 erneut ausführen.
