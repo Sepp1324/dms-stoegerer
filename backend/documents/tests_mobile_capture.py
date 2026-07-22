@@ -15,6 +15,7 @@ from unittest import mock
 import pikepdf
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import override_settings
 from PIL import Image
 from rest_framework.test import APITestCase
 
@@ -145,6 +146,28 @@ class MobileCaptureUploadTests(APITestCase):
 
     def test_zu_viele_bilder_ergibt_400(self):
         data = {"images": [_file(_jpeg(), f"{i}.jpg", "image/jpeg") for i in range(31)]}
+        resp, delay = self._post(data, user=self.user)
+        self.assertEqual(resp.status_code, 400, resp.data)
+        delay.assert_not_called()
+        self.assertEqual(Document.objects.count(), 0)
+
+    # --- RAM-Schutz (P1) ------------------------------------------------
+    @override_settings(MOBILE_CAPTURE_MAX_TOTAL_BYTES=100)  # winziges Gesamtlimit
+    def test_gesamtlimit_ueberschritten_ergibt_400(self):
+        # Zwei kleine Bilder überschreiten zusammen bereits 100 Bytes.
+        data = {"images": [
+            _file(_jpeg(), "a.jpg", "image/jpeg"),
+            _file(_jpeg(), "b.jpg", "image/jpeg"),
+        ]}
+        resp, delay = self._post(data, user=self.user)
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("Gesamtlimit", resp.data["detail"])
+        delay.assert_not_called()
+        self.assertEqual(Document.objects.count(), 0)
+
+    @override_settings(MOBILE_CAPTURE_MAX_IMAGE_PIXELS=100)  # 100 Pixel -> jedes Bild zu groß
+    def test_pixel_bombe_wird_abgewiesen(self):
+        data = {"images": [_file(_jpeg(size=(120, 160)), "gross.jpg", "image/jpeg")]}
         resp, delay = self._post(data, user=self.user)
         self.assertEqual(resp.status_code, 400, resp.data)
         delay.assert_not_called()

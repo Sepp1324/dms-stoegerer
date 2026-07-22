@@ -155,6 +155,15 @@ CONSUME_MIN_AGE = float(os.getenv("CONSUME_MIN_AGE", "15"))
 # abgewiesen, bevor die Platte vollläuft. Neue Env-Var: Backend-Deployment-Env
 # ggf. anpassen – KEINE Migration.
 UPLOAD_MAX_FILE_MB = int(os.getenv("UPLOAD_MAX_FILE_MB", "200"))
+
+# Mobile-Erfassung (mehrere Bilder -> ein PDF). Grenzen gegen RAM-Erschöpfung des
+# Web-Prozesses: Gesamt-Byte-Deckel über ALLE Bilder, Pixel-Obergrenze je Bild
+# (Decompression-Bomb) und maximale Kantenlänge fürs Downscaling beim Dekodieren.
+MOBILE_CAPTURE_MAX_TOTAL_BYTES = int(
+    os.getenv("MOBILE_CAPTURE_MAX_TOTAL_MB", "120")
+) * 1024 * 1024
+MOBILE_CAPTURE_MAX_IMAGE_PIXELS = int(os.getenv("MOBILE_CAPTURE_MAX_IMAGE_PIXELS", "40000000"))
+MOBILE_CAPTURE_MAX_DIMENSION = int(os.getenv("MOBILE_CAPTURE_MAX_DIMENSION", "4000"))
 # Pro-User-Attribution des Consume-Ingest. Ist das Flag aktiv, iteriert
 # ``scan_consume_folder`` die Top-Level-Unterordner von ``CONSUME_DIR``: der
 # Ordnername ist der Username, alle darin reifen Dateien werden dem passenden

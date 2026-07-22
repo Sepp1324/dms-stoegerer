@@ -3,6 +3,8 @@ import io
 import os
 import re
 import secrets
+import shutil
+import tempfile
 from datetime import date as date_cls
 from datetime import datetime, time, timedelta
 from datetime import timezone as dt_timezone
@@ -12,7 +14,7 @@ import img2pdf
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.core.files.uploadedfile import SimpleUploadedFile
+from django.core.files import File
 from django.db import connection, transaction
 from django.db.models import Case, DecimalField, F, Q, Value, When
 from django.db.models import Count, IntegerField, Max, OuterRef, Prefetch, Subquery
@@ -1137,22 +1139,64 @@ class _InvalidImage(Exception):
     """Interne Markierung: hochgeladene Datei ist kein verarbeitbares Bild."""
 
 
+def _mobile_capture_max_pixels() -> int:
+    return int(getattr(settings, "MOBILE_CAPTURE_MAX_IMAGE_PIXELS", 40_000_000))
+
+
+def _mobile_capture_max_dimension() -> int:
+    return int(getattr(settings, "MOBILE_CAPTURE_MAX_DIMENSION", 4000))
+
+
+def _reject_if_pixel_bomb(raw: bytes) -> None:
+    """Weist Bilder ab, deren Pixelzahl das Limit sprengt – BEVOR sie dekodiert
+    oder (via img2pdf) verlustfrei eingebettet werden.
+
+    Schützt (a) den Web-Prozess vor Decompression-Bombs beim Pillow-Decode und
+    (b) den späteren OCR-Schritt (rastert eingebettete Riesenbilder). ``Image.open``
+    liest die Maße lazy (ohne Voll-Dekodierung). Nicht lesbare Bytes werden hier
+    durchgelassen – img2pdf/Pillow entscheiden dann.
+    """
+    from PIL import Image
+
+    try:
+        with Image.open(io.BytesIO(raw)) as im:
+            width, height = im.size
+    except Exception:  # noqa: BLE001 – hier nur die Größe prüfen; Format später
+        return
+    max_pixels = _mobile_capture_max_pixels()
+    if width * height > max_pixels:
+        raise _InvalidImage(
+            f"Bild zu groß ({width}x{height} Pixel > Limit {max_pixels})."
+        )
+
+
 def _pillow_to_jpeg(raw: bytes) -> bytes:
     """Öffnet Bytes mit Pillow, flacht nach RGB ab und liefert JPEG Q90.
 
     Deckt HEIC/HEIF (nach ``register_heif_opener``), PNG mit Alpha und
     CMYK-JPEG ab – Formate, die ``img2pdf`` sonst ablehnt. Kann Pillow das
     Bild nicht öffnen, wird ``_InvalidImage`` geworfen (→ 400 im View).
+
+    RAM-Schutz: zu pixelreiche Bilder werden abgewiesen (Decompression-Bomb) und
+    das dekodierte Bild auf ``MOBILE_CAPTURE_MAX_DIMENSION`` (längste Seite)
+    heruntergerechnet – der JPEG-Encode arbeitet so auf beschränktem Speicher.
     """
     from PIL import Image, UnidentifiedImageError
 
+    _reject_if_pixel_bomb(raw)
+    max_dim = _mobile_capture_max_dimension()
     try:
         with Image.open(io.BytesIO(raw)) as im:
+            # JPEG: beim Dekodieren gleich vorskalieren (speichersparsam).
+            im.draft("RGB", (max_dim, max_dim))
             rgb = im.convert("RGB")
+            rgb.thumbnail((max_dim, max_dim))  # längste Seite <= max_dim
             out = io.BytesIO()
             rgb.save(out, format="JPEG", quality=90)
             return out.getvalue()
-    except (UnidentifiedImageError, OSError, ValueError) as exc:
+    except _InvalidImage:
+        raise
+    except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError) as exc:
         raise _InvalidImage(str(exc))
 
 
@@ -1179,6 +1223,9 @@ def _normalize_image_to_pdf_source(uploaded) -> bytes:
             raise _InvalidImage(f"HEIC-Unterstützung nicht verfügbar: {exc}")
         return _pillow_to_jpeg(raw)
 
+    # Auch im verlustfreien Direkt-Pfad zuerst die Pixelzahl begrenzen: img2pdf
+    # bettet das Bild unverändert ein, aber der spätere OCR-Schritt rastert es.
+    _reject_if_pixel_bomb(raw)
     try:
         # Validiert Format und akzeptiert JPEG/TIFF verlustfrei.
         img2pdf.convert([raw])
@@ -1203,6 +1250,13 @@ class MobileCaptureUploadView(APIView):
     MAX_IMAGES = 30
     MAX_BYTES_PER_IMAGE = 25 * 1024 * 1024  # ~25 MB
 
+    @property
+    def MAX_TOTAL_BYTES(self) -> int:
+        # Deckel über ALLE Bilder zusammen (nicht nur je Bild): 30x25 MB = 750 MB
+        # wären sonst zulässig und würden – gleichzeitig gehalten + dekodiert – den
+        # Pod per RAM töten. Default 120 MB, per Env justierbar.
+        return int(getattr(settings, "MOBILE_CAPTURE_MAX_TOTAL_BYTES", 120 * 1024 * 1024))
+
     def post(self, request):
         if not request.user.can_write:
             return Response(
@@ -1222,32 +1276,56 @@ class MobileCaptureUploadView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        page_sources: list[bytes] = []
-        for uploaded in images:
-            if uploaded.size and uploaded.size > self.MAX_BYTES_PER_IMAGE:
-                return Response(
-                    {"detail": f"Datei {uploaded.name} ist zu groß (max. 25 MB je Bild)."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-            try:
-                page_sources.append(_normalize_image_to_pdf_source(uploaded))
-            except _InvalidImage:
-                return Response(
-                    {"detail": f"Datei {uploaded.name} ist kein gültiges Bild."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+        total = sum(int(getattr(u, "size", 0) or 0) for u in images)
+        if total > self.MAX_TOTAL_BYTES:
+            mb = self.MAX_TOTAL_BYTES // (1024 * 1024)
+            return Response(
+                {"detail": f"Bilder überschreiten das Gesamtlimit (max. {mb} MB zusammen)."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-        # Reihenfolge der Seiten = Reihenfolge im Request.
-        pdf_bytes = img2pdf.convert(page_sources)
+        # Jede normalisierte Seite SOFORT auf die Platte schreiben (nicht alle Bytes
+        # gleichzeitig im RAM halten) und die PDF-Ausgabe direkt in eine Temp-Datei
+        # streamen (img2pdf ``outputstream``) – der Web-Prozess hält nie mehr als ein
+        # Bild + Puffer im Speicher. Temp-Dateien werden am Ende garantiert entfernt.
+        tmp_dir = tempfile.mkdtemp(prefix="dms-mobile-")
+        try:
+            page_paths: list[str] = []
+            for idx, uploaded in enumerate(images):
+                if uploaded.size and uploaded.size > self.MAX_BYTES_PER_IMAGE:
+                    return Response(
+                        {"detail": f"Datei {uploaded.name} ist zu groß (max. 25 MB je Bild)."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                try:
+                    page_bytes = _normalize_image_to_pdf_source(uploaded)
+                except _InvalidImage:
+                    return Response(
+                        {"detail": f"Datei {uploaded.name} ist kein gültiges Bild."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                page_path = os.path.join(tmp_dir, f"page-{idx:04d}")
+                with open(page_path, "wb") as fh:
+                    fh.write(page_bytes)
+                page_paths.append(page_path)
+                del page_bytes  # Referenz freigeben (GC), bevor das nächste Bild kommt
 
-        title = request.data.get("title") or (
-            f"Mobile-Erfassung {timezone.localdate().strftime('%d.%m.%Y')}"
-        )
-        safe_title = slugify(title) or "mobile-erfassung"
-        pdf_file = SimpleUploadedFile(
-            f"{safe_title}.pdf", pdf_bytes, content_type="application/pdf"
-        )
-        file_path, size, _mime = storage.save_upload(pdf_file)
+            title = request.data.get("title") or (
+                f"Mobile-Erfassung {timezone.localdate().strftime('%d.%m.%Y')}"
+            )
+            safe_title = slugify(title) or "mobile-erfassung"
+
+            # PDF direkt in eine Temp-Datei streamen (Reihenfolge = Request-Reihenfolge).
+            pdf_path = os.path.join(tmp_dir, f"{safe_title}.pdf")
+            with open(pdf_path, "wb") as out:
+                img2pdf.convert(page_paths, outputstream=out)
+
+            with open(pdf_path, "rb") as pdf_fh:
+                # storage.save_upload streamt via .chunks() – kein Voll-Read in den RAM.
+                django_file = File(pdf_fh, name=f"{safe_title}.pdf")
+                file_path, size, _mime = storage.save_upload(django_file)
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
         document, version = pipeline.create_document_from_file(
             file_path,
