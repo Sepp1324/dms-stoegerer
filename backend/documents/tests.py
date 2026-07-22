@@ -1238,6 +1238,11 @@ class CustomFieldTests(APITestCase):
         cls.guest = User.objects.create_user(
             username="cf_guest", password="pw", role="guest"
         )
+        # Zusatzfeld-Definitionen sind globale Schema-Daten: Umbenennen/Löschen ist
+        # admin-only (P2). Für diese Mutationen ein Admin-Nutzer.
+        cls.admin = User.objects.create_user(
+            username="cf_admin", password="pw", role="admin"
+        )
         cls.betrag = CustomField.objects.create(
             name="Rechnungsbetrag", data_type=CustomField.DataType.CURRENCY
         )
@@ -1274,7 +1279,7 @@ class CustomFieldTests(APITestCase):
         self.assertEqual(resp.status_code, 403)
 
     def test_data_type_beim_update_read_only(self):
-        self.client.force_authenticate(self.user)
+        self.client.force_authenticate(self.admin)
         resp = self.client.patch(
             f"/api/custom-fields/{self.betrag.id}/",
             {"name": "Betrag", "data_type": "text"},
@@ -1288,7 +1293,7 @@ class CustomFieldTests(APITestCase):
 
     def test_delete_ohne_werte_erlaubt(self):
         field = CustomField.objects.create(name="Temp", data_type="text")
-        self.client.force_authenticate(self.user)
+        self.client.force_authenticate(self.admin)
         resp = self.client.delete(f"/api/custom-fields/{field.id}/")
         self.assertEqual(resp.status_code, 204)
         self.assertFalse(CustomField.objects.filter(id=field.id).exists())
@@ -1296,7 +1301,7 @@ class CustomFieldTests(APITestCase):
     def test_delete_mit_werten_geblockt(self):
         doc = Document.objects.create(title="Rg", owner=self.user)
         CustomFieldValue.objects.create(document=doc, field=self.betrag, value="42")
-        self.client.force_authenticate(self.user)
+        self.client.force_authenticate(self.admin)
         resp = self.client.delete(f"/api/custom-fields/{self.betrag.id}/")
         self.assertEqual(resp.status_code, 409)
         self.assertIn("detail", resp.json())
