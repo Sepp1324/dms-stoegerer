@@ -119,9 +119,13 @@ spec:
                     | gzip > "${DB_BACKUP}"
 
                   echo "--- tar: /data → ${DATA_BACKUP}"
+                  # WICHTIG: ``originals`` MUSS mit gesichert werden – dort liegen die
+                  # Dateien hinter DocumentVersion.file_path samt Hash-Beweiskette.
+                  # Ohne sie ist ein Restore wertlos (P0). archive = OCR-PDFs,
+                  # thumbnails = Vorschauen, consume = Eingang.
                   tar -czf "${DATA_BACKUP}" \
                     -C /data \
-                    archive thumbnails consume
+                    originals archive thumbnails consume
 
                   echo "--- Übertragung → ${BACKUP_SSH_USER}@${BACKUP_SSH_HOST}:${BACKUP_TARGET_PATH}"
                   scp -O -S "${SSH_WRAPPER}" \
