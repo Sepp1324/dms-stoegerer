@@ -45,22 +45,11 @@ jobs:
         uses: actions/checkout@v4
 
       - name: KUBECONFIG (SA, least privilege) prüfen
-        # Verbindlich auf die namespacebeschränkte dms-deployer-Kubeconfig. Kein
-        # stiller Fallback auf die Admin-Kubeconfig: leerer Pfad oder ein Pfad in
-        # /etc/rancher/k3s/ bricht hier hart ab.
-        run: |
-          set -euo pipefail
-          if [ -z "${KUBECONFIG:-}" ] || [ ! -r "${KUBECONFIG}" ]; then
-            echo "::error::Actions-Variable DMS_KUBECONFIG nicht gesetzt oder Datei nicht lesbar."
-            echo "Erwartet: Pfad zur 0600-SA-Kubeconfig (dms-deployer). Siehe docs/ci-cd.md §1."
-            exit 1
-          fi
-          case "${KUBECONFIG}" in
-            /etc/rancher/k3s/*)
-              echo "::error::KUBECONFIG zeigt auf die k3s-Admin-Kubeconfig – bitte die SA-Kubeconfig verwenden."
-              exit 1;;
-          esac
-          echo "Deploy-Kontext: $(kubectl config current-context)"
+        # Verbindlich auf die namespacebeschränkte dms-deployer-Identität. Der
+        # Pfad-Check allein reicht NICHT (eine anderswo hinkopierte Admin-Kubeconfig
+        # käme durch): daher die ECHTE Identität serverseitig prüfen und cluster-
+        # admin explizit ablehnen.
+        run: scripts/verify-deploy-identity.sh
 
       - name: Image-Tag = Git-SHA
         run: echo "TAG=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
