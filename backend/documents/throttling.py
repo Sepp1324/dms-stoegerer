@@ -34,3 +34,11 @@ class CaptureRateThrottle(_PerUserScopeThrottle):
     """Limit für den Mobile-Capture-Upload (Scope ``capture``)."""
 
     scope = "capture"
+
+
+class AiRateThrottle(_PerUserScopeThrottle):
+    """Limit für teure KI-Endpunkte – Copilot (Ask) und semantische Suche
+    (Scope ``ai``). Bremst Provider-Kosten und CPU/RAM-Last durch einzelne
+    (auch versehentlich schleifende) Nutzer, ohne Listen/Suche zu drosseln."""
+
+    scope = "ai"
