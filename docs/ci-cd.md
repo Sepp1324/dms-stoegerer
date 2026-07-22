@@ -83,9 +83,11 @@ nur in `dms` und braucht kein cluster-admin. Einmalig als Admin anwenden und
 eine eigene **0600**-Kubeconfig mit einem SA-Token erzeugen:
 
 ```bash
-# 1) ServiceAccount + namespace-scoped Role/RoleBinding (Rechte nur auf die vom
-#    Deploy angefassten Ressourcen im Namespace dms):
-kubectl apply -f deploy/k8s/deploy-serviceaccount.yaml
+# 1) Einmaliger Bootstrap (Admin): Namespace dms + ServiceAccount dms-deployer
+#    + namespace-scoped Role/RoleBinding (Rechte nur auf die vom Deploy
+#    angefassten Ressourcen). Enthält bewusst den cluster-scoped Namespace,
+#    den der SA selbst NICHT anlegen darf:
+kubectl apply -k deploy/k8s/bootstrap
 
 # 2) Kurzlebiges (hier 1 Jahr) Token + eigene Kubeconfig NUR für den Runner (0600):
 RUNNER_HOME=$(eval echo "~<runner-user>")
@@ -112,10 +114,15 @@ sudo chown <runner-user> "$KCFG"
 sudo chmod 600 "$KCFG"
 ```
 
-Dann in beiden Workflows (`deploy.yml`, `deploy-frontend.yml`) das `KUBECONFIG`
-im `env`-Block auf `/home/<runner-user>/.kube/dms-deployer.yaml` zeigen lassen.
-Den Namespace `dms` legt der Admin einmalig an (er ist cluster-scoped und wird
-bewusst nicht vom SA verwaltet). Läuft ein Token ab, Schritt 2 erneut ausführen.
+Dann die **Actions-Variable `DMS_KUBECONFIG`** auf diesen Pfad setzen (Repo →
+**Settings → Actions → Variables → New variable**, z. B.
+`/home/<runner-user>/.kube/dms-deployer.yaml`). Beide Workflows lesen sie bereits
+(`KUBECONFIG: ${{ vars.DMS_KUBECONFIG }}`) und brechen **hart ab**, wenn sie fehlt
+oder auf `/etc/rancher/k3s/…` (Admin-Kubeconfig) zeigt – kein stiller Admin-
+Fallback. Den Namespace `dms` legt Schritt 1 (Bootstrap) an; er ist cluster-scoped
+und bewusst nicht Teil von `deploy/k8s/base` (sonst enthielte jedes CI-`apply -k`
+ein Objekt, für das die SA-Role keine Rechte hat). Läuft ein Token ab, Schritt 2
+erneut ausführen.
 
 **Mindestens (falls die admin-Kubeconfig vorerst bleibt): NIE 0644.** Nur der
 Runner-Nutzer darf lesen – eigene Gruppe + `0640`, nicht weltlesbar:

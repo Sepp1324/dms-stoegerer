@@ -188,13 +188,14 @@ In `deploy/k8s/secret.yaml` eintragen:
 ## 7. Ausrollen
 
 ```bash
-# 1. Namespace zuerst – das Secret lebt darin und braucht ihn vorab
-kubectl apply -f deploy/k8s/namespace.yaml
+# 1. Bootstrap zuerst (Admin): Namespace dms + Deploy-ServiceAccount/RBAC.
+#    Das Secret lebt im Namespace und braucht ihn vorab.
+kubectl apply -k deploy/k8s/bootstrap
 
 # 2. Secret (steht bewusst nicht in der kustomization)
 kubectl apply -f deploy/k8s/secret.yaml
 
-# 3. Der Rest per kustomize (legt den Namespace idempotent erneut an – ok)
+# 3. Der Rest per kustomize (Namespace ist NICHT mehr in base – kommt aus Schritt 1)
 kubectl apply -k deploy/k8s
 
 # Hochlaufen beobachten
@@ -529,9 +530,9 @@ docker build -t registry.stoegerer-home.at/dms-frontend:$VERSION ./frontend
 docker push registry.stoegerer-home.at/dms-backend:$VERSION
 docker push registry.stoegerer-home.at/dms-frontend:$VERSION
 
-# 3. Namespace → Secret → Deploy (Reihenfolge beachten!)
+# 3. Bootstrap → Secret → Deploy (Reihenfolge beachten!)
 cp deploy/k8s/secret.example.yaml deploy/k8s/secret.yaml   # Werte eintragen!
-kubectl apply -f deploy/k8s/namespace.yaml
+kubectl apply -k deploy/k8s/bootstrap
 kubectl apply -f deploy/k8s/secret.yaml
 kubectl apply -k deploy/k8s
 

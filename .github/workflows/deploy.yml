@@ -26,8 +26,13 @@ permissions:
 
 env:
   REGISTRY: registry.stoegerer-home.at
-  # k3s legt die Kubeconfig hier ab; der Runner-Nutzer braucht Lesezugriff.
-  KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  # Deploy-Identität: die namespacebeschränkte SA-Kubeconfig (dms-deployer), NICHT
+  # die cluster-admin-Kubeconfig. Der Pfad kommt aus der Actions-Variable
+  # DMS_KUBECONFIG (Repo → Settings → Actions → Variables), die der Betreiber beim
+  # Setup auf die 0600-SA-Kubeconfig zeigen lässt (docs/ci-cd.md §1). BEWUSST kein
+  # Fallback auf /etc/rancher/k3s/k3s.yaml – ein leerer Wert soll hart scheitern,
+  # statt heimlich mit Admin-Rechten zu deployen.
+  KUBECONFIG: ${{ vars.DMS_KUBECONFIG }}
   # STOAA-450: NFS-Konfiguration aus Secrets (nicht im Repo)
   NFS_SERVER: ${{ secrets.NFS_SERVER }}
   NFS_EXPORT_PATH: ${{ secrets.NFS_EXPORT_PATH }}
@@ -38,6 +43,24 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: KUBECONFIG (SA, least privilege) prüfen
+        # Verbindlich auf die namespacebeschränkte dms-deployer-Kubeconfig. Kein
+        # stiller Fallback auf die Admin-Kubeconfig: leerer Pfad oder ein Pfad in
+        # /etc/rancher/k3s/ bricht hier hart ab.
+        run: |
+          set -euo pipefail
+          if [ -z "${KUBECONFIG:-}" ] || [ ! -r "${KUBECONFIG}" ]; then
+            echo "::error::Actions-Variable DMS_KUBECONFIG nicht gesetzt oder Datei nicht lesbar."
+            echo "Erwartet: Pfad zur 0600-SA-Kubeconfig (dms-deployer). Siehe docs/ci-cd.md §1."
+            exit 1
+          fi
+          case "${KUBECONFIG}" in
+            /etc/rancher/k3s/*)
+              echo "::error::KUBECONFIG zeigt auf die k3s-Admin-Kubeconfig – bitte die SA-Kubeconfig verwenden."
+              exit 1;;
+          esac
+          echo "Deploy-Kontext: $(kubectl config current-context)"
 
       - name: Image-Tag = Git-SHA
         run: echo "TAG=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"

@@ -32,7 +32,10 @@ permissions:
 
 env:
   REGISTRY: registry.stoegerer-home.at
-  KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  # Namespacebeschränkte SA-Kubeconfig (dms-deployer), NICHT cluster-admin. Pfad
+  # aus der Actions-Variable DMS_KUBECONFIG (docs/ci-cd.md §1). Kein Fallback auf
+  # die Admin-Kubeconfig – leerer Wert scheitert hart.
+  KUBECONFIG: ${{ vars.DMS_KUBECONFIG }}
 
 jobs:
   deploy-frontend:
@@ -43,6 +46,20 @@ jobs:
         with:
           # Falls git_sha angegeben wurde, diesen SHA auschecken; sonst main-HEAD.
           ref: ${{ github.event.inputs.git_sha || 'main' }}
+
+      - name: KUBECONFIG (SA, least privilege) prüfen
+        run: |
+          set -euo pipefail
+          if [ -z "${KUBECONFIG:-}" ] || [ ! -r "${KUBECONFIG}" ]; then
+            echo "::error::Actions-Variable DMS_KUBECONFIG nicht gesetzt oder Datei nicht lesbar (docs/ci-cd.md §1)."
+            exit 1
+          fi
+          case "${KUBECONFIG}" in
+            /etc/rancher/k3s/*)
+              echo "::error::KUBECONFIG zeigt auf die k3s-Admin-Kubeconfig – bitte die SA-Kubeconfig verwenden."
+              exit 1;;
+          esac
+          echo "Deploy-Kontext: $(kubectl config current-context)"
 
       - name: Image-Tag bestimmen
         # Als Docker-Tag IMMER den aufgelösten kurzen Git-SHA des ausgecheckten
