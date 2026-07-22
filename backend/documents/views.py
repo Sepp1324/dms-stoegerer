@@ -425,6 +425,18 @@ def health(request):
     )
 
 
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def livez(request):
+    """Liveness-Probe: prüft NUR, ob der Web-Prozess antwortet – KEINE DB.
+
+    Getrennt von ``health`` (Readiness inkl. DB): Ein DB-Ausfall soll den Pod
+    aus dem Service nehmen (Readiness 503), aber NICHT zusätzlich Neustarts
+    auslösen (Liveness). Sonst rebooten bei jedem DB-Blip alle Backend-Pods.
+    """
+    return Response({"status": "alive", "service": "dms-backend"}, status=200)
+
+
 class BackupStatusView(APIView):
     """Admin-only Betriebsstatus für Backup-CronJob und Restore-Drill."""
 

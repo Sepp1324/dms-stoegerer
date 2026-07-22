@@ -111,9 +111,13 @@ spec:
                   value: localhost
             initialDelaySeconds: 10
             periodSeconds: 15
+          # Liveness prüft NUR den Webprozess (/api/livez/, KEINE DB). Sonst würde
+          # ein DB-Ausfall (health = 503) zusätzlich zum Readiness-Ausfall alle
+          # Backend-Pods in einen Neustart-Loop schicken – der die DB-Erholung nur
+          # weiter stört. Readiness (mit DB) nimmt den Pod solange aus dem Service.
           livenessProbe:
             httpGet:
-              path: /api/health/
+              path: /api/livez/
               port: 8000
               httpHeaders:
                 - name: Host
