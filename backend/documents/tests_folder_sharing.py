@@ -33,13 +33,14 @@ class FolderSharingTests(APITestCase):
         household = Household.objects.create(name="Fam", created_by=cls.alice)
         household.members.add(cls.alice, cls.bob)  # carol NICHT
 
+        # Ordner gehören Alice (Sicherheits-Anker: nur der Owner teilt seine Docs).
         cls.shared_folder = DocumentFolder.objects.create(
-            name="Familie", shared_with_household=True
+            name="Familie", shared_with_household=True, owner=cls.alice
         )
         cls.sub_folder = DocumentFolder.objects.create(
-            name="Unterordner", parent=cls.shared_folder
+            name="Unterordner", parent=cls.shared_folder, owner=cls.alice
         )  # erbt Freigabe
-        cls.private_folder = DocumentFolder.objects.create(name="Privat")
+        cls.private_folder = DocumentFolder.objects.create(name="Privat", owner=cls.alice)
 
         cls.in_shared = _doc(cls.alice, "InShared", folder=cls.shared_folder)
         cls.in_sub = _doc(cls.alice, "InSub", folder=cls.sub_folder)
@@ -88,3 +89,56 @@ class FolderSharingTests(APITestCase):
 
         self.client.force_authenticate(self.bob)
         self.assertIn(self.in_private.id, self._list_ids())
+
+
+class FolderShareOwnershipTests(APITestCase):
+    """P1: Ordnerfreigabe ist owner-verankert – ein Mitglied kann weder fremde
+    Ordner freigeben noch über einen eigenen Ordner fremde Dokumente exponieren."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.alice = User.objects.create_user("o_alice", password="pw", role="user")
+        cls.bob = User.objects.create_user("o_bob", password="pw", role="user")
+        hh = Household.objects.create(name="Fam", created_by=cls.alice)
+        hh.members.add(cls.alice, cls.bob)
+
+    def _list_ids(self, user):
+        self.client.force_authenticate(user)
+        return [d["id"] for d in self.client.get("/api/documents/").data["results"]]
+
+    def test_fremder_ordner_freigabe_wird_abgelehnt(self):
+        folder = DocumentFolder.objects.create(name="AlicesOrdner", owner=self.alice)
+        self.client.force_authenticate(self.bob)  # NICHT der Owner
+        resp = self.client.patch(
+            f"/api/folders/{folder.id}/", {"shared_with_household": True}, format="json"
+        )
+        self.assertEqual(resp.status_code, 403)
+        folder.refresh_from_db()
+        self.assertFalse(folder.shared_with_household)
+
+    def test_ownerloser_ordner_nur_admin(self):
+        folder = DocumentFolder.objects.create(name="Global", owner=None)
+        self.client.force_authenticate(self.bob)
+        resp = self.client.patch(
+            f"/api/folders/{folder.id}/", {"shared_with_household": True}, format="json"
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_ordnerfreigabe_exponiert_nur_owner_dokumente(self):
+        # Bob besitzt und teilt einen Ordner; Alice hat ein privates Dokument darin
+        # abgelegt. Bobs Freigabe darf ALICES Dokument NICHT exponieren.
+        folder = DocumentFolder.objects.create(
+            name="BobsOrdner", owner=self.bob, shared_with_household=True
+        )
+        bob_doc = _doc(self.bob, "BobEigen", folder=folder)
+        alice_doc = _doc(self.alice, "AliceFremd", folder=folder)
+
+        alice_sees = self._list_ids(self.alice)
+        self.assertIn(bob_doc.id, alice_sees)        # Bobs eigenes Doc: geteilt
+        self.assertIn(alice_doc.id, alice_sees)      # Alices eigenes Doc: sowieso sichtbar
+
+        # Umgekehrt: für Bob ist Alices Fremd-Doc im selben Ordner NICHT sichtbar
+        # (die Ordnerfreigabe wirkt nur für Bobs eigene Dokumente).
+        bob_sees = self._list_ids(self.bob)
+        self.assertIn(bob_doc.id, bob_sees)
+        self.assertNotIn(alice_doc.id, bob_sees)
