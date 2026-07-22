@@ -837,23 +837,15 @@ class AskView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # Haushalts-Sichtbarkeit (eigene + freigegebene) EINHEITLICH über den
+        # zentralen Helfer – sonst verschwinden geteilte Dokumente aus dem Copilot.
         qs = (
-            Document.objects.select_related(
-                "correspondent",
-                "document_type",
-                "folder",
-                "case_file",
-                "current_version",
-            )
-            .select_related(
-                "contract_record",
-            )
+            _visible_documents_for(request.user)
+            .select_related("contract_record")
             .prefetch_related("tags", "current_version__page_texts")
             .exclude(current_version__isnull=True)
             .order_by("-added_at")
         )
-        if not getattr(request.user, "is_dms_admin", False):
-            qs = qs.filter(owner=request.user)
 
         folder = request.data.get("folder")
         if folder in ("", None):
@@ -978,12 +970,9 @@ class SemanticSearchView(APIView):
             limit = 8
         limit = max(1, min(limit, 20))
 
-        qs = (
-            Document.objects.select_related("folder", "current_version")
-            .exclude(current_version__isnull=True)
-        )
-        if not getattr(request.user, "is_dms_admin", False):
-            qs = qs.filter(owner=request.user)
+        # Haushalts-Sichtbarkeit EINHEITLICH über den zentralen Helfer (nicht nur
+        # owner=request.user) – sonst fehlen geteilte Dokumente in der Bedeutungssuche.
+        qs = _visible_documents_for(request.user).exclude(current_version__isnull=True)
 
         results = semantic_index_service.search_documents(question, qs, limit=limit)
         from ai import embeddings as _embeddings
