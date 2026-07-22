@@ -378,7 +378,19 @@ CELERY_BEAT_SCHEDULE = {
         "task": "documents.tasks.reap_stuck_flashcard_syncs",
         "schedule": float(os.getenv("FLASHCARD_REAP_INTERVAL", "900")),
     },
+    # Findbarkeits-Reconciler: READY-Versionen ohne bestätigten Index (indexed_at
+    # NULL) nachindexieren (Suchvektor + Semantik), damit kein Dokument dauerhaft
+    # „bereit", aber nicht auffindbar bleibt.
+    "reap-unindexed-versions": {
+        "task": "documents.tasks.reap_unindexed_versions",
+        "schedule": float(os.getenv("INDEX_RECONCILE_INTERVAL", "600")),
+    },
 }
+
+# Findbarkeits-Reconciler: ab wann eine READY-Version ohne indexed_at nachindexiert
+# wird (der Erst-Lauf nach READY bekommt Zeit) und wie viele pro Beat-Lauf.
+INDEX_RECONCILE_AFTER_MINUTES = int(os.getenv("INDEX_RECONCILE_AFTER_MINUTES", "15"))
+INDEX_RECONCILE_BATCH = int(os.getenv("INDEX_RECONCILE_BATCH", "50"))
 
 # psychosr-Kartensync: nach wie vielen fehlgeschlagenen Push-Versuchen eine Karte
 # endgültig FAILED wird (kein Endlos-Retry; Monitoring über last_error). Und das

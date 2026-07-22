@@ -444,6 +444,51 @@ def reap_stuck_versions() -> dict:
 
 
 @shared_task
+def reap_unindexed_versions() -> dict:
+    """Reconciler (Beat): baut die PFLICHT-Findbarkeitsindizes für READY-Versionen
+    nach, deren Indizierung fehlte oder fehlschlug.
+
+    Hintergrund: Suchvektor + semantischer Index laufen best-effort NACH READY;
+    ein Fehler wird nur geloggt. Ohne diesen Reconciler bliebe das Dokument
+    dauerhaft „bereit", aber NICHT auffindbar (der Stuck-Watchdog behandelt READY
+    als terminal). Kriterium: ``processing_state=READY`` UND ``indexed_at IS NULL``
+    UND seit dem Erreichen von READY sind mind. ``INDEX_RECONCILE_AFTER_MINUTES``
+    vergangen (der Erst-Lauf bekommt Zeit). Gebatcht (``INDEX_RECONCILE_BATCH``),
+    idempotent (Reindex ist wiederholbar; Erfolg setzt indexed_at).
+    """
+    from datetime import timedelta
+
+    PS = DocumentVersion.ProcessingState
+    minutes = float(getattr(settings, "INDEX_RECONCILE_AFTER_MINUTES", 15))
+    limit = int(getattr(settings, "INDEX_RECONCILE_BATCH", 50))
+    threshold = timezone.now() - timedelta(minutes=minutes)
+
+    versions = list(
+        DocumentVersion.objects.select_related("document")
+        .filter(
+            processing_state=PS.READY,
+            indexed_at__isnull=True,
+            processing_state_changed_at__lt=threshold,
+        )
+        .order_by("processing_state_changed_at")[:limit]
+    )
+    reindexed = 0
+    for version in versions:
+        try:
+            if pipeline.ensure_findability_index(version):
+                reindexed += 1
+        except SoftTimeLimitExceeded:
+            raise  # Soft-Time-Limit nicht verschlucken.
+        except Exception:  # noqa: BLE001 – pro Version isoliert, Beat läuft weiter
+            logger.exception(
+                "reap_unindexed_versions: Nachindizierung fehlgeschlagen für %s", version.id
+            )
+    if reindexed:
+        logger.info("reap_unindexed_versions: %d Versionen nachindexiert.", reindexed)
+    return {"candidates": len(versions), "reindexed": reindexed}
+
+
+@shared_task
 def reap_stuck_flashcard_syncs() -> dict:
     """Watchdog für hängengebliebene psychosr-Kartensyncs (Beat).
 
