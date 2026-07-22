@@ -233,45 +233,59 @@ def _household_member_ids(user) -> set:
     return ids
 
 
-def _shared_folder_ids() -> set:
-    """Ordner-IDs, die (selbst ODER über einen Vorfahren) haushaltsgeteilt sind.
+def _folder_share_map() -> dict:
+    """Bildet ``folder_id -> {sharer_owner_ids}`` ab: die Owner der Ordner, die in
+    der Elternkette dieses Ordners freigegeben sind (Vererbung auf Unterordner).
 
-    Der Ordnerbaum ist klein (Familien-DMS); wir laden ihn einmal und markieren
-    jeden Ordner, der einen freigegebenen Ordner in seiner Elternkette hat. So
-    wirkt eine Freigabe automatisch auf alle Unterordner.
+    Sicherheits-Anker: Eine Ordnerfreigabe wirkt NUR für Dokumente des Ordner-
+    Owners. Ein ownerloser (alt-globaler) freigegebener Ordner trägt niemanden bei
+    – seine Freigabe exponiert damit nichts (kein Leak fremder Dokumente).
+    Der Ordnerbaum ist klein (Familien-DMS) → einmaliges Laden reicht.
     """
-    rows = list(DocumentFolder.objects.values_list("id", "parent_id", "shared_with_household"))
-    parent = {fid: pid for fid, pid, _ in rows}
-    shared = {fid for fid, _, is_shared in rows if is_shared}
+    rows = list(
+        DocumentFolder.objects.values_list(
+            "id", "parent_id", "shared_with_household", "owner_id"
+        )
+    )
+    parent = {fid: pid for fid, pid, _, _ in rows}
+    owner = {fid: oid for fid, _, _, oid in rows}
+    shared = {fid for fid, _, is_shared, _ in rows if is_shared}
     if not shared:
-        return set()
-    result: set = set()
-    for fid, _pid, _is_shared in rows:
-        cursor, seen = fid, set()
+        return {}
+    result: dict = {}
+    for fid, _pid, _is_shared, _oid in rows:
+        cursor, seen, owners = fid, set(), set()
         while cursor is not None and cursor not in seen:
             seen.add(cursor)
-            if cursor in shared:
-                result.add(fid)
-                break
+            if cursor in shared and owner.get(cursor) is not None:
+                owners.add(owner[cursor])
             cursor = parent.get(cursor)
+        if owners:
+            result[fid] = owners
     return result
 
 
 def _household_visibility_q(user):
     """Q für die LESE-Sichtbarkeit: eigene Dokumente + haushaltsgeteilte.
 
-    Haushaltsgeteilt = Eigentümer ist Haushalts-Mitmitglied UND (Dokument selbst
-    freigegeben ODER in einem freigegebenen Ordner/Unterordner). Die Sichtbarkeit
-    bleibt strikt an der Haushalts-Mitgliedschaft des Eigentümers verankert –
-    niemals über Haushalte hinweg. EINE Quelle für alle Lese-Kontexte
-    (get_queryset lesend + _visible_documents_for), damit die Regel nicht driftet.
+    Haushaltsgeteilt = Eigentümer ist Haushalts-Mitmitglied UND
+      * das Dokument selbst ist freigegeben (``shared_with_household``), ODER
+      * das Dokument liegt in einem freigegebenen Ordner/Unterordner, DESSEN Owner
+        der Dokument-Eigentümer ist (man teilt nur die EIGENEN Dokumente per
+        Ordner – nicht fremde, die jemand hineingelegt hat).
+    Die Sichtbarkeit bleibt strikt an der Haushalts-Mitgliedschaft verankert –
+    niemals über Haushalte hinweg. EINE Quelle für alle Lese-Kontexte.
     """
     member_ids = _household_member_ids(user)
-    shared_folder_ids = _shared_folder_ids()
-    household_read = Q(owner_id__in=member_ids) & (
-        Q(shared_with_household=True) | Q(folder_id__in=shared_folder_ids)
-    )
-    return Q(owner=user) | household_read
+    q = Q(owner=user) | (Q(owner_id__in=member_ids) & Q(shared_with_household=True))
+
+    # Ordnerbasierte Freigabe: nur Dokumente, deren Owner den (in der Kette)
+    # freigegebenen Ordner besitzt UND mit ``user`` einen Haushalt teilt.
+    for folder_id, sharer_ids in _folder_share_map().items():
+        eligible = sharer_ids & member_ids
+        if eligible:
+            q |= Q(folder_id=folder_id, owner_id__in=eligible)
+    return q
 
 
 def _visible_documents_for(user):
@@ -1559,9 +1573,12 @@ class DocumentViewSet(viewsets.ModelViewSet):
             if shared_scope == "with-me":
                 qs = qs.exclude(owner=user)
             elif shared_scope == "by-me":
+                # Ordner, die der Nutzer selbst (in der Kette) freigegeben hat.
+                by_me_folders = [
+                    fid for fid, owners in _folder_share_map().items() if user.id in owners
+                ]
                 qs = qs.filter(owner=user).filter(
-                    Q(shared_with_household=True)
-                    | Q(folder_id__in=_shared_folder_ids())
+                    Q(shared_with_household=True) | Q(folder_id__in=by_me_folders)
                 )
 
         # Triage-Ansicht (STOAA-295): Admins können mit ``?owner=none`` gezielt
@@ -4636,10 +4653,31 @@ class DocumentFolderViewSet(viewsets.ModelViewSet):
         if not getattr(user, "is_dms_admin", False):
             count_filter = Q(documents__owner=user)
         return (
-            DocumentFolder.objects.select_related("parent")
+            DocumentFolder.objects.select_related("parent", "owner")
             .annotate(document_count=Count("documents", filter=count_filter))
             .order_by("parent__name", "name")
         )
+
+    def perform_create(self, serializer):
+        # Ersteller = Eigentümer (Sicherheits-Anker der Ordnerfreigabe).
+        serializer.save(owner=self.request.user)
+
+    def perform_update(self, serializer):
+        # Die Freigabe (shared_with_household) darf NUR der Owner oder ein Admin
+        # umschalten – sonst könnte ein Haushaltsmitglied fremde Dokumente in einem
+        # (globalen) Ordner freigeben.
+        instance = serializer.instance
+        if "shared_with_household" in serializer.validated_data:
+            new_val = serializer.validated_data["shared_with_household"]
+            is_admin = getattr(self.request.user, "is_dms_admin", False)
+            is_owner = instance.owner_id == self.request.user.id
+            if new_val != instance.shared_with_household and not (is_owner or is_admin):
+                from rest_framework.exceptions import PermissionDenied
+
+                raise PermissionDenied(
+                    "Nur der Ordner-Eigentümer (oder ein Admin) darf die Freigabe ändern."
+                )
+        serializer.save()
 
 
 class SavedViewViewSet(viewsets.ModelViewSet):

@@ -85,13 +85,22 @@ class StoragePathSerializer(serializers.ModelSerializer):
 class DocumentFolderSerializer(serializers.ModelSerializer):
     full_path = serializers.CharField(read_only=True)
     document_count = serializers.IntegerField(read_only=True)
+    # Eigentümer (server-seitig beim Anlegen gesetzt) – read-only. Nur er/Admin
+    # darf die Freigabe umschalten (Guard im ViewSet.perform_update).
+    owner = serializers.PrimaryKeyRelatedField(read_only=True)
+    owner_username = serializers.CharField(
+        source="owner.username", read_only=True, default=None
+    )
 
     class Meta:
         model = DocumentFolder
-        fields = ("id", "name", "parent", "full_path", "document_count", "shared_with_household")
+        fields = (
+            "id", "name", "parent", "full_path", "document_count",
+            "shared_with_household", "owner", "owner_username",
+        )
         extra_kwargs = {
             "parent": {"required": False},
-            # Ordnerweite Familien-Freigabe – per PATCH umschaltbar.
+            # Ordnerweite Familien-Freigabe – per PATCH umschaltbar (nur Owner/Admin).
             "shared_with_household": {"required": False},
         }
 

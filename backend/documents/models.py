@@ -156,6 +156,20 @@ class DocumentFolder(models.Model):
     # global; die Sichtbarkeit bleibt aber an der Haushalts-Mitgliedschaft des
     # Dokument-Eigentümers verankert (kein Leak über Haushalte hinweg).
     shared_with_household = models.BooleanField(default=False, db_index=True)
+    # Eigentümer des Ordners (Ersteller). Sicherheits-Anker der Freigabe: Nur der
+    # Owner (oder ein DMS-Admin) darf ``shared_with_household`` umschalten, UND die
+    # Ordnerfreigabe wirkt ausschließlich für Dokumente DIESES Owners (man kann
+    # also nur die EIGENEN Dokumente per Ordner teilen – nicht fremde, die jemand
+    # in den Ordner gelegt hat). ``null`` = alt-globaler Ordner ohne Owner: dessen
+    # Freigabe ist wirkungslos (exponiert nichts) und nur von Admins schaltbar.
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="owned_folders",
+        help_text="Eigentümer – nur er (oder Admin) darf die Freigabe umschalten.",
+    )
 
     class Meta:
         verbose_name = "Ordner"
