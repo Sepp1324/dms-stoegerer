@@ -205,16 +205,30 @@ def ingest_message(account, raw_bytes: bytes) -> int | None:
 
     attachment_count = 0
     imported = 0
+    recovered = 0
     attachment_names: list[str] = []
     imported_documents = []
+    recovered_documents = []
     for filename, payload, ctype in iter_attachments(msg):
         attachment_count += 1
         attachment_names.append(filename)
         sha = hashlib.sha256(payload).hexdigest()
         # Owner-scoped (P1): nur gegen Dokumente DIESES Owners deduplizieren,
         # sonst unterdrückt der identische Anhang eines anderen Nutzers den Import.
-        if pipeline.find_duplicate_version(sha, owner=owner):
-            logger.info("Anhang %s bereits vorhanden (Hash-Dedup) – übersprungen", filename)
+        dup = pipeline.find_duplicate_version(sha, owner=owner)
+        if dup is not None:
+            # WIEDERAUFNAHME (STOAA): Der Anhang existiert bereits als Dokument –
+            # etwa weil ein früherer Lauf NACH dem Speichern, aber VOR dem
+            # ProcessedMail.create() abstürzte. Statt ihn nur zu überspringen (dann
+            # bliebe die Mail unverknüpft und würde fälschlich IGNORED), das
+            # bestehende Dokument mit DIESER Mail verknüpfen und als „recovered"
+            # zählen – die Zuordnung Mail↔Dokument geht so nicht verloren.
+            logger.info(
+                "Anhang %s bereits vorhanden (Hash) – bestehendes Dokument #%s "
+                "verknüpft (Wiederaufnahme).", filename, dup.document_id,
+            )
+            recovered_documents.append(dup.document)
+            recovered += 1
             continue
         try:
             path, safe_mime = storage.save_bytes(payload, _ext_of(filename))
@@ -266,12 +280,23 @@ def ingest_message(account, raw_bytes: bytes) -> int | None:
         imported_documents.append(document)
         imported += 1
 
-    if imported == 0:
+    # „behandelt" = neu importiert ODER über Hash wiederaufgenommen (bestehendes
+    # Dokument verknüpft). Nur so wird eine vollständig wiederaufgenommene Mail
+    # nicht mehr fälschlich IGNORED, sondern IMPORTED.
+    handled = imported + recovered
+    if handled == 0:
         mail_status = ProcessedMail.Status.IGNORED
-    elif imported < attachment_count:
+    elif handled < attachment_count:
         mail_status = ProcessedMail.Status.PARTIAL
     else:
         mail_status = ProcessedMail.Status.IMPORTED
+
+    note = ""
+    if recovered:
+        note = (
+            f"{recovered} Anhang/Anhänge über Hash bereits vorhanden – bestehende "
+            f"Dokumente verknüpft (Wiederaufnahme)."
+        )
 
     processed_mail = ProcessedMail.objects.create(
         account=account,
@@ -283,9 +308,18 @@ def ingest_message(account, raw_bytes: bytes) -> int | None:
         attachment_count=attachment_count,
         imported_count=imported,
         attachment_names=attachment_names,
+        note=note,
     )
-    if imported_documents:
-        processed_mail.documents.add(*imported_documents)
+    # Neue UND wiederaufgenommene Dokumente verknüpfen (dedupliziert nach PK, falls
+    # ein identischer Anhang mehrfach in derselben Mail vorkam).
+    seen: set = set()
+    link_documents = []
+    for document in imported_documents + recovered_documents:
+        if document.pk not in seen:
+            seen.add(document.pk)
+            link_documents.append(document)
+    if link_documents:
+        processed_mail.documents.add(*link_documents)
     return imported
 
 
