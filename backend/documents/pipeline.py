@@ -450,6 +450,39 @@ def generate_version_thumbnail(version: DocumentVersion) -> str | None:
     return thumbnail_path
 
 
+def _place_archive_at_storage_path(version: DocumentVersion) -> None:
+    """Verschiebt das OCR-Archiv-PDF an den per ``StoragePath``-Template
+    konfigurierten Zielpfad (``storage.build_archive_path``) und aktualisiert
+    ``archive_path``.
+
+    Läuft NACH der Klassifizierung (Korrespondent/Titel/Ablagepfad final) und VOR
+    dem Versiegeln (Version noch nicht ``is_immutable`` → ``save()`` erlaubt). Nur
+    wirksam, wenn ein Archiv existiert und noch am OCR-Temppfad
+    (``<original>.ocr.pdf``) liegt (idempotent: nach dem Move endet der Pfad nicht
+    mehr auf ``.ocr.pdf``). Best-effort: das Archiv ist eine Ableitung des
+    Originals; ein Fehler hier darf das Sealing NIE kippen (das Original + die
+    Hash-Kette bleiben maßgeblich, der ``seal_hash`` deckt ``archive_path`` nicht ab).
+    """
+    if version.is_immutable:
+        return  # bereits versiegelt (WORM) – save() gesperrt, kein Move mehr
+    archive = version.archive_path or ""
+    if not archive.endswith(".ocr.pdf") or not os.path.exists(archive):
+        return
+    try:
+        target = storage.build_archive_path(version.document)
+        os.replace(archive, str(target))  # atomar innerhalb von /data
+        version.archive_path = str(target)
+        version.save(update_fields=["archive_path"])
+        logger.info("Archiv nach Ablage-Template verschoben: %s → %s", archive, target)
+    except SoftTimeLimitExceeded:
+        raise  # Soft-Time-Limit nie verschlucken
+    except Exception:  # noqa: BLE001 – Ablage ist best-effort, Sealing darf nicht kippen
+        logger.exception(
+            "Archiv-Ablage nach Template fehlgeschlagen (Version %s) – behalte %s",
+            version.id, archive,
+        )
+
+
 def seal_version(version: DocumentVersion) -> None:
     """WORM-/Retention-Siegel setzen und danach State ``READY`` erreichen."""
     version.refresh_from_db(fields=["processing_state"])
@@ -457,6 +490,8 @@ def seal_version(version: DocumentVersion) -> None:
         DocumentVersion.ProcessingState.SEALED,
         actor=version.created_by,
     )
+    # Archiv an den konfigurierten Ablagepfad legen, BEVOR is_immutable gesetzt wird.
+    _place_archive_at_storage_path(version)
     _seal_version(version)
     version.transition_to(
         DocumentVersion.ProcessingState.READY,
@@ -484,6 +519,9 @@ def finalize_sealed_version(version: DocumentVersion) -> bool:
     # Retention-Sync/Audit gesetzt, ein Crash dazwischen ließe die Finalisierung
     # sonst überspringen. _seal_version ist idempotent (No-Op wenn schon fertig).
     if version.seal_finalized_at is None:
+        # Falls der Crash VOR dem Archiv-Move + is_immutable passierte, noch
+        # nachholen (die Funktion ist gegen bereits-immutable abgesichert).
+        _place_archive_at_storage_path(version)
         _seal_version(version)
     try:
         version.transition_to(
