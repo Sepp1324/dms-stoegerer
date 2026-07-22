@@ -46,83 +46,92 @@ def build_document_revision_package(document: Document) -> RevisionPackage:
 
     fd, tmp_path = tempfile.mkstemp(prefix="dms-revpkg-", suffix=".zip")
     os.close(fd)
-    with zipfile.ZipFile(tmp_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        _write_json(
-            zf,
-            "metadata.json",
-            _metadata_payload(document, generated_at=generated_at),
-            manifest_entries,
+    try:
+        with zipfile.ZipFile(tmp_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+            _write_json(
+                zf,
+                "metadata.json",
+                _metadata_payload(document, generated_at=generated_at),
+                manifest_entries,
+            )
+            _write_json(
+                zf,
+                "integrity.json",
+                archive_report,
+                manifest_entries,
+            )
+            _write_json(
+                zf,
+                "retention.json",
+                _retention_payload(document, archive_report),
+                manifest_entries,
+            )
+            _write_json(
+                zf,
+                "audit.json",
+                _audit_payload(document),
+                manifest_entries,
+            )
+
+            for version in document.versions.order_by("version_no"):
+                base = f"files/v{version.version_no}"
+                original_name = f"{base}/original{_suffix(version.file_path)}"
+                _write_file(zf, original_name, version.file_path, manifest_entries, missing_files)
+
+                if version.archive_path and version.archive_path != version.file_path:
+                    _write_file(
+                        zf,
+                        f"{base}/archive{_suffix(version.archive_path, fallback='.pdf')}",
+                        version.archive_path,
+                        manifest_entries,
+                        missing_files,
+                    )
+
+                if version.ocr_text:
+                    _write_text(
+                        zf,
+                        f"text/v{version.version_no}-ocr.txt",
+                        version.ocr_text,
+                        manifest_entries,
+                    )
+
+                if version.metadata_snapshot is not None:
+                    _write_json(
+                        zf,
+                        f"snapshots/v{version.version_no}-metadata_snapshot.json",
+                        version.metadata_snapshot,
+                        manifest_entries,
+                    )
+
+            manifest = {
+                "schema": "dms-revision-package-v1",
+                "generated_at": generated_at.isoformat(),
+                "document": {
+                    "id": document.id,
+                    "title": document.title,
+                    "asn": document.asn,
+                    "asn_label": format_asn(document.asn) if document.asn else None,
+                },
+                "archive_status": archive_report["status"],
+                "entries": manifest_entries,
+                "missing_files": missing_files,
+            }
+            _write_json(zf, "manifest.json", manifest, manifest_entries=None)
+
+        filename = f"{slugify(document.title) or 'dokument'}-{document.id}-revisionspaket.zip"
+        return RevisionPackage(
+            filename=filename,
+            path=tmp_path,
+            manifest=manifest,
         )
-        _write_json(
-            zf,
-            "integrity.json",
-            archive_report,
-            manifest_entries,
-        )
-        _write_json(
-            zf,
-            "retention.json",
-            _retention_payload(document, archive_report),
-            manifest_entries,
-        )
-        _write_json(
-            zf,
-            "audit.json",
-            _audit_payload(document),
-            manifest_entries,
-        )
-
-        for version in document.versions.order_by("version_no"):
-            base = f"files/v{version.version_no}"
-            original_name = f"{base}/original{_suffix(version.file_path)}"
-            _write_file(zf, original_name, version.file_path, manifest_entries, missing_files)
-
-            if version.archive_path and version.archive_path != version.file_path:
-                _write_file(
-                    zf,
-                    f"{base}/archive{_suffix(version.archive_path, fallback='.pdf')}",
-                    version.archive_path,
-                    manifest_entries,
-                    missing_files,
-                )
-
-            if version.ocr_text:
-                _write_text(
-                    zf,
-                    f"text/v{version.version_no}-ocr.txt",
-                    version.ocr_text,
-                    manifest_entries,
-                )
-
-            if version.metadata_snapshot is not None:
-                _write_json(
-                    zf,
-                    f"snapshots/v{version.version_no}-metadata_snapshot.json",
-                    version.metadata_snapshot,
-                    manifest_entries,
-                )
-
-        manifest = {
-            "schema": "dms-revision-package-v1",
-            "generated_at": generated_at.isoformat(),
-            "document": {
-                "id": document.id,
-                "title": document.title,
-                "asn": document.asn,
-                "asn_label": format_asn(document.asn) if document.asn else None,
-            },
-            "archive_status": archive_report["status"],
-            "entries": manifest_entries,
-            "missing_files": missing_files,
-        }
-        _write_json(zf, "manifest.json", manifest, manifest_entries=None)
-
-    filename = f"{slugify(document.title) or 'dokument'}-{document.id}-revisionspaket.zip"
-    return RevisionPackage(
-        filename=filename,
-        path=tmp_path,
-        manifest=manifest,
-    )
+    except BaseException:
+        # Bei jedem Fehler die halbfertige Temp-ZIP entfernen (kein /tmp-Leak) und
+        # weiterwerfen – so wird auch KEIN Export-Audit geschrieben (View-Reihenfolge).
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def _metadata_payload(document: Document, *, generated_at) -> dict[str, Any]:

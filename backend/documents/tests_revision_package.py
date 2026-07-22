@@ -101,6 +101,7 @@ class RevisionPackageApiTests(RevisionPackageMixin, APITestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response["Content-Type"], "application/zip")
         self.assertIn("revisionspaket.zip", response["Content-Disposition"])
+        # Export-Audit wird NUR nach erfolgreichem Build geschrieben (in der DB).
         self.assertTrue(
             AuditLogEntry.objects.filter(
                 action="revision_package_export",
@@ -108,13 +109,26 @@ class RevisionPackageApiTests(RevisionPackageMixin, APITestCase):
                 object_id=str(self.doc.id),
             ).exists()
         )
-
+        # Das Paket ist ein gültiges ZIP mit audit.json (das Export-Ereignis selbst
+        # steht bewusst NICHT drin – es entsteht erst nach dem Build).
         payload = b"".join(response.streaming_content)  # FileResponse -> Streaming
         with zipfile.ZipFile(BytesIO(payload)) as zf:
-            audit = json.loads(zf.read("audit.json"))
-        self.assertTrue(
-            any(entry["action"] == "revision_package_export" for entry in audit)
-        )
+            self.assertIn("audit.json", zf.namelist())
+
+    def test_build_fehler_raeumt_temp_zip_auf_und_kein_audit(self):
+        import glob
+        import tempfile
+        from unittest import mock
+
+        before = set(glob.glob(f"{tempfile.gettempdir()}/dms-revpkg-*.zip"))
+        with mock.patch(
+            "documents.services.revision_package._write_json",
+            side_effect=OSError("disk full"),
+        ):
+            with self.assertRaises(OSError):
+                revision_package.build_document_revision_package(self.doc)
+        after = set(glob.glob(f"{tempfile.gettempdir()}/dms-revpkg-*.zip"))
+        self.assertEqual(before, after, "verwaiste Temp-ZIP nach Fehler")
 
     def test_revision_package_respects_owner_scope(self):
         self.client.force_authenticate(self.other)

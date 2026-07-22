@@ -1771,6 +1771,10 @@ class DocumentViewSet(viewsets.ModelViewSet):
     def revision_package(self, request, pk=None):
         """Exportiert ein prüfbares ZIP-Paket für Steuer/Anwalt/Behörde."""
         document = self.get_object()
+        # Erst das Paket bauen; scheitert das (Schreib-/Lesefehler), wird KEIN
+        # Export-Audit geschrieben (kein Phantom-Eintrag) und die Temp-ZIP im
+        # Service aufgeräumt. Das Audit protokolliert nur den ERFOLGREICHEN Export.
+        package = revision_package_service.build_document_revision_package(document)
         AuditLogEntry.objects.create(
             actor=request.user,
             action="revision_package_export",
@@ -1778,7 +1782,6 @@ class DocumentViewSet(viewsets.ModelViewSet):
             object_id=str(document.id),
             detail={"format": "zip", "scope": "document"},
         )
-        package = revision_package_service.build_document_revision_package(document)
         # Streamen statt im RAM halten: Datei öffnen und sofort entlinken – auf
         # POSIX bleibt sie über den offenen fd lesbar und wird beim Schließen der
         # Response (Ende des Streamings) automatisch freigegeben. Kein Vollkopieren
