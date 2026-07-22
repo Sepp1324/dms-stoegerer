@@ -4665,25 +4665,36 @@ class DocumentFolderViewSet(viewsets.ModelViewSet):
         )
 
     def perform_create(self, serializer):
-        # Ersteller = Eigentümer (Sicherheits-Anker der Ordnerfreigabe).
+        # Ersteller = Eigentümer (Sicherheits-Anker: nur er/Admin darf ändern).
         serializer.save(owner=self.request.user)
 
-    def perform_update(self, serializer):
-        # Die Freigabe (shared_with_household) darf NUR der Owner oder ein Admin
-        # umschalten – sonst könnte ein Haushaltsmitglied fremde Dokumente in einem
-        # (globalen) Ordner freigeben.
-        instance = serializer.instance
-        if "shared_with_household" in serializer.validated_data:
-            new_val = serializer.validated_data["shared_with_household"]
-            is_admin = getattr(self.request.user, "is_dms_admin", False)
-            is_owner = instance.owner_id == self.request.user.id
-            if new_val != instance.shared_with_household and not (is_owner or is_admin):
-                from rest_framework.exceptions import PermissionDenied
+    def _assert_folder_mutable(self, instance):
+        """Nur der Eigentümer (oder ein Admin) darf einen Ordner ändern/löschen.
 
-                raise PermissionDenied(
-                    "Nur der Ordner-Eigentümer (oder ein Admin) darf die Freigabe ändern."
-                )
+        Der Ordnerbaum ist global lesbar (Navigation), aber Umbenennen, Verschieben
+        (parent), Freigabe-Umschalten UND Löschen sind Owner-Aktionen. Sonst könnte
+        ein Nutzer fremde Ordner umbenennen/verschieben oder – beim Löschen eines
+        Elternordners – fremde Unterordner kaskadiert löschen und Dokumente ihrer
+        Ordnerzuordnung berauben. Globale (ownerlose) Ordner sind admin-only.
+        """
+        user = self.request.user
+        if getattr(user, "is_dms_admin", False):
+            return
+        if instance.owner_id != user.id:
+            from rest_framework.exceptions import PermissionDenied
+
+            raise PermissionDenied(
+                "Nur der Ordner-Eigentümer (oder ein Admin) darf diesen Ordner "
+                "ändern oder löschen. Globale Ordner sind admin-only."
+            )
+
+    def perform_update(self, serializer):
+        self._assert_folder_mutable(serializer.instance)
         serializer.save()
+
+    def perform_destroy(self, instance):
+        self._assert_folder_mutable(instance)
+        instance.delete()
 
 
 class SavedViewViewSet(viewsets.ModelViewSet):

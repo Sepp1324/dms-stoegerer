@@ -142,3 +142,61 @@ class FolderShareOwnershipTests(APITestCase):
         bob_sees = self._list_ids(self.bob)
         self.assertIn(bob_doc.id, bob_sees)
         self.assertNotIn(alice_doc.id, bob_sees)
+
+    # --- Mutation/Löschung nur durch Owner/Admin (P1) -------------------------
+    def test_fremden_ordner_umbenennen_abgelehnt(self):
+        folder = DocumentFolder.objects.create(name="Alices", owner=self.alice)
+        self.client.force_authenticate(self.bob)
+        resp = self.client.patch(
+            f"/api/folders/{folder.id}/", {"name": "Gekapert"}, format="json"
+        )
+        self.assertEqual(resp.status_code, 403)
+        folder.refresh_from_db()
+        self.assertEqual(folder.name, "Alices")
+
+    def test_fremden_ordner_verschieben_abgelehnt(self):
+        parent = DocumentFolder.objects.create(name="BobParent", owner=self.bob)
+        folder = DocumentFolder.objects.create(name="Alices", owner=self.alice)
+        self.client.force_authenticate(self.bob)
+        resp = self.client.patch(
+            f"/api/folders/{folder.id}/", {"parent": parent.id}, format="json"
+        )
+        self.assertEqual(resp.status_code, 403)
+        folder.refresh_from_db()
+        self.assertIsNone(folder.parent_id)
+
+    def test_fremden_ordner_loeschen_abgelehnt(self):
+        folder = DocumentFolder.objects.create(name="Alices", owner=self.alice)
+        self.client.force_authenticate(self.bob)
+        resp = self.client.delete(f"/api/folders/{folder.id}/")
+        self.assertEqual(resp.status_code, 403)
+        self.assertTrue(DocumentFolder.objects.filter(pk=folder.id).exists())
+
+    def test_ownerlosen_ordner_loeschen_nur_admin(self):
+        folder = DocumentFolder.objects.create(name="Global", owner=None)
+        self.client.force_authenticate(self.bob)
+        self.assertEqual(self.client.delete(f"/api/folders/{folder.id}/").status_code, 403)
+
+    def test_owner_darf_eigenen_ordner_umbenennen_und_loeschen(self):
+        folder = DocumentFolder.objects.create(name="Meiner", owner=self.bob)
+        self.client.force_authenticate(self.bob)
+        self.assertEqual(
+            self.client.patch(
+                f"/api/folders/{folder.id}/", {"name": "Umbenannt"}, format="json"
+            ).status_code,
+            200,
+        )
+        self.assertEqual(self.client.delete(f"/api/folders/{folder.id}/").status_code, 204)
+
+    def test_admin_darf_fremden_und_globalen_ordner_verwalten(self):
+        admin = User.objects.create_user("o_admin", password="pw", role="admin")
+        alices = DocumentFolder.objects.create(name="Alices", owner=self.alice)
+        glob = DocumentFolder.objects.create(name="Global", owner=None)
+        self.client.force_authenticate(admin)
+        self.assertEqual(
+            self.client.patch(
+                f"/api/folders/{alices.id}/", {"name": "AdminEdit"}, format="json"
+            ).status_code,
+            200,
+        )
+        self.assertEqual(self.client.delete(f"/api/folders/{glob.id}/").status_code, 204)
