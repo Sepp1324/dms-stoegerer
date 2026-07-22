@@ -28,6 +28,12 @@ SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", _INSECURE_DEFAULT_SECRET)
 DEBUG = env_bool("DJANGO_DEBUG", True)
 ALLOWED_HOSTS = env_list("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1")
 
+# Laufende Version/Commit – beim Image-Build injiziert (Dockerfile ARG -> ENV,
+# gesetzt aus dem Git-SHA-Tag). Der Health-Endpoint meldet sie, damit prüfbar ist,
+# welcher Commit tatsächlich läuft (statt einer hartkodierten 0.1.0).
+APP_VERSION = os.getenv("APP_VERSION", "dev")
+GIT_SHA = os.getenv("GIT_SHA", "")
+
 # Fail-closed (P2): In Produktion (DEBUG=false) NICHT mit dem unsicheren
 # Default-SECRET_KEY starten – sonst sind Session-Cookies und JWT-Signaturen
 # trivial fälschbar. Beim Test-Runner (``manage.py test``) bewusst nachsichtig,

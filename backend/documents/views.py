@@ -399,7 +399,9 @@ def health(request):
         {
             "status": status,
             "service": "dms-backend",
-            "version": "0.1.0",
+            # Beim Build injiziert (Git-SHA-Tag) – zeigt den WIRKLICH laufenden Commit.
+            "version": getattr(settings, "APP_VERSION", "dev"),
+            "commit": getattr(settings, "GIT_SHA", ""),
             "database": "ok" if db_ok else "unreachable",
         },
         status=200 if db_ok else 503,
