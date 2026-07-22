@@ -111,7 +111,14 @@ def apply_rules(document) -> dict:
     matched: list[str] = []
     applied: dict = {}
 
-    for rule in ClassificationRule.objects.filter(enabled=True).order_by("priority", "name"):
+    from django.db.models import Q
+
+    # Owner-Scoping (P1): nur globale (owner=null) ODER dem Dokument-Eigentümer
+    # gehörende Regeln – keine fremden Regeln auf fremden Dokumenten.
+    rules = ClassificationRule.objects.filter(enabled=True).filter(
+        Q(owner__isnull=True) | Q(owner_id=document.owner_id)
+    ).order_by("priority", "name")
+    for rule in rules:
         if not rule_matches(rule, text, subject=subject, sender=sender):
             continue
         matched.append(rule.name)

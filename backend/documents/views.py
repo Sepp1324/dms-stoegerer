@@ -2619,7 +2619,12 @@ class DocumentViewSet(viewsets.ModelViewSet):
             )
 
         match = {"text_contains": [needle]}
-        existing = ClassificationRule.objects.filter(match=match, then=then).first()
+        # Owner-Scoping (P1): die gelernte Regel gehört dem Eigentümer des Dokuments
+        # und wirkt nur auf dessen Dokumente. Dedup ebenfalls owner-scoped.
+        rule_owner_id = document.owner_id
+        existing = ClassificationRule.objects.filter(
+            match=match, then=then, owner_id=rule_owner_id
+        ).first()
         if existing is not None:
             return existing, False
 
@@ -2639,6 +2644,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
             enabled=True,
             match=match,
             then=then,
+            owner_id=rule_owner_id,
         )
         return rule, True
 
@@ -4897,10 +4903,58 @@ class CaseFileViewSet(viewsets.ModelViewSet):
         )
 
 
-class ClassificationRuleViewSet(viewsets.ModelViewSet):
+class _OwnerScopedAutomationMixin:
+    """Owner-Scoping für Automatisierungen (Workflows/Klassifizierungsregeln, P1).
+
+    Nicht-Admins sehen globale (``owner=null``) UND eigene Objekte, dürfen aber nur
+    EIGENE anlegen/ändern/löschen. Globale Automatisierungen (wirken auf ALLE
+    Dokumente) verwalten ausschließlich Admins. So kann ein Haushaltsmitglied nicht
+    über eine globale/fremde Regel fremde Dokumente verändern.
+    """
+
+    def _scope(self, qs):
+        user = self.request.user
+        if not getattr(user, "is_dms_admin", False):
+            qs = qs.filter(Q(owner__isnull=True) | Q(owner=user))
+        return qs
+
+    def _assert_can_modify(self, instance):
+        user = self.request.user
+        if getattr(user, "is_dms_admin", False):
+            return
+        if instance.owner_id != user.id:
+            from rest_framework.exceptions import PermissionDenied
+
+            raise PermissionDenied(
+                "Nur der Eigentümer (oder ein Admin) darf dies ändern/löschen; "
+                "globale Automatisierungen sind admin-only."
+            )
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        if getattr(user, "is_dms_admin", False):
+            serializer.save()  # Admin: owner wie übergeben (Default null = global)
+        else:
+            serializer.save(owner=user)  # Nicht-Admin: erzwungen eigener Owner
+
+    def perform_update(self, serializer):
+        self._assert_can_modify(serializer.instance)
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        self._assert_can_modify(instance)
+        instance.delete()
+
+
+class ClassificationRuleViewSet(_OwnerScopedAutomationMixin, viewsets.ModelViewSet):
+    # queryset nur für die Router-Basename-Ableitung; das echte (owner-gescopte)
+    # Queryset liefert get_queryset().
     queryset = ClassificationRule.objects.all()
     serializer_class = ClassificationRuleSerializer
     permission_classes = [ReadOnlyOrCanWrite]
+
+    def get_queryset(self):
+        return self._scope(ClassificationRule.objects.all())
 
     def _simulation_documents(self, request):
         qs = (
@@ -4978,7 +5032,7 @@ class CustomFieldViewSet(viewsets.ModelViewSet):
         return super().destroy(request, *args, **kwargs)
 
 
-class WorkflowViewSet(viewsets.ModelViewSet):
+class WorkflowViewSet(_OwnerScopedAutomationMixin, viewsets.ModelViewSet):
     """CRUD für Workflows (STOAA-263) inkl. verschachteltem Trigger + Aktionen.
 
     Schreiben nur für ``can_write`` (nicht Gäste). Der Serializer nimmt
@@ -4986,16 +5040,22 @@ class WorkflowViewSet(viewsets.ModelViewSet):
     ersetzt sie idempotent – passend zum geführten Frontend-Editor (PR3).
     """
 
-    queryset = Workflow.objects.prefetch_related(
-        "trigger",
-        "trigger__filter_has_tags",
-        "trigger__filter_has_not_tags",
-        "actions",
-        "actions__assign_tags",
-        "actions__remove_tags",
-    ).all()
+    # queryset nur für die Router-Basename-Ableitung; siehe get_queryset().
+    queryset = Workflow.objects.all()
     serializer_class = WorkflowSerializer
     permission_classes = [ReadOnlyOrCanWrite]
+
+    def get_queryset(self):
+        return self._scope(
+            Workflow.objects.prefetch_related(
+                "trigger",
+                "trigger__filter_has_tags",
+                "trigger__filter_has_not_tags",
+                "actions",
+                "actions__assign_tags",
+                "actions__remove_tags",
+            ).all()
+        )
 
 
 class DocumentReminderViewSet(viewsets.ModelViewSet):
