@@ -55,6 +55,30 @@ class ReadOnlyOrCanWrite(BasePermission):
         return bool(getattr(request.user, "can_write", False))
 
 
+class ReadCreateOrAdminMutate(BasePermission):
+    """Für GLOBALE, von allen Nutzern geteilte Stammdaten (Tags, Korrespondenten,
+    Dokumenttypen, Ablagepfade, Zusatzfeld-Definitionen):
+
+    * Lesen (SAFE) – jeder Angemeldete.
+    * Anlegen (POST) – ``can_write`` (nötig fürs inline-Anlegen beim Ablegen).
+    * Umbenennen/Löschen (PUT/PATCH/DELETE) – NUR Admins.
+
+    Sonst könnte ein Nutzer Metadaten ALLER Nutzer global umbenennen oder löschen
+    (ein Tag/Korrespondent hängt an fremden Dokumenten). Anlegen bleibt erlaubt,
+    weil es additiv/ungefährlich ist.
+    """
+
+    def has_permission(self, request, view):
+        user = request.user
+        if not (user and user.is_authenticated):
+            return False
+        if request.method in SAFE_METHODS:
+            return True
+        if request.method == "POST":
+            return bool(getattr(user, "can_write", False))
+        return bool(getattr(user, "is_dms_admin", False))
+
+
 class IsDmsAdmin(BasePermission):
     """Nur DMS-Administratoren (``is_dms_admin``) – für Systemkonfiguration.
 
@@ -4628,25 +4652,25 @@ class EntityRelationViewSet(viewsets.ReadOnlyModelViewSet):
 class TagViewSet(viewsets.ModelViewSet):
     queryset = Tag.objects.all()
     serializer_class = TagSerializer
-    permission_classes = [ReadOnlyOrCanWrite]
+    permission_classes = [ReadCreateOrAdminMutate]
 
 
 class CorrespondentViewSet(viewsets.ModelViewSet):
     queryset = Correspondent.objects.all()
     serializer_class = CorrespondentSerializer
-    permission_classes = [ReadOnlyOrCanWrite]
+    permission_classes = [ReadCreateOrAdminMutate]
 
 
 class DocumentTypeViewSet(viewsets.ModelViewSet):
     queryset = DocumentType.objects.all()
     serializer_class = DocumentTypeSerializer
-    permission_classes = [ReadOnlyOrCanWrite]
+    permission_classes = [ReadCreateOrAdminMutate]
 
 
 class StoragePathViewSet(viewsets.ModelViewSet):
     queryset = StoragePath.objects.all()
     serializer_class = StoragePathSerializer
-    permission_classes = [ReadOnlyOrCanWrite]
+    permission_classes = [ReadCreateOrAdminMutate]
 
 
 class DocumentFolderViewSet(viewsets.ModelViewSet):
@@ -5026,7 +5050,8 @@ class CustomFieldViewSet(viewsets.ModelViewSet):
 
     queryset = CustomField.objects.all()
     serializer_class = CustomFieldSerializer
-    permission_classes = [ReadOnlyOrCanWrite]
+    # Globale Schema-Definition: Anlegen für Writer, Umbenennen/Löschen admin-only.
+    permission_classes = [ReadCreateOrAdminMutate]
 
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()
