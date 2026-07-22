@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import tempfile
 import zipfile
 from io import BytesIO
@@ -62,8 +63,9 @@ class RevisionPackageServiceTests(RevisionPackageMixin, TestCase):
         )
 
         package = revision_package.build_document_revision_package(doc)
+        self.addCleanup(lambda: os.path.exists(package.path) and os.unlink(package.path))
 
-        with zipfile.ZipFile(BytesIO(package.content)) as zf:
+        with zipfile.ZipFile(package.path) as zf:
             names = set(zf.namelist())
             self.assertIn("metadata.json", names)
             self.assertIn("integrity.json", names)
@@ -107,7 +109,8 @@ class RevisionPackageApiTests(RevisionPackageMixin, APITestCase):
             ).exists()
         )
 
-        with zipfile.ZipFile(BytesIO(response.content)) as zf:
+        payload = b"".join(response.streaming_content)  # FileResponse -> Streaming
+        with zipfile.ZipFile(BytesIO(payload)) as zf:
             audit = json.loads(zf.read("audit.json"))
         self.assertTrue(
             any(entry["action"] == "revision_package_export" for entry in audit)

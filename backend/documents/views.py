@@ -1672,9 +1672,21 @@ class DocumentViewSet(viewsets.ModelViewSet):
             detail={"format": "zip", "scope": "document"},
         )
         package = revision_package_service.build_document_revision_package(document)
-        response = HttpResponse(package.content, content_type="application/zip")
-        response["Content-Disposition"] = f'attachment; filename="{package.filename}"'
-        response["Content-Length"] = str(len(package.content))
+        # Streamen statt im RAM halten: Datei öffnen und sofort entlinken – auf
+        # POSIX bleibt sie über den offenen fd lesbar und wird beim Schließen der
+        # Response (Ende des Streamings) automatisch freigegeben. Kein Vollkopieren
+        # in den Web-Prozess, kein Temp-Leak.
+        handle = open(package.path, "rb")
+        try:
+            os.unlink(package.path)
+        except OSError:
+            pass
+        response = FileResponse(
+            handle,
+            as_attachment=True,
+            filename=package.filename,
+            content_type="application/zip",
+        )
         return response
 
     @action(detail=False, methods=["get"], url_path="evidence-status")
