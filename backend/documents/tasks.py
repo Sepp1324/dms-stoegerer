@@ -43,7 +43,21 @@ def _read_regular_nofollow(path: Path, max_bytes: int) -> bytes:
             raise OSError("Keine reguläre Datei.")
         if st.st_size > max_bytes:
             raise OSError(f"Datei zu groß ({st.st_size} Bytes > {max_bytes}).")
-        return fh.read(max_bytes + 1)[:max_bytes]
+        # ``max_bytes + 1`` lesen und beim ZUSÄTZLICHEN Byte ABBRECHEN – NICHT
+        # still auf ``max_bytes`` kürzen. Sonst würde eine während des Lesens noch
+        # wachsende Datei (langsamer NFS-Scan) abgeschnitten gespeichert und als
+        # „verarbeitet" weggeräumt (Datenverlust). Zu groß gewordene Dateien holt
+        # der nächste Scan, wenn sie stabil sind.
+        data = fh.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            raise OSError(
+                f"Datei überschreitet das Limit ({max_bytes} Bytes) oder wächst noch."
+            )
+        # Nach dem Lesen erneut prüfen: Größe/mtime unverändert (Datei war stabil)?
+        st_after = os.fstat(fh.fileno())
+        if st_after.st_size != st.st_size or st_after.st_mtime_ns != st.st_mtime_ns:
+            raise OSError("Datei wurde während des Lesens verändert – erneuter Versuch später.")
+        return data
 
 
 def _ensure_flashcard_entries(version, *, text, max_q):
