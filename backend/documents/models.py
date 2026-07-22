@@ -915,15 +915,18 @@ class FlashcardSyncEntry(models.Model):
     * **Atomarer Claim**: ``pending`` (bzw. verwaiste ``in_progress``) → ``in_progress``
       per CAS-Update. Nur der Task, der die Zeile gewinnt, sendet sie – zwei
       parallele Tasks können dieselbe Karte nicht doppelt senden.
-    * **Stabiler ``idempotency_key``** (``dms-v<versionId>-c<ordinal>``), der an
-      psychosr übertragen wird: ein Crash NACH erfolgreichem POST, aber VOR dem
-      DB-Commit, wird beim Retry serverseitig dedupliziert.
+    * **Stabiler ``idempotency_key``** (``dms-v<versionId>-c<ordinal>``), der als
+      ``ext_id`` an psychosr übertragen wird. Er ermöglicht serverseitige Dedup
+      des Fensters „POST ok, Crash vor DB-Commit" – ABER nur, wenn psychosr den
+      ``ext_id`` auswertet (Unique-Spalte + Insert-or-return). Bis dahin ist die
+      Zustellung *at-least-once* (siehe ``psychosr_client.push_flashcard``).
     """
 
     class State(models.TextChoices):
         PENDING = "pending", "Ausstehend"
         IN_PROGRESS = "in_progress", "Wird gesendet"
         PUSHED = "pushed", "Gesendet"
+        FAILED = "failed", "Endgültig fehlgeschlagen"
 
     version = models.ForeignKey(
         DocumentVersion, on_delete=models.CASCADE, related_name="flashcard_entries"
@@ -944,6 +947,9 @@ class FlashcardSyncEntry(models.Model):
         db_index=True,
     )
     attempts = models.PositiveIntegerField(default=0)
+    last_error = models.TextField(
+        blank=True, default="", help_text="Letzter Push-Fehler (Monitoring)"
+    )
     claimed_at = models.DateTimeField(null=True, blank=True)
     pushed_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(default=timezone.now)

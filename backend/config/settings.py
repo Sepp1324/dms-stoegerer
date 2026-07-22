@@ -354,7 +354,20 @@ CELERY_BEAT_SCHEDULE = {
         "task": "documents.tasks.reap_stuck_versions",
         "schedule": float(os.getenv("STUCK_REAP_INTERVAL", "600")),
     },
+    # psychosr-Sync-Watchdog: hängende/offene FlashcardSyncEntry (Worker-Crash,
+    # acks_late ist aus) periodisch neu einplanen, damit offene Karten auch ohne
+    # erneutes Taggen eventuell zugestellt werden (endgültig FAILED bleibt liegen).
+    "reap-stuck-flashcard-syncs": {
+        "task": "documents.tasks.reap_stuck_flashcard_syncs",
+        "schedule": float(os.getenv("FLASHCARD_REAP_INTERVAL", "900")),
+    },
 }
+
+# psychosr-Kartensync: nach wie vielen fehlgeschlagenen Push-Versuchen eine Karte
+# endgültig FAILED wird (kein Endlos-Retry; Monitoring über last_error). Und das
+# Stale-Fenster, ab dem ein hängendes ``in_progress`` neu geclaimt werden darf.
+PSYCHOSR_MAX_CARD_ATTEMPTS = int(os.getenv("PSYCHOSR_MAX_CARD_ATTEMPTS", "10"))
+PSYCHOSR_CLAIM_STALE_MINUTES = int(os.getenv("PSYCHOSR_CLAIM_STALE_MINUTES", "15"))
 
 # --- E-Mail-Versand (SMTP) ---
 # Erinnerungs-Mails (STOAA-372) werden NUR verschickt, wenn ein SMTP-Host
