@@ -32,10 +32,20 @@ def push_flashcard(question: dict, *, source_title: str, idempotency_key: str) -
     dem erfolgreichen Rückkehren dieser Funktion als ``pushed``. Deshalb genau
     eine Karte pro Aufruf: so ist jeder Erfolg sofort einzeln persistierbar.
 
-    ``idempotency_key`` (stabil pro Version+Karte) wird als ``ext_id`` mitgesendet,
-    damit psychosr einen Doppel-POST (Crash NACH POST, VOR DB-Commit) server-
-    seitig deduplizieren kann. ``question`` muss bereits valide sein (4 Aussagen,
-    ≥1 richtig, kap 1..8) – siehe :func:`ai.flashcards.parse_and_validate`.
+    ``idempotency_key`` (stabil pro Version+Karte) wird als ``ext_id`` mitgesendet.
+
+    WICHTIG – Zustellsemantik: Der DMS-seitige atomare Claim + der pro Karte
+    durable ``pushed``-Status verhindern Dubletten durch parallele Tasks und
+    normale Retries. Das verbleibende Fenster „POST erfolgreich, aber Crash vor
+    dem DB-Commit" ist **nur dann** dublettenfrei, wenn **psychosr** den ``ext_id``
+    tatsächlich auswertet (Spalte + Unique-Constraint + Insert-or-return-existing).
+    Solange psychosr das NICHT tut, ist die Zustellung *at-least-once*: eine spätere
+    Reklamation einer verwaisten Karte kann in diesem schmalen Fenster eine Dublette
+    erzeugen. Der ``ext_id`` wird bereits vorwärtskompatibel gesendet; die server-
+    seitige Dedup ist in psychosr separat umzusetzen.
+
+    ``question`` muss bereits valide sein (4 Aussagen, ≥1 richtig, kap 1..8) –
+    siehe :func:`ai.flashcards.parse_and_validate`.
 
     Wirft, wenn psychosr nicht konfiguriert ist oder der POST fehlschlägt
     (``httpx``-Fehler / non-2xx). ``SoftTimeLimitExceeded`` propagiert unangetastet.

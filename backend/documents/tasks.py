@@ -124,6 +124,18 @@ def _claim_flashcard_entries(version_id, *, stale_after):
     return list(FlashcardSyncEntry.objects.filter(pk__in=won).order_by("ordinal"))
 
 
+def _release_claims(entries):
+    """Gibt Karten, die geclaimt aber NICHT gesendet wurden (kein POST erfolgt),
+    sofort wieder frei (``in_progress`` -> ``pending``). Nur für Karten aufrufen,
+    bei denen sicher KEIN POST rausging (sonst droht eine Dublette)."""
+    from .models import FlashcardSyncEntry
+
+    for entry in entries:
+        FlashcardSyncEntry.objects.filter(
+            pk=entry.pk, state=FlashcardSyncEntry.State.IN_PROGRESS
+        ).update(state=FlashcardSyncEntry.State.PENDING)
+
+
 def _set_synced_marker(document, name, *, present):
     """Marker-Tag NUR als Anzeige – spiegelt den Zustand der AKTUELLEN Version.
     Gesetzt, wenn alle Karten gepusht sind; sonst entfernt (neue/offene Version).
@@ -170,38 +182,55 @@ def _sync_document_flashcards(document_id: int) -> dict:
         return {"status": reason, "document_id": document_id, "generated": 0}
 
     stale = timedelta(minutes=getattr(settings, "PSYCHOSR_CLAIM_STALE_MINUTES", 15))
+    max_attempts = int(getattr(settings, "PSYCHOSR_MAX_CARD_ATTEMPTS", 10))
     claimed = _claim_flashcard_entries(version.pk, stale_after=stale)
 
     pushed = 0
     failed = 0
     title = document.title or f"Dokument {document_id}"
-    for entry in claimed:
+    for idx, entry in enumerate(claimed):
         try:
             psychosr_client.push_flashcard(
                 entry.payload, source_title=title, idempotency_key=entry.idempotency_key
             )
         except SoftTimeLimitExceeded:
-            raise  # Soft-Time-Limit nie verschlucken (Task muss abbrechen)
+            # Task bricht ab. Die AKTUELLE Karte ist mehrdeutig (evtl. schon
+            # gepostet) -> in_progress lassen (stale-Reclaim/Watchdog übernimmt).
+            # Alle NOCH NICHT versuchten Karten sicher wieder freigeben, sonst
+            # blieben sie bis zum stale-Timeout blockiert.
+            _release_claims(claimed[idx + 1 :])
+            raise
         except Exception as exc:  # noqa: BLE001 – einzelne Karte scheitert, Rest weiter
             failed += 1
             logger.warning(
                 "psychosr push (v%s c%s) fehlgeschlagen: %s", version.pk, entry.ordinal, exc
             )
-            # Claim freigeben -> nächster (Retry-)Lauf nimmt die Karte erneut.
+            # Zu oft gescheitert -> endgültig FAILED (kein Endlos-Retry, Monitoring
+            # über last_error); sonst Claim freigeben (nächster Lauf nimmt sie erneut).
+            new_state = (
+                FlashcardSyncEntry.State.FAILED
+                if entry.attempts >= max_attempts
+                else FlashcardSyncEntry.State.PENDING
+            )
             FlashcardSyncEntry.objects.filter(
                 pk=entry.pk, state=FlashcardSyncEntry.State.IN_PROGRESS
-            ).update(state=FlashcardSyncEntry.State.PENDING)
+            ).update(state=new_state, last_error=str(exc)[:2000])
             continue
         # Erfolg SOFORT einzeln durabel machen (Crash danach -> psychosr dedupt via ext_id).
         FlashcardSyncEntry.objects.filter(pk=entry.pk).update(
-            state=FlashcardSyncEntry.State.PUSHED, pushed_at=timezone.now()
+            state=FlashcardSyncEntry.State.PUSHED, pushed_at=timezone.now(), last_error=""
         )
         pushed += 1
 
     qs = FlashcardSyncEntry.objects.filter(version_id=version.pk)
     total = qs.count()
-    open_count = qs.exclude(state=FlashcardSyncEntry.State.PUSHED).count()
-    _set_synced_marker(document, synced_name, present=(total > 0 and open_count == 0))
+    pushed_total = qs.filter(state=FlashcardSyncEntry.State.PUSHED).count()
+    failed_perm = qs.filter(state=FlashcardSyncEntry.State.FAILED).count()
+    # „offen" = noch (erneut) versuchbar; FAILED zählt NICHT als offen (kein Retry).
+    open_count = qs.filter(
+        state__in=[FlashcardSyncEntry.State.PENDING, FlashcardSyncEntry.State.IN_PROGRESS]
+    ).count()
+    _set_synced_marker(document, synced_name, present=(total > 0 and pushed_total == total))
 
     return {
         "status": "done",
@@ -211,28 +240,47 @@ def _sync_document_flashcards(document_id: int) -> dict:
         "pushed": pushed,
         "failed": failed,
         "open": open_count,
+        "failed_permanent": failed_perm,
     }
 
 
 @shared_task(bind=True, max_retries=5)
 def push_document_flashcards(self, document_id: int) -> dict:
     """Erzeugt aus der aktuellen Dokumentversion MC-Lernkarten und pusht sie an
-    **psychosr**. Ausgelöst durch den Trigger-Tag (siehe ``documents/signals.py``).
+    **psychosr**. Ausgelöst durch den Trigger-Tag (``documents/signals.py``) und –
+    für neue Versionen – nach READY aus ``process_document_version``.
 
     Idempotent über :class:`FlashcardSyncEntry`: Karten werden pro Version einmalig
     generiert, atomar geclaimt und einzeln nach Erfolg als ``pushed`` markiert –
-    ein (Teil-)Retry sendet nur die noch offenen. Bleiben nach einem Lauf Karten
-    offen (psychosr-Ausfall), wird der Task mit begrenztem exponentiellem Backoff
-    erneut eingeplant (der Tag-Trigger feuert nur einmal).
+    ein (Teil-)Retry sendet nur die noch offenen. Fehlerbehandlung:
+
+    * noch offene Karten ODER transienter KI-Fehler (``status == "error"``) →
+      begrenzter exponentieller Retry;
+    * Retries erschöpft oder endgültig fehlgeschlagene Karten (``failed``) →
+      der Task endet als **FEHLER** (sichtbar im Monitoring), NICHT als Erfolg.
     """
     result = _sync_document_flashcards(document_id)
+    status = result.get("status")
     open_count = result.get("open", 0)
-    if open_count and self.request.retries < self.max_retries:
-        countdown = min(600, 30 * (2 ** self.request.retries))  # 30s,60,120,240,480→max 600
+    failed_perm = result.get("failed_permanent", 0)
+
+    # Transient (nochmal versuchen): KI-Providerfehler oder noch offene Karten.
+    retryable = status == "error" or open_count > 0
+    if retryable and self.request.retries < self.max_retries:
+        countdown = min(600, 30 * (2 ** self.request.retries))  # 30,60,120,240,480→max 600
         raise self.retry(
             countdown=countdown,
-            exc=RuntimeError(f"{open_count} psychosr-Karten offen (Dok {document_id})"),
+            exc=RuntimeError(f"psychosr-Sync unvollständig (Dok {document_id}): {result}"),
         )
+
+    # Retries erschöpft oder endgültig fehlgeschlagene Karten -> Task FAILED.
+    if retryable or failed_perm:
+        logger.error(
+            "psychosr-Sync für Dok %s nicht abgeschlossen (retries=%s): %s",
+            document_id, self.request.retries, result,
+        )
+        raise RuntimeError(f"psychosr-Sync fehlgeschlagen (Dok {document_id}): {result}")
+
     return result
 
 
@@ -253,11 +301,38 @@ def process_document_version(version_id: int) -> dict:
         from ai.tasks import suggest_document_metadata
 
         suggest_document_metadata.delay(version.document_id)
+        # Trägt das Dokument den psychosr-Trigger-Tag, wird auch die NEUE Version
+        # synchronisiert (nicht nur beim erstmaligen Taggen) – nach Commit, damit
+        # der Task die persistierte Version/Tags sicher sieht.
+        _maybe_dispatch_flashcards(version.document_id)
 
     # Der semantische Index (Bedeutungssuche + Copilot-RAG) wird bereits innerhalb
     # von pipeline.process_version() über _sync_semantic_index() synchron
     # aufgebaut – kein separater Task nötig (ein einziger Indexierungs-Pfad).
     return result
+
+
+def _maybe_dispatch_flashcards(document_id: int) -> None:
+    """Stößt den psychosr-Sync für ``document_id`` an, WENN psychosr konfiguriert
+    ist und das Dokument den Trigger-Tag trägt. Über ``transaction.on_commit``,
+    damit der asynchrone Task die committeten Daten sieht. Fehler hier dürfen die
+    Verarbeitung nie brechen (best effort).
+    """
+    if not (getattr(settings, "PSYCHOSR_URL", "") and getattr(settings, "PSYCHOSR_TOKEN", "")):
+        return
+    from .models import Document
+
+    trigger = getattr(settings, "PSYCHOSR_TRIGGER_TAG", "Psychologie")
+    if not Document.objects.filter(pk=document_id, tags__name=trigger).exists():
+        return
+
+    def _enqueue():
+        try:
+            push_document_flashcards.delay(document_id)
+        except Exception as exc:  # noqa: BLE001 – Broker weg? Verarbeitung nie brechen
+            logger.warning("psychosr-Auto-Sync (neue Version) nicht eingeplant: %s", exc)
+
+    transaction.on_commit(_enqueue)
 
 
 @shared_task
@@ -352,6 +427,49 @@ def reap_stuck_versions() -> dict:
             completed,
         )
     return {"reaped": reaped, "completed": completed, "threshold_minutes": minutes}
+
+
+@shared_task
+def reap_stuck_flashcard_syncs() -> dict:
+    """Watchdog für hängengebliebene psychosr-Kartensyncs (Beat).
+
+    Nötig, weil ``acks_late`` bewusst AUS ist: geht ``push_document_flashcards``
+    bei Worker-Crash/OOM/Hard-Timeout verloren, bleiben Karten in ``pending`` oder
+    verwaist in ``in_progress`` liegen – ohne erneuten Tag-Trigger würde sie sonst
+    nie wieder jemand senden. Dieser Task findet Versionen mit noch offenen Karten
+    (``pending``, oder ``in_progress`` älter als das Claim-Stale-Fenster) und plant
+    ``push_document_flashcards`` pro betroffenem Dokument neu ein. ``failed``-Karten
+    (endgültig) werden bewusst NICHT erneut versucht (Monitoring über last_error).
+    """
+    from .models import FlashcardSyncEntry
+
+    if not (getattr(settings, "PSYCHOSR_URL", "") and getattr(settings, "PSYCHOSR_TOKEN", "")):
+        return {"redispatched": 0, "disabled": True}
+
+    stale = timedelta(minutes=getattr(settings, "PSYCHOSR_CLAIM_STALE_MINUTES", 15))
+    cutoff = timezone.now() - stale
+    open_q = Q(state=FlashcardSyncEntry.State.PENDING) | Q(
+        state=FlashcardSyncEntry.State.IN_PROGRESS, claimed_at__lt=cutoff
+    )
+    # Nur aktuelle Versionen re-syncen (der Sync arbeitet auf current_version).
+    document_ids = list(
+        FlashcardSyncEntry.objects.filter(open_q)
+        .filter(version__document__current_version=models.F("version_id"))
+        .values_list("version__document_id", flat=True)
+        .distinct()
+    )
+    redispatched = 0
+    for doc_id in document_ids:
+        try:
+            push_document_flashcards.delay(doc_id)
+            redispatched += 1
+        except SoftTimeLimitExceeded:
+            raise
+        except Exception:  # noqa: BLE001 – Watchdog darf pro Dokument nicht kippen
+            logger.exception("reap_stuck_flashcard_syncs: Enqueue fehlgeschlagen für Dok %s", doc_id)
+    if redispatched:
+        logger.info("reap_stuck_flashcard_syncs: %d Dokumente neu eingeplant.", redispatched)
+    return {"redispatched": redispatched}
 
 
 def enqueue_processing(version) -> bool:
