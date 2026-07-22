@@ -25,7 +25,7 @@ POD="dms-restore-drill-$(date +%s)"
 ARTIFACT_TS=""
 MONITOR_OK=0
 
-for tool in kubectl ssh gzip tar base64; do
+for tool in kubectl ssh gzip tar base64 sha256sum awk; do
   command -v "$tool" >/dev/null 2>&1 || {
     echo "FEHLER: $tool fehlt" >&2
     exit 1
@@ -160,15 +160,57 @@ mkdir -p "$WORK/data"
 tar xzf "$DATA_LOCAL" -C "$WORK/data"
 FILES="$(find "$WORK/data" -type f | wc -l | tr -d '[:space:]')"
 TOP_LEVEL="$(find "$WORK/data" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort | tr '\n' ' ')"
-record_drill_status success "Restore-Drill erfolgreich: ${DOCS} Dokumente, ${FILES} Dateien"
+
+# --- ECHTE Wiederherstellbarkeits-Prüfung (P0) ---------------------------------
+# Nur Entpacken + Zählen beweist NICHTS: Ein Backup ohne originals/ war früher
+# „erfolgreich", obwohl die Dateien hinter DocumentVersion.file_path fehlten.
+# Daher: JEDE Version-Datei aus der wiederhergestellten DB muss im entpackten
+# /data vorhanden sein UND (falls Hash hinterlegt) exakt ihren SHA-256 tragen.
+echo "[drill] prüfe DB-Dateipfade + SHA-256 gegen das wiederhergestellte /data ..."
+VERSIONS="$(kubectl -n "$NAMESPACE" exec "$POD" -- psql -U dms -d dms -tAF $'\t' -c \
+  "select file_path, sha256 from documents_documentversion where coalesce(file_path,'') <> '';" \
+  2>/dev/null)"
+checked=0; missing=0; mismatch=0
+while IFS=$'\t' read -r fpath fsha; do
+  [ -z "$fpath" ] && continue
+  checked=$((checked + 1))
+  # /data/<...> -> $WORK/data/<...>  (andere Pfade sind nicht im Backup -> missing)
+  rel="${fpath#/data/}"
+  local="$WORK/data/$rel"
+  if [ ! -f "$local" ]; then
+    missing=$((missing + 1))
+    [ "$missing" -le 10 ] && echo "  FEHLT: $fpath" >&2
+    continue
+  fi
+  if [ -n "$fsha" ]; then
+    actual="$(sha256sum "$local" | awk '{print $1}')"
+    if [ "$actual" != "$fsha" ]; then
+      mismatch=$((mismatch + 1))
+      [ "$mismatch" -le 10 ] && echo "  HASH-MISMATCH: $fpath (erwartet $fsha, ist $actual)" >&2
+    fi
+  fi
+done <<EOF
+$VERSIONS
+EOF
+
+if [ "$missing" -ne 0 ] || [ "$mismatch" -ne 0 ]; then
+  record_drill_status failure \
+    "Restore-Drill FEHLGESCHLAGEN: ${missing} fehlende Dateien, ${mismatch} Hash-Abweichungen (von ${checked} geprüft)"
+  echo "FEHLER: Backup nicht vollständig wiederherstellbar – ${missing} fehlend, ${mismatch} Hash-Mismatch." >&2
+  exit 1
+fi
+
+record_drill_status success \
+  "Restore-Drill erfolgreich: ${DOCS} Dokumente, ${FILES} Dateien, ${checked} Version-Dateien (Hash) verifiziert"
 MONITOR_OK=1
 
 echo ""
 echo "==================== RESTORE-DRILL ERFOLGREICH ===================="
-echo " Backup-TS       : $TS"
-echo " DB-Tabellen     : $TABLES"
-echo " Dokumente       : $DOCS"
-echo " /data-Dateien   : $FILES"
-echo " /data-Ordner    : $TOP_LEVEL"
-echo " Produktion      : NICHT verändert"
+echo " Backup-TS         : $TS"
+echo " DB-Tabellen       : $TABLES"
+echo " Dokumente         : $DOCS"
+echo " /data-Dateien     : $FILES"
+echo " /data-Ordner      : $TOP_LEVEL"
+echo " Version-Dateien   : $checked geprüft, 0 fehlend, 0 Hash-Abweichungen"
+echo " Produktion        : NICHT verändert"
 echo "==================================================================="
