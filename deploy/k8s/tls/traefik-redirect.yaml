@@ -1,0 +1,22 @@
+# Globaler HTTP -> HTTPS-Redirect auf Traefik-Entrypoint-Ebene (k3s deployt Traefik
+# per HelmChart; diese HelmChartConfig ergänzt die Werte, ohne Traefik zu ersetzen).
+#
+# Vorteil gegenüber einer per-Router-Middleware: der Redirect greift für ALLE
+# HTTP-Anfragen und kann keine Redirect-Schleife auf websecure auslösen. HTTP (web)
+# antwortet mit 301/308 auf denselben Host via https (websecure).
+#
+# Einmalig als Admin anwenden (liegt im kube-system-Namespace):
+#   kubectl apply -f deploy/k8s/tls/traefik-redirect.yaml
+# k3s übernimmt die Änderung und startet Traefik neu.
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: traefik
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    ports:
+      web:
+        redirectTo:
+          port: websecure
+          priority: 10

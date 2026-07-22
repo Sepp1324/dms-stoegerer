@@ -1,15 +1,27 @@
 # Ingress über Traefik (in k3s standardmäßig installiert).
 # /api,/admin,/static -> Backend,  alles andere -> Frontend (SPA).
 # Hostname dms.stoegerer-home.at per DNS (UDM) auf eine Node-IP zeigen lassen.
+#
+# TLS: Der Router hört auf web UND websecure; das Zertifikat liefert cert-manager
+# über eine interne Cluster-CA in das Secret ``dms-tls`` (siehe deploy/k8s/tls/).
+# HTTP wird global auf HTTPS umgeleitet (Traefik-Entrypoint-Redirect, siehe
+# deploy/k8s/tls/traefik-redirect.yaml). Bevor cert-manager + tls-Overlay
+# eingerichtet sind, existiert ``dms-tls`` nicht → Traefik nutzt sein Default-Cert
+# (unverändertes Verhalten, kein harter Fehler).
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: dms
   namespace: dms
   annotations:
-    traefik.ingress.kubernetes.io/router.entrypoints: web
+    traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
 spec:
   ingressClassName: traefik
+  tls:
+    - hosts:
+        - dms.stoegerer-home.at
+      secretName: dms-tls
   rules:
     - host: dms.stoegerer-home.at
       http:
