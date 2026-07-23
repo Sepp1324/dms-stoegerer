@@ -5,6 +5,7 @@ import tempfile
 import zipfile
 from io import BytesIO
 from pathlib import Path
+from unittest import mock
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
@@ -85,6 +86,25 @@ class RevisionPackageServiceTests(RevisionPackageMixin, TestCase):
         self.assertEqual(metadata["versions"][0]["seal_hash"], version.seal_hash)
         self.assertTrue(any(entry["action"] == "update" for entry in audit))
 
+    def test_build_failure_raeumt_tempdatei_auf(self):
+        # Reißt der ZIP-Aufbau nach mkstemp ab, darf keine verwaiste dms-revpkg-*.zip
+        # im Temp-Verzeichnis zurückbleiben.
+        user = User.objects.create_user(username="rev-fail", password="pw", role="user")
+        doc, _version = self.make_document(owner=user)
+
+        tmp_root = tempfile.gettempdir()
+
+        def _revpkgs():
+            return {n for n in os.listdir(tmp_root) if n.startswith("dms-revpkg-")}
+
+        before = _revpkgs()
+        with mock.patch.object(
+            revision_package, "_fill_revision_zip", side_effect=RuntimeError("boom")
+        ):
+            with self.assertRaises(RuntimeError):
+                revision_package.build_document_revision_package(doc)
+        self.assertEqual(_revpkgs() - before, set())  # kein Leak
+
 
 class RevisionPackageApiTests(RevisionPackageMixin, APITestCase):
     def setUp(self):
@@ -112,7 +132,10 @@ class RevisionPackageApiTests(RevisionPackageMixin, APITestCase):
         payload = b"".join(response.streaming_content)  # FileResponse -> Streaming
         with zipfile.ZipFile(BytesIO(payload)) as zf:
             audit = json.loads(zf.read("audit.json"))
-        self.assertTrue(
+        # Der Export-Audit wird bewusst ERST NACH erfolgreichem Build geschrieben
+        # (kein "Export" protokollieren, der scheitern könnte) und ist daher NICHT
+        # im Paket selbst enthalten – er liegt aber in der DB (oben geprüft).
+        self.assertFalse(
             any(entry["action"] == "revision_package_export" for entry in audit)
         )
 
@@ -122,3 +145,19 @@ class RevisionPackageApiTests(RevisionPackageMixin, APITestCase):
         response = self.client.get(f"/api/documents/{self.doc.id}/revision-package/")
 
         self.assertEqual(response.status_code, 404)
+
+    def test_fehlgeschlagener_export_schreibt_keinen_audit(self):
+        # Scheitert der Build, darf KEIN "revision_package_export" protokolliert
+        # werden (Audit erst nach erfolgreichem Export).
+        self.client.force_authenticate(self.user)
+        with mock.patch.object(
+            revision_package, "_fill_revision_zip", side_effect=RuntimeError("boom")
+        ):
+            with self.assertRaises(RuntimeError):
+                self.client.get(f"/api/documents/{self.doc.id}/revision-package/")
+        self.assertFalse(
+            AuditLogEntry.objects.filter(
+                action="revision_package_export",
+                object_id=str(self.doc.id),
+            ).exists()
+        )

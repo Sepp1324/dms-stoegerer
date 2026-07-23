@@ -46,6 +46,45 @@ def build_document_revision_package(document: Document) -> RevisionPackage:
 
     fd, tmp_path = tempfile.mkstemp(prefix="dms-revpkg-", suffix=".zip")
     os.close(fd)
+    try:
+        manifest = _fill_revision_zip(
+            tmp_path,
+            document,
+            generated_at=generated_at,
+            archive_report=archive_report,
+            manifest_entries=manifest_entries,
+            missing_files=missing_files,
+        )
+    except BaseException:
+        # Reißt der ZIP-Aufbau ab (fehlende Datei, I/O, KeyboardInterrupt), darf die
+        # bereits per mkstemp angelegte Datei NICHT auf der Platte zurückbleiben –
+        # sonst sammeln sich bei jedem Fehlversuch verwaiste ZIPs im Temp-Verzeichnis.
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+    filename = f"{slugify(document.title) or 'dokument'}-{document.id}-revisionspaket.zip"
+    return RevisionPackage(
+        filename=filename,
+        path=tmp_path,
+        manifest=manifest,
+    )
+
+
+def _fill_revision_zip(
+    tmp_path: str,
+    document: Document,
+    *,
+    generated_at,
+    archive_report: dict[str, Any],
+    manifest_entries: list[dict[str, Any]],
+    missing_files: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Schreibt den kompletten Paketinhalt in ``tmp_path`` und gibt das Manifest
+    zurück. Ausgelagert, damit der Aufrufer bei JEDEM Abbruch die Temp-Datei
+    zuverlässig aufräumen kann."""
     with zipfile.ZipFile(tmp_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         _write_json(
             zf,
@@ -117,12 +156,7 @@ def build_document_revision_package(document: Document) -> RevisionPackage:
         }
         _write_json(zf, "manifest.json", manifest, manifest_entries=None)
 
-    filename = f"{slugify(document.title) or 'dokument'}-{document.id}-revisionspaket.zip"
-    return RevisionPackage(
-        filename=filename,
-        path=tmp_path,
-        manifest=manifest,
-    )
+    return manifest
 
 
 def _metadata_payload(document: Document, *, generated_at) -> dict[str, Any]:
