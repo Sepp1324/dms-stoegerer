@@ -24,6 +24,21 @@ class HealthVersionTests(SimpleTestCase):
         self.assertEqual(resp.json()["commit"], "abc1234")
 
 
+class LivezTests(SimpleTestCase):
+    """Liveness (P2): antwortet 200 OHNE DB-Zugriff.
+
+    Bewusst ``SimpleTestCase`` OHNE ``databases`` – hier ist jeder DB-Zugriff
+    verboten. Dass ``livez`` trotzdem 200 liefert, BEWEIST damit, dass es die DB
+    nicht anfasst (würde es die DB berühren, schlüge der Test hier fehl). Kein
+    ``connection.cursor``-Mock nötig (der kollidiert mit dem DB-Guard von
+    SimpleTestCase)."""
+
+    def test_livez_ohne_db_200(self):
+        resp = APIClient().get(reverse("livez"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["status"], "alive")
+
+
 class CountAnnotationTests(SimpleTestCase):
     """Annotierter Wert 0 muss zurückgegeben werden – NICHT via or-Fallback neu
     gezählt werden (das war die N+1-Quelle bei leeren Akten/Dossiers/Entitäten).

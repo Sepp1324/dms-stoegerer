@@ -6,12 +6,14 @@ from rest_framework_simplejwt.views import (
     TokenRefreshView,
 )
 
-from documents.views import health
+from documents.views import health, livez
 
 urlpatterns = [
     path("admin/", admin.site.urls),
-    # Health-Check (unauthentifiziert) – vom Frontend und k8s genutzt
+    # Readiness (inkl. DB) – vom Frontend und k8s genutzt
     path("api/health/", health, name="health"),
+    # Liveness (NUR Webprozess, KEINE DB) – k8s livenessProbe
+    path("api/livez/", livez, name="livez"),
     # Auth
     path("api/auth/token/", TokenObtainPairView.as_view(), name="token_obtain_pair"),
     path("api/auth/token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
