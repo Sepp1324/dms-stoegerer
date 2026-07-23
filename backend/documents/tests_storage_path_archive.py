@@ -57,8 +57,11 @@ class StoragePathArchivePlacementTests(TestCase):
         v, _ = self._version(storage_template="/tmp/evil/{titel}")
         pipeline._place_archive_at_storage_path(v)
         v.refresh_from_db()
-        self.assertTrue(self._under_archive(v.archive_path))   # NICHT /tmp/evil
-        self.assertNotIn("/tmp/evil", v.archive_path)
+        # Die absolute Wurzel wird eingefangen: der Pfad liegt UNTER ARCHIVE_DIR
+        # (die Segmente "tmp"/"evil" bleiben als harmlose Unterordnernamen erhalten,
+        # zeigen aber NICHT mehr auf das echte /tmp/evil).
+        self.assertTrue(self._under_archive(v.archive_path))
+        self.assertFalse(v.archive_path.startswith("/tmp/evil"))
 
     def test_dotdot_ausbruch_wird_eingefangen(self):
         v, _ = self._version(storage_template="../../etc/{titel}")
