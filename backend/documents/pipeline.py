@@ -225,15 +225,32 @@ def extract_text(pdf_path: str | Path) -> str:
         return ""
 
 
+def resolve_readable_version_path(version) -> str | None:
+    """Liefert den Pfad einer LESBAREN Datei der Version – bevorzugt das Archiv-PDF,
+    fällt aber auf das Original zurück, wenn ``archive_path`` zwar gesetzt, die Datei
+    aber verschwunden ist (z. B. nach einem Restore ohne archive/).
+
+    Zentral, damit ALLE Leser (Thumbnail, Volltext-Reindex, Vorschau) dieselbe
+    Fallback-Kette nutzen. Ein blindes ``archive_path or file_path`` würde bei
+    gesetztem, aber fehlendem Archiv das vorhandene Original ignorieren. Gibt
+    ``None`` zurück, wenn keine der beiden Dateien existiert.
+    """
+    for candidate in (version.archive_path, version.file_path):
+        if candidate and os.path.exists(candidate):
+            return candidate
+    return None
+
+
 def generate_thumbnail(version, *, max_width: int = 700) -> str | None:
     """Erzeugt ein JPEG-Miniaturbild der ersten Seite und speichert den Pfad.
 
-    Quelle: bevorzugt das Archiv-PDF, sonst das Original. Für Bild-Originale
-    direkt via Pillow. Imports sind lazy, damit das Backend ohne die
-    Render-Bibliotheken lädt (z. B. `manage.py check`).
+    Quelle: bevorzugt das Archiv-PDF, sonst das Original (via
+    ``resolve_readable_version_path``). Für Bild-Originale direkt via Pillow.
+    Imports sind lazy, damit das Backend ohne die Render-Bibliotheken lädt
+    (z. B. `manage.py check`).
     """
-    src = version.archive_path or version.file_path
-    if not src or not os.path.exists(src):
+    src = resolve_readable_version_path(version)
+    if not src:
         return None
 
     thumbs_dir = storage.DATA_DIR / "thumbnails"
