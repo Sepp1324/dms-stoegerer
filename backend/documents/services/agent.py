@@ -101,7 +101,15 @@ def _do_move_to_folder(user, document, params):
         raise ValueError("Ordnername fehlt.")
     # Bewusst NUR bestehende Ordner (keine Auto-Anlage → keine Tippfehler-Ordner);
     # gleichnamige Ordner in verschiedenen Ebenen sind mehrdeutig → Fehler.
-    matches = list(DocumentFolder.objects.filter(name__iexact=name)[:2])
+    # Owner-Scope (P1): NUR Ordner des Dokument-Eigentümers – sonst könnte der Agent
+    # ein Dokument in einen eindeutig benannten FREMDEN Ordner verschieben und damit
+    # den Serializer-/Bulk-Owner-Schutz umgehen. Zugleich löst das die neue
+    # Namensmehrdeutigkeit (Root-Namen dürfen pro Owner doppelt vorkommen) auf.
+    matches = list(
+        DocumentFolder.objects.filter(
+            name__iexact=name, owner_id=document.owner_id
+        )[:2]
+    )
     if not matches:
         raise ValueError(f"Ordner '{name}' nicht gefunden.")
     if len(matches) > 1:
@@ -153,13 +161,30 @@ def _undo_fk(document, undo, field: str, label: str) -> str:
     return f"{label} zurückgesetzt"
 
 
+def _undo_move_to_folder(document, undo) -> str:
+    """Setzt den Ordner zurück – aber NUR, wenn das Ziel weiterhin zulässig ist.
+
+    Owner-Scope (P1): Ein blindes Zurücksetzen könnte eine inzwischen unzulässige
+    Zuordnung (fremder/gelöschter Ordner) wiederherstellen. ``None`` (aus dem Ordner
+    nehmen) ist immer erlaubt; ein konkreter Vorgänger nur, wenn er noch existiert
+    und dem Dokument-Eigentümer gehört."""
+    previous = undo.get("previous")
+    if previous is not None and not DocumentFolder.objects.filter(
+        pk=previous, owner_id=document.owner_id
+    ).exists():
+        return "Vorheriger Ordner nicht mehr zulässig – Zuordnung unverändert"
+    document.folder_id = previous
+    document.save(update_fields=["folder"])
+    return "Ordner zurückgesetzt"
+
+
 UNDO_HANDLERS = {
     "add_tag": _undo_add_tag,
     "set_note": _undo_set_note,
     "set_reminder": _undo_set_reminder,
     "set_correspondent": lambda d, u: _undo_fk(d, u, "correspondent", "Korrespondent"),
     "set_document_type": lambda d, u: _undo_fk(d, u, "document_type", "Dokumenttyp"),
-    "move_to_folder": lambda d, u: _undo_fk(d, u, "folder", "Ordner"),
+    "move_to_folder": _undo_move_to_folder,
 }
 
 

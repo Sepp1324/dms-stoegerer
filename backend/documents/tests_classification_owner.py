@@ -40,3 +40,43 @@ class ClassificationOwnerScopingTests(TestCase):
         apply_rules(bob_doc)
         bob_doc.refresh_from_db()
         self.assertIsNotNone(bob_doc.document_type)
+
+
+class ClassificationFolderOwnerTests(TestCase):
+    """P1: Der Ordner-Resolver einer Regel legt/sucht owner-gebunden – kein
+    MultipleObjectsReturned bei gleichnamigen Ordnern, keine Fremdzuweisung."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.alice = User.objects.create_user("cf_alice", password="pw", role="user")
+        cls.bob = User.objects.create_user("cf_bob", password="pw", role="user")
+
+    def _folder_rule(self):
+        return ClassificationRule.objects.create(
+            name="Ablage", enabled=True, owner=None,
+            match={"text_contains": ["steuer"]}, then={"folder": "Steuer"},
+        )
+
+    def test_ordner_wird_fuer_dokument_eigentuemer_angelegt(self):
+        from documents.models import DocumentFolder
+
+        self._folder_rule()
+        doc = Document.objects.create(title="Steuer 2026", owner=self.alice)
+        apply_rules(doc)
+        doc.refresh_from_db()
+        self.assertIsNotNone(doc.folder)
+        self.assertEqual(doc.folder.owner_id, self.alice.id)
+        self.assertEqual(DocumentFolder.objects.filter(name="Steuer").count(), 1)
+
+    def test_zwei_gleichnamige_ordner_kein_multipleobjects(self):
+        from documents.models import DocumentFolder
+
+        # Alice und Bob haben je einen Root "Steuer" (pro Owner erlaubt).
+        DocumentFolder.objects.create(name="Steuer", owner=self.alice)
+        DocumentFolder.objects.create(name="Steuer", owner=self.bob)
+        self._folder_rule()
+        doc = Document.objects.create(title="Steuer 2026", owner=self.bob)
+        apply_rules(doc)  # darf NICHT MultipleObjectsReturned werfen
+        doc.refresh_from_db()
+        self.assertIsNotNone(doc.folder)
+        self.assertEqual(doc.folder.owner_id, self.bob.id)  # Bobs, nicht Alices
