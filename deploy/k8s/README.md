@@ -510,6 +510,36 @@ im `kube-system`/`cert-manager`-Namespace – außerhalb der SA-Rechte).
 > Let's-Encrypt-`ClusterIssuer` (DNS-01) verwenden und in `certificate.yaml` den
 > `issuerRef` darauf zeigen lassen (braucht ein DNS-Provider-API-Token als Secret).
 
+### 14a. Domain wechseln (Checkliste)
+
+> ⚠️ **Wichtig:** Ein reiner Merge, der nur den Host in `configmap.yaml`/
+> `ingress.yaml` ändert, rollt das **Zertifikat NICHT mit** – der CD-Deploy fasst
+> `deploy/k8s/tls` bewusst nicht an (Admin-/One-time-Ressourcen außerhalb der
+> SA-Rechte). Das Secret `dms-tls` trägt dann weiter das **alte** Zertifikat, und
+> Traefik quittiert `https://<neue-domain>` mit **`tlsv1 alert internal error`**
+> (Seite „nicht erreichbar", obwohl DNS + `:80`-Redirect funktionieren). Nach jeder
+> Hoständerung daher als Cluster-Admin:
+
+```bash
+# 1) neuen Host in configmap.yaml (DJANGO_ALLOWED_HOSTS/CORS), ingress.yaml
+#    (Host + TLS-Host) und tls/certificate.yaml (dnsNames) setzen, mergen lassen.
+
+# 2) DNS-A-Record <neue-domain> -> Node-IP setzen (UDM).
+
+# 3) Zertifikat für den neuen Host neu ausstellen (interne CA -> sofort):
+kubectl apply -k deploy/k8s/tls
+kubectl -n dms get certificate dms-tls -o wide     # READY=True + neuer dnsName?
+# hängt es? Secret wegwerfen, cert-manager erzeugt es aus der Certificate neu:
+kubectl -n dms delete secret dms-tls
+
+# 4) Backend neu starten – laufende Pods haben DJANGO_ALLOWED_HOSTS/CORS noch aus
+#    der ALTEN ConfigMap geladen (ein ConfigMap-Update restartet Pods NICHT):
+kubectl -n dms rollout restart deploy/backend
+
+# 5) Prüfen:
+curl -k https://<neue-domain>/api/health/         # erwartet HTTP 200
+```
+
 ---
 
 ## 15. Troubleshooting
@@ -524,6 +554,8 @@ im `kube-system`/`cert-manager`-Namespace – außerhalb der SA-Rechte).
 | Upload OK, aber kein OCR-Ergebnis | Worker-Logs (`kubectl -n dms logs deploy/worker`); Redis erreichbar? OCR-Binaries im Image (§ Dockerfile) |
 | `dms.stoegerer-home.cloud` nicht erreichbar | DNS-A-Record (UDM) auf Node-IP gesetzt? Erst per `curl -H 'Host: …' http://127.0.0.1/api/health/` prüfen, ob Traefik antwortet; Traefik läuft (`kubectl -n kube-system get pods`)? |
 | `404 page not found` (Traefik) beim Aufruf | Kein Router für den Host → Ingress vorhanden (`kubectl -n dms get ingress`)? `ingressClassName: traefik` gesetzt? Host im Ingress == angefragter Host? |
+| `https://…` bricht mit `tlsv1 alert internal error` (`:80`-Redirect geht aber) | `dms-tls` trägt ein Zertifikat für den **alten** Host – nach Domainwechsel wurde `deploy/k8s/tls` nicht neu angewendet (CD rollt es nicht). → **§14a Domain wechseln**: `kubectl apply -k deploy/k8s/tls`, Cert `READY` prüfen, ggf. `kubectl -n dms delete secret dms-tls` |
+| `https://…` „no available server" (Traefik) | Backend hat keine bereiten Endpoints → `kubectl -n dms get pods`/`endpoints backend`; meist laufender Rollout oder Readiness rot (`kubectl -n dms logs deploy/backend`) |
 | PVC `Pending` | local-path-Provisioner aktiv? `kubectl get sc` sollte `local-path (default)` zeigen |
 | postgres `Error`: `initdb: directory … not empty (lost+found)` | PVC liegt auf eigenem Dateisystem-Mount → bereits gelöst per `PGDATA=/var/lib/postgresql/data/pgdata` im `postgres.yaml` (Daten im Unterverzeichnis statt im Mount-Punkt) |
 | `FailedMount … volumeattachments … no relationship found between node …` | RWO-PVC `dms-data` von backend+worker auf verschiedenen Nodes angefordert → durch `podAffinity` in `celery.yaml` gelöst (Co-Location). Dauerhaft besser: RWX-Storage, siehe §12 |
