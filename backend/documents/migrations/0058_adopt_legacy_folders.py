@@ -1,19 +1,24 @@
 from django.db import migrations
-from django.db.models import Count
 
 
 def adopt_legacy_folders(apps, schema_editor):
     """Weist bestehenden owner=NULL-Ordnern (Migration 0054 ließ sie bewusst
     ownerlos) einen Eigentümer zu, damit sie unter dem neuen Owner-Check wieder
-    zuweisbar sind (Detail/Bulk/Drag-and-drop, Serializer.validate_folder).
+    zuweisbar sind (Detail/Bulk/Drag, Serializer.validate_folder).
 
-    Strategie – jeder Baum wird SINGLE-OWNER (Voraussetzung des Owner-Modells):
-      * Wurzel-Ordner: Eigentümer = Mehrheits-Dokumenteigentümer der direkt darin
-        liegenden Dokumente (deterministischer Tie-Break über die kleinste ID).
-      * Unterordner: erben den Eigentümer ihres Parents (in Baum-Reihenfolge),
-        damit kein gemischter Baum entsteht (CASCADE bliebe sonst owner-übergreifend).
-      * Wurzeln ganz OHNE Dokumente bleiben ownerlos (admin-only, global) – sie
-        blockieren keine bestehende Zuordnung.
+    Vorgehen – jeder Baum wird als GANZES betrachtet und bleibt SINGLE-OWNER:
+      * Der Eigentümer wird aus den Dokumenten des GESAMTEN Teilbaums (Wurzel +
+        alle Nachfahren) ermittelt – nicht nur aus denen, die direkt in der Wurzel
+        liegen. Bei ``Akte / Rechnungen / Dokument.pdf`` ist die Wurzel selbst
+        meist leer; nur so werden verschachtelte Ordner überhaupt adoptiert.
+      * Genau EIN Dokumenteigentümer im Teilbaum -> der ganze Teilbaum geht an ihn.
+      * Kein Dokument -> Teilbaum bleibt ownerlos (nichts zu adoptieren).
+      * MEHRERE Eigentümer (gemischter Baum) -> Teilbaum bleibt bewusst ownerlos.
+        Er ist damit admin-only (nur Admins mutieren owner=NULL-Ordner) – die
+        korrekte Zuordnung ist eine manuelle Admin-Triage. So bleibt KEIN
+        Minderheitsdokument unter einem fremden Eigentümer hängen (Single-Owner-
+        Invariante gewahrt) und kein Fremder kann die Zuordnung per Umbenennen/
+        Löschen beeinflussen.
 
     Kollisionen: Zwei ownerlose Wurzeln gleichen Namens konnten koexistieren
     (unique(owner,name) behandelt NULL als verschieden). Fallen sie beim Adoptieren
@@ -24,15 +29,20 @@ def adopt_legacy_folders(apps, schema_editor):
     DocumentFolder = apps.get_model("documents", "DocumentFolder")
     Document = apps.get_model("documents", "Document")
 
-    def majority_owner(folder_pk):
-        row = (
-            Document.objects.filter(folder_id=folder_pk, owner__isnull=False)
-            .values("owner")
-            .annotate(n=Count("id"))
-            .order_by("-n", "owner")
-            .first()
-        )
-        return row["owner"] if row else None
+    folders = list(
+        DocumentFolder.objects.all().values("id", "parent_id", "owner_id", "name")
+    )
+    children = {}
+    for f in folders:
+        children.setdefault(f["parent_id"], []).append(f["id"])
+
+    def subtree_ids(root_id):
+        out, stack = [], [root_id]
+        while stack:
+            cur = stack.pop()
+            out.append(cur)
+            stack.extend(children.get(cur, []))
+        return out
 
     def unique_root_name(owner_id, name, pk):
         base, candidate, i = name, name, 1
@@ -47,26 +57,28 @@ def adopt_legacy_folders(apps, schema_editor):
             candidate = f"{base} ({i})"
         return candidate
 
-    # Wiederholt, bis keine Zuweisung mehr möglich ist: pro Runde jede ownerlose
-    # Wurzel (per Mehrheit) bzw. jedes Kind mit inzwischen bekanntem Parent-Owner.
-    changed = True
-    while changed:
-        changed = False
-        for folder in DocumentFolder.objects.filter(
-            owner__isnull=True
-        ).select_related("parent"):
-            if folder.parent_id is not None:
-                if folder.parent.owner_id is not None:
-                    folder.owner_id = folder.parent.owner_id
-                    folder.save(update_fields=["owner"])
-                    changed = True
-                continue  # Parent noch NULL -> spätere Runde
-            owner_id = majority_owner(folder.pk)
-            if owner_id is not None:
-                folder.owner_id = owner_id
-                folder.name = unique_root_name(owner_id, folder.name, folder.pk)
-                folder.save(update_fields=["owner", "name"])
-                changed = True
+    roots = [f for f in folders if f["parent_id"] is None and f["owner_id"] is None]
+    for root in roots:
+        ids = subtree_ids(root["id"])
+        owners = list(
+            Document.objects.filter(folder_id__in=ids, owner__isnull=False)
+            .values_list("owner", flat=True)
+            .distinct()
+        )
+        if len(owners) != 1:
+            continue  # 0 -> nichts zu adoptieren; >=2 -> gemischt -> Admin-Triage
+        owner_id = owners[0]
+        # Nachfahren zuerst (keine per-Owner-Namensbindung -> unkritisch), die
+        # Wurzel zuletzt mit kollisionsfreiem Namen (unique(owner,name) an der Wurzel).
+        descendants = [i for i in ids if i != root["id"]]
+        if descendants:
+            DocumentFolder.objects.filter(
+                id__in=descendants, owner__isnull=True
+            ).update(owner_id=owner_id)
+        root_obj = DocumentFolder.objects.get(pk=root["id"])
+        root_obj.owner_id = owner_id
+        root_obj.name = unique_root_name(owner_id, root_obj.name, root_obj.pk)
+        root_obj.save(update_fields=["owner", "name"])
 
 
 class Migration(migrations.Migration):

@@ -153,7 +153,14 @@ def apply_rules(document) -> dict:
             applied["storage_path"] = sp
 
         folder_path = str(then.get("folder", "")).strip()
-        if folder_path and document.folder is None:
+        # Owner-Konsistenz (P1): Der fachliche Ordner ist owner-gebunden. Ein
+        # Triage-Dokument (owner=None) darf hier KEINEN Ordner bekommen – die
+        # Klassifizierung läuft VOR der Workflow-Engine, die den Owner ggf. erst
+        # setzt. Sonst entstünde ein nutzereigenes Dokument in einem ownerlosen
+        # Ordner (und owner=None-Anlage könnte mehrdeutige NULL-Root-Treffer geben).
+        # Für ownerlose Dokumente bleibt die Ordnerzuordnung offen (Admin-Triage
+        # bzw. spätere Zuordnung, wenn der Owner feststeht).
+        if folder_path and document.folder is None and document.owner_id is not None:
             folder = _get_or_create_folder(folder_path, document.owner)
             if folder is not None:
                 document.folder = folder

@@ -80,3 +80,16 @@ class ClassificationFolderOwnerTests(TestCase):
         doc.refresh_from_db()
         self.assertIsNotNone(doc.folder)
         self.assertEqual(doc.folder.owner_id, self.bob.id)  # Bobs, nicht Alices
+
+    def test_triage_dokument_bekommt_keinen_ordner(self):
+        from documents.models import DocumentFolder
+
+        # Owner=None (Triage): die Regel darf KEINEN ownerlosen Ordner anlegen und
+        # das Dokument nicht zuordnen (sonst nutzereigenes Doc in ownerlosem Ordner,
+        # sobald ein Workflow den Owner setzt; zudem kein owner=None-Root angelegt).
+        self._folder_rule()
+        doc = Document.objects.create(title="Steuer 2026", owner=None)
+        apply_rules(doc)
+        doc.refresh_from_db()
+        self.assertIsNone(doc.folder)
+        self.assertFalse(DocumentFolder.objects.filter(name="Steuer").exists())
