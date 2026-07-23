@@ -176,14 +176,21 @@ class DocumentFolder(models.Model):
         verbose_name_plural = "Ordner"
         ordering = ["parent__name", "name"]
         constraints = [
+            # Nicht-Root: ``parent`` bestimmt den Owner (Teilbäume sind
+            # single-owner, siehe Serializer-Guard), daher ist (parent, name)
+            # bereits pro Owner eindeutig.
             models.UniqueConstraint(
                 fields=["parent", "name"],
                 name="documents_folder_unique_sibling_name",
             ),
+            # Root-Ordner (parent IS NULL) existieren pro Owner nebeneinander –
+            # daher pro OWNER eindeutig, NICHT global. Sonst blockiert der
+            # Root-Ordner eines Nutzers denselben Namen für alle anderen
+            # (und würde als IntegrityError/500 statt sauberer Validierung enden).
             models.UniqueConstraint(
-                fields=["name"],
+                fields=["owner", "name"],
                 condition=Q(parent__isnull=True),
-                name="documents_folder_unique_root_name",
+                name="documents_folder_unique_root_name_per_owner",
             ),
         ]
 

@@ -200,3 +200,80 @@ class FolderShareOwnershipTests(APITestCase):
             200,
         )
         self.assertEqual(self.client.delete(f"/api/folders/{glob.id}/").status_code, 204)
+
+
+class FolderTreeOwnerConsistencyTests(APITestCase):
+    """P2: Kein gemischter Eigentümerbaum – Unterordner nur unter eigenem Parent,
+    Root-Namen pro Owner eindeutig (kein Blockieren fremder Namen, kein CASCADE
+    über Owner-Grenzen)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.alice = User.objects.create_user("t_alice", password="pw", role="user")
+        cls.bob = User.objects.create_user("t_bob", password="pw", role="user")
+        cls.admin = User.objects.create_user("t_admin", password="pw", role="admin")
+
+    def test_anlegen_unter_fremdem_parent_abgelehnt(self):
+        alices = DocumentFolder.objects.create(name="AlicesRoot", owner=self.alice)
+        self.client.force_authenticate(self.bob)
+        resp = self.client.post(
+            "/api/folders/", {"name": "BobsKind", "parent": alices.id}, format="json"
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("parent", resp.data)
+        self.assertFalse(DocumentFolder.objects.filter(name="BobsKind").exists())
+
+    def test_eigenes_kind_unter_fremden_parent_verschieben_abgelehnt(self):
+        alices = DocumentFolder.objects.create(name="AlicesRoot2", owner=self.alice)
+        bobs = DocumentFolder.objects.create(name="BobsRoot", owner=self.bob)
+        self.client.force_authenticate(self.bob)
+        resp = self.client.patch(
+            f"/api/folders/{bobs.id}/", {"parent": alices.id}, format="json"
+        )
+        self.assertEqual(resp.status_code, 400)
+        bobs.refresh_from_db()
+        self.assertIsNone(bobs.parent_id)  # nicht in fremden Baum gehängt
+
+    def test_anlegen_unter_eigenem_parent_ok(self):
+        self.client.force_authenticate(self.bob)
+        parent = self.client.post("/api/folders/", {"name": "BobsParent"}, format="json")
+        self.assertEqual(parent.status_code, 201)
+        child = self.client.post(
+            "/api/folders/",
+            {"name": "BobsChild", "parent": parent.data["id"]},
+            format="json",
+        )
+        self.assertEqual(child.status_code, 201)
+
+    def test_gleicher_root_name_pro_owner_erlaubt(self):
+        # Alice legt "Steuer" an; Bob darf denselben Root-Namen verwenden.
+        self.client.force_authenticate(self.alice)
+        self.assertEqual(
+            self.client.post("/api/folders/", {"name": "Steuer"}, format="json").status_code,
+            201,
+        )
+        self.client.force_authenticate(self.bob)
+        self.assertEqual(
+            self.client.post("/api/folders/", {"name": "Steuer"}, format="json").status_code,
+            201,
+        )
+        self.assertEqual(DocumentFolder.objects.filter(name="Steuer").count(), 2)
+
+    def test_gleicher_root_name_selber_owner_abgelehnt(self):
+        self.client.force_authenticate(self.alice)
+        self.assertEqual(
+            self.client.post("/api/folders/", {"name": "Doppelt"}, format="json").status_code,
+            201,
+        )
+        self.assertEqual(
+            self.client.post("/api/folders/", {"name": "Doppelt"}, format="json").status_code,
+            400,
+        )
+
+    def test_admin_darf_unter_fremden_parent_einordnen(self):
+        alices = DocumentFolder.objects.create(name="AlicesAdminRoot", owner=self.alice)
+        self.client.force_authenticate(self.admin)
+        resp = self.client.post(
+            "/api/folders/", {"name": "AdminKind", "parent": alices.id}, format="json"
+        )
+        self.assertEqual(resp.status_code, 201)

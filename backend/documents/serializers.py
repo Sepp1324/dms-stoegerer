@@ -107,6 +107,24 @@ class DocumentFolderSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         parent = attrs.get("parent", getattr(self.instance, "parent", None))
         name = attrs.get("name", getattr(self.instance, "name", None))
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        is_admin = bool(getattr(user, "is_dms_admin", False))
+
+        # Owner-Konsistenz des Baums (P2): Ein Nicht-Admin darf einen Ordner NUR
+        # unter einen EIGENEN Parent hängen. Sonst entsteht ein gemischter
+        # Eigentümerbaum – und da ``parent`` per CASCADE löscht, würde das Löschen
+        # des fremden Elternordners (eine legitime Owner-Aktion des Fremden) den
+        # eigenen Unterordner mitreißen (Datenverlust). Zudem könnten fremde
+        # Kindnamen unter einem sichtbaren Parent die eigene Vergabe blockieren.
+        # Konsequenz: jeder Teilbaum gehört genau einem Owner; CASCADE bleibt
+        # innerhalb dieses Owners. Admins dürfen frei einordnen.
+        if parent is not None and not is_admin:
+            if parent.owner_id != getattr(user, "id", None):
+                raise serializers.ValidationError(
+                    {"parent": "Unterordner nur unterhalb eines eigenen Ordners erlaubt."}
+                )
+
         if self.instance is not None and parent is not None:
             if parent.pk == self.instance.pk:
                 raise serializers.ValidationError("Ein Ordner kann nicht sein eigener Parent sein.")
@@ -118,7 +136,16 @@ class DocumentFolderSerializer(serializers.ModelSerializer):
                     )
                 cursor = cursor.parent
         if name:
-            siblings = DocumentFolder.objects.filter(name=name, parent=parent)
+            # Namens-Eindeutigkeit pro OWNER (nicht global): der Zieleigentümer ist
+            # beim Anlegen der Request-Nutzer, beim Bearbeiten der bestehende Owner.
+            target_owner_id = (
+                self.instance.owner_id
+                if self.instance is not None
+                else getattr(user, "id", None)
+            )
+            siblings = DocumentFolder.objects.filter(
+                name=name, parent=parent, owner_id=target_owner_id
+            )
             if self.instance is not None:
                 siblings = siblings.exclude(pk=self.instance.pk)
             if siblings.exists():
