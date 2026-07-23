@@ -60,14 +60,17 @@ def adopt_legacy_folders(apps, schema_editor):
     roots = [f for f in folders if f["parent_id"] is None and f["owner_id"] is None]
     for root in roots:
         ids = subtree_ids(root["id"])
-        owners = list(
+        # Python-``set`` statt ``.distinct()``: bei einer Default-``Meta.ordering``
+        # auf ``Document`` zieht Django die Order-Spalte implizit in den SELECT, dann
+        # dedupliziert ``.distinct()`` NICHT nach owner allein (mehrere Dokumente
+        # desselben Owners zaehlten faelschlich als „mehrere Owner").
+        owners = set(
             Document.objects.filter(folder_id__in=ids, owner__isnull=False)
             .values_list("owner", flat=True)
-            .distinct()
         )
         if len(owners) != 1:
             continue  # 0 -> nichts zu adoptieren; >=2 -> gemischt -> Admin-Triage
-        owner_id = owners[0]
+        owner_id = next(iter(owners))
         # Nachfahren zuerst (keine per-Owner-Namensbindung -> unkritisch), die
         # Wurzel zuletzt mit kollisionsfreiem Namen (unique(owner,name) an der Wurzel).
         descendants = [i for i in ids if i != root["id"]]
