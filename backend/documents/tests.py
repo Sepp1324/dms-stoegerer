@@ -847,11 +847,18 @@ class MailClassificationRuleTests(TestCase):
     Mail-Bedingungen bei Nicht-Mail-Dokumenten (leere Felder) nicht feuern.
     """
 
+    @classmethod
+    def setUpTestData(cls):
+        # Ordnerregeln legen owner-gebundene Ordner an (Triage-Guard: ownerlose
+        # Dokumente bekommen keinen Ordner) -> die Testdokumente brauchen einen Owner.
+        cls.owner = User.objects.create_user("mailclass-owner", password="pw", role="user")
+
     def _doc(self, *, title="", mail_subject="", mail_sender=""):
         return Document.objects.create(
             title=title,
             mail_subject=mail_subject,
             mail_sender=mail_sender,
+            owner=self.owner,
         )
 
     def test_regel_matcht_per_betreff(self):
