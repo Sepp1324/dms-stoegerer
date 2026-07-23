@@ -34,7 +34,7 @@ def _ready_version(*, immutable=False, indexed_at=None, changed_min_ago=30, stat
 class EnsureFindabilityIndexTests(TestCase):
     def test_beide_erfolg_setzt_indexed_at_worm_safe(self):
         v = _ready_version(immutable=True)  # WORM: save() waere gesperrt
-        with mock.patch(SEARCH), mock.patch(SEM, return_value={"status": "ok"}):
+        with mock.patch(SEARCH), mock.patch(SEM, return_value={"status": "indexed"}):
             ok = pipeline.ensure_findability_index(v)
         self.assertTrue(ok)
         v.refresh_from_db()
@@ -43,8 +43,19 @@ class EnsureFindabilityIndexTests(TestCase):
     def test_index_fehler_laesst_indexed_at_null(self):
         v = _ready_version(immutable=True)
         with mock.patch(SEARCH, side_effect=Exception("boom")), mock.patch(
-            SEM, return_value={"status": "ok"}
+            SEM, return_value={"status": "indexed"}
         ):
+            ok = pipeline.ensure_findability_index(v)
+        self.assertFalse(ok)
+        v.refresh_from_db()
+        self.assertIsNone(v.indexed_at)  # -> Reconciler holt nach
+
+    def test_semantik_error_status_laesst_indexed_at_null(self):
+        # KERN-Regression: sync_document_embeddings meldet einen Embedding-Fehler
+        # NICHT per Exception, sondern per status="error" (z. B. Backend down).
+        # Frueher galt das als Erfolg -> indexed_at gesetzt -> Reconciler nie wieder.
+        v = _ready_version(immutable=True)
+        with mock.patch(SEARCH), mock.patch(SEM, return_value={"status": "error"}):
             ok = pipeline.ensure_findability_index(v)
         self.assertFalse(ok)
         v.refresh_from_db()
@@ -55,7 +66,7 @@ class EnsureFindabilityIndexTests(TestCase):
 class ReapUnindexedVersionsTests(TestCase):
     def test_reindexiert_ready_ohne_indexed_at(self):
         v = _ready_version(indexed_at=None, changed_min_ago=30)
-        with mock.patch(SEARCH), mock.patch(SEM, return_value={"status": "ok"}):
+        with mock.patch(SEARCH), mock.patch(SEM, return_value={"status": "indexed"}):
             res = tasks.reap_unindexed_versions()
         self.assertEqual(res["reindexed"], 1)
         v.refresh_from_db()
