@@ -3924,12 +3924,19 @@ class DocumentViewSet(viewsets.ModelViewSet):
             )
 
         errors = []
-        if (
-            folder_id is not unset
-            and folder_id is not None
-            and not DocumentFolder.objects.filter(id=folder_id).exists()
-        ):
-            errors.append({"field": "folder", "error": "Ordner nicht gefunden."})
+        if folder_id is not unset and folder_id is not None:
+            # Owner-Scope (P2): Nur EIGENE Ordner (oder Admin) sind zuordenbar. Der
+            # Ordnerbaum ist zwar global sichtbar (Navigation), aber ein fremder
+            # Folder-Owner könnte per Umbenennen/Löschen die effektive Zuordnung
+            # fremder Dokumente beeinflussen (CASCADE/Freigabe). Deshalb hier NICHT
+            # nur „existiert?", sondern „gehört dem Nutzer?".
+            folder_qs = DocumentFolder.objects.filter(id=folder_id)
+            if not getattr(request.user, "is_dms_admin", False):
+                folder_qs = folder_qs.filter(owner=request.user)
+            if not folder_qs.exists():
+                errors.append(
+                    {"field": "folder", "error": "Ordner nicht gefunden oder nicht zugreifbar."}
+                )
         if (
             document_type_id is not unset
             and document_type_id is not None

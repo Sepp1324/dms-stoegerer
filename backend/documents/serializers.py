@@ -1071,6 +1071,24 @@ class DocumentSerializer(serializers.ModelSerializer):
             "archive_error",
         )
 
+    def validate_folder(self, value):
+        """Owner-Scope (P2): Ein Dokument darf nur einem EIGENEN Ordner zugeordnet
+        werden (oder von einem Admin beliebig). Der Ordnerbaum ist global sichtbar,
+        aber ein fremder Folder-Owner könnte per Umbenennen/Löschen die effektive
+        Zuordnung fremder Dokumente beeinflussen (CASCADE/Freigabe). ``None`` = aus
+        dem Ordner nehmen ist immer erlaubt."""
+        if value is None:
+            return value
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if getattr(user, "is_dms_admin", False):
+            return value
+        if value.owner_id != getattr(user, "id", None):
+            raise serializers.ValidationError(
+                "Dokument kann nur einem eigenen Ordner zugeordnet werden."
+            )
+        return value
+
     def get_asn_label(self, obj) -> str | None:
         """Kanonische Anzeigeform der ASN (``ASN000123``) oder ``None``."""
         if not obj.asn:

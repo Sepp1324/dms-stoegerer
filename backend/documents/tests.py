@@ -2806,7 +2806,7 @@ class BulkUpdateEndpointTests(APITestCase):
         cls.user = User.objects.create_user(username="bulk-u", password="pw", role="user")
         cls.other = User.objects.create_user(username="bulk-o", password="pw", role="user")
         cls.guest = User.objects.create_user(username="bulk-g", password="pw", role="guest")
-        cls.folder = DocumentFolder.objects.create(name="Versicherungen")
+        cls.folder = DocumentFolder.objects.create(name="Versicherungen", owner=cls.user)
         cls.dtype = DocumentType.objects.create(name="Polizze")
         cls.corr = Correspondent.objects.create(name="Wüstenrot")
         cls.tag_add = Tag.objects.create(name="Wichtig")
@@ -2907,6 +2907,86 @@ class BulkUpdateEndpointTests(APITestCase):
         )
 
         self.assertEqual(resp.status_code, 400)
+
+    def test_bulk_update_fremder_ordner_abgelehnt(self):
+        # Owner-Scope (P2): Ein fremder Ordner ist nicht zuordenbar – auch wenn er
+        # existiert und im globalen Baum sichtbar ist.
+        fremd = DocumentFolder.objects.create(name="FremderOrdner", owner=self.other)
+        doc = self._doc("A")
+        self.client.force_authenticate(self.user)
+
+        resp = self.client.post(
+            self.URL,
+            {"ids": [doc.id], "set": {"folder": fremd.id}},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertTrue(any(e.get("field") == "folder" for e in resp.data["errors"]))
+        doc.refresh_from_db()
+        self.assertIsNone(doc.folder_id)
+
+    def test_bulk_update_admin_darf_fremden_ordner(self):
+        admin = User.objects.create_user(username="bulk-admin", password="pw", role="admin")
+        fremd = DocumentFolder.objects.create(name="FremderOrdner2", owner=self.other)
+        doc = Document.objects.create(title="AdminDoc", owner=admin)
+        self.client.force_authenticate(admin)
+
+        resp = self.client.post(
+            self.URL,
+            {"ids": [doc.id], "set": {"folder": fremd.id}},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        doc.refresh_from_db()
+        self.assertEqual(doc.folder_id, fremd.id)
+
+
+class DocumentFolderOwnerScopeTests(APITestCase):
+    """P2: Ein Dokument darf nur einem EIGENEN Ordner zugeordnet werden (PATCH)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(username="dfo-u", password="pw", role="user")
+        cls.other = User.objects.create_user(username="dfo-o", password="pw", role="user")
+        cls.admin = User.objects.create_user(username="dfo-a", password="pw", role="admin")
+
+    def test_patch_fremder_ordner_abgelehnt(self):
+        fremd = DocumentFolder.objects.create(name="Fremd", owner=self.other)
+        doc = Document.objects.create(title="D", owner=self.user)
+        self.client.force_authenticate(self.user)
+
+        resp = self.client.patch(
+            f"/api/documents/{doc.id}/", {"folder": fremd.id}, format="json"
+        )
+        self.assertEqual(resp.status_code, 400)
+        doc.refresh_from_db()
+        self.assertIsNone(doc.folder_id)
+
+    def test_patch_eigener_ordner_ok(self):
+        eigen = DocumentFolder.objects.create(name="Eigen", owner=self.user)
+        doc = Document.objects.create(title="D", owner=self.user)
+        self.client.force_authenticate(self.user)
+
+        resp = self.client.patch(
+            f"/api/documents/{doc.id}/", {"folder": eigen.id}, format="json"
+        )
+        self.assertEqual(resp.status_code, 200)
+        doc.refresh_from_db()
+        self.assertEqual(doc.folder_id, eigen.id)
+
+    def test_patch_ordner_leeren_ok(self):
+        eigen = DocumentFolder.objects.create(name="Eigen2", owner=self.user)
+        doc = Document.objects.create(title="D", owner=self.user, folder=eigen)
+        self.client.force_authenticate(self.user)
+
+        resp = self.client.patch(
+            f"/api/documents/{doc.id}/", {"folder": None}, format="json"
+        )
+        self.assertEqual(resp.status_code, 200)
+        doc.refresh_from_db()
+        self.assertIsNone(doc.folder_id)
 
 
 class DocumentProcessingStateMachineTests(TestCase):
