@@ -35,24 +35,40 @@ class AdoptLegacyFoldersTests(TestCase):
         cls.alice = User.objects.create_user("ad_alice", password="pw", role="user")
         cls.bob = User.objects.create_user("ad_bob", password="pw", role="user")
 
-    def test_wurzel_geht_an_mehrheits_eigentuemer(self):
+    def test_single_owner_baum_wird_adoptiert(self):
         f = DocumentFolder.objects.create(name="Steuer", owner=None)
         _doc(self.alice, f, "A1")
         _doc(self.alice, f, "A2")
-        _doc(self.bob, f, "B1")  # Minderheit
         _adopt()
         f.refresh_from_db()
         self.assertEqual(f.owner_id, self.alice.id)
 
-    def test_kind_erbt_parent_owner(self):
+    def test_verschachtelt_leere_wurzel_wird_ueber_teilbaum_adoptiert(self):
+        # Wurzel ist leer, Dokument liegt im Enkel -> Owner muss aus dem GESAMTEN
+        # Teilbaum ermittelt werden, sonst bliebe alles owner=NULL.
         root = DocumentFolder.objects.create(name="Akte", owner=None)
-        child = DocumentFolder.objects.create(name="Unter", parent=root, owner=None)
-        _doc(self.bob, root, "R1")  # bestimmt den Wurzel-Owner = bob
+        sub = DocumentFolder.objects.create(name="Rechnungen", parent=root, owner=None)
+        _doc(self.bob, sub, "R1")  # nur im Unterordner
         _adopt()
         root.refresh_from_db()
-        child.refresh_from_db()
-        self.assertEqual(root.owner_id, self.bob.id)
-        self.assertEqual(child.owner_id, self.bob.id)  # geerbt -> single-owner-Baum
+        sub.refresh_from_db()
+        self.assertEqual(root.owner_id, self.bob.id)   # Wurzel adoptiert
+        self.assertEqual(sub.owner_id, self.bob.id)    # Kind adoptiert
+
+    def test_gemischter_baum_bleibt_ownerlos(self):
+        # Dokumente mehrerer Eigentümer -> KEINE Mehrheitsentscheidung. Der ganze
+        # Baum bleibt ownerlos (Admin-Triage); kein Minderheitsdokument haengt
+        # unter einem fremden Eigentuemer.
+        root = DocumentFolder.objects.create(name="Gemeinsam", owner=None)
+        sub = DocumentFolder.objects.create(name="Sub", parent=root, owner=None)
+        _doc(self.alice, root, "A1")
+        _doc(self.alice, root, "A2")
+        _doc(self.bob, sub, "B1")  # Minderheit
+        _adopt()
+        root.refresh_from_db()
+        sub.refresh_from_db()
+        self.assertIsNone(root.owner_id)   # NICHT an alice adoptiert
+        self.assertIsNone(sub.owner_id)
 
     def test_leere_wurzel_bleibt_ownerlos(self):
         f = DocumentFolder.objects.create(name="Leer", owner=None)
