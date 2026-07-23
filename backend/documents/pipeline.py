@@ -387,6 +387,7 @@ def classify_version(version: DocumentVersion) -> dict:
         DocumentVersion.ProcessingState.CLASSIFICATION_RUNNING,
         actor=version.created_by,
     )
+    owner_before = version.document.owner_id
     result = classification.apply_rules(version.document)
 
     # Workflow-Engine (STOAA-263): document_added nach apply_rules
@@ -397,6 +398,18 @@ def classify_version(version: DocumentVersion) -> dict:
         source=source,
     )
     result["workflows"] = wf_result.get("workflows", [])
+
+    # Triage-Nachzügler (P2): Der owner-gebundene Ordnerschritt wird bei einem
+    # Triage-Dokument (owner=None) in apply_rules bewusst übersprungen. Hat ein
+    # Workflow gerade erst einen Owner gesetzt, den Regel-Ordner jetzt gezielt
+    # nachziehen (apply_rules ist idempotent – belegte Felder bleiben unangetastet,
+    # nur der noch fehlende Ordner wird owner-gebunden angelegt/zugewiesen).
+    if (
+        owner_before is None
+        and version.document.owner_id is not None
+        and version.document.folder_id is None
+    ):
+        classification.apply_rules(version.document)
 
     # Smart Inbox: Strukturvorschläge nach OCR/Klassifizierung vorbereiten.
     # Best effort – Extraktion darf die technische Dokumentverarbeitung nie
