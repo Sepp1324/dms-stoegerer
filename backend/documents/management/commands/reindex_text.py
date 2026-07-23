@@ -6,8 +6,6 @@ deren ``ocr_text`` (z. B. bei digitalen PDFs) leer geblieben ist.
     python manage.py reindex_text          # nur Versionen ohne Text
     python manage.py reindex_text --all    # alle Versionen neu einlesen
 """
-import os
-
 from django.core.management.base import BaseCommand
 
 from documents import pipeline
@@ -32,8 +30,12 @@ class Command(BaseCommand):
         updated = 0
         skipped = 0
         for version in qs.iterator():
-            src = version.archive_path or version.file_path
-            if not src or not os.path.exists(src):
+            # Zentrale Fallback-Kette Archiv -> Original (nicht blind
+            # ``archive_path or file_path``): ist das Archiv gesetzt, aber
+            # verschwunden, wird die Version sonst uebersprungen, obwohl das
+            # Original existiert.
+            src = pipeline.resolve_readable_version_path(version)
+            if not src:
                 skipped += 1
                 continue
             text = pipeline.extract_text(src)
