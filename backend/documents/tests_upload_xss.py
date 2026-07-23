@@ -194,3 +194,66 @@ class PreviewUnsafeTypeTests(TestCase):
         resp = self.client.get(f"/api/documents/{doc.id}/preview/")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp["Content-Type"], "application/pdf")
+
+
+class PreviewArchiveFallbackTests(TestCase):
+    """P1: Ist archive_path GESETZT, die Archivdatei aber NICHT vorhanden (z. B.
+    nach einem Restore ohne archive/), fällt die Vorschau auf das Original zurück,
+    statt 404 zu liefern."""
+
+    def setUp(self):
+        self.client = APIClient()
+        User = get_user_model()
+        self.user = User.objects.create_user(username="prevfb", password="pw12345!")
+        self.client.force_authenticate(self.user)
+
+    def _version_with_missing_archive(self):
+        import os
+        import tempfile
+
+        from . import pipeline
+        from .models import Document, DocumentVersion
+
+        tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+        tmp.write(PDF_BYTES)
+        tmp.close()
+        self.addCleanup(lambda: os.path.exists(tmp.name) and os.remove(tmp.name))
+        doc = Document.objects.create(title="doc", owner=self.user)
+        version = DocumentVersion.objects.create(
+            document=doc, version_no=1, file_path=tmp.name,
+            archive_path="/data/archive/nicht/vorhanden.pdf",  # gesetzt, aber fehlt
+            sha256=pipeline.sha256_of(tmp.name),
+            mime_type="application/pdf", size=os.path.getsize(tmp.name),
+        )
+        doc.current_version = version
+        doc.save(update_fields=["current_version"])
+        return doc
+
+    def test_fehlendes_archiv_faellt_auf_original_zurueck(self):
+        doc = self._version_with_missing_archive()
+        resp = self.client.get(f"/api/documents/{doc.id}/preview/")
+        self.assertEqual(resp.status_code, 200)          # NICHT 404
+        self.assertEqual(resp["Content-Type"], "application/pdf")
+
+    def test_beide_fehlen_ergibt_404(self):
+        import os
+        import tempfile
+
+        from . import pipeline
+        from .models import Document, DocumentVersion
+
+        tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+        tmp.write(PDF_BYTES)
+        tmp.close()
+        sha = pipeline.sha256_of(tmp.name)
+        os.remove(tmp.name)  # Original fehlt ebenfalls
+        doc = Document.objects.create(title="doc", owner=self.user)
+        version = DocumentVersion.objects.create(
+            document=doc, version_no=1, file_path=tmp.name,
+            archive_path="/data/archive/auch/weg.pdf", sha256=sha,
+            mime_type="application/pdf", size=1,
+        )
+        doc.current_version = version
+        doc.save(update_fields=["current_version"])
+        resp = self.client.get(f"/api/documents/{doc.id}/preview/")
+        self.assertEqual(resp.status_code, 404)
