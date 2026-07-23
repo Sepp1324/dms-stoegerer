@@ -9,6 +9,7 @@ Zwei Bereiche unterhalb von ``DMS_DATA_DIR`` (siehe Settings):
 """
 from __future__ import annotations
 
+import os
 import uuid
 from pathlib import Path
 
@@ -141,13 +142,41 @@ def build_archive_path(document) -> Path:
     titel = slugify(document.title) or "dokument"
 
     relative = template.format(jahr=jahr, korrespondent=korrespondent, titel=titel)
-    candidate = DATA_DIR / f"{relative}.pdf"
-    candidate.parent.mkdir(parents=True, exist_ok=True)
 
-    # Kollisionen auflösen: dokument.pdf → dokument-1.pdf → …
-    counter = 1
-    stem = candidate.stem
-    while candidate.exists():
-        candidate = candidate.with_name(f"{stem}-{counter}.pdf")
-        counter += 1
-    return candidate
+    # Sicherheit (P1): das Template ist NUTZERGESTEUERT (jeder Writer legt StoragePath
+    # an). Es darf NICHT aus dem gesicherten Archiv-Subtree ausbrechen – weder per
+    # absolutem Pfad (``/tmp/x``) noch ``..`` noch in einen nicht gesicherten Ordner
+    # (Backup sichert nur originals/archive/thumbnails/consume). Deshalb: jedes
+    # Segment slugifizieren (``.``/``..``/leer/``\`` verwerfen) und ALLES zwingend
+    # unter ARCHIVE_DIR verankern. Ein evtl. führendes ``archive`` wird verworfen,
+    # damit ``archive/{jahr}/…`` NICHT zu ``archive/archive/…`` wird.
+    segments = []
+    for seg in relative.replace("\\", "/").split("/"):
+        seg = slugify(seg.strip())
+        if seg:
+            segments.append(seg)
+    if segments and segments[0] == "archive":
+        segments = segments[1:]
+    safe_rel = "/".join(segments) or "dokument"
+
+    base = ARCHIVE_DIR / f"{safe_rel}.pdf"
+    base.parent.mkdir(parents=True, exist_ok=True)
+
+    # Kollisionen RACE-SICHER auflösen (P1): NICHT exists()+os.replace (TOCTOU –
+    # zwei gleichnamige Dokumente könnten denselben freien Namen wählen und sich
+    # gegenseitig überschreiben). Stattdessen den Zielnamen ATOMAR per O_CREAT|
+    # O_EXCL reservieren (leere Platzhalterdatei); der Aufrufer ersetzt sie per
+    # os.replace. Suffix hochzählen, bis die Reservierung gewinnt.
+    stem = base.stem
+    parent = base.parent
+    suffix = 0
+    while True:
+        target = base if suffix == 0 else parent / f"{stem}-{suffix}.pdf"
+        try:
+            fd = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            os.close(fd)
+            return target
+        except FileExistsError:
+            suffix += 1
+            if suffix > 100000:  # praktisch unerreichbar – Schutz gegen Endlosschleife
+                raise RuntimeError("Zu viele Namenskollisionen im Archiv.")
