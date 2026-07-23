@@ -1,6 +1,6 @@
 # Ingress über Traefik (in k3s standardmäßig installiert).
 # /api,/admin,/static -> Backend,  alles andere -> Frontend (SPA).
-# Hostname dms.stoegerer-home.at per DNS (UDM) auf eine Node-IP zeigen lassen.
+# Hostname dms.stoegerer-home.cloud per DNS (UDM) auf eine Node-IP zeigen lassen.
 #
 # TLS: Der Router hört auf web UND websecure; das Zertifikat liefert cert-manager
 # über eine interne Cluster-CA in das Secret ``dms-tls`` (siehe deploy/k8s/tls/).
@@ -20,10 +20,10 @@ spec:
   ingressClassName: traefik
   tls:
     - hosts:
-        - dms.stoegerer-home.at
+        - dms.stoegerer-home.cloud
       secretName: dms-tls
   rules:
-    - host: dms.stoegerer-home.at
+    - host: dms.stoegerer-home.cloud
       http:
         paths:
           # API, Django-Admin und dessen Static-Dateien → Backend
