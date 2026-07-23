@@ -2,6 +2,7 @@
 import hashlib
 
 from django.contrib.auth import get_user_model
+from django.test import TestCase
 from rest_framework.test import APITestCase
 
 from accounts.models import Household
@@ -270,10 +271,78 @@ class FolderTreeOwnerConsistencyTests(APITestCase):
             400,
         )
 
-    def test_admin_darf_unter_fremden_parent_einordnen(self):
+    def test_admin_darf_keinen_gemischten_baum_erzeugen(self):
+        # Auch Admins duerfen keinen owner-uebergreifenden Baum bauen (der Ordner
+        # gehoert dem Admin, der Parent Alice -> gemischt -> abgelehnt).
         alices = DocumentFolder.objects.create(name="AlicesAdminRoot", owner=self.alice)
         self.client.force_authenticate(self.admin)
         resp = self.client.post(
             "/api/folders/", {"name": "AdminKind", "parent": alices.id}, format="json"
         )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("parent", resp.data)
+
+    def test_admin_darf_unter_eigenem_parent_einordnen(self):
+        parent = DocumentFolder.objects.create(name="AdminRoot", owner=self.admin)
+        self.client.force_authenticate(self.admin)
+        resp = self.client.post(
+            "/api/folders/", {"name": "AdminKind", "parent": parent.id}, format="json"
+        )
         self.assertEqual(resp.status_code, 201)
+
+
+class RepairMixedOwnerTreesMigrationTests(TestCase):
+    """P1: Die Datenmigration 0058 trennt bereits vorhandene owner-übergreifende
+    Parent/Child-Kanten (die alte API erlaubte sie)."""
+
+    def _repair(self):
+        import importlib
+
+        from django.apps import apps as global_apps
+
+        mod = importlib.import_module(
+            "documents.migrations.0058_repair_mixed_owner_folder_trees"
+        )
+        mod.repair_mixed_owner_trees(global_apps, None)
+
+    def test_fremdes_kind_wird_zum_root_getrennt(self):
+        alice = User.objects.create_user("m_alice", password="pw", role="user")
+        bob = User.objects.create_user("m_bob", password="pw", role="user")
+        bobs_root = DocumentFolder.objects.create(name="BobRoot", owner=bob)
+        alices_child = DocumentFolder.objects.create(
+            name="AliceKind", parent=bobs_root, owner=alice
+        )
+
+        self._repair()
+
+        alices_child.refresh_from_db()
+        self.assertIsNone(alices_child.parent_id)          # getrennt -> Root
+        self.assertTrue(DocumentFolder.objects.filter(pk=alices_child.pk).exists())
+        # Der eigene Teilbaum-Owner (bob) ist unberührt
+        self.assertTrue(DocumentFolder.objects.filter(pk=bobs_root.pk).exists())
+
+    def test_gleiche_owner_kante_bleibt(self):
+        alice = User.objects.create_user("m_alice2", password="pw", role="user")
+        root = DocumentFolder.objects.create(name="R", owner=alice)
+        child = DocumentFolder.objects.create(name="C", parent=root, owner=alice)
+
+        self._repair()
+
+        child.refresh_from_db()
+        self.assertEqual(child.parent_id, root.pk)         # unverändert
+
+    def test_namenskollision_beim_trennen_wird_aufgeloest(self):
+        alice = User.objects.create_user("m_alice3", password="pw", role="user")
+        bob = User.objects.create_user("m_bob3", password="pw", role="user")
+        DocumentFolder.objects.create(name="X", owner=alice)               # bestehender Root
+        bobs_root = DocumentFolder.objects.create(name="BobRoot3", owner=bob)
+        collided = DocumentFolder.objects.create(name="X", parent=bobs_root, owner=alice)
+
+        self._repair()
+
+        collided.refresh_from_db()
+        self.assertIsNone(collided.parent_id)
+        self.assertNotEqual(collided.name, "X")            # umbenannt bei Kollision
+        self.assertEqual(
+            DocumentFolder.objects.filter(owner=alice, parent__isnull=True).count(), 2
+        )
