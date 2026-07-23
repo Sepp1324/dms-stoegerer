@@ -77,11 +77,19 @@ def rule_matches(rule, text: str, *, subject: str = "", sender: str = "") -> boo
     return bool(checks) and all(checks)
 
 
-def _get_or_create_folder(path: str):
-    """Legt einen fachlichen Ordnerpfad wie ``Akte / Unterordner`` an.
+def _get_or_create_folder(path: str, owner):
+    """Legt einen fachlichen Ordnerpfad wie ``Akte / Unterordner`` an – für den
+    Eigentümer des Dokuments.
 
     Regeln speichern bewusst Namen statt IDs: So bleiben sie lesbar, exportierbar
     und über Umgebungen hinweg stabil. Leere Pfadsegmente werden ignoriert.
+
+    Owner-Scope (P1): Der Ordnerbaum darf pro Eigentümer denselben Namen mehrfach
+    tragen. Ohne ``owner`` im Lookup wäre die Suche mehrdeutig (``Steuer`` für Alice
+    UND Bob → ``MultipleObjectsReturned``, Dokument bliebe in CLASSIFICATION_RUNNING)
+    oder ein Treffer würde ein Dokument einem FREMDEN Ordner zuweisen. Deshalb wird
+    der komplette Pfad owner-gebunden aufgelöst/angelegt (jedes Segment mit
+    ``owner``); so bleibt der Baum single-owner und eindeutig.
     """
     from .models import DocumentFolder
 
@@ -89,7 +97,9 @@ def _get_or_create_folder(path: str):
     parent = None
     folder = None
     for name in parts:
-        folder, _ = DocumentFolder.objects.get_or_create(name=name, parent=parent)
+        folder, _ = DocumentFolder.objects.get_or_create(
+            name=name, parent=parent, owner=owner
+        )
         parent = folder
     return folder
 
@@ -144,7 +154,7 @@ def apply_rules(document) -> dict:
 
         folder_path = str(then.get("folder", "")).strip()
         if folder_path and document.folder is None:
-            folder = _get_or_create_folder(folder_path)
+            folder = _get_or_create_folder(folder_path, document.owner)
             if folder is not None:
                 document.folder = folder
                 applied["folder"] = folder.full_path

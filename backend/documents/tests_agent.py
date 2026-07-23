@@ -110,7 +110,7 @@ class AgentExecuteTests(TestCase):
         self.assertEqual(self.doc.document_type, DocumentType.objects.get(name="Bescheid"))
 
     def test_move_to_existing_folder(self):
-        folder = DocumentFolder.objects.create(name="Steuern")
+        folder = DocumentFolder.objects.create(name="Steuern", owner=self.user)
         res = agent.execute(
             self.user,
             [{"action": "move_to_folder", "document": self.doc.id, "params": {"folder": "Steuern"}}],
@@ -128,6 +128,33 @@ class AgentExecuteTests(TestCase):
         self.assertEqual(len(res["errors"]), 1)
         self.doc.refresh_from_db()
         self.assertIsNone(self.doc.folder_id)
+
+    def test_move_to_fremden_ordner_wird_abgelehnt(self):
+        # Owner-Scope (P1): Ein eindeutig benannter FREMDER Ordner ist NICHT
+        # zuweisbar – der Agent darf den Owner-Schutz nicht umgehen.
+        DocumentFolder.objects.create(name="AlicesGeheim", owner=self.other)
+        res = agent.execute(
+            self.user,
+            [{"action": "move_to_folder", "document": self.doc.id,
+              "params": {"folder": "AlicesGeheim"}}],
+        )
+        self.assertEqual(res["applied"], [])
+        self.assertEqual(len(res["errors"]), 1)
+        self.doc.refresh_from_db()
+        self.assertIsNone(self.doc.folder_id)
+
+    def test_gleichnamiger_eigener_ordner_gewinnt(self):
+        # Alice und user haben je "Wichtig" – der Agent trifft NUR den eigenen.
+        DocumentFolder.objects.create(name="Wichtig", owner=self.other)
+        mine = DocumentFolder.objects.create(name="Wichtig", owner=self.user)
+        res = agent.execute(
+            self.user,
+            [{"action": "move_to_folder", "document": self.doc.id,
+              "params": {"folder": "Wichtig"}}],
+        )
+        self.assertEqual(len(res["applied"]), 1)
+        self.doc.refresh_from_db()
+        self.assertEqual(self.doc.folder_id, mine.id)
 
 
 class AgentUndoTests(TestCase):
@@ -174,7 +201,7 @@ class AgentUndoTests(TestCase):
 
     def test_undo_move_to_folder_restores_previous(self):
         doc = _doc(self.user, "UndoFolder")
-        DocumentFolder.objects.create(name="Ziel")
+        DocumentFolder.objects.create(name="Ziel", owner=self.user)
         audit_id = self._apply(doc, "move_to_folder", {"folder": "Ziel"})
         doc.refresh_from_db()
         self.assertIsNotNone(doc.folder_id)
@@ -183,6 +210,29 @@ class AgentUndoTests(TestCase):
 
         doc.refresh_from_db()
         self.assertIsNone(doc.folder_id)
+
+    def test_undo_stellt_unzulaessigen_vorgaenger_nicht_wieder_her(self):
+        # Vorher lag das Dokument in einem eigenen Ordner; danach wechselt dieser
+        # den Eigentümer (wird fremd). Undo darf die nun unzulässige Zuordnung
+        # NICHT wiederherstellen.
+        prev = DocumentFolder.objects.create(name="FrueherMeins", owner=self.user)
+        ziel = DocumentFolder.objects.create(name="NeuesZiel", owner=self.user)
+        doc = _doc(self.user, "UndoGuard")
+        doc.folder = prev
+        doc.save(update_fields=["folder"])
+        audit_id = self._apply(doc, "move_to_folder", {"folder": "NeuesZiel"})
+        doc.refresh_from_db()
+        self.assertEqual(doc.folder_id, ziel.id)
+
+        # Vorgänger wird fremd
+        prev.owner = self.other
+        prev.save(update_fields=["owner"])
+
+        res = agent.undo(self.user, audit_id)
+
+        self.assertEqual(res["status"], "ok")
+        doc.refresh_from_db()
+        self.assertEqual(doc.folder_id, ziel.id)  # NICHT auf prev zurückgesetzt
 
     def test_double_undo_is_guarded(self):
         doc = _doc(self.user, "UndoTwice")
