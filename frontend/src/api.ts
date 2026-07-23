@@ -2771,6 +2771,9 @@ export interface FolderRef extends NamedRef {
   full_path: string;
   document_count: number;
   shared_with_household: boolean;
+  /** Eigentümer-Name – zur Unterscheidung gleichnamiger Ordner verschiedener
+   *  Besitzer (Root-Namen dürfen pro Owner doppelt vorkommen). */
+  owner_username?: string | null;
 }
 /** Ordnerweite Familien-Freigabe setzen/aufheben (wirkt auf Unterordner mit). */
 export async function setFolderShared(id: number, shared: boolean): Promise<FolderRef> {

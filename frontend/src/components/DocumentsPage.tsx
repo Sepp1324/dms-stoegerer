@@ -2184,11 +2184,20 @@ function FolderSection({
 }) {
   const [expanded, setExpanded] = useState(active !== "");
   const [dropTarget, setDropTarget] = useState<FolderFilterValue | null>(null);
+  // Gleichnamige Pfade kommen vor, seit Root-Namen pro Owner doppelt sein dürfen.
+  // Nur bei echter Mehrdeutigkeit den Eigentümer anhängen (sonst bleibt es sauber).
+  const pathCounts = folders.reduce<Record<string, number>>((acc, f) => {
+    acc[f.full_path] = (acc[f.full_path] ?? 0) + 1;
+    return acc;
+  }, {});
   const items = [
     { id: "none" as const, label: "Ohne Ordner", count: 0, folderId: null },
     ...folders.map((folder) => ({
       id: folder.id,
-      label: folder.full_path,
+      label:
+        pathCounts[folder.full_path] > 1 && folder.owner_username
+          ? `${folder.full_path} (${folder.owner_username})`
+          : folder.full_path,
       count: folder.document_count,
       folderId: folder.id,
     })),
