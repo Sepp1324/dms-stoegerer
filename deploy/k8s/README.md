@@ -512,25 +512,39 @@ im `kube-system`/`cert-manager`-Namespace – außerhalb der SA-Rechte).
 
 ### 14a. Domain wechseln (Checkliste)
 
-> ⚠️ **Wichtig:** Ein reiner Merge, der nur den Host in `configmap.yaml`/
-> `ingress.yaml` ändert, rollt das **Zertifikat NICHT mit** – der CD-Deploy fasst
-> `deploy/k8s/tls` bewusst nicht an (Admin-/One-time-Ressourcen außerhalb der
-> SA-Rechte). Das Secret `dms-tls` trägt dann weiter das **alte** Zertifikat, und
-> Traefik quittiert `https://<neue-domain>` mit **`tlsv1 alert internal error`**
-> (Seite „nicht erreichbar", obwohl DNS + `:80`-Redirect funktionieren). Nach jeder
-> Hoständerung daher als Cluster-Admin:
+> ⚠️ **Wichtig:** Der CD-Deploy rollt den neuen Ingress-Host aus, fasst
+> `deploy/k8s/tls` aber bewusst **nicht** an (Admin-/One-time-Ressourcen außerhalb
+> der SA-Rechte). Mergst du Ingress- und Cert-Änderung „in einem Rutsch", schaltet
+> die CD den Ingress sofort auf den neuen Host — mit dem **alten** Zertifikat im
+> Secret `dms-tls`. Traefik quittiert `https://<neue-domain>` dann mit
+> **`tlsv1 alert internal error`** (Seite „nicht erreichbar", obwohl DNS + der
+> `:80`-Redirect funktionieren). Deshalb in **zwei Phasen mit Überlappung** wechseln
+> — so ist der Host zu keinem Zeitpunkt ohne passendes Zertifikat:
+
+**Phase 1 – Zertifikat für BEIDE Hosts ausstellen (VOR dem Ingress-Merge):**
 
 ```bash
-# 1) neuen Host in configmap.yaml (DJANGO_ALLOWED_HOSTS/CORS), ingress.yaml
-#    (Host + TLS-Host) und tls/certificate.yaml (dnsNames) setzen, mergen lassen.
+# 1) In tls/certificate.yaml den neuen Host ZUSAETZLICH eintragen (alten behalten):
+#      dnsNames:
+#        - dms.alt-domain      # noch aktiv
+#        - dms.neue-domain     # neu
+#    (Nur diese Datei – Ingress/ConfigMap noch NICHT anfassen.)
 
-# 2) DNS-A-Record <neue-domain> -> Node-IP setzen (UDM).
-
-# 3) Zertifikat für den neuen Host neu ausstellen (interne CA -> sofort):
 kubectl apply -k deploy/k8s/tls
-kubectl -n dms get certificate dms-tls -o wide     # READY=True + neuer dnsName?
+kubectl -n dms get certificate dms-tls -o wide     # READY=True, beide dnsNames?
 # hängt es? Secret wegwerfen, cert-manager erzeugt es aus der Certificate neu:
 kubectl -n dms delete secret dms-tls
+
+# 2) DNS-A-Record <neue-domain> -> Node-IP setzen (UDM). Der alte Host laeuft weiter.
+```
+
+**Phase 2 – Ingress + ConfigMap umschalten (Merge/CD):**
+
+```bash
+# 3) Jetzt Host in configmap.yaml (DJANGO_ALLOWED_HOSTS/CORS) und ingress.yaml
+#    (Host + TLS-Host) auf <neue-domain> setzen und mergen. Die CD schaltet den
+#    Router um – das Zertifikat deckt den neuen Host aus Phase 1 bereits ab
+#    (kein tls-Fehler, kein Ausfallfenster).
 
 # 4) Backend neu starten – laufende Pods haben DJANGO_ALLOWED_HOSTS/CORS noch aus
 #    der ALTEN ConfigMap geladen (ein ConfigMap-Update restartet Pods NICHT):
@@ -538,6 +552,13 @@ kubectl -n dms rollout restart deploy/backend
 
 # 5) Prüfen:
 curl -k https://<neue-domain>/api/health/         # erwartet HTTP 200
+```
+
+**Phase 3 – alten Host entfernen (aufräumen, wenn alles läuft):**
+
+```bash
+# 6) In tls/certificate.yaml den alten Host aus dnsNames streichen, dann:
+kubectl apply -k deploy/k8s/tls
 ```
 
 ---
