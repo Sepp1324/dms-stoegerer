@@ -1429,14 +1429,18 @@ def _serve_version_preview(version):
     Antwort eine same-origin Blob-URL, die im (un-sandboxed) iframe rendert;
     ein text/html-Blob würde dort im DMS-Origin ausgeführt (Stored XSS).
     """
-    path = version.archive_path or version.file_path
-    if not path or not os.path.exists(path):
-        raise Http404("Datei nicht gefunden.")
-    # Archiv-PDF ist per Konstruktion ein von uns erzeugtes PDF; das Original
-    # wird am Byte-Header verifiziert (nie am gespeicherten mime_type).
-    if version.archive_path:
+    # Fallback-Kette (P1): Bevorzugt das Archiv-PDF, fällt aber auf das Original
+    # zurück, wenn ``archive_path`` zwar GESETZT, die Datei aber NICHT vorhanden ist
+    # (z. B. nach einem Restore, dessen Backup das Archiv nicht enthielt). Vorher
+    # führte ein gesetzter, aber fehlender archive_path direkt zu 404 – die WORM-
+    # Version wäre so trotz vorhandenem Original nicht mehr vorschaubar.
+    if version.archive_path and os.path.exists(version.archive_path):
+        # Archiv-PDF ist per Konstruktion ein von uns erzeugtes PDF.
+        path = version.archive_path
         content_type = "application/pdf"
-    else:
+    elif version.file_path and os.path.exists(version.file_path):
+        # Original am Byte-Header verifizieren (nie am gespeicherten mime_type).
+        path = version.file_path
         with open(path, "rb") as fh:
             info = detect(fh.read(SNIFF_BYTES))
         if info is None or not is_safe_inline(info.mime):
@@ -1446,6 +1450,8 @@ def _serve_version_preview(version):
                 content_type="text/plain; charset=utf-8",
             )
         content_type = info.mime
+    else:
+        raise Http404("Datei nicht gefunden.")
     response = FileResponse(
         open(path, "rb"),
         content_type=content_type,

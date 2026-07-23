@@ -198,15 +198,38 @@ done <<EOF
 $VERSIONS
 EOF
 
-if [ "$missing" -ne 0 ] || [ "$mismatch" -ne 0 ]; then
+# Auch die Archiv-PDFs (archive_path) müssen wiederherstellbar sein (P1). Sonst
+# gilt ein Backup ohne archive/ als „erfolgreich", obwohl Vorschau, Revisionspaket
+# und Archivprüfung für WORM-Versionen danach nicht funktionieren (die Vorschau
+# fällt bei gesetztem, aber fehlendem archive_path nicht immer aufs Original
+# zurück). Für das Archiv liegt kein separater Hash vor -> nur Existenz prüfen.
+echo "[drill] prüfe DB-Archivpfade (archive_path) gegen das wiederhergestellte /data ..."
+ARCHIVES="$(kubectl -n "$NAMESPACE" exec "$POD" -- psql -U dms -d dms -tAF "$TAB" -c \
+  "select archive_path from documents_documentversion where coalesce(archive_path,'') <> '' and archive_path <> coalesce(file_path,'');" \
+  2>/dev/null)"
+arch_checked=0; arch_missing=0
+while IFS="$TAB" read -r apath; do
+  [ -z "$apath" ] && continue
+  arch_checked=$((arch_checked + 1))
+  rel="${apath#/data/}"
+  local="$WORK/data/$rel"
+  if [ ! -f "$local" ]; then
+    arch_missing=$((arch_missing + 1))
+    [ "$arch_missing" -le 10 ] && echo "  ARCHIV FEHLT: $apath" >&2
+  fi
+done <<EOF
+$ARCHIVES
+EOF
+
+if [ "$missing" -ne 0 ] || [ "$mismatch" -ne 0 ] || [ "$arch_missing" -ne 0 ]; then
   record_drill_status failed \
-    "Restore-Drill FEHLGESCHLAGEN: ${missing} fehlende Dateien, ${mismatch} Hash-Abweichungen (von ${checked} geprüft)"
-  echo "FEHLER: Backup nicht vollständig wiederherstellbar – ${missing} fehlend, ${mismatch} Hash-Mismatch." >&2
+    "Restore-Drill FEHLGESCHLAGEN: ${missing} fehlende Dateien, ${mismatch} Hash-Abweichungen, ${arch_missing} fehlende Archive (von ${checked}/${arch_checked} geprüft)"
+  echo "FEHLER: Backup nicht vollständig wiederherstellbar – ${missing} fehlend, ${mismatch} Hash-Mismatch, ${arch_missing} Archiv fehlt." >&2
   exit 1
 fi
 
 record_drill_status success \
-  "Restore-Drill erfolgreich: ${DOCS} Dokumente, ${FILES} Dateien, ${checked} Version-Dateien (Hash) verifiziert"
+  "Restore-Drill erfolgreich: ${DOCS} Dokumente, ${FILES} Dateien, ${checked} Version-Dateien (Hash) + ${arch_checked} Archive verifiziert"
 MONITOR_OK=1
 
 echo ""
@@ -217,5 +240,6 @@ echo " Dokumente         : $DOCS"
 echo " /data-Dateien     : $FILES"
 echo " /data-Ordner      : $TOP_LEVEL"
 echo " Version-Dateien   : $checked geprüft, 0 fehlend, 0 Hash-Abweichungen"
+echo " Archiv-PDFs       : $arch_checked geprüft, 0 fehlend"
 echo " Produktion        : NICHT verändert"
 echo "==================================================================="
