@@ -885,9 +885,10 @@ def _sync_entity_graph(version: DocumentVersion, result: dict, *, actor=None) ->
 
 
 def _sync_semantic_index(version: DocumentVersion, result: dict, *, actor=None) -> bool:
-    """Best-effort-Aufbau des semantischen Index nach READY. Gibt ``True`` zurück,
-    wenn der Sync ohne Fehler durchlief (auch bei 0 Embeddings, z. B. leerer Text),
-    ``False`` bei einem Fehler (-> Reconciler holt nach)."""
+    """Best-effort-Aufbau des semantischen Index nach READY. Gibt ``True`` NUR
+    zurück, wenn tatsächlich ein vollständiger Index vorliegt (``indexed`` oder –
+    mangels Text – ``empty``); bei ``error``/``disabled``/``missing_version``
+    ``False`` (-> Reconciler holt nach)."""
     if result.get("status") != "done":
         return False
     try:
@@ -897,13 +898,19 @@ def _sync_semantic_index(version: DocumentVersion, result: dict, *, actor=None) 
             version.document, version=version
         )
         result["semantic_index"] = outcome
-        # WICHTIG: sync_document_embeddings signalisiert einen Embedding-Fehler
-        # NICHT per Exception, sondern per ``{"status": "error"}`` (z. B. wenn das
-        # Embedding-Backend down ist). Diesen Fall NICHT als Erfolg werten – sonst
-        # setzt ensure_findability_index ``indexed_at`` und der Reconciler holt den
-        # fehlenden Index nie wieder nach. Alle anderen Status (indexed/empty/
-        # disabled/missing_version) sind kein Fehler.
-        return (outcome or {}).get("status") != "error"
+        # WICHTIG: sync_document_embeddings signalisiert Fehlschläge NICHT per
+        # Exception, sondern per Status. Nur ein TATSÄCHLICH vollständiger Index
+        # ist Erfolg -> ``indexed`` (Embeddings geschrieben) oder ``empty`` (kein
+        # Text, es GIBT nichts zu indexieren). Alles andere ist KEIN Erfolg und darf
+        # ``indexed_at`` nicht setzen:
+        #   * ``error``   – Backend down o. ä.
+        #   * ``disabled``– EMBEDDING_ENABLED=false: es existieren keine Embeddings;
+        #                   würde man das als Erfolg werten, würden diese Dokumente
+        #                   nach späterem Aktivieren der AI NIE nachindexiert.
+        #   * ``missing_version`` – Version verschwunden.
+        # Der Reconciler versucht diese Fälle so lange erneut, bis ein echter Index
+        # entsteht (bei dauerhaft deaktivierter AI bleibt indexed_at bewusst NULL).
+        return (outcome or {}).get("status") in {"indexed", "empty"}
     except SoftTimeLimitExceeded:
         raise  # Soft-Time-Limit nie als Best-Effort-Teilfehler verschlucken
     except Exception:  # noqa: BLE001 - Semantik darf Pipeline nie kippen
