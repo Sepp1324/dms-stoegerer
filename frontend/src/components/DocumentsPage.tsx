@@ -464,6 +464,12 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
     () => folders.filter((f) => me?.is_dms_admin || f.owner === me?.id),
     [folders, me],
   );
+  // IDs der zuweisbaren Ordner – für die Drag-and-drop-Ziele in der Seitenleiste
+  // (die Navigation zeigt weiterhin alle Ordner, Drop nur auf eigene erlaubt).
+  const assignableFolderIds = useMemo(
+    () => new Set(assignableFolders.map((f) => f.id)),
+    [assignableFolders],
+  );
   async function addCorrespondent(name: string) {
     const item = await createCorrespondent(name);
     setCorrespondents((prev) => [...prev, item].sort(byName));
@@ -1137,6 +1143,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
         draggingDocumentId={draggingDocumentId}
         folderDropBusy={folderDropBusy}
         folderDropError={folderDropError}
+        assignableFolderIds={assignableFolderIds}
         onDocumentDropToFolder={moveDocumentToFolder}
         onProcessingStateChange={onProcessingStateChange}
         storagePathEnabled={STORAGE_PATH_FILTER_ENABLED}
@@ -1779,6 +1786,7 @@ function Sidebar({
   draggingDocumentId,
   folderDropBusy,
   folderDropError,
+  assignableFolderIds,
   onDocumentDropToFolder,
   onProcessingStateChange,
   storagePathEnabled,
@@ -1821,6 +1829,7 @@ function Sidebar({
   draggingDocumentId: number | null;
   folderDropBusy: number | null;
   folderDropError: string | null;
+  assignableFolderIds: Set<number>;
   onDocumentDropToFolder: (documentId: number, folderId: number | null) => void;
   onProcessingStateChange: (v: ProcessingStateFilter | "") => void;
   storagePathEnabled: boolean;
@@ -2026,6 +2035,7 @@ function Sidebar({
             active={folder}
             draggingDocumentId={draggingDocumentId}
             folderDropBusy={folderDropBusy}
+            assignableFolderIds={assignableFolderIds}
             error={folderDropError}
             onSelect={(v) => {
               onFolderChange(v);
@@ -2177,6 +2187,7 @@ function FolderSection({
   active,
   draggingDocumentId,
   folderDropBusy,
+  assignableFolderIds,
   error,
   onSelect,
   onDropDocument,
@@ -2185,10 +2196,17 @@ function FolderSection({
   active: FolderFilterValue;
   draggingDocumentId: number | null;
   folderDropBusy: number | null;
+  assignableFolderIds: Set<number>;
   error: string | null;
   onSelect: (v: FolderFilterValue) => void;
   onDropDocument: (documentId: number, folderId: number | null) => void;
 }) {
+  // Ein Drop ist nur auf ZUWEISBARE Ziele erlaubt: eigene Ordner oder „Ohne
+  // Ordner" (folderId === null, entfernt die Zuordnung – immer zulässig). Fremde
+  // Ordner sind zwar in der Navigation sichtbar, aber kein Drop-Ziel (sonst
+  // scheiterte das Ablegen erst nach dem Request am Backend-Owner-Check).
+  const isDroppable = (folderId: number | null) =>
+    folderId === null || assignableFolderIds.has(folderId);
   const [expanded, setExpanded] = useState(active !== "");
   const [dropTarget, setDropTarget] = useState<FolderFilterValue | null>(null);
   // Gleichnamige Pfade kommen vor, seit Root-Namen pro Owner doppelt sein dürfen.
@@ -2218,17 +2236,21 @@ function FolderSection({
     setDropTarget(null);
   }, [draggingDocumentId]);
 
-  function handleDragOver(event: DragEvent<HTMLButtonElement>, itemId: FolderFilterValue) {
-    if (draggingDocumentId == null) return;
+  function handleDragOver(
+    event: DragEvent<HTMLButtonElement>,
+    item: (typeof items)[number],
+  ) {
+    if (draggingDocumentId == null || !isDroppable(item.folderId)) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = "move";
-    setDropTarget(itemId);
+    setDropTarget(item.id);
   }
 
   function handleDrop(
     event: DragEvent<HTMLButtonElement>,
     item: (typeof items)[number],
   ) {
+    if (!isDroppable(item.folderId)) return;  // fremdes Ziel: kein Drop
     event.preventDefault();
     setDropTarget(null);
     const raw =
@@ -2263,19 +2285,22 @@ function FolderSection({
           {items.map((item) => {
             const isActive = active === item.id;
             const isDropTarget = dropTarget === item.id;
+            const droppable = isDroppable(item.folderId);
             return (
               <li key={String(item.id)}>
                 <button
                   className={[
                     "nav-filter",
                     isActive ? "nav-filter--active" : "",
-                    draggingDocumentId != null ? "nav-filter--drop-enabled" : "",
+                    draggingDocumentId != null && droppable
+                      ? "nav-filter--drop-enabled"
+                      : "",
                     isDropTarget ? "nav-filter--drop-target" : "",
                   ]
                     .filter(Boolean)
                     .join(" ")}
                   onClick={() => onSelect(isActive ? "" : item.id)}
-                  onDragOver={(event) => handleDragOver(event, item.id)}
+                  onDragOver={(event) => handleDragOver(event, item)}
                   onDragLeave={() => setDropTarget(null)}
                   onDrop={(event) => handleDrop(event, item)}
                   aria-current={isActive ? "true" : undefined}
