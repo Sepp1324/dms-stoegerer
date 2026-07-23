@@ -469,8 +469,18 @@ def _place_archive_at_storage_path(version: DocumentVersion) -> None:
     if not archive.endswith(".ocr.pdf") or not os.path.exists(archive):
         return
     try:
+        # build_archive_path RESERVIERT den Zielnamen atomar (leere Platzhalterdatei,
+        # O_EXCL) – kein TOCTOU-Race. os.replace ersetzt den Platzhalter.
         target = storage.build_archive_path(version.document)
-        os.replace(archive, str(target))  # atomar innerhalb von /data
+        try:
+            os.replace(archive, str(target))  # atomar innerhalb von /data
+        except Exception:
+            # Reservierten 0-Byte-Platzhalter aufräumen, bevor wir weiterwerfen.
+            try:
+                os.unlink(target)
+            except OSError:
+                pass
+            raise
         version.archive_path = str(target)
         version.save(update_fields=["archive_path"])
         logger.info("Archiv nach Ablage-Template verschoben: %s → %s", archive, target)

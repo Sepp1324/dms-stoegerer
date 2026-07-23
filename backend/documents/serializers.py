@@ -81,6 +81,22 @@ class StoragePathSerializer(serializers.ModelSerializer):
             "path_template": {"required": False},
         }
 
+    def validate_path_template(self, value):
+        """Ablage-Template ist nutzergesteuert – klare, frühe Ablehnung von
+        Pfadausbruch (Defense-in-depth; ``storage.build_archive_path`` verankert
+        zusätzlich hart unter dem gesicherten Archiv-Subtree)."""
+        v = (value or "").strip()
+        if not v:
+            return v
+        segments = v.replace("\\", "/").split("/")
+        if v.startswith("/") or ".." in segments or ":" in v or "\\" in value:
+            raise serializers.ValidationError(
+                "Ungültiges Ablage-Template: keine absoluten Pfade, kein '..', "
+                "kein ':' oder '\\'. Erlaubt sind relative Segmente + die "
+                "Platzhalter {jahr}/{korrespondent}/{titel}."
+            )
+        return v
+
 
 class DocumentFolderSerializer(serializers.ModelSerializer):
     full_path = serializers.CharField(read_only=True)
