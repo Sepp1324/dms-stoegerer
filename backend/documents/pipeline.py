@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import shutil
 from pathlib import Path
 
 from celery.exceptions import SoftTimeLimitExceeded
@@ -470,12 +471,24 @@ def _place_archive_at_storage_path(version: DocumentVersion) -> None:
         return
     try:
         # build_archive_path RESERVIERT den Zielnamen atomar (leere Platzhalterdatei,
-        # O_EXCL) – kein TOCTOU-Race. os.replace ersetzt den Platzhalter.
+        # O_EXCL) – kein TOCTOU-Race.
         target = storage.build_archive_path(version.document)
         try:
-            os.replace(archive, str(target))  # atomar innerhalb von /data
+            # CRASH-KONSISTENT (P1): NICHT os.replace (Move) + danach save(). Stirbt
+            # der Worker dazwischen, existiert die Quelle (.ocr.pdf) nicht mehr, die DB
+            # zeigt aber weiter darauf; der SEALED-Watchdog überspringt den Move (Quelle
+            # fehlt) und versiegelt mit totem archive_path als READY. Stattdessen
+            # KOPIEREN + fsync, dann den DB-Zeiger umlegen, DANN erst das Original
+            # löschen. So verweist archive_path zu JEDEM Zeitpunkt auf eine existierende
+            # Datei: vor dem Commit das Original (endet auf .ocr.pdf, existiert ->
+            # Watchdog wiederholt sauber), nach dem Commit die Kopie. Ein Crash
+            # hinterlässt höchstens eine verwaiste Datei, nie einen toten archive_path.
+            with open(archive, "rb") as src, open(target, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+                dst.flush()
+                os.fsync(dst.fileno())
         except Exception:
-            # Reservierten 0-Byte-Platzhalter aufräumen, bevor wir weiterwerfen.
+            # Reservierten Platzhalter/Teilkopie aufräumen; Original bleibt unberührt.
             try:
                 os.unlink(target)
             except OSError:
@@ -483,6 +496,11 @@ def _place_archive_at_storage_path(version: DocumentVersion) -> None:
             raise
         version.archive_path = str(target)
         version.save(update_fields=["archive_path"])
+        # Original erst NACH dem Commit entfernen (bis hier war es der gültige Zeiger).
+        try:
+            os.unlink(archive)
+        except OSError:
+            pass
         logger.info("Archiv nach Ablage-Template verschoben: %s → %s", archive, target)
     except SoftTimeLimitExceeded:
         raise  # Soft-Time-Limit nie verschlucken
