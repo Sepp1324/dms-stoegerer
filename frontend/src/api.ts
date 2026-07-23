@@ -2771,6 +2771,10 @@ export interface FolderRef extends NamedRef {
   full_path: string;
   document_count: number;
   shared_with_household: boolean;
+  /** Eigentümer-ID – nur EIGENE Ordner sind einem Dokument zuweisbar (Backend-
+   *  Owner-Check); die UI filtert Zuweisungs-Auswahlen darauf. ``null`` = alt-
+   *  globaler Ordner (admin-only). */
+  owner?: number | null;
   /** Eigentümer-Name – zur Unterscheidung gleichnamiger Ordner verschiedener
    *  Besitzer (Root-Namen dürfen pro Owner doppelt vorkommen). */
   owner_username?: string | null;
