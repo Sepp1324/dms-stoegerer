@@ -93,3 +93,58 @@ class ClassificationFolderOwnerTests(TestCase):
         doc.refresh_from_db()
         self.assertIsNone(doc.folder)
         self.assertFalse(DocumentFolder.objects.filter(name="Steuer").exists())
+
+
+class TriageFolderAfterWorkflowOwnerTests(TestCase):
+    """P2: Setzt ein Workflow den Owner NACH der Klassifizierung, wird der zuvor
+    übersprungene owner-gebundene Ordnerschritt in classify_version nachgeholt."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.alice = User.objects.create_user("tw_alice", password="pw", role="user")
+
+    def test_ordner_wird_nach_workflow_owner_nachgeholt(self):
+        from unittest import mock
+
+        from documents import pipeline
+        from documents.models import (
+            ClassificationRule,
+            Document,
+            DocumentVersion,
+            Workflow,
+            WorkflowAction,
+            WorkflowTrigger,
+        )
+
+        doc = Document.objects.create(title="Steuer 2026", owner=None)  # Triage
+        v = DocumentVersion.objects.create(
+            document=doc, version_no=1, file_path="/tmp/x.pdf",
+            ocr_text="steuer", ingest_source="mail",
+            processing_state=DocumentVersion.ProcessingState.OCR_DONE,
+        )
+        doc.current_version = v
+        doc.save(update_fields=["current_version"])
+
+        ClassificationRule.objects.create(
+            name="Ablage", enabled=True, owner=None,
+            match={"text_contains": ["steuer"]}, then={"folder": "Steuer"},
+        )
+        wf = Workflow.objects.create(name="Owner", order=10, enabled=True)
+        WorkflowTrigger.objects.create(
+            workflow=wf, trigger_type="document_added", sources=""
+        )
+        WorkflowAction.objects.create(
+            workflow=wf, order=10, action_type="assign", assign_owner=self.alice
+        )
+
+        with mock.patch(
+            "documents.services.extraction.generate_candidates", return_value=0
+        ), mock.patch(
+            "documents.services.case_matching.generate_candidates", return_value=0
+        ):
+            pipeline.classify_version(v)
+
+        doc.refresh_from_db()
+        self.assertEqual(doc.owner_id, self.alice.id)   # Workflow setzte den Owner
+        self.assertIsNotNone(doc.folder)                # Ordnerschritt nachgeholt
+        self.assertEqual(doc.folder.owner_id, self.alice.id)
