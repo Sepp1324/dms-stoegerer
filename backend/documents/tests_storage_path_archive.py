@@ -84,6 +84,35 @@ class StoragePathArchivePlacementTests(TestCase):
         self.assertEqual(v.archive_path, str(old))
         self.assertTrue(os.path.exists(old))
 
+    def test_erfolgreicher_move_loescht_original(self):
+        v, old = self._version(storage_template="archive/{titel}")
+        pipeline._place_archive_at_storage_path(v)
+        v.refresh_from_db()
+        self.assertFalse(os.path.exists(old))          # Original entfernt
+        self.assertTrue(os.path.exists(v.archive_path))
+        with open(v.archive_path, "rb") as fh:
+            self.assertEqual(fh.read(), b"%PDF archive")  # Inhalt 1:1 kopiert
+
+    def test_crash_zwischen_kopie_und_commit_haelt_db_konsistent(self):
+        # Stirbt der Worker NACH der Kopie, aber VOR version.save(), muss der
+        # DB-Zeiger weiter auf das (noch existierende) Original zeigen – nicht auf
+        # eine Datei, die es nicht gibt. Sonst versiegelt der Watchdog mit totem
+        # archive_path.
+        v, old = self._version(storage_template="archive/{titel}")
+        real_save = DocumentVersion.save
+
+        def _boom(self_v, *a, **kw):
+            if "archive_path" in (kw.get("update_fields") or []):
+                raise RuntimeError("worker crash")
+            return real_save(self_v, *a, **kw)
+
+        with mock.patch.object(DocumentVersion, "save", _boom):
+            pipeline._place_archive_at_storage_path(v)  # best-effort: schluckt Fehler
+
+        v.refresh_from_db()
+        self.assertEqual(v.archive_path, str(old))     # DB unverändert
+        self.assertTrue(os.path.exists(old))           # Original NICHT gelöscht
+
 
 class StoragePathTemplateValidationTests(TestCase):
     def _valid(self, template):
