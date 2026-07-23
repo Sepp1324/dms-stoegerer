@@ -61,6 +61,26 @@ class EnsureFindabilityIndexTests(TestCase):
         v.refresh_from_db()
         self.assertIsNone(v.indexed_at)  # -> Reconciler holt nach
 
+    def test_disabled_status_laesst_indexed_at_null(self):
+        # EMBEDDING_ENABLED=false -> status="disabled": es existieren KEINE
+        # Embeddings. Nicht als Erfolg werten, sonst werden die Dokumente nach
+        # spaeterem Aktivieren der AI nie nachindexiert.
+        v = _ready_version(immutable=True)
+        with mock.patch(SEARCH), mock.patch(SEM, return_value={"status": "disabled"}):
+            ok = pipeline.ensure_findability_index(v)
+        self.assertFalse(ok)
+        v.refresh_from_db()
+        self.assertIsNone(v.indexed_at)
+
+    def test_empty_status_ist_erfolg(self):
+        # Kein Text zu indexieren (status="empty") ist ein legitimer Abschluss.
+        v = _ready_version(immutable=True)
+        with mock.patch(SEARCH), mock.patch(SEM, return_value={"status": "empty"}):
+            ok = pipeline.ensure_findability_index(v)
+        self.assertTrue(ok)
+        v.refresh_from_db()
+        self.assertIsNotNone(v.indexed_at)
+
 
 @override_settings(INDEX_RECONCILE_AFTER_MINUTES=15, INDEX_RECONCILE_BATCH=50)
 class ReapUnindexedVersionsTests(TestCase):
