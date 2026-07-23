@@ -457,6 +457,13 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
 
   // Stammdaten inline anlegen: erzeugen, in die lokale Liste einsortieren, Item zurückgeben.
   const byName = (a: NamedRef, b: NamedRef) => a.name.localeCompare(b.name);
+  // Zuweisbare Ordner: nur EIGENE (bzw. alle für Admin). Der Backend-Owner-Check
+  // (validate_folder / Bulk) lehnt fremde Ordner ab – die Auswahl darf sie daher
+  // gar nicht erst anbieten. Die Navigation (Seitenleiste) zeigt weiterhin alle.
+  const assignableFolders = useMemo(
+    () => folders.filter((f) => me?.is_dms_admin || f.owner === me?.id),
+    [folders, me],
+  );
   async function addCorrespondent(name: string) {
     const item = await createCorrespondent(name);
     setCorrespondents((prev) => [...prev, item].sort(byName));
@@ -1060,7 +1067,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
           correspondents={correspondents}
           documentTypes={documentTypes}
           storagePaths={storagePaths}
-          folders={folders.map((f) => ({ id: f.id, name: f.full_path }))}
+          folders={assignableFolders.map((f) => ({ id: f.id, name: f.full_path }))}
           allTags={tags}
           customFields={customFields}
           canEdit={!!me?.can_write}
@@ -1475,7 +1482,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
                         selectedCount={selectedIds.size}
                         correspondents={correspondents}
                         documentTypes={documentTypes}
-                        folders={folders}
+                        folders={assignableFolders}
                         tags={tags}
                         folder={bulkFolder}
                         documentType={bulkDocumentType}
