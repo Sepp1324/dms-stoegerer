@@ -1807,6 +1807,28 @@ class DocumentViewSet(viewsets.ModelViewSet):
     def revision_package(self, request, pk=None):
         """Exportiert ein prüfbares ZIP-Paket für Steuer/Anwalt/Behörde."""
         document = self.get_object()
+        # Paket ZUERST bauen (kann scheitern) und die Temp-Datei öffnen; erst danach
+        # den Audit-Eintrag schreiben. Sonst protokollierten wir einen "Export", der
+        # gar nicht stattfand. Der Service räumt eine halbfertige Temp-Datei bei einem
+        # Fehler bereits selbst auf.
+        package = revision_package_service.build_document_revision_package(document)
+        # Streamen statt im RAM halten: Datei öffnen und sofort entlinken – auf
+        # POSIX bleibt sie über den offenen fd lesbar und wird beim Schließen der
+        # Response (Ende des Streamings) automatisch freigegeben. Kein Vollkopieren
+        # in den Web-Prozess, kein Temp-Leak. Scheitert das Öffnen, die Temp-Datei
+        # dennoch entfernen (sonst bliebe sie liegen).
+        try:
+            handle = open(package.path, "rb")
+        except OSError:
+            try:
+                os.unlink(package.path)
+            except OSError:
+                pass
+            raise
+        try:
+            os.unlink(package.path)
+        except OSError:
+            pass
         AuditLogEntry.objects.create(
             actor=request.user,
             action="revision_package_export",
@@ -1814,16 +1836,6 @@ class DocumentViewSet(viewsets.ModelViewSet):
             object_id=str(document.id),
             detail={"format": "zip", "scope": "document"},
         )
-        package = revision_package_service.build_document_revision_package(document)
-        # Streamen statt im RAM halten: Datei öffnen und sofort entlinken – auf
-        # POSIX bleibt sie über den offenen fd lesbar und wird beim Schließen der
-        # Response (Ende des Streamings) automatisch freigegeben. Kein Vollkopieren
-        # in den Web-Prozess, kein Temp-Leak.
-        handle = open(package.path, "rb")
-        try:
-            os.unlink(package.path)
-        except OSError:
-            pass
         response = FileResponse(
             handle,
             as_attachment=True,
