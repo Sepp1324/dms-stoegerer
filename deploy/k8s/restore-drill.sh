@@ -24,6 +24,11 @@ PG_IMAGE="${PG_IMAGE:-postgres:16-alpine}"
 POD="dms-restore-drill-$(date +%s)"
 ARTIFACT_TS=""
 MONITOR_OK=0
+# POSIX-Tab: der Shebang ist /bin/sh (unter k3s meist dash/busybox). Dort ist
+# ``$'\t'`` KEINE Escape-Sequenz, sondern der Literalstring ``\t`` – die
+# Feldtrennung unten würde brechen. Ein echtes Tab-Zeichen erzeugen wir portabel
+# per printf.
+TAB="$(printf '\t')"
 
 for tool in kubectl ssh gzip tar base64 sha256sum awk; do
   command -v "$tool" >/dev/null 2>&1 || {
@@ -167,11 +172,11 @@ TOP_LEVEL="$(find "$WORK/data" -mindepth 1 -maxdepth 1 -type d -exec basename {}
 # Daher: JEDE Version-Datei aus der wiederhergestellten DB muss im entpackten
 # /data vorhanden sein UND (falls Hash hinterlegt) exakt ihren SHA-256 tragen.
 echo "[drill] prüfe DB-Dateipfade + SHA-256 gegen das wiederhergestellte /data ..."
-VERSIONS="$(kubectl -n "$NAMESPACE" exec "$POD" -- psql -U dms -d dms -tAF $'\t' -c \
+VERSIONS="$(kubectl -n "$NAMESPACE" exec "$POD" -- psql -U dms -d dms -tAF "$TAB" -c \
   "select file_path, sha256 from documents_documentversion where coalesce(file_path,'') <> '';" \
   2>/dev/null)"
 checked=0; missing=0; mismatch=0
-while IFS=$'\t' read -r fpath fsha; do
+while IFS="$TAB" read -r fpath fsha; do
   [ -z "$fpath" ] && continue
   checked=$((checked + 1))
   # /data/<...> -> $WORK/data/<...>  (andere Pfade sind nicht im Backup -> missing)
@@ -194,7 +199,7 @@ $VERSIONS
 EOF
 
 if [ "$missing" -ne 0 ] || [ "$mismatch" -ne 0 ]; then
-  record_drill_status failure \
+  record_drill_status failed \
     "Restore-Drill FEHLGESCHLAGEN: ${missing} fehlende Dateien, ${mismatch} Hash-Abweichungen (von ${checked} geprüft)"
   echo "FEHLER: Backup nicht vollständig wiederherstellbar – ${missing} fehlend, ${mismatch} Hash-Mismatch." >&2
   exit 1
