@@ -845,10 +845,17 @@ def _sync_semantic_index(version: DocumentVersion, result: dict, *, actor=None) 
     try:
         from documents.services import semantic_index
 
-        result["semantic_index"] = semantic_index.sync_document_embeddings(
+        outcome = semantic_index.sync_document_embeddings(
             version.document, version=version
         )
-        return True
+        result["semantic_index"] = outcome
+        # WICHTIG: sync_document_embeddings signalisiert einen Embedding-Fehler
+        # NICHT per Exception, sondern per ``{"status": "error"}`` (z. B. wenn das
+        # Embedding-Backend down ist). Diesen Fall NICHT als Erfolg werten – sonst
+        # setzt ensure_findability_index ``indexed_at`` und der Reconciler holt den
+        # fehlenden Index nie wieder nach. Alle anderen Status (indexed/empty/
+        # disabled/missing_version) sind kein Fehler.
+        return (outcome or {}).get("status") != "error"
     except SoftTimeLimitExceeded:
         raise  # Soft-Time-Limit nie als Best-Effort-Teilfehler verschlucken
     except Exception:  # noqa: BLE001 - Semantik darf Pipeline nie kippen
