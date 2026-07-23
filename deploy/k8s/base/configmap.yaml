@@ -5,8 +5,8 @@ metadata:
   namespace: dms
 data:
   DJANGO_DEBUG: "false"
-  DJANGO_ALLOWED_HOSTS: "dms.stoegerer-home.at,localhost,backend"
-  DJANGO_CORS_ORIGINS: "http://dms.stoegerer-home.at"
+  DJANGO_ALLOWED_HOSTS: "dms.stoegerer-home.cloud,localhost,backend"
+  DJANGO_CORS_ORIGINS: "http://dms.stoegerer-home.cloud"
   POSTGRES_DB: "dms"
   POSTGRES_USER: "dms"
   POSTGRES_HOST: "postgres"

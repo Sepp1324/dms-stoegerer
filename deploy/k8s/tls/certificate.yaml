@@ -14,7 +14,7 @@ spec:
     algorithm: ECDSA
     size: 256
   dnsNames:
-    - dms.stoegerer-home.at
+    - dms.stoegerer-home.cloud
   issuerRef:
     name: dms-ca
     kind: ClusterIssuer

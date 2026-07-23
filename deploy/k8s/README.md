@@ -1,7 +1,7 @@
 # DMS auf k3s – vollständige Konfigurationsanleitung
 
 Diese Anleitung führt das DMS auf einem **k3s-Cluster** aus – vom leeren Server
-bis zum erreichbaren `http://dms.stoegerer-home.at`. Optimiert für ein **Einzel-Node-Setup**
+bis zum erreichbaren `http://dms.stoegerer-home.cloud`. Optimiert für ein **Einzel-Node-Setup**
 (Familien-Homelab); Hinweise für Multi-Node stehen jeweils dabei.
 
 ---
@@ -23,7 +23,7 @@ bis zum erreichbaren `http://dms.stoegerer-home.at`. Optimiert für ein **Einzel
 | `dms` | Ingress (Traefik) | `/api`,`/admin`,`/static` → Backend, `/` → Frontend |
 
 ```
-                 ┌──────────── Traefik Ingress (dms.stoegerer-home.at) ───────────┐
+                 ┌──────────── Traefik Ingress (dms.stoegerer-home.cloud) ───────────┐
                  │  /api /admin /static → backend    / → frontend      │
                  └───────────────┬───────────────────────┬────────────┘
                           ┌──────▼──────┐          ┌───────▼───────┐
@@ -176,7 +176,7 @@ In `deploy/k8s/secret.yaml` eintragen:
 
 ### 6b. ConfigMap prüfen (`deploy/k8s/configmap.yaml`)
 
-- `DJANGO_ALLOWED_HOSTS` / `DJANGO_CORS_ORIGINS` – müssen den Ingress-Host (`dms.stoegerer-home.at`) enthalten.
+- `DJANGO_ALLOWED_HOSTS` / `DJANGO_CORS_ORIGINS` – müssen den Ingress-Host (`dms.stoegerer-home.cloud`) enthalten.
 - `AI_PROVIDER` – `anthropic` (Default), `ollama` (lokal, ohne Cloud) oder `disabled`.
 - `AI_MODEL` – Default `claude-opus-4-8`; für günstige Massen-Klassifizierung `claude-haiku-4-5`.
 - Für **Ollama** (Datenschutz, lokal): `AI_PROVIDER=ollama` und `OLLAMA_BASE_URL`
@@ -217,14 +217,14 @@ führt `migrate` und `collectstatic` aus → dann laufen `backend`, `worker`,
 kubectl -n dms exec -it deploy/backend -- python manage.py createsuperuser
 ```
 
-Danach kannst du dich unter `http://dms.stoegerer-home.at/admin/` anmelden und dort
+Danach kannst du dich unter `http://dms.stoegerer-home.cloud/admin/` anmelden und dort
 Korrespondenten, Dokumenttypen, Tags, Klassifizierungsregeln und Nutzer pflegen.
 
 ---
 
 ## 9. Zugriff einrichten (DNS)
 
-Der Ingress hört auf den Host **`dms.stoegerer-home.at`**. Der DNS-Eintrag wird
+Der Ingress hört auf den Host **`dms.stoegerer-home.cloud`**. Der DNS-Eintrag wird
 zentral in der **UDM (UniFi)** gepflegt – ein A-Record auf eine Node-IP:
 
 ```bash
@@ -232,15 +232,15 @@ zentral in der **UDM (UniFi)** gepflegt – ein A-Record auf eine Node-IP:
 kubectl get nodes -o wide      # Spalte INTERNAL-IP
 ```
 
-Dann in der UDM: `dms.stoegerer-home.at  A  <node-ip>` anlegen. Kein
+Dann in der UDM: `dms.stoegerer-home.cloud  A  <node-ip>` anlegen. Kein
 `/etc/hosts`-Eintrag nötig – gilt für alle Geräte im Netz.
 
-Aufruf im Browser: **http://dms.stoegerer-home.at** (SPA) ·
-**http://dms.stoegerer-home.at/admin/** (Verwaltung).
+Aufruf im Browser: **http://dms.stoegerer-home.cloud** (SPA) ·
+**http://dms.stoegerer-home.cloud/admin/** (Verwaltung).
 
 > **Vor dem DNS-Eintrag testen** (umgeht DNS, spricht Traefik direkt an):
 > ```bash
-> curl -s -H 'Host: dms.stoegerer-home.at' http://127.0.0.1/api/health/
+> curl -s -H 'Host: dms.stoegerer-home.cloud' http://127.0.0.1/api/health/
 > ```
 > Kommt `{"status":"ok",…}`, funktioniert der Ingress – dann fehlt nur noch DNS.
 
@@ -253,7 +253,7 @@ Aufruf im Browser: **http://dms.stoegerer-home.at** (SPA) ·
 kubectl -n dms get all,ingress,pvc
 
 # Health-Check über den Ingress
-curl http://dms.stoegerer-home.at/api/health/
+curl http://dms.stoegerer-home.cloud/api/health/
 # → {"status":"ok","service":"dms-backend","version":"0.1.0","database":"ok"}
 
 # Logs
@@ -264,10 +264,10 @@ kubectl -n dms logs deploy/worker      # Celery/OCR
 **Ende-zu-Ende-Test** (Token holen, PDF hochladen):
 
 ```bash
-TOKEN=$(curl -s http://dms.stoegerer-home.at/api/auth/token/ \
+TOKEN=$(curl -s http://dms.stoegerer-home.cloud/api/auth/token/ \
   -d 'username=<user>&password=<pass>' | python3 -c 'import sys,json;print(json.load(sys.stdin)["access"])')
 
-curl -s http://dms.stoegerer-home.at/api/documents/upload/ \
+curl -s http://dms.stoegerer-home.cloud/api/documents/upload/ \
   -H "Authorization: Bearer $TOKEN" \
   -F 'file=@rechnung.pdf' -F 'title=Stadtwerke Januar'
 ```
@@ -502,7 +502,7 @@ kubectl -n cert-manager get secret dms-ca-root \
   -o jsonpath='{.data.tls\.crt}' | base64 -d > dms-ca.crt
 ```
 
-Danach leitet `http://dms.stoegerer-home.at` automatisch auf `https://…` um. Der
+Danach leitet `http://dms.stoegerer-home.cloud` automatisch auf `https://…` um. Der
 CD-Deploy fasst `deploy/k8s/tls` **nicht** an (Admin-/One-time-Ressourcen, u. a.
 im `kube-system`/`cert-manager`-Namespace – außerhalb der SA-Rechte).
 
@@ -522,7 +522,7 @@ im `kube-system`/`cert-manager`-Namespace – außerhalb der SA-Rechte).
 | `/admin/` ohne Styles | `collectstatic` lief nicht → Init-Container-Logs; Ingress-Pfad `/static` vorhanden? |
 | `400 Bad Request`/`DisallowedHost` | Host nicht in `DJANGO_ALLOWED_HOSTS` (ConfigMap) → ergänzen, Rollout-Restart |
 | Upload OK, aber kein OCR-Ergebnis | Worker-Logs (`kubectl -n dms logs deploy/worker`); Redis erreichbar? OCR-Binaries im Image (§ Dockerfile) |
-| `dms.stoegerer-home.at` nicht erreichbar | DNS-A-Record (UDM) auf Node-IP gesetzt? Erst per `curl -H 'Host: …' http://127.0.0.1/api/health/` prüfen, ob Traefik antwortet; Traefik läuft (`kubectl -n kube-system get pods`)? |
+| `dms.stoegerer-home.cloud` nicht erreichbar | DNS-A-Record (UDM) auf Node-IP gesetzt? Erst per `curl -H 'Host: …' http://127.0.0.1/api/health/` prüfen, ob Traefik antwortet; Traefik läuft (`kubectl -n kube-system get pods`)? |
 | `404 page not found` (Traefik) beim Aufruf | Kein Router für den Host → Ingress vorhanden (`kubectl -n dms get ingress`)? `ingressClassName: traefik` gesetzt? Host im Ingress == angefragter Host? |
 | PVC `Pending` | local-path-Provisioner aktiv? `kubectl get sc` sollte `local-path (default)` zeigen |
 | postgres `Error`: `initdb: directory … not empty (lost+found)` | PVC liegt auf eigenem Dateisystem-Mount → bereits gelöst per `PGDATA=/var/lib/postgresql/data/pgdata` im `postgres.yaml` (Daten im Unterverzeichnis statt im Mount-Punkt) |
@@ -562,7 +562,7 @@ kubectl apply -k deploy/k8s
 
 # 4. Superuser + Zugriff
 kubectl -n dms exec -it deploy/backend -- python manage.py createsuperuser
-# DNS-A-Record in der UDM: dms.stoegerer-home.at -> <node-ip>
-curl -H 'Host: dms.stoegerer-home.at' http://127.0.0.1/api/health/   # Ingress-Test ohne DNS
-curl http://dms.stoegerer-home.at/api/health/                        # nach DNS-Eintrag
+# DNS-A-Record in der UDM: dms.stoegerer-home.cloud -> <node-ip>
+curl -H 'Host: dms.stoegerer-home.cloud' http://127.0.0.1/api/health/   # Ingress-Test ohne DNS
+curl http://dms.stoegerer-home.cloud/api/health/                        # nach DNS-Eintrag
 ```
