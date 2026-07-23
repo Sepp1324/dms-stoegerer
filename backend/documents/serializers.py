@@ -81,10 +81,18 @@ class StoragePathSerializer(serializers.ModelSerializer):
             "path_template": {"required": False},
         }
 
+    # Nur diese Platzhalter füllt ``storage.build_archive_path`` – ein Template mit
+    # abweichendem Namen (z. B. ``{title}``) würde dort einen KeyError auslösen.
+    ALLOWED_TEMPLATE_FIELDS = frozenset({"jahr", "korrespondent", "titel"})
+    MAX_TEMPLATE_SEGMENT = 200
+
     def validate_path_template(self, value):
         """Ablage-Template ist nutzergesteuert – klare, frühe Ablehnung von
         Pfadausbruch (Defense-in-depth; ``storage.build_archive_path`` verankert
-        zusätzlich hart unter dem gesicherten Archiv-Subtree)."""
+        zusätzlich hart unter dem gesicherten Archiv-Subtree) UND von Templates,
+        die zwar gültig aussehen, aber beim Erzeugen still scheitern würden."""
+        import string
+
         v = (value or "").strip()
         if not v:
             return v
@@ -95,6 +103,33 @@ class StoragePathSerializer(serializers.ModelSerializer):
                 "kein ':' oder '\\'. Erlaubt sind relative Segmente + die "
                 "Platzhalter {jahr}/{korrespondent}/{titel}."
             )
+        # Unbekannte Platzhalter früh ablehnen (statt später im Worker mit KeyError
+        # zu scheitern und das Dokument dennoch READY zu markieren).
+        try:
+            fields = {
+                name
+                for _, name, _, _ in string.Formatter().parse(v)
+                if name
+            }
+        except (ValueError, IndexError):
+            raise serializers.ValidationError(
+                "Ungültiges Ablage-Template: fehlerhafte Platzhalter-Syntax."
+            )
+        unknown = fields - self.ALLOWED_TEMPLATE_FIELDS
+        if unknown:
+            raise serializers.ValidationError(
+                "Unbekannte Platzhalter im Ablage-Template: "
+                + ", ".join("{%s}" % f for f in sorted(unknown))
+                + ". Erlaubt sind {jahr}, {korrespondent}, {titel}."
+            )
+        # Statische Segmente dürfen die Dateisystemgrenze (255) nicht sprengen; die
+        # Platzhalter-Segmente kappt build_archive_path zusätzlich zur Laufzeit.
+        for seg in segments:
+            if len(seg) > self.MAX_TEMPLATE_SEGMENT:
+                raise serializers.ValidationError(
+                    "Ein Segment im Ablage-Template ist zu lang "
+                    f"(max. {self.MAX_TEMPLATE_SEGMENT} Zeichen)."
+                )
         return v
 
 

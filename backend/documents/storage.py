@@ -141,7 +141,17 @@ def build_archive_path(document) -> Path:
     ) or "unbekannt"
     titel = slugify(document.title) or "dokument"
 
-    relative = template.format(jahr=jahr, korrespondent=korrespondent, titel=titel)
+    # Robust gegen fehlerhafte (Alt-)Templates: unbekannte Platzhalter wie
+    # ``{title}`` (statt ``{titel}``) lösen einen KeyError aus, kaputte Syntax einen
+    # ValueError/IndexError. Neue Templates werden zwar im Serializer geprüft, aber
+    # bereits gespeicherte könnten ungültig sein – dann NICHT die Verarbeitung
+    # kippen, sondern auf das Default-Template zurückfallen (Best-effort-Ablage).
+    try:
+        relative = template.format(jahr=jahr, korrespondent=korrespondent, titel=titel)
+    except (KeyError, IndexError, ValueError):
+        relative = DEFAULT_TEMPLATE.format(
+            jahr=jahr, korrespondent=korrespondent, titel=titel
+        )
 
     # Sicherheit (P1): das Template ist NUTZERGESTEUERT (jeder Writer legt StoragePath
     # an). Es darf NICHT aus dem gesicherten Archiv-Subtree ausbrechen – weder per
@@ -150,9 +160,13 @@ def build_archive_path(document) -> Path:
     # Segment slugifizieren (``.``/``..``/leer/``\`` verwerfen) und ALLES zwingend
     # unter ARCHIVE_DIR verankern. Ein evtl. führendes ``archive`` wird verworfen,
     # damit ``archive/{jahr}/…`` NICHT zu ``archive/archive/…`` wird.
+    # Segmentlänge kappen (P2): Document.title erlaubt 512 Zeichen, übliche
+    # Dateisysteme aber nur 255 pro Segment. Ohne Kappung scheitert os.open() mit
+    # ENAMETOOLONG. Auf 200 begrenzen, damit Suffix (``-NNNNN``) und ``.pdf`` passen.
+    _MAX_SEG = 200
     segments = []
     for seg in relative.replace("\\", "/").split("/"):
-        seg = slugify(seg.strip())
+        seg = slugify(seg.strip())[:_MAX_SEG]
         if seg:
             segments.append(seg)
     if segments and segments[0] == "archive":
