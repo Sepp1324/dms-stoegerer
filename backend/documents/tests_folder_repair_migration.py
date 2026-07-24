@@ -81,3 +81,59 @@ class Repair0059MigrationTests(TransactionTestCase):
         from documents.models import DocumentFolder
 
         self.assertEqual(DocumentFolder.objects.get(pk=root.id).owner_id, bob.id)
+
+
+class Repair0060NodeOwnerMigrationTests(TransactionTestCase):
+    """P1: 0060 zieht zusätzlich die ORDNERKNOTEN-Owner heran – ein Admin-
+    Unterordner unter Alices Root (gemischte Knoten-Owner) wird bereinigt."""
+
+    app = "documents"
+    migrate_from = "0059_repair_folder_owner_consistency"
+    migrate_to = "0060_repair_folder_node_owner_consistency"
+
+    def _migrate(self, target):
+        executor = MigrationExecutor(connection)
+        executor.migrate([(self.app, target)])
+        executor.loader.build_graph()
+        return executor.loader.project_state([(self.app, target)]).apps
+
+    def tearDown(self):
+        self._migrate(self.migrate_to)
+
+    def test_admin_unterordner_mit_alice_docs_wird_alice(self):
+        old = self._migrate(self.migrate_from)
+        User = old.get_model("accounts", "User")
+        Folder = old.get_model("documents", "DocumentFolder")
+        Document = old.get_model("documents", "Document")
+        alice = User.objects.create(username="n_alice", role="user")
+        admin = User.objects.create(username="n_admin", role="admin")
+        root = Folder.objects.create(name="AliceRoot", owner_id=alice.id)
+        sub = Folder.objects.create(name="AdminSub", parent_id=root.id, owner_id=admin.id)
+        Document.objects.create(title="A", owner_id=alice.id, folder_id=root.id)
+
+        F = self._migrate(self.migrate_to).get_model("documents", "DocumentFolder")
+        self.assertEqual(F.objects.get(pk=root.id).owner_id, alice.id)
+        self.assertEqual(F.objects.get(pk=sub.id).owner_id, alice.id)  # admin -> alice
+
+    def test_gemischte_knoten_ohne_docs_wird_ownerlos(self):
+        old = self._migrate(self.migrate_from)
+        User = old.get_model("accounts", "User")
+        Folder = old.get_model("documents", "DocumentFolder")
+        alice = User.objects.create(username="n_alice2", role="user")
+        admin = User.objects.create(username="n_admin2", role="admin")
+        root = Folder.objects.create(name="AliceRoot2", owner_id=alice.id)
+        sub = Folder.objects.create(name="AdminSub2", parent_id=root.id, owner_id=admin.id)
+
+        F = self._migrate(self.migrate_to).get_model("documents", "DocumentFolder")
+        self.assertIsNone(F.objects.get(pk=root.id).owner_id)   # gemischt -> ownerlos
+        self.assertIsNone(F.objects.get(pk=sub.id).owner_id)
+
+    def test_konsistenter_leerer_ordner_unveraendert(self):
+        old = self._migrate(self.migrate_from)
+        User = old.get_model("accounts", "User")
+        Folder = old.get_model("documents", "DocumentFolder")
+        alice = User.objects.create(username="n_alice3", role="user")
+        legit = Folder.objects.create(name="AlicePrivat", owner_id=alice.id)
+
+        F = self._migrate(self.migrate_to).get_model("documents", "DocumentFolder")
+        self.assertEqual(F.objects.get(pk=legit.id).owner_id, alice.id)  # unverändert

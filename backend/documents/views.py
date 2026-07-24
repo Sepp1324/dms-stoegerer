@@ -4726,8 +4726,13 @@ class DocumentFolderViewSet(viewsets.ModelViewSet):
         )
 
     def perform_create(self, serializer):
-        # Ersteller = Eigentümer (Sicherheits-Anker: nur er/Admin darf ändern).
-        serializer.save(owner=self.request.user)
+        # Owner-Konsistenz (P1): Ein Root-Ordner gehört dem Ersteller; ein Kind ERBT
+        # den Owner seines Parents – auch wenn ein Admin es anlegt. So bleibt jeder
+        # Teilbaum single-owner und CASCADE (parent) kreuzt nie Owner-Grenzen (sonst
+        # könnte das Löschen des Parents durch dessen Owner ein fremdes Kind mitreißen).
+        parent = serializer.validated_data.get("parent")
+        owner = parent.owner if parent is not None else self.request.user
+        serializer.save(owner=owner)
 
     def _assert_folder_mutable(self, instance):
         """Nur der Eigentümer (oder ein Admin) darf einen Ordner ändern/löschen.
@@ -4748,6 +4753,14 @@ class DocumentFolderViewSet(viewsets.ModelViewSet):
                 "Nur der Ordner-Eigentümer (oder ein Admin) darf diesen Ordner "
                 "ändern oder löschen. Globale Ordner sind admin-only."
             )
+
+    def update(self, request, *args, **kwargs):
+        # Owner-Permission ZUERST prüfen (403), BEVOR der Serializer validiert.
+        # Sonst liefert ein Nicht-Owner, der einen ungültigen Move sendet, ein 400
+        # (Validierungsfehler) statt des korrekten 403 (fremder Ordner) – der
+        # Permission-Fehler soll den Validierungsfehler dominieren.
+        self._assert_folder_mutable(self.get_object())
+        return super().update(request, *args, **kwargs)
 
     def perform_update(self, serializer):
         self._assert_folder_mutable(serializer.instance)
