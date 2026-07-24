@@ -82,8 +82,23 @@ class EnsureFindabilityIndexTests(TestCase):
         self.assertIsNotNone(v.indexed_at)
 
 
-@override_settings(INDEX_RECONCILE_AFTER_MINUTES=15, INDEX_RECONCILE_BATCH=50)
+@override_settings(
+    INDEX_RECONCILE_AFTER_MINUTES=15, INDEX_RECONCILE_BATCH=50, EMBEDDING_ENABLED=True
+)
 class ReapUnindexedVersionsTests(TestCase):
+    @override_settings(EMBEDDING_ENABLED=False)
+    def test_pausiert_bei_deaktivierten_embeddings(self):
+        # Kandidat vorhanden, aber AI aus -> keine Dauerlast, indexed_at bleibt NULL.
+        v = _ready_version(indexed_at=None, changed_min_ago=30)
+        with mock.patch(SEARCH) as search, mock.patch(SEM) as sem:
+            res = tasks.reap_unindexed_versions()
+        self.assertEqual(res.get("skipped"), "embeddings_disabled")
+        self.assertEqual(res["candidates"], 0)
+        search.assert_not_called()   # kein Volltext-Neuaufbau
+        sem.assert_not_called()
+        v.refresh_from_db()
+        self.assertIsNone(v.indexed_at)
+
     def test_reindexiert_ready_ohne_indexed_at(self):
         v = _ready_version(indexed_at=None, changed_min_ago=30)
         with mock.patch(SEARCH), mock.patch(SEM, return_value={"status": "indexed"}):

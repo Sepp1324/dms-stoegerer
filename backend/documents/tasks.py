@@ -458,6 +458,15 @@ def reap_unindexed_versions() -> dict:
     """
     from datetime import timedelta
 
+    # Pause bei bewusst deaktivierten Embeddings (P2): Ohne AI liefert
+    # sync_document_embeddings dauerhaft status="disabled" -> ensure_findability_index
+    # bleibt erfolglos, indexed_at wird nie gesetzt. Ohne diese Pause nähme der Beat
+    # alle N Minuten dieselben ältesten Versionen und berechnete auch den
+    # Volltextindex sinnlos neu (Dauerlast). Bei aktivierter AI holt der Reconciler
+    # dann alles nach (die Kandidaten haben weiterhin indexed_at IS NULL).
+    if not getattr(settings, "EMBEDDING_ENABLED", True):
+        return {"candidates": 0, "reindexed": 0, "skipped": "embeddings_disabled"}
+
     PS = DocumentVersion.ProcessingState
     minutes = float(getattr(settings, "INDEX_RECONCILE_AFTER_MINUTES", 15))
     limit = int(getattr(settings, "INDEX_RECONCILE_BATCH", 50))
