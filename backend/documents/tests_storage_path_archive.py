@@ -85,6 +85,8 @@ class StoragePathArchivePlacementTests(TestCase):
         self.assertTrue(os.path.exists(old))
 
     def test_erfolgreicher_move_loescht_original(self):
+        import hashlib
+
         v, old = self._version(storage_template="archive/{titel}")
         pipeline._place_archive_at_storage_path(v)
         v.refresh_from_db()
@@ -92,6 +94,10 @@ class StoragePathArchivePlacementTests(TestCase):
         self.assertTrue(os.path.exists(v.archive_path))
         with open(v.archive_path, "rb") as fh:
             self.assertEqual(fh.read(), b"%PDF archive")  # Inhalt 1:1 kopiert
+        # Archiv-Hash beim Ablegen gesetzt (für den Restore-Drill verifizierbar).
+        self.assertEqual(
+            v.archive_sha256, hashlib.sha256(b"%PDF archive").hexdigest()
+        )
 
     def test_crash_zwischen_kopie_und_commit_haelt_db_konsistent(self):
         # Stirbt der Worker NACH der Kopie, aber VOR version.save(), muss der
