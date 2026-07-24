@@ -61,3 +61,19 @@ class ResolveReadableVersionPathTests(TestCase):
             call_command("reindex_text", stdout=StringIO())
         v.refresh_from_db()
         self.assertEqual(v.ocr_text, f"TEXT::{v.file_path}")  # Original, nicht Archiv
+
+    def test_reindex_page_texts_nutzt_original_wenn_archiv_fehlt(self):
+        # Archiv gesetzt, aber verschwunden -> extract_page_texts muss mit dem
+        # ORIGINAL aufgerufen werden (sonst landet der ganze OCR-Text als 1 Seite).
+        from unittest import mock
+
+        v = self._version(archive_rel="a.pdf", write_archive=False, ocr_text="x")
+        seen = {}
+        with mock.patch(
+            "documents.services.page_text.extract_page_texts",
+            side_effect=lambda src, fallback_text="": seen.setdefault("src", src) or [],
+        ), mock.patch(
+            "documents.services.page_text.write_page_texts", return_value=1
+        ):
+            call_command("reindex_page_texts", "--all", stdout=StringIO())
+        self.assertEqual(seen["src"], v.file_path)   # Original, nicht das fehlende Archiv
