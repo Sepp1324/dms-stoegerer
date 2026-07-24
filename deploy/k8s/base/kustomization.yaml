@@ -27,9 +27,9 @@ namespace: dms
 # pflegen ausschließlich den frontend-Tag).
 images:
   - name: registry.stoegerer-home.at/dms-backend
-    newTag: "0.5.0"    # CI-gepflegt – nächster Deploy setzt den echten SHA
+    newTag: "cc06fc6"    # CI-gepflegt – nächster Deploy setzt den echten SHA
   - name: registry.stoegerer-home.at/dms-frontend
-    newTag: "df8abf1"  # CI-gepflegt – nächster Deploy setzt den echten SHA
+    newTag: "cc06fc6"  # CI-gepflegt – nächster Deploy setzt den echten SHA
 
 # Der Namespace dms ist BEWUSST NICHT hier, sondern im einmaligen Bootstrap
 # (deploy/k8s/bootstrap, Admin-only). Sonst enthielte jedes von der CD gerenderte
