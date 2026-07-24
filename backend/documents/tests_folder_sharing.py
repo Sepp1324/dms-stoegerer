@@ -270,10 +270,38 @@ class FolderTreeOwnerConsistencyTests(APITestCase):
             400,
         )
 
-    def test_admin_darf_unter_fremden_parent_einordnen(self):
+    def test_admin_unter_fremden_parent_erbt_owner(self):
+        # Admin darf unter Alices Root anlegen, das Kind ERBT aber Alices Owner
+        # (kein owner=admin-Knoten im fremden Baum -> kein Mischbaum).
         alices = DocumentFolder.objects.create(name="AlicesAdminRoot", owner=self.alice)
         self.client.force_authenticate(self.admin)
         resp = self.client.post(
             "/api/folders/", {"name": "AdminKind", "parent": alices.id}, format="json"
         )
         self.assertEqual(resp.status_code, 201)
+        child = DocumentFolder.objects.get(name="AdminKind")
+        self.assertEqual(child.owner_id, self.alice.id)  # geerbt, NICHT admin
+
+    def test_admin_move_in_fremden_baum_abgelehnt(self):
+        # Auch ein Admin darf einen bestehenden Ordner nicht in einen Baum mit
+        # anderem Owner verschieben (der Ordner behielte seinen Owner -> Mischbaum).
+        alices = DocumentFolder.objects.create(name="AliceZiel", owner=self.alice)
+        bobs = DocumentFolder.objects.create(name="BobQuelle", owner=self.bob)
+        self.client.force_authenticate(self.admin)
+        resp = self.client.patch(
+            f"/api/folders/{bobs.id}/", {"parent": alices.id}, format="json"
+        )
+        self.assertEqual(resp.status_code, 400)
+        bobs.refresh_from_db()
+        self.assertIsNone(bobs.parent_id)
+
+    def test_eigenes_kind_erbt_eigenen_owner(self):
+        parent = DocumentFolder.objects.create(name="BobParentOwn", owner=self.bob)
+        self.client.force_authenticate(self.bob)
+        resp = self.client.post(
+            "/api/folders/", {"name": "BobKindOwn", "parent": parent.id}, format="json"
+        )
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(
+            DocumentFolder.objects.get(name="BobKindOwn").owner_id, self.bob.id
+        )

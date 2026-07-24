@@ -127,19 +127,44 @@ class DocumentFolderSerializer(serializers.ModelSerializer):
         user = getattr(request, "user", None)
         is_admin = bool(getattr(user, "is_dms_admin", False))
 
-        # Owner-Konsistenz des Baums (P2): Ein Nicht-Admin darf einen Ordner NUR
-        # unter einen EIGENEN Parent hängen. Sonst entsteht ein gemischter
-        # Eigentümerbaum – und da ``parent`` per CASCADE löscht, würde das Löschen
-        # des fremden Elternordners (eine legitime Owner-Aktion des Fremden) den
-        # eigenen Unterordner mitreißen (Datenverlust). Zudem könnten fremde
-        # Kindnamen unter einem sichtbaren Parent die eigene Vergabe blockieren.
-        # Konsequenz: jeder Teilbaum gehört genau einem Owner; CASCADE bleibt
-        # innerhalb dieses Owners. Admins dürfen frei einordnen.
-        if parent is not None and not is_admin:
-            if parent.owner_id != getattr(user, "id", None):
-                raise serializers.ValidationError(
-                    {"parent": "Unterordner nur unterhalb eines eigenen Ordners erlaubt."}
-                )
+        # Owner-Konsistenz des Baums (P1): Jeder Teilbaum gehört GENAU EINEM Owner,
+        # damit ``parent`` (CASCADE) nie über Owner-Grenzen löscht.
+        #   * Nicht-Admin darf nur unter einen EIGENEN Parent anlegen (Kind-Owner ==
+        #     Nutzer).
+        #   * Ein Admin darf zwar unter einen fremden Parent anlegen, das Kind ERBT
+        #     dann aber den Parent-Owner (ViewSet.perform_create) – KEIN owner=admin-
+        #     Knoten im fremden Baum mehr, also kein Admin-erzeugter Mischbaum.
+        #   * VERSCHIEBEN (bestehender Ordner) in einen Fremd-Owner-Parent ist für
+        #     ALLE unzulässig (auch Admins): der Ordner behält seinen Owner, sonst
+        #     entstünde ein gemischter Baum.
+        if (
+            parent is not None
+            and self.instance is None
+            and not is_admin
+            and parent.owner_id != getattr(user, "id", None)
+        ):
+            raise serializers.ValidationError(
+                {"parent": "Unterordner nur unterhalb eines eigenen Ordners erlaubt."}
+            )
+
+        if (
+            self.instance is not None
+            and "parent" in attrs
+            and attrs["parent"] is not None
+            and attrs["parent"].owner_id != self.instance.owner_id
+        ):
+            raise serializers.ValidationError(
+                {"parent": "Verschieben nur unter einen Ordner desselben Eigentümers."}
+            )
+
+        # Zielowner: Kind erbt Parent-Owner (Admin unter fremd -> Parent-Owner);
+        # sonst bestehender/eigener Owner.
+        if parent is not None:
+            target_owner_id = parent.owner_id
+        elif self.instance is not None:
+            target_owner_id = self.instance.owner_id
+        else:
+            target_owner_id = getattr(user, "id", None)
 
         if self.instance is not None and parent is not None:
             if parent.pk == self.instance.pk:
@@ -152,13 +177,8 @@ class DocumentFolderSerializer(serializers.ModelSerializer):
                     )
                 cursor = cursor.parent
         if name:
-            # Namens-Eindeutigkeit pro OWNER (nicht global): der Zieleigentümer ist
-            # beim Anlegen der Request-Nutzer, beim Bearbeiten der bestehende Owner.
-            target_owner_id = (
-                self.instance.owner_id
-                if self.instance is not None
-                else getattr(user, "id", None)
-            )
+            # Namens-Eindeutigkeit pro OWNER (nicht global) – target_owner_id oben:
+            # Parent-Owner (Kind erbt), sonst bestehender/eigener Owner.
             siblings = DocumentFolder.objects.filter(
                 name=name, parent=parent, owner_id=target_owner_id
             )
