@@ -82,7 +82,9 @@ class EnsureFindabilityIndexTests(TestCase):
         self.assertIsNotNone(v.indexed_at)
 
 
-@override_settings(INDEX_RECONCILE_AFTER_MINUTES=15, INDEX_RECONCILE_BATCH=50)
+@override_settings(
+    INDEX_RECONCILE_AFTER_MINUTES=15, INDEX_RECONCILE_BATCH=50, EMBEDDING_ENABLED=True
+)
 class ReapUnindexedVersionsTests(TestCase):
     @override_settings(EMBEDDING_ENABLED=False)
     def test_pausiert_bei_deaktivierten_embeddings(self):
