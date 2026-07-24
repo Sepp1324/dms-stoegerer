@@ -418,15 +418,17 @@ def classify_version(version: DocumentVersion) -> dict:
 
     # Triage-Nachzügler (P2): Der owner-gebundene Ordnerschritt wird bei einem
     # Triage-Dokument (owner=None) in apply_rules bewusst übersprungen. Hat ein
-    # Workflow gerade erst einen Owner gesetzt, den Regel-Ordner jetzt gezielt
-    # nachziehen (apply_rules ist idempotent – belegte Felder bleiben unangetastet,
-    # nur der noch fehlende Ordner wird owner-gebunden angelegt/zugewiesen).
+    # Workflow gerade erst einen Owner gesetzt, NUR den Regel-Ordner nachziehen –
+    # gezielt (kein zweiter classify-Audit, kein Überschreiben von
+    # document.classification) und das Ergebnis ins Task-Return übernehmen.
     if (
         owner_before is None
         and version.document.owner_id is not None
         and version.document.folder_id is None
     ):
-        classification.apply_rules(version.document)
+        applied_folder = classification.assign_folder_from_rules(version.document)
+        if applied_folder:
+            result.setdefault("applied", {})["folder"] = applied_folder
 
     # Smart Inbox: Strukturvorschläge nach OCR/Klassifizierung vorbereiten.
     # Best effort – Extraktion darf die technische Dokumentverarbeitung nie

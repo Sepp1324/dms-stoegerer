@@ -148,3 +148,12 @@ class TriageFolderAfterWorkflowOwnerTests(TestCase):
         self.assertEqual(doc.owner_id, self.alice.id)   # Workflow setzte den Owner
         self.assertIsNotNone(doc.folder)                # Ordnerschritt nachgeholt
         self.assertEqual(doc.folder.owner_id, self.alice.id)
+        # Nur EIN classify-Audit (der Nachlauf erzeugt keinen zweiten).
+        from documents.models import AuditLogEntry
+
+        self.assertEqual(
+            AuditLogEntry.objects.filter(
+                action="classify", object_id=str(doc.id)
+            ).count(),
+            1,
+        )
