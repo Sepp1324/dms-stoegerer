@@ -537,8 +537,13 @@ class DocumentFolderTests(APITestCase):
         cls.other = User.objects.create_user(
             username="folderother", password="pw", role="user"
         )
-        cls.root = DocumentFolder.objects.create(name="Versicherungen")
-        cls.child = DocumentFolder.objects.create(name="Wüstenrot", parent=cls.root)
+        # Ordner gehören der Testnutzerin – sonst lehnt der Owner-Guard (owner=None
+        # = admin-only) ihre PATCH/POST bereits mit 403 ab, bevor die Zyklus-/
+        # Namensvalidierung greift.
+        cls.root = DocumentFolder.objects.create(name="Versicherungen", owner=cls.user)
+        cls.child = DocumentFolder.objects.create(
+            name="Wüstenrot", parent=cls.root, owner=cls.user
+        )
         cls.doc_child = Document.objects.create(
             title="Polizze", owner=cls.user, folder=cls.child
         )
