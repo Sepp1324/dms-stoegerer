@@ -104,6 +104,45 @@ def _get_or_create_folder(path: str, owner):
     return folder
 
 
+def assign_folder_from_rules(document) -> str | None:
+    """Wendet NUR den Ordner-Schritt der passenden Regeln an (owner-gebunden) –
+    ohne classify-Audit und ohne ``document.classification`` zu überschreiben.
+
+    Für den Triage-Nachlauf (P2): apply_rules überspringt den Ordner bei owner=None;
+    setzt ein Workflow danach den Owner, wird hier NUR die noch fehlende
+    Ordnerzuordnung nachgezogen. So entsteht kein zweiter classify-Audit (idempotenz
+    NUR fuer Datenaenderungen, nicht fuer Nebenwirkungen). Gibt den zugewiesenen
+    ``full_path`` zurueck oder ``None``.
+    """
+    from django.db.models import Q
+
+    from .models import ClassificationRule
+
+    if document.folder is not None or document.owner_id is None:
+        return None
+
+    text = _searchable_text(document)
+    subject = getattr(document, "mail_subject", "") or ""
+    sender = getattr(document, "mail_sender", "") or ""
+    rules = (
+        ClassificationRule.objects.filter(enabled=True)
+        .filter(Q(owner__isnull=True) | Q(owner_id=document.owner_id))
+        .order_by("priority", "name")
+    )
+    for rule in rules:
+        if not rule_matches(rule, text, subject=subject, sender=sender):
+            continue
+        folder_path = str((rule.then or {}).get("folder", "")).strip()
+        if not folder_path:
+            continue
+        folder = _get_or_create_folder(folder_path, document.owner)
+        if folder is not None:
+            document.folder = folder
+            document.save(update_fields=["folder"])
+            return folder.full_path
+    return None
+
+
 def apply_rules(document) -> dict:
     """Wendet alle passenden Regeln (nach Priorität) auf ein Dokument an."""
     from .models import (
