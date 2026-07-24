@@ -4754,6 +4754,14 @@ class DocumentFolderViewSet(viewsets.ModelViewSet):
                 "ändern oder löschen. Globale Ordner sind admin-only."
             )
 
+    def update(self, request, *args, **kwargs):
+        # Owner-Permission ZUERST prüfen (403), BEVOR der Serializer validiert.
+        # Sonst liefert ein Nicht-Owner, der einen ungültigen Move sendet, ein 400
+        # (Validierungsfehler) statt des korrekten 403 (fremder Ordner) – der
+        # Permission-Fehler soll den Validierungsfehler dominieren.
+        self._assert_folder_mutable(self.get_object())
+        return super().update(request, *args, **kwargs)
+
     def perform_update(self, serializer):
         self._assert_folder_mutable(serializer.instance)
         serializer.save()
