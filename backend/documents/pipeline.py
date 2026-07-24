@@ -515,8 +515,14 @@ def _place_archive_at_storage_path(version: DocumentVersion) -> None:
             # Datei: vor dem Commit das Original (endet auf .ocr.pdf, existiert ->
             # Watchdog wiederholt sauber), nach dem Commit die Kopie. Ein Crash
             # hinterlässt höchstens eine verwaiste Datei, nie einen toten archive_path.
+            # Beim Kopieren gleich den SHA-256 des Archivs berechnen (P2): so kann der
+            # Restore-Drill das Archiv-PDF verlässlich verifizieren, statt nur Größe/
+            # PDF-Magic zu plausibilisieren.
+            hasher = hashlib.sha256()
             with open(archive, "rb") as src, open(target, "wb") as dst:
-                shutil.copyfileobj(src, dst)
+                for chunk in iter(lambda: src.read(1024 * 1024), b""):
+                    hasher.update(chunk)
+                    dst.write(chunk)
                 dst.flush()
                 os.fsync(dst.fileno())
         except Exception:
@@ -527,7 +533,8 @@ def _place_archive_at_storage_path(version: DocumentVersion) -> None:
                 pass
             raise
         version.archive_path = str(target)
-        version.save(update_fields=["archive_path"])
+        version.archive_sha256 = hasher.hexdigest()
+        version.save(update_fields=["archive_path", "archive_sha256"])
         # Original erst NACH dem Commit entfernen (bis hier war es der gültige Zeiger).
         try:
             os.unlink(archive)

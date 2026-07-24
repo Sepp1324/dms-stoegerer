@@ -202,16 +202,16 @@ EOF
 # gilt ein Backup ohne archive/ als „erfolgreich", obwohl Vorschau/Revisionspaket/
 # Archivprüfung für WORM-Versionen danach kaputt sind: die Vorschau bevorzugt das
 # Archiv und liefert bei gesetztem, aber fehlendem archive_path 404.
-# Es wird KEIN archive_sha256 gespeichert -> statt nur Existenz zusätzlich plausi-
-# bilisieren: nicht leer (Größe > 0) UND PDF-Magic (%PDF-). So fällt eine leere
-# oder abgeschnittene .pdf auf. (Belastbarer wäre ein beim Sealing gespeicherter
-# Archivhash – separate Änderung an Modell + Pipeline.)
-echo "[drill] prüfe DB-Archivpfade (archive_path): Existenz + Größe + PDF-Magic ..."
+# Verifikation (P2): ist ein archive_sha256 hinterlegt (neuere Versionen), wird der
+# Hash exakt geprüft – das erkennt auch abgeschnittene/beschädigte PDFs zuverlässig.
+# Alt-Versionen OHNE archive_sha256 fallen auf die Plausibilisierung zurück: nicht
+# leer (Größe > 0) UND PDF-Magic (%PDF-).
+echo "[drill] prüfe DB-Archivpfade (archive_path) + SHA-256/Plausibilität ..."
 ARCHIVES="$(kubectl -n "$NAMESPACE" exec "$POD" -- psql -U dms -d dms -tAF "$TAB" -c \
-  "select archive_path from documents_documentversion where coalesce(archive_path,'') <> '' and archive_path <> coalesce(file_path,'');" \
+  "select archive_path, coalesce(archive_sha256,'') from documents_documentversion where coalesce(archive_path,'') <> '' and archive_path <> coalesce(file_path,'');" \
   2>/dev/null)"
 arch_checked=0; arch_missing=0; arch_bad=0
-while IFS="$TAB" read -r apath; do
+while IFS="$TAB" read -r apath asha; do
   [ -z "$apath" ] && continue
   arch_checked=$((arch_checked + 1))
   rel="${apath#/data/}"
@@ -221,7 +221,13 @@ while IFS="$TAB" read -r apath; do
     [ "$arch_missing" -le 10 ] && echo "  ARCHIV FEHLT: $apath" >&2
     continue
   fi
-  if [ ! -s "$local" ] || [ "$(head -c 5 "$local" 2>/dev/null)" != "%PDF-" ]; then
+  if [ -n "$asha" ]; then
+    actual="$(sha256sum "$local" | awk '{print $1}')"
+    if [ "$actual" != "$asha" ]; then
+      arch_bad=$((arch_bad + 1))
+      [ "$arch_bad" -le 10 ] && echo "  ARCHIV HASH-MISMATCH: $apath (erwartet $asha, ist $actual)" >&2
+    fi
+  elif [ ! -s "$local" ] || [ "$(head -c 5 "$local" 2>/dev/null)" != "%PDF-" ]; then
     arch_bad=$((arch_bad + 1))
     [ "$arch_bad" -le 10 ] && echo "  ARCHIV DEFEKT (leer/kein PDF): $apath" >&2
   fi
@@ -248,6 +254,6 @@ echo " Dokumente         : $DOCS"
 echo " /data-Dateien     : $FILES"
 echo " /data-Ordner      : $TOP_LEVEL"
 echo " Version-Dateien   : $checked geprüft, 0 fehlend, 0 Hash-Abweichungen"
-echo " Archiv-PDFs       : $arch_checked geprüft (Größe/PDF-Magic), 0 fehlend, 0 defekt"
+echo " Archiv-PDFs       : $arch_checked geprüft (SHA-256/PDF-Magic), 0 fehlend, 0 defekt"
 echo " Produktion        : NICHT verändert"
 echo "==================================================================="
