@@ -484,6 +484,83 @@ class CaseFileDocumentSerializer(serializers.ModelSerializer):
         return format_asn(obj.asn)
 
 
+def _prime_folder_ancestors(documents) -> None:
+    """Lädt die komplette Ordner-Eltern-Kette der Dokumente in O(Tiefe) Queries
+    vor und verdrahtet den ``parent``-Cache, damit ``folder.full_path`` rein im
+    Speicher läuft (P3).
+
+    ``full_path`` traversiert die GESAMTE Eltern-Kette. Das Viewset lädt via
+    ``select_related`` nur zwei Ebenen (``folder__parent__parent``); ab der
+    vierten Ordnerebene würde ``.parent`` sonst je Dokument und Ebene erneut
+    anfragen. Hier werden die noch fehlenden Vorfahren batch-weise nachgeladen –
+    die Query-Zahl hängt nur an der Baum-TIEFE, nicht an der Dokumentanzahl.
+
+    Wichtig: Jedes Dokument trägt via ``select_related`` eine EIGENE
+    Ordner-Instanz. Es reicht daher nicht, je Ordner-ID nur eine Instanz zu
+    verdrahten – jede erreichbare Instanz wird auf gemeinsame (kanonische)
+    Vorfahren-Instanzen umgehängt, sonst würde full_path auf den Dubletten weiter
+    nachladen.
+    """
+    from .models import DocumentFolder
+
+    parent_field = DocumentFolder._meta.get_field("parent")
+
+    # Wurzeln = die (evtl. duplizierten) Ordner-Instanzen der Dokumente.
+    roots = [
+        document.folder
+        for document in documents
+        if getattr(document, "folder", None) is not None
+    ]
+    if not roots:
+        return
+
+    # 1) Kanonische Instanzen sammeln: Dokument-Ordner + deren bereits per
+    #    select_related gecachte Vorfahren (ohne Query).
+    canonical: dict[int, DocumentFolder] = {}
+    stack = list(roots)
+    while stack:
+        folder = stack.pop()
+        if folder.id in canonical:
+            continue
+        canonical[folder.id] = folder
+        if "parent" in folder._state.fields_cache and folder.parent is not None:
+            stack.append(folder.parent)
+
+    # 2) Noch fehlende Vorfahren batch-weise nachladen (O(Tiefe) Queries).
+    def _missing_ids():
+        return {
+            f.parent_id
+            for f in list(canonical.values())
+            if f.parent_id and f.parent_id not in canonical
+        }
+
+    missing = _missing_ids()
+    while missing:
+        fetched = list(DocumentFolder.objects.filter(id__in=missing))
+        if not fetched:  # Sicherheitsnetz gegen defekte Ketten -> Endlosschleife
+            break
+        for parent in fetched:
+            canonical.setdefault(parent.id, parent)
+        missing = _missing_ids()
+
+    # 3) Jede erreichbare Instanz (auch die Dubletten der Dokument-Ordner) so
+    #    verdrahten, dass ``parent`` auf eine kanonische Instanz zeigt.
+    for folder in roots:
+        current = folder
+        seen: set[int] = set()
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            parent_id = current.parent_id
+            if not parent_id:
+                parent_field.set_cached_value(current, None)
+                break
+            parent = canonical.get(parent_id)
+            if parent is None:
+                break
+            parent_field.set_cached_value(current, parent)
+            current = parent
+
+
 class CaseFileSerializer(serializers.ModelSerializer):
     """Vorgangsakte mit Dokument-Timeline und KI-/Heuristik-Zusammenfassung."""
 
@@ -545,6 +622,7 @@ class CaseFileSerializer(serializers.ModelSerializer):
             docs = list(
                 obj.documents.all().order_by("-created_at", "-added_at", "-id")
             )
+        _prime_folder_ancestors(docs)
         return CaseFileDocumentSerializer(docs, many=True).data
 
 
@@ -611,12 +689,15 @@ class DossierSerializer(serializers.ModelSerializer):
         # Einzelabrufe ohne diesen Prefetch.
         docs = getattr(obj, "ordered_documents", None)
         if docs is None:
-            docs = obj.documents.all().select_related(
-                "correspondent",
-                "document_type",
-                "folder",
-                "current_version",
+            docs = list(
+                obj.documents.all().select_related(
+                    "correspondent",
+                    "document_type",
+                    "folder",
+                    "current_version",
+                )
             )
+        _prime_folder_ancestors(docs)
         return CaseFileDocumentSerializer(docs, many=True).data
 
 
