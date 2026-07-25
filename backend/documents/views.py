@@ -4131,11 +4131,19 @@ class DossierViewSet(viewsets.ModelViewSet):
         qs = (
             Dossier.objects.select_related("owner")
             .prefetch_related(
-                "documents",
-                "documents__correspondent",
-                "documents__document_type",
-                "documents__folder",
-                "documents__current_version",
+                # Fertig geladene, stabil sortierte Dokumentliste (to_attr). Zuvor
+                # haengte get_documents ein select_related() an den Related Manager
+                # und verwarf damit den Prefetch-Cache -> N+1 je Dossier.
+                Prefetch(
+                    "documents",
+                    queryset=Document.objects.select_related(
+                        "correspondent",
+                        "document_type",
+                        "folder",
+                        "current_version",
+                    ).order_by("-added_at", "-id"),
+                    to_attr="ordered_documents",
+                )
             )
             .annotate(document_count=Count("documents", distinct=True))
             .order_by("-updated_at", "-created_at")
@@ -4815,10 +4823,22 @@ class CaseFileViewSet(viewsets.ModelViewSet):
         qs = (
             CaseFile.objects.select_related("owner")
             .prefetch_related(
-                "documents__correspondent",
-                "documents__document_type",
-                "documents__folder",
-                "documents__current_version",
+                # Bereits SORTIERT und mit den FKs geladen, die der Serializer
+                # rendert. Frueher haengte get_documents ein order_by() an den
+                # Related Manager – das verwirft den Prefetch-Cache und erzeugt je
+                # Akte eine Extra-Query (N+1). Das to_attr liefert eine fertige,
+                # korrekt sortierte Liste, ohne die annotate-basierten Felder
+                # (document_count/latest_document_at) anzutasten.
+                Prefetch(
+                    "documents",
+                    queryset=Document.objects.select_related(
+                        "correspondent",
+                        "document_type",
+                        "folder",
+                        "current_version",
+                    ).order_by("-created_at", "-added_at", "-id"),
+                    to_attr="ordered_documents",
+                )
             )
             .annotate(
                 document_count=Count("documents", distinct=True),

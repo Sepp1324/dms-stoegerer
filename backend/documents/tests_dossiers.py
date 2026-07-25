@@ -1,4 +1,6 @@
 from django.contrib.auth import get_user_model
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
 from rest_framework.test import APITestCase
 
 from .models import Dossier, Document, DocumentPageText, DocumentVersion
@@ -100,3 +102,28 @@ class DossierApiTests(APITestCase):
         resp = self.client.post(f"/api/dossiers/{dossier.id}/generate/")
 
         self.assertEqual(resp.status_code, 403)
+
+    def test_dossier_liste_kein_n_plus_1(self):
+        # P2: Query-Zahl der Dossierliste bleibt KONSTANT, unabhaengig von der
+        # Anzahl verknuepfter Dokumente. Frueher hing get_documents ein
+        # select_related() an den Related Manager und verwarf den Prefetch-Cache.
+        dossier = Dossier.objects.create(
+            owner=self.user, title="Sammel", query="Helvetia"
+        )
+        dossier.documents.add(self.own_doc)
+        self.client.force_authenticate(self.user)
+
+        with CaptureQueriesContext(connection) as ctx1:
+            resp = self.client.get("/api/dossiers/")
+        self.assertEqual(resp.status_code, 200)
+        baseline = len(ctx1)
+
+        for i in range(5):
+            doc = make_doc(self.user, f"Extra {i}", "Helvetia Inhalt")
+            dossier.documents.add(doc)
+
+        with CaptureQueriesContext(connection) as ctx2:
+            resp = self.client.get("/api/dossiers/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.data["results"][0]["documents"]), 6)
+        self.assertEqual(len(ctx2), baseline)

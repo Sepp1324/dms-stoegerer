@@ -537,7 +537,13 @@ class CaseFileSerializer(serializers.ModelSerializer):
         return obj.documents.order_by("-added_at").values_list("added_at", flat=True).first()
 
     def get_documents(self, obj):
-        docs = obj.documents.all().order_by("-created_at", "-added_at", "-id")
+        # Bevorzugt die im Viewset vorsortierte, per to_attr geladene Liste
+        # (kein N+1). Fallback fuer Einzelabrufe ohne diesen Prefetch.
+        docs = getattr(obj, "ordered_documents", None)
+        if docs is None:
+            docs = list(
+                obj.documents.all().order_by("-created_at", "-added_at", "-id")
+            )
         return CaseFileDocumentSerializer(docs, many=True).data
 
 
@@ -600,12 +606,16 @@ class DossierSerializer(serializers.ModelSerializer):
         return obj.documents.count()
 
     def get_documents(self, obj):
-        docs = obj.documents.all().select_related(
-            "correspondent",
-            "document_type",
-            "folder",
-            "current_version",
-        )
+        # Vorsortierte to_attr-Liste aus dem Viewset (kein N+1); Fallback fuer
+        # Einzelabrufe ohne diesen Prefetch.
+        docs = getattr(obj, "ordered_documents", None)
+        if docs is None:
+            docs = obj.documents.all().select_related(
+                "correspondent",
+                "document_type",
+                "folder",
+                "current_version",
+            )
         return CaseFileDocumentSerializer(docs, many=True).data
 
 
