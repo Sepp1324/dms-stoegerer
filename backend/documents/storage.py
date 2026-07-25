@@ -123,6 +123,39 @@ def save_bytes(data: bytes, ext: str = "") -> tuple[Path, str]:
     return dest, info.mime
 
 
+def save_file(src_path: str | Path) -> tuple[Path, str]:
+    """Übernimmt eine bereits auf der Platte liegende Datei nach ``originals/``.
+
+    Wie ``save_bytes``, aber OHNE die Datei komplett in den RAM zu laden: Der
+    Typ wird am Byte-Header (nur die ersten ``SNIFF_BYTES``) erkannt, die Größe
+    über ``stat`` geprüft, und die Datei per ``os.replace`` in den Ablagebereich
+    verschoben (auf demselben Dateisystem ein reiner Rename, sonst Kopie). Gedacht
+    für serverseitig erzeugte PDFs (z. B. PDF-Werkbank), die sonst über
+    ``BytesIO.getvalue()`` doppelt im Speicher gehalten würden.
+
+    Gibt ``(Pfad, erkannter MIME)`` zurück. Bei unerlaubtem Typ/Übergröße wird
+    ``UnsupportedFileType`` geworfen und die Quelldatei NICHT verschoben.
+    """
+    src = Path(src_path)
+    size = src.stat().st_size
+    if size > _max_upload_bytes():
+        raise UnsupportedFileType(
+            f"Datei zu groß ({size} Bytes > Limit {_max_upload_bytes()} Bytes)."
+        )
+    with open(src, "rb") as fh:
+        header = fh.read(SNIFF_BYTES)
+    info = _sniff_or_reject(header)
+    ORIGINALS_DIR.mkdir(parents=True, exist_ok=True)
+    dest = ORIGINALS_DIR / f"{uuid.uuid4().hex}{info.ext}"
+    try:
+        os.replace(src, dest)  # Rename auf gleichem FS, sonst OSError -> Fallback
+    except OSError:
+        import shutil
+
+        shutil.move(str(src), str(dest))
+    return dest, info.mime
+
+
 def build_archive_path(document) -> Path:
     """Bildet den Ziel-Pfad des Archiv-PDFs aus dem Ablage-Template.
 
