@@ -3,7 +3,13 @@ from django.db import connection
 from django.test.utils import CaptureQueriesContext
 from rest_framework.test import APITestCase
 
-from .models import Dossier, Document, DocumentPageText, DocumentVersion
+from .models import (
+    Dossier,
+    Document,
+    DocumentFolder,
+    DocumentPageText,
+    DocumentVersion,
+)
 
 User = get_user_model()
 
@@ -107,9 +113,20 @@ class DossierApiTests(APITestCase):
         # P2: Query-Zahl der Dossierliste bleibt KONSTANT, unabhaengig von der
         # Anzahl verknuepfter Dokumente. Frueher hing get_documents ein
         # select_related() an den Related Manager und verwarf den Prefetch-Cache.
+        # Verschachtelte Ordner: folder.full_path traversiert die Eltern-Kette,
+        # die daher vorgeladen sein muss (sonst je Ordnerebene eine Query).
+        root = DocumentFolder.objects.create(name="Root", owner=self.user)
+        child = DocumentFolder.objects.create(
+            name="Kind", parent=root, owner=self.user
+        )
+        leaf = DocumentFolder.objects.create(
+            name="Blatt", parent=child, owner=self.user
+        )
         dossier = Dossier.objects.create(
             owner=self.user, title="Sammel", query="Helvetia"
         )
+        self.own_doc.folder = leaf
+        self.own_doc.save(update_fields=["folder"])
         dossier.documents.add(self.own_doc)
         self.client.force_authenticate(self.user)
 
@@ -120,10 +137,14 @@ class DossierApiTests(APITestCase):
 
         for i in range(5):
             doc = make_doc(self.user, f"Extra {i}", "Helvetia Inhalt")
+            doc.folder = leaf
+            doc.save(update_fields=["folder"])
             dossier.documents.add(doc)
 
         with CaptureQueriesContext(connection) as ctx2:
             resp = self.client.get("/api/dossiers/")
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(len(resp.data["results"][0]["documents"]), 6)
+        docs = resp.data["results"][0]["documents"]
+        self.assertEqual(len(docs), 6)
+        self.assertEqual(docs[0]["folder_path"], "Root / Kind / Blatt")
         self.assertEqual(len(ctx2), baseline)
