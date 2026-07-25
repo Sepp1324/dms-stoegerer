@@ -105,18 +105,20 @@ def _get_or_create_folder(path: str, owner):
 
 
 def assign_folder_from_rules(document) -> str | None:
-    """Wendet NUR den Ordner-Schritt der passenden Regeln an (owner-gebunden) –
-    ohne classify-Audit und ohne ``document.classification`` zu überschreiben.
+    """Wendet NUR den Ordner-Schritt der passenden Regeln an (owner-gebunden) und
+    protokolliert ihn revisionssicher.
 
     Für den Triage-Nachlauf (P2): apply_rules überspringt den Ordner bei owner=None;
     setzt ein Workflow danach den Owner, wird hier NUR die noch fehlende
-    Ordnerzuordnung nachgezogen. So entsteht kein zweiter classify-Audit (idempotenz
-    NUR fuer Datenaenderungen, nicht fuer Nebenwirkungen). Gibt den zugewiesenen
+    Ordnerzuordnung nachgezogen. Damit KEIN doppelter ``classify``-Audit entsteht
+    (der Erst-Lauf hat bereits einen), wird der Nachlauf mit dem EIGENEN Audit-Typ
+    ``classify_folder`` protokolliert; zusätzlich wird ``document.classification``
+    konsolidiert (der persistierte Stand enthält den Ordner). Gibt den zugewiesenen
     ``full_path`` zurueck oder ``None``.
     """
     from django.db.models import Q
 
-    from .models import ClassificationRule
+    from .models import AuditLogEntry, ClassificationRule
 
     if document.folder is not None or document.owner_id is None:
         return None
@@ -136,10 +138,34 @@ def assign_folder_from_rules(document) -> str | None:
         if not folder_path:
             continue
         folder = _get_or_create_folder(folder_path, document.owner)
-        if folder is not None:
-            document.folder = folder
-            document.save(update_fields=["folder"])
-            return folder.full_path
+        if folder is None:
+            continue
+        document.folder = folder
+        # Klassifizierungsstand konsolidieren: den Erst-Lauf-Stand um den Ordner
+        # (und die Regel) ergänzen, damit document.classification den Ordner spiegelt.
+        classification = dict(document.classification or {})
+        applied = dict(classification.get("applied") or {})
+        applied["folder"] = folder.full_path
+        classification["applied"] = applied
+        rules_applied = list(classification.get("rules") or [])
+        if rule.name not in rules_applied:
+            rules_applied.append(rule.name)
+        classification["rules"] = rules_applied
+        document.classification = classification
+        document.save(update_fields=["folder", "classification"])
+        # Eigener Audit-Typ (kein zweiter ``classify``): nachvollziehbar, dass die
+        # Ordnerzuordnung NACH der Workflow-Owner-Zuweisung nachgezogen wurde.
+        AuditLogEntry.objects.create(
+            action="classify_folder",
+            object_type="Document",
+            object_id=str(document.id),
+            detail={
+                "rule": rule.name,
+                "folder": folder.full_path,
+                "trigger": "workflow_owner_followup",
+            },
+        )
+        return folder.full_path
     return None
 
 
