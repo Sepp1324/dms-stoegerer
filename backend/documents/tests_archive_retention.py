@@ -241,7 +241,7 @@ class EvidenceArchiveHashGateTests(ArchiveDocMixin, TestCase):
         doc, apath = self._doc_with_archive()
         apath.write_bytes(b"%PDF manipuliert")   # nach dem Setzen des Hashes
         report = evidence.document_report(doc)
-        arch = next(c for c in report["checks"] if c["name"] == "archive_file")
+        arch = next(c for c in report["checks"] if c["code"] == "archive_file")
         self.assertEqual(arch["status"], "error")
 
     def test_unlesbares_archiv_meldet_fehler_ohne_crash(self):
