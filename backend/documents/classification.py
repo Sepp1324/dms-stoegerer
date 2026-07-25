@@ -23,9 +23,54 @@ from __future__ import annotations
 
 import logging
 
+from django.db import transaction
+
 from . import regex_safe
 
 logger = logging.getLogger(__name__)
+
+# Obergrenze für aus ``then`` übernommene Namen (deckt die Model-max_length ab).
+_MAX_THEN_FIELD_LEN = 255
+
+
+def _then_text(then: dict, key: str) -> str:
+    """Ein Einzelwert aus ``then`` – NUR als String akzeptiert, getrimmt/gekappt.
+
+    Robust gegen fehlerhafte JSON-Daten: eine Liste/ein Dict würde von ``str()``
+    zu Müll (z. B. ``"['x']"``); solche Werte werden verworfen statt gespeichert.
+    """
+    value = then.get(key)
+    if not value:
+        return ""
+    if not isinstance(value, str):
+        logger.warning(
+            "Regel-then[%s] ist kein String (%s) – ignoriert.", key, type(value).__name__
+        )
+        return ""
+    return value.strip()[:_MAX_THEN_FIELD_LEN]
+
+
+def _then_tags(then: dict) -> list[str]:
+    """Die Tag-Liste aus ``then`` – NUR eine echte Liste von Strings.
+
+    Verhindert das zeichenweise Zerlegen eines Strings: ``tags: "steuer"`` würde
+    sonst zu den Tags ``s, t, e, u, e, r``. Nicht-Listen werden verworfen.
+    """
+    raw = then.get("tags")
+    if not raw:
+        return []
+    if not isinstance(raw, list):
+        logger.warning(
+            "Regel-then[tags] ist keine Liste (%s) – ignoriert.", type(raw).__name__
+        )
+        return []
+    tags: list[str] = []
+    for item in raw:
+        if isinstance(item, str):
+            name = item.strip()[:_MAX_THEN_FIELD_LEN]
+            if name and name not in tags:
+                tags.append(name)
+    return tags
 
 
 def _searchable_text(document) -> str:
@@ -206,62 +251,68 @@ def apply_rules(document) -> dict:
     rules = ClassificationRule.objects.filter(enabled=True).filter(
         Q(owner__isnull=True) | Q(owner_id=document.owner_id)
     ).order_by("priority", "name")
-    for rule in rules:
-        if not rule_matches(rule, text, subject=subject, sender=sender):
-            continue
-        matched.append(rule.name)
-        then = rule.then or {}
 
-        dt = str(then.get("document_type", "")).strip()
-        if dt and document.document_type is None:
-            document.document_type, _ = DocumentType.objects.get_or_create(name=dt)
-            applied["document_type"] = dt
+    # Atomar (P2): Stammdaten (Typ/Korrespondent/Ablage/Ordner/Tags) werden VOR dem
+    # abschließenden Dokument-Update + Audit angelegt. Ohne Transaktion hinterließe
+    # ein Fehler mittendrin teilweise Stammdaten OHNE zugehörige Klassifizierung/
+    # Audit. Die gesamte Anwendung inkl. Audit läuft daher in einer Transaktion.
+    with transaction.atomic():
+        for rule in rules:
+            if not rule_matches(rule, text, subject=subject, sender=sender):
+                continue
+            matched.append(rule.name)
+            then = rule.then if isinstance(rule.then, dict) else {}
 
-        corr = str(then.get("correspondent", "")).strip()
-        if corr and document.correspondent is None:
-            document.correspondent, _ = Correspondent.objects.get_or_create(name=corr)
-            applied["correspondent"] = corr
+            dt = _then_text(then, "document_type")
+            if dt and document.document_type is None:
+                document.document_type, _ = DocumentType.objects.get_or_create(name=dt)
+                applied["document_type"] = dt
 
-        sp = str(then.get("storage_path", "")).strip()
-        if sp and document.storage_path is None:
-            document.storage_path, _ = StoragePath.objects.get_or_create(
-                name=sp,
-                defaults={"path_template": "archive/{jahr}/{korrespondent}/{titel}"},
-            )
-            applied["storage_path"] = sp
+            corr = _then_text(then, "correspondent")
+            if corr and document.correspondent is None:
+                document.correspondent, _ = Correspondent.objects.get_or_create(
+                    name=corr
+                )
+                applied["correspondent"] = corr
 
-        folder_path = str(then.get("folder", "")).strip()
-        # Owner-Konsistenz (P1): Der fachliche Ordner ist owner-gebunden. Ein
-        # Triage-Dokument (owner=None) darf hier KEINEN Ordner bekommen – die
-        # Klassifizierung läuft VOR der Workflow-Engine, die den Owner ggf. erst
-        # setzt. Sonst entstünde ein nutzereigenes Dokument in einem ownerlosen
-        # Ordner (und owner=None-Anlage könnte mehrdeutige NULL-Root-Treffer geben).
-        # Für ownerlose Dokumente bleibt die Ordnerzuordnung offen (Admin-Triage
-        # bzw. spätere Zuordnung, wenn der Owner feststeht).
-        if folder_path and document.folder is None and document.owner_id is not None:
-            folder = _get_or_create_folder(folder_path, document.owner)
-            if folder is not None:
-                document.folder = folder
-                applied["folder"] = folder.full_path
+            sp = _then_text(then, "storage_path")
+            if sp and document.storage_path is None:
+                document.storage_path, _ = StoragePath.objects.get_or_create(
+                    name=sp,
+                    defaults={"path_template": "archive/{jahr}/{korrespondent}/{titel}"},
+                )
+                applied["storage_path"] = sp
 
-        for tname in then.get("tags") or []:
-            name = str(tname).strip()
-            if name:
+            folder_path = _then_text(then, "folder")
+            # Owner-Konsistenz (P1): Der fachliche Ordner ist owner-gebunden. Ein
+            # Triage-Dokument (owner=None) darf hier KEINEN Ordner bekommen – die
+            # Klassifizierung läuft VOR der Workflow-Engine, die den Owner ggf. erst
+            # setzt. Sonst entstünde ein nutzereigenes Dokument in einem ownerlosen
+            # Ordner (und owner=None-Anlage könnte mehrdeutige NULL-Root-Treffer geben).
+            # Für ownerlose Dokumente bleibt die Ordnerzuordnung offen (Admin-Triage
+            # bzw. spätere Zuordnung, wenn der Owner feststeht).
+            if folder_path and document.folder is None and document.owner_id is not None:
+                folder = _get_or_create_folder(folder_path, document.owner)
+                if folder is not None:
+                    document.folder = folder
+                    applied["folder"] = folder.full_path
+
+            for name in _then_tags(then):
                 tag, _ = Tag.objects.get_or_create(name=name, parent=None)
                 document.tags.add(tag)
                 applied.setdefault("tags", [])
                 if name not in applied["tags"]:
                     applied["tags"].append(name)
 
-    if matched:
-        document.classification = {"rules": matched, "applied": applied}
-        document.save()
-        AuditLogEntry.objects.create(
-            action="classify",
-            object_type="Document",
-            object_id=str(document.id),
-            detail={"rules": matched, "applied": applied},
-        )
+        if matched:
+            document.classification = {"rules": matched, "applied": applied}
+            document.save()
+            AuditLogEntry.objects.create(
+                action="classify",
+                object_type="Document",
+                object_id=str(document.id),
+                detail={"rules": matched, "applied": applied},
+            )
 
     return {"rules": matched, "applied": applied}
 
