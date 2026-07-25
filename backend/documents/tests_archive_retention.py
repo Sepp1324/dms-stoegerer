@@ -295,3 +295,72 @@ class EvidenceArchiveHashGateTests(ArchiveDocMixin, TestCase):
         arch = next(c for c in report["checks"] if c["code"] == "archive_file")
         self.assertEqual(arch["status"], "ok")
         self.assertTrue(report["archive_report"]["archive_files"])
+
+
+class IntegrityUnreadableOriginalTests(ArchiveDocMixin, TestCase):
+    """P2: Ist die Originaldatei vorhanden, aber nicht lesbar (Rechte/NFS/I/O),
+    meldet verify_document_integrity file_ok=False + Fehlerdetail statt 500. Der
+    Evidence-original_file-Check übernimmt diesen Fehler (statt nur exists())."""
+
+    def _raise_on(self, path):
+        from documents import pipeline
+
+        real = pipeline.sha256_of
+
+        def _se(p):
+            if str(p) == str(path):
+                raise OSError("Permission denied")
+            return real(p)
+
+        return _se
+
+    def test_integrity_meldet_file_ok_false_ohne_crash(self):
+        from unittest import mock
+
+        from documents import pipeline
+
+        doc, version, path = self.make_ready_document()
+        with mock.patch(
+            "documents.pipeline.sha256_of", side_effect=self._raise_on(path)
+        ):
+            report = pipeline.verify_document_integrity(doc)
+
+        self.assertFalse(report["chain_ok"])
+        entry = next(v for v in report["versions"] if v["version_no"] == 1)
+        self.assertTrue(entry["file_present"])
+        self.assertFalse(entry["file_ok"])
+        self.assertEqual(entry["computed_sha256"], "")
+        self.assertIn("nicht lesbar", entry["error"])
+
+    def test_evidence_original_file_check_spiegelt_lesefehler(self):
+        # P2: Kern-Fix – der original_file-Check darf nicht gruen sein, waehrend
+        # die Integritaetspruefung den Lesefehler erkennt.
+        from unittest import mock
+
+        from documents import pipeline
+
+        from .services import evidence
+
+        doc, version, path = self.make_ready_document()
+        with mock.patch(
+            "documents.pipeline.sha256_of", side_effect=self._raise_on(path)
+        ):
+            report = evidence.document_report(doc)
+
+        original = next(c for c in report["checks"] if c["code"] == "original_file")
+        self.assertEqual(original["status"], "error")
+        self.assertIn("nicht lesbar", original["detail"])
+        self.assertTrue(
+            any(r["code"] == "original_unreadable" for r in report["risks"])
+        )
+        self.assertEqual(report["status"], "error")
+
+    def test_lesbares_original_bleibt_ok(self):
+        from documents import pipeline
+
+        from .services import evidence
+
+        doc, version, path = self.make_ready_document()
+        report = evidence.document_report(doc)
+        original = next(c for c in report["checks"] if c["code"] == "original_file")
+        self.assertEqual(original["status"], "ok")

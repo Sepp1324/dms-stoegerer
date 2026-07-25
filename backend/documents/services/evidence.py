@@ -190,19 +190,38 @@ def _document_summary(
     elif retention["state"] == "due_soon":
         _risk(risks, "retention_due_soon", "warn", "Aufbewahrungsfrist läuft bald ab.")
 
+    # Integrität VOR den Versionschecks bestimmen, damit der original_file-Check
+    # den Lesefehler der Integritätsprüfung übernehmen kann (P2). In der
+    # Detailansicht (verify_hash) hier frisch berechnen, falls der Aufrufer sie
+    # nicht schon geteilt hat; die Übersicht (verify_hash=False) hat bewusst
+    # kein Integritätsergebnis.
+    if verify_hash and integrity is None:
+        integrity = pipeline.verify_document_integrity(document)
+
     if current is None:
         _risk(risks, "version_missing", "error", "Keine aktuelle Version vorhanden.")
         checks.append(_check("current_version", "error", "Aktuelle Version fehlt."))
     else:
+        integrity_entry = None
+        if integrity:
+            integrity_entry = next(
+                (
+                    v
+                    for v in integrity.get("versions", [])
+                    if v.get("version_no") == current.version_no
+                ),
+                None,
+            )
         checks.extend(
             _current_version_checks(
-                current, risks, verify_hash=verify_hash, archive_files=archive_files
+                current,
+                risks,
+                verify_hash=verify_hash,
+                archive_files=archive_files,
+                integrity_entry=integrity_entry,
             )
         )
 
-    if verify_hash and integrity is None:
-        # Nur berechnen, wenn nicht schon vom Aufrufer (document_report) geteilt.
-        integrity = pipeline.verify_document_integrity(document)
     if verify_hash:
         checks.append(
             _check(
@@ -257,14 +276,29 @@ def _current_version_checks(
     *,
     verify_hash: bool = False,
     archive_files: list[dict] | None = None,
+    integrity_entry: dict | None = None,
 ) -> list[dict[str, Any]]:
     checks = []
     file_present = os.path.exists(version.file_path)
-    checks.append(
-        _check("original_file", "ok" if file_present else "error", version.file_path)
-    )
+    # P2: Der original_file-Check darf nicht nur os.path.exists() spiegeln – sonst
+    # erscheint er GRÜN, während die Integritätsprüfung (die die Datei tatsächlich
+    # liest) einen Lese-/NFS-/Rechtefehler erkennt. Liegt ein solcher Lesefehler
+    # aus verify_document_integrity vor, wird die Originaldatei als Fehler geführt.
+    read_error = (integrity_entry or {}).get("error") if integrity_entry else ""
+    if not file_present:
+        original_state = "error"
+        original_detail = version.file_path
+    elif read_error:
+        original_state = "error"
+        original_detail = f"{version.file_path} ({read_error})"
+    else:
+        original_state = "ok"
+        original_detail = version.file_path
+    checks.append(_check("original_file", original_state, original_detail))
     if not file_present:
         _risk(risks, "original_missing", "error", "Originaldatei fehlt auf dem Speicher.")
+    elif read_error:
+        _risk(risks, "original_unreadable", "error", "Originaldatei ist nicht lesbar.")
 
     archive_present = bool(version.archive_path and os.path.exists(version.archive_path))
     # Archiv-Integrität (P1/P2): Den vollen Archiv-SHA-256 NUR in der Detailansicht
