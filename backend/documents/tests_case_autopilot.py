@@ -160,6 +160,35 @@ class CaseFileAutopilotTests(APITestCase):
             ).exists()
         )
 
+    def test_admin_darf_kandidat_nicht_auf_fremde_akte_anwenden(self):
+        # P1: apply_case_candidate darf – auch fuer Admins – ein Dokument nicht
+        # einer Akte mit anderem Eigentuemer zuweisen (sonst wird der von
+        # add_documents behobene Owner-Mix ueber einen veralteten/inkonsistenten
+        # Kandidaten wiederhergestellt).
+        admin = User.objects.create_user(
+            username="case-auto-admin", password="pw", role="admin"
+        )
+        foreign_case = CaseFile.objects.create(title="Fremdakte", owner=self.other)
+        doc = self._doc("Beleg", self.user, "Vertragsnummer 510/839294-2")
+        candidate = CaseFileCandidate.objects.create(
+            document=doc,
+            case_file=foreign_case,
+            kind=CaseFileCandidate.Kind.EXISTING_CASE,
+            signature=f"existing:{foreign_case.id}",
+            score=80,
+        )
+        self.client.force_authenticate(admin)
+
+        resp = self.client.post(
+            f"/api/documents/{doc.id}/case-candidates/{candidate.id}/apply/"
+        )
+
+        self.assertEqual(resp.status_code, 409)
+        doc.refresh_from_db()
+        candidate.refresh_from_db()
+        self.assertIsNone(doc.case_file)  # keine Fremdzuordnung
+        self.assertEqual(candidate.status, CaseFileCandidate.Status.PENDING)
+
     def test_apply_new_case_candidate_creates_case_file(self):
         doc = self._doc("Neuer Vorgang", self.user, "Neuer Vertrag")
         candidate = CaseFileCandidate.objects.create(
