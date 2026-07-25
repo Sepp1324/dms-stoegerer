@@ -9,8 +9,10 @@ blockieren – ``re.search`` lässt sich in Python nicht per Timeout unterbreche
 
 Deshalb laufen ALLE nutzerdefinierten Muster über RE2 (google-re2): eine
 Automaten-Engine mit **garantiert linearer Laufzeit** ohne Backtracking – ein
-ReDoS ist damit strukturell ausgeschlossen. Zusätzlich wird die Eingabelänge
-gedeckelt (Defense-in-depth gegen sehr große OCR-Texte).
+ReDoS ist damit strukturell ausgeschlossen. Der GESAMTE Text wird durchsucht:
+Weil RE2 linear in der Textlänge ist, ist das gefahrlos – eine künstliche
+Deckelung würde nur dazu führen, dass Regeln bei langen Dokumenten still nicht
+mehr treffen.
 
 RE2 unterstützt bewusst KEINE Backreferences/Lookaround; solche Muster werden
 beim Speichern abgelehnt (``compile_user_regex`` -> ``InvalidRegex``) und zur
@@ -23,10 +25,6 @@ import logging
 import re2
 
 logger = logging.getLogger(__name__)
-
-# Obergrenze für die Textlänge je Regex-Auswertung. RE2 ist linear, aber sehr
-# große OCR-Texte (mehrere MB) sollen trotzdem nicht unnötig Zeit kosten.
-MAX_TEXT_CHARS = 200_000
 
 
 class InvalidRegex(ValueError):
@@ -47,7 +45,10 @@ def compile_user_regex(pattern: str):
 
 
 def search(pattern: str, text: str) -> bool:
-    """True, wenn das (case-insensitive) RE2-Muster im gedeckelten Text matcht.
+    """True, wenn das (case-insensitive) RE2-Muster im GESAMTEN Text matcht.
+
+    Der vollständige Text wird durchsucht (RE2 ist linear -> gefahrlos); eine
+    Deckelung würde Regeln bei langen Dokumenten still nicht mehr treffen lassen.
 
     Fällt bei ungültigem Muster **geschlossen** auf ``False`` zurück (kein Crash,
     kein ReDoS). So bleibt ein historisch gespeichertes, RE2-inkompatibles Muster
@@ -60,4 +61,4 @@ def search(pattern: str, text: str) -> bool:
     except InvalidRegex:
         logger.warning("Ungültiges Regel-/Trigger-Regex ignoriert (RE2): %r", pattern)
         return False
-    return compiled.search(text[:MAX_TEXT_CHARS]) is not None
+    return compiled.search(text or "") is not None

@@ -46,12 +46,12 @@ class RegexSafeTests(TestCase):
         with self.assertRaises(regex_safe.InvalidRegex):
             regex_safe.compile_user_regex(r"(a)\1")
 
-    def test_text_wird_gedeckelt(self):
-        # Treffer erst jenseits der Deckelung -> wird bewusst nicht gefunden.
-        text = "x" * (regex_safe.MAX_TEXT_CHARS + 10) + "NADEL"
-        self.assertFalse(regex_safe.search("NADEL", text))
-        # Treffer innerhalb der Deckelung wird gefunden.
-        self.assertTrue(regex_safe.search("NADEL", "NADEL" + "x" * 100))
+    def test_ganzer_text_wird_durchsucht(self):
+        # P2: RE2 ist linear -> der GESAMTE Text wird durchsucht. Ein Treffer weit
+        # hinten in einem langen Dokument muss weiterhin gefunden werden (frueher
+        # verhinderte die 200k-Deckelung das still).
+        text = "x" * 500_000 + "NADEL"
+        self.assertTrue(regex_safe.search("NADEL", text))
 
 
 class RuleMatchesRegexTests(TestCase):
