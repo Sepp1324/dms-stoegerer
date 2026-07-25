@@ -261,3 +261,37 @@ class EvidenceArchiveHashGateTests(ArchiveDocMixin, TestCase):
             report = archive.verify_document_archive(doc)
         self.assertEqual(report["status"], Document.ArchiveStatus.ERROR)
         self.assertTrue(any("nicht lesbar" in e for e in report["errors"]))
+
+    def test_detail_teilt_integrity_und_hasht_archiv_nur_einmal(self):
+        # P2: document_report berechnet die Original-Hash-Kette EINMAL (geteilt an
+        # _document_summary UND verify_document_archive) und hasht das aktuelle
+        # Archiv-PDF nur EINMAL (Evidence reuse ueber archive_files).
+        from unittest import mock
+
+        from documents import pipeline
+
+        from .services import evidence
+
+        doc, apath = self._doc_with_archive()
+        real_integrity = pipeline.verify_document_integrity
+        real_sha = pipeline.sha256_of
+
+        with mock.patch(
+            "documents.pipeline.verify_document_integrity",
+            side_effect=real_integrity,
+        ) as vi, mock.patch(
+            "documents.pipeline.sha256_of", side_effect=real_sha
+        ) as sha:
+            report = evidence.document_report(doc)
+
+        # Hash-Kette genau EINMAL (nicht in summary UND archive erneut).
+        self.assertEqual(vi.call_count, 1)
+        # Aktuelles Archiv-PDF genau EINMAL gehasht.
+        archive_hashes = [
+            c for c in sha.call_args_list if str(c.args[0]) == str(apath)
+        ]
+        self.assertEqual(len(archive_hashes), 1)
+        # Ergebnis bleibt korrekt (unmanipuliertes Archiv -> archive_file ok).
+        arch = next(c for c in report["checks"] if c["code"] == "archive_file")
+        self.assertEqual(arch["status"], "ok")
+        self.assertTrue(report["archive_report"]["archive_files"])

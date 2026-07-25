@@ -98,13 +98,25 @@ def document_report(document: Document) -> dict[str, Any]:
         .prefetch_related("versions", "tags")
         .get(pk=document.pk)
     )
-    summary = _document_summary(document, verify_hash=True)
+    # Die teure Original-Hash-Kette GENAU EINMAL berechnen und an beide
+    # Auswerter weiterreichen (P2): frueher hashte _document_summary sie und
+    # verify_document_archive gleich danach ERNEUT (auf NFS doppelte I/O/Latenz).
+    # Ebenso wird das aktuelle Archiv-PDF nur noch einmal gehasht (archive_files).
+    integrity = pipeline.verify_document_integrity(document)
+    archive_report = archive_service.verify_document_archive(
+        document, persist=False, integrity=integrity
+    )
+    summary = _document_summary(
+        document,
+        verify_hash=True,
+        integrity=integrity,
+        archive_files=archive_report.get("archive_files"),
+    )
     versions = [
         _version_report(version)
         for version in document.versions.order_by("version_no")
     ]
     audit = _audit_summary(document)
-    archive_report = archive_service.verify_document_archive(document, persist=False)
 
     return {
         **summary,
@@ -135,7 +147,13 @@ def _prepare_queryset(documents: QuerySet[Document] | Iterable[Document]):
     return documents
 
 
-def _document_summary(document: Document, *, verify_hash: bool = False) -> dict[str, Any]:
+def _document_summary(
+    document: Document,
+    *,
+    verify_hash: bool = False,
+    integrity: dict | None = None,
+    archive_files: list[dict] | None = None,
+) -> dict[str, Any]:
     current = document.current_version
     risks: list[dict[str, str]] = []
     checks: list[dict[str, Any]] = []
@@ -176,11 +194,16 @@ def _document_summary(document: Document, *, verify_hash: bool = False) -> dict[
         _risk(risks, "version_missing", "error", "Keine aktuelle Version vorhanden.")
         checks.append(_check("current_version", "error", "Aktuelle Version fehlt."))
     else:
-        checks.extend(_current_version_checks(current, risks, verify_hash=verify_hash))
+        checks.extend(
+            _current_version_checks(
+                current, risks, verify_hash=verify_hash, archive_files=archive_files
+            )
+        )
 
-    integrity = None
-    if verify_hash:
+    if verify_hash and integrity is None:
+        # Nur berechnen, wenn nicht schon vom Aufrufer (document_report) geteilt.
         integrity = pipeline.verify_document_integrity(document)
+    if verify_hash:
         checks.append(
             _check(
                 "hash_chain",
@@ -229,7 +252,11 @@ def _document_summary(document: Document, *, verify_hash: bool = False) -> dict[
 
 
 def _current_version_checks(
-    version, risks: list[dict[str, str]], *, verify_hash: bool = False
+    version,
+    risks: list[dict[str, str]],
+    *,
+    verify_hash: bool = False,
+    archive_files: list[dict] | None = None,
 ) -> list[dict[str, Any]]:
     checks = []
     file_present = os.path.exists(version.file_path)
@@ -247,7 +274,20 @@ def _current_version_checks(
     # mit 500 kippen – er IST der zu meldende Fehlerzustand.
     archive_note = ""
     archive_bad = False
-    if verify_hash and archive_present and version.archive_sha256:
+    # Hat der Aufrufer (document_report) das Archiv bereits ueber
+    # verify_document_archive geprueft, das strukturierte Ergebnis wiederverwenden
+    # statt das Archiv-PDF ein ZWEITES Mal zu hashen (P2).
+    shared = None
+    if archive_files is not None:
+        shared = next(
+            (a for a in archive_files if a.get("version_no") == version.version_no),
+            None,
+        )
+    if shared is not None:
+        archive_bad = not shared.get("ok", True)
+        if shared.get("note"):
+            archive_note = f" ({shared['note']})"
+    elif verify_hash and archive_present and version.archive_sha256:
         try:
             if pipeline.sha256_of(version.archive_path) != version.archive_sha256:
                 archive_bad = True
