@@ -6,6 +6,7 @@ from django.utils import timezone
 from rest_framework.test import APITestCase
 
 from .models import (
+    CaseFile,
     ContractRecord,
     Correspondent,
     Document,
@@ -182,3 +183,64 @@ class ContractCenterTests(APITestCase):
         self.client.force_authenticate(self.guest)
         resp = self.client.post("/api/contracts/scan/", {}, format="json")
         self.assertEqual(resp.status_code, 403)
+
+
+class ContractCaseFileOwnerScopeTests(APITestCase):
+    """P1: Ein Vertrag darf nur mit einer Akte DESSELBEN Owners verknüpft werden.
+
+    Das Feld ``case_file`` ist schreibbar; der Owner-Check am Dokument allein
+    verhinderte nicht, einen eigenen Vertrag an eine FREMDE Akte zu hängen (deren
+    Titel dann über ``case_file_title`` zurückkam = Datenleck).
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.owner = User.objects.create_user(
+            username="cf_owner", password="pw", role="user"
+        )
+        cls.other = User.objects.create_user(
+            username="cf_other", password="pw", role="user"
+        )
+
+    def _doc(self, owner):
+        return Document.objects.create(title="Vertrag", owner=owner)
+
+    def test_create_mit_fremder_akte_wird_abgelehnt(self):
+        doc = self._doc(self.owner)
+        foreign_case = CaseFile.objects.create(title="Fremde Akte", owner=self.other)
+        self.client.force_authenticate(self.owner)
+        resp = self.client.post(
+            "/api/contracts/",
+            {"document": doc.id, "case_file": foreign_case.id},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("case_file", resp.data)
+        self.assertFalse(ContractRecord.objects.filter(document=doc).exists())
+
+    def test_create_mit_eigener_akte_gelingt(self):
+        doc = self._doc(self.owner)
+        own_case = CaseFile.objects.create(title="Meine Akte", owner=self.owner)
+        self.client.force_authenticate(self.owner)
+        resp = self.client.post(
+            "/api/contracts/",
+            {"document": doc.id, "case_file": own_case.id},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        record = ContractRecord.objects.get(document=doc)
+        self.assertEqual(record.case_file_id, own_case.id)
+
+    def test_patch_haengt_vertrag_nicht_an_fremde_akte(self):
+        doc = self._doc(self.owner)
+        record = ContractRecord.objects.create(document=doc, case_file=None)
+        foreign_case = CaseFile.objects.create(title="Fremde Akte", owner=self.other)
+        self.client.force_authenticate(self.owner)
+        resp = self.client.patch(
+            f"/api/contracts/{record.id}/",
+            {"case_file": foreign_case.id},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400)
+        record.refresh_from_db()
+        self.assertIsNone(record.case_file_id)
