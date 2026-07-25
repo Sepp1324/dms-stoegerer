@@ -164,6 +164,49 @@ class PdfWorkbenchTests(APITestCase):
         self.assertEqual(resp.status_code, 400)
         self.assertEqual(doc.versions.count(), 1)
 
+    def test_rewrite_ueber_seitenlimit_wird_abgelehnt(self):
+        # P1: Auch der Rewrite muss die Ressourcengrenzen prüfen (nicht nur
+        # Merge/Split) – sonst OOM durch tausendfache Wiederholung derselben Seite.
+        from django.test import override_settings
+
+        doc = self._doc("rewrite-limit", self.user, pages=2)
+        self.client.force_authenticate(self.user)
+        with override_settings(PDF_WORKBENCH_MAX_PAGES=1):
+            resp = self.client.post(
+                f"/api/documents/{doc.id}/pdf-workbench/rewrite/",
+                {"pages": [{"page": 1}, {"page": 2}]},
+                format="json",
+            )
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(doc.versions.count(), 1)  # keine neue Version
+
+    def test_rewrite_audit_fehler_rollt_version_zurueck(self):
+        # P2: Version + Audit sind EINE Operation. Scheitert der Audit nach dem
+        # Versions-Insert, darf KEINE neue aktuelle Version zurueckbleiben.
+        doc = self._doc("rewrite-atomic", self.user, pages=2)
+        self.client.force_authenticate(self.user)
+
+        real = AuditLogEntry.objects.create
+
+        def flaky(**kwargs):
+            if kwargs.get("action") == "pdf_workbench_rewrite":
+                raise RuntimeError("audit boom")
+            return real(**kwargs)
+
+        with mock.patch.object(
+            AuditLogEntry.objects, "create", side_effect=flaky
+        ), mock.patch("documents.views.process_document_version.delay"):
+            resp = self.client.post(
+                f"/api/documents/{doc.id}/pdf-workbench/rewrite/",
+                {"pages": [{"page": 1}]},
+                format="json",
+            )
+
+        self.assertEqual(resp.status_code, 400)
+        doc.refresh_from_db()
+        self.assertEqual(doc.versions.count(), 1)  # Rollback: keine 2. Version
+        self.assertEqual(doc.current_version.version_no, 1)
+
     def test_split_creates_new_documents_and_copies_tags(self):
         doc = self._doc("split-source", self.user, pages=4)
         tag = Tag.objects.create(name="Werkbank", color="#93c5fd")
