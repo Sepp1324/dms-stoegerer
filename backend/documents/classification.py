@@ -22,7 +22,8 @@ Regel-Schema (``ClassificationRule``):
 from __future__ import annotations
 
 import logging
-import re
+
+from . import regex_safe
 
 logger = logging.getLogger(__name__)
 
@@ -68,10 +69,9 @@ def rule_matches(rule, text: str, *, subject: str = "", sender: str = "") -> boo
 
     regex = match.get("text_regex")
     if regex:
-        try:
-            checks.append(bool(re.search(regex, text, re.IGNORECASE)))
-        except re.error:
-            checks.append(False)
+        # ReDoS-Schutz (P1): nutzerdefiniertes Muster über RE2 (lineare Laufzeit,
+        # kein Backtracking), Text gedeckelt. Siehe documents.regex_safe.
+        checks.append(regex_safe.search(regex, text))
 
     # Ohne erkannte Bedingung greift die Regel nicht (verhindert Alles-Treffer).
     return bool(checks) and all(checks)

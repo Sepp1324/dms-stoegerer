@@ -1,5 +1,6 @@
 from rest_framework import serializers
 
+from . import regex_safe
 from .models import (
     AuditLogEntry,
     CaseFile,
@@ -273,6 +274,20 @@ class ClassificationRuleSerializer(serializers.ModelSerializer):
     class Meta:
         model = ClassificationRule
         fields = ("id", "name", "priority", "enabled", "match", "then", "owner", "owner_username")
+
+    def validate_match(self, value):
+        # ReDoS-Schutz beim Speichern (P1): Ein ``text_regex`` muss von RE2
+        # kompilierbar sein. So werden ungültige/nicht unterstützte (und damit
+        # zur Laufzeit wirkungslose) Muster früh und mit klarer Meldung abgelehnt,
+        # statt still ins Nichts zu laufen.
+        if isinstance(value, dict) and value.get("text_regex"):
+            try:
+                regex_safe.compile_user_regex(str(value["text_regex"]))
+            except regex_safe.InvalidRegex as exc:
+                raise serializers.ValidationError(
+                    {"text_regex": f"Ungültiges Regex-Muster (RE2): {exc}"}
+                )
+        return value
 
 
 class CustomFieldSerializer(serializers.ModelSerializer):
@@ -1345,6 +1360,18 @@ class WorkflowTriggerSerializer(serializers.ModelSerializer):
             "filter_text_contains",
             "filter_text_regex",
         )
+
+    def validate_filter_text_regex(self, value):
+        # ReDoS-Schutz beim Speichern (P1): Trigger-Regex muss RE2-kompilierbar
+        # sein (siehe ClassificationRuleSerializer.validate_match).
+        if value:
+            try:
+                regex_safe.compile_user_regex(value)
+            except regex_safe.InvalidRegex as exc:
+                raise serializers.ValidationError(
+                    f"Ungültiges Regex-Muster (RE2): {exc}"
+                )
+        return value
 
 
 class WorkflowActionSerializer(serializers.ModelSerializer):
