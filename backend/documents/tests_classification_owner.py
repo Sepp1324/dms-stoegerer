@@ -148,12 +148,21 @@ class TriageFolderAfterWorkflowOwnerTests(TestCase):
         self.assertEqual(doc.owner_id, self.alice.id)   # Workflow setzte den Owner
         self.assertIsNotNone(doc.folder)                # Ordnerschritt nachgeholt
         self.assertEqual(doc.folder.owner_id, self.alice.id)
-        # Nur EIN classify-Audit (der Nachlauf erzeugt keinen zweiten).
+        # Der persistierte Klassifizierungsstand spiegelt den Ordner (revisionssicher).
+        self.assertEqual(doc.classification["applied"]["folder"], doc.folder.full_path)
         from documents.models import AuditLogEntry
 
+        # KEIN doppelter classify-Audit ...
         self.assertEqual(
             AuditLogEntry.objects.filter(
                 action="classify", object_id=str(doc.id)
+            ).count(),
+            1,
+        )
+        # ... aber ein eigener classify_folder-Audit fuer den Nachlauf.
+        self.assertEqual(
+            AuditLogEntry.objects.filter(
+                action="classify_folder", object_id=str(doc.id)
             ).count(),
             1,
         )
