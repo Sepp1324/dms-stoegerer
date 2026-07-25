@@ -38,6 +38,12 @@ qrcode==7.4.2
 # ASN-Barcode-Erkennung (Code128 + QR) – braucht libzbar0 als System-Lib (STOAA-515)
 pyzbar==0.1.9
 
+# ReDoS-Schutz (P1): Nutzerdefinierte Regel-/Workflow-Regexe laufen auf RE2 statt
+# auf dem backtracking-basierten `re`. RE2 garantiert lineare Laufzeit -> ein Muster
+# mit katastrophalem Backtracking kann Backend/Worker nicht mehr blockieren. Die
+# manylinux-Wheels buendeln re2+abseil (self-contained, keine System-Lib noetig).
+google-re2==1.1.20240702
+
 # AI-Anbindung (optional je nach Provider)
 anthropic==0.42.0
 httpx==0.28.1
