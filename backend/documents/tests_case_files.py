@@ -1,4 +1,6 @@
 from django.contrib.auth import get_user_model
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
 from rest_framework.test import APITestCase
 
 from .models import AuditLogEntry, CaseFile, Document, DocumentVersion
@@ -150,3 +152,30 @@ class CaseFileTests(APITestCase):
         self.client.force_authenticate(self.guest)
         resp = self.client.post("/api/case-files/", {"title": "Nein"}, format="json")
         self.assertEqual(resp.status_code, 403)
+
+    def test_akten_liste_kein_n_plus_1(self):
+        # P2: Die Query-Zahl der Aktenliste bleibt KONSTANT, egal wie viele
+        # Dokumente die Akten enthalten. Frueher hing get_documents ein
+        # order_by() an den Related Manager und verwarf den Prefetch-Cache -> je
+        # Dokument eine Extra-Query.
+        case_file = CaseFile.objects.create(title="Sammelakte", owner=self.owner)
+        self.owner_doc.case_file = case_file
+        self.owner_doc.save(update_fields=["case_file"])
+        self.client.force_authenticate(self.owner)
+
+        with CaptureQueriesContext(connection) as ctx1:
+            resp = self.client.get("/api/case-files/")
+        self.assertEqual(resp.status_code, 200)
+        baseline = len(ctx1)
+
+        # Weitere Dokumente in dieselbe Akte -> darf die Query-Zahl NICHT erhoehen.
+        for i in range(5):
+            doc = self._doc(f"Beleg {i}", self.owner, "Inhalt")
+            doc.case_file = case_file
+            doc.save(update_fields=["case_file"])
+
+        with CaptureQueriesContext(connection) as ctx2:
+            resp = self.client.get("/api/case-files/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.data["results"][0]["documents"]), 6)
+        self.assertEqual(len(ctx2), baseline)
