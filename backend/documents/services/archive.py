@@ -7,6 +7,7 @@ expliziten Prüfaktionen oder Management Commands.
 """
 from __future__ import annotations
 
+import os
 from datetime import date, timedelta
 from typing import Iterable
 
@@ -34,6 +35,19 @@ def verify_document_archive(document: Document, *, persist: bool = True) -> dict
         errors.append("Datei-Hash oder Versionskette ist fehlerhaft.")
     if any(not item["seal_ok"] for item in seal_results):
         errors.append("Mindestens ein Metadaten-Siegel ist ungültig.")
+
+    # Archiv-Integrität (P2): Ist ein archive_sha256 hinterlegt, muss das Archiv-PDF
+    # exakt diesen Hash tragen – sonst wurde es verändert/beschädigt. Ohne diese
+    # Prüfung meldet die Ampel ein manipuliertes Archiv weiterhin als OK.
+    for version in versions:
+        if not version.archive_sha256:
+            continue
+        if not (version.archive_path and os.path.exists(version.archive_path)):
+            errors.append(f"Archiv-PDF fehlt (v{version.version_no}).")
+        elif pipeline.sha256_of(version.archive_path) != version.archive_sha256:
+            errors.append(
+                f"Archiv-PDF verändert – Hash stimmt nicht (v{version.version_no})."
+            )
 
     current = document.current_version
     if current is None:
