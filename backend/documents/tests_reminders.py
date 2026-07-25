@@ -160,6 +160,39 @@ class DocumentReminderTests(APITestCase):
         self.assertEqual(resp.status_code, 404)
         self.assertEqual(DocumentReminder.objects.count(), vorher)
 
+    def test_patch_verschiebt_reminder_nicht_auf_fremdes_dokument(self):
+        # Owner-Isolation beim Update (STOAA-7): Eine EIGENE Erinnerung darf per
+        # PATCH nicht auf ein FREMDES Dokument umgehängt werden → 404, und die
+        # Zuordnung bleibt unverändert.
+        reminder = DocumentReminder.objects.create(
+            document=self.doc, remind_on="2026-08-01", created_by=self.sebastian
+        )
+        self.client.force_authenticate(self.sebastian)
+        resp = self.client.patch(
+            f"/api/reminders/{reminder.id}/",
+            {"document": self.fremd_doc.id},
+        )
+        self.assertEqual(resp.status_code, 404)
+        reminder.refresh_from_db()
+        self.assertEqual(reminder.document_id, self.doc.id)
+
+    def test_patch_ohne_document_bleibt_erlaubt(self):
+        # Ein PATCH, der nur Randfelder ändert (ohne document mitzusenden), muss
+        # weiterhin durchgehen – die Prüfung fällt dann auf das Bestandsdokument
+        # zurück (das dem Nutzer gehört).
+        reminder = DocumentReminder.objects.create(
+            document=self.doc, remind_on="2026-08-01", created_by=self.sebastian
+        )
+        self.client.force_authenticate(self.sebastian)
+        resp = self.client.patch(
+            f"/api/reminders/{reminder.id}/",
+            {"note": "aktualisiert"},
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        reminder.refresh_from_db()
+        self.assertEqual(reminder.note, "aktualisiert")
+        self.assertEqual(reminder.document_id, self.doc.id)
+
     def test_admin_darf_create_auf_fremdes_dokument(self):
         # DMS-Admin ist bewusst nicht owner-gescoped.
         self.client.force_authenticate(self.admin)

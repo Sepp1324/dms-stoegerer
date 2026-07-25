@@ -5197,6 +5197,21 @@ class DocumentReminderViewSet(viewsets.ModelViewSet):
             },
         )
 
+    def perform_update(self, serializer):
+        # Owner-Isolation auch beim Update (STOAA-7): ``document`` ist schreibbar,
+        # daher konnte eine EIGENE Erinnerung per PATCH auf ein FREMDES Dokument
+        # umgehängt werden – der Create-Pfad prüfte den Owner, der Default-Update
+        # nicht. Die effektive (evtl. neue) Zielakte muss dem Nutzer gehören;
+        # Admin darf alle. Fremd/unbekannt → 404 (kein ID-Leak), analog Create.
+        document = serializer.validated_data.get(
+            "document", getattr(serializer.instance, "document", None)
+        )
+        user = self.request.user
+        if not getattr(user, "is_dms_admin", False):
+            if document is None or document.owner_id != user.id:
+                raise Http404("Dokument nicht gefunden.")
+        serializer.save()
+
     @action(detail=True, methods=["post"])
     def done(self, request, pk=None):
         """Markiert die Erinnerung als erledigt (aus der Wiedervorlage genommen)."""
