@@ -183,26 +183,43 @@ def verify_document_integrity(document: Document) -> dict:
     for version in versions:
         source = version.file_path
         file_present = bool(source) and os.path.exists(source)
-        computed = sha256_of(source) if file_present else ""
+        read_error = ""
+        computed = ""
+        if file_present:
+            # os.path.exists() und das Lesen sind nicht atomar: zwischen beidem
+            # koennen Rechte-, NFS- oder I/O-Fehler auftreten. Ein solcher Fehler
+            # darf den Integritaets-Endpunkt NICHT mit 500 abstuerzen lassen
+            # (analog Archiv-Hash); er wird als file_ok=False + Fehlerdetail
+            # gemeldet. Downstream: Integrity-View, Archive-Check, Evidence.
+            try:
+                computed = sha256_of(source)
+            except OSError as exc:
+                read_error = f"Originaldatei nicht lesbar: {exc.__class__.__name__}"
         # Nur prüfbar, wenn ein Hash hinterlegt ist (unverarbeitete Version: offen).
-        file_ok = bool(version.sha256) and file_present and computed == version.sha256
+        file_ok = (
+            bool(version.sha256)
+            and file_present
+            and not read_error
+            and computed == version.sha256
+        )
         prev_ok = (version.prev_hash or "") == (prev_sha or "")
 
         if not (file_ok and prev_ok):
             chain_ok = False
 
-        results.append(
-            {
-                "version_no": version.version_no,
-                "sha256": version.sha256,
-                "computed_sha256": computed,
-                "prev_hash": version.prev_hash,
-                "expected_prev_hash": prev_sha,
-                "file_present": file_present,
-                "file_ok": file_ok,
-                "prev_ok": prev_ok,
-            }
-        )
+        entry = {
+            "version_no": version.version_no,
+            "sha256": version.sha256,
+            "computed_sha256": computed,
+            "prev_hash": version.prev_hash,
+            "expected_prev_hash": prev_sha,
+            "file_present": file_present,
+            "file_ok": file_ok,
+            "prev_ok": prev_ok,
+        }
+        if read_error:
+            entry["error"] = read_error
+        results.append(entry)
         prev_sha = version.sha256
 
     return {"chain_ok": chain_ok, "versions": results}
