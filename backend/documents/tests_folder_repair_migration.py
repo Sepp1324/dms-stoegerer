@@ -145,3 +145,45 @@ class Repair0060NodeOwnerMigrationTests(TransactionTestCase):
 
         F = self._migrate(self.migrate_to).get_model("documents", "DocumentFolder")
         self.assertEqual(F.objects.get(pk=legit.id).owner_id, alice.id)  # unverändert
+
+
+class Repair0062NullOwnerMixTests(TransactionTestCase):
+    """P2: 0062 normalisiert Baeume mit gemischten NULL-/Owner-Knoten – ein
+    NULL-Kind unter Alices Root wird Alice (0060 uebersah das)."""
+
+    app = "documents"
+    migrate_from = "0061_documentversion_archive_sha256"
+    migrate_to = "0062_repair_folder_null_owner_mix"
+
+    def _migrate(self, target):
+        executor = MigrationExecutor(connection)
+        executor.migrate([(self.app, target)])
+        executor.loader.build_graph()
+        return executor.loader.project_state([(self.app, target)]).apps
+
+    def tearDown(self):
+        from django.core.management import call_command
+
+        call_command("migrate", self.app, verbosity=0)
+
+    def test_null_kind_unter_owner_wird_owner(self):
+        old = self._migrate(self.migrate_from)
+        User = old.get_model("accounts", "User")
+        Folder = old.get_model("documents", "DocumentFolder")
+        alice = User.objects.create(username="z_alice", role="user")
+        root = Folder.objects.create(name="AliceRootZ", owner_id=alice.id)
+        sub = Folder.objects.create(name="NullSub", parent_id=root.id, owner=None)
+
+        F = self._migrate(self.migrate_to).get_model("documents", "DocumentFolder")
+        self.assertEqual(F.objects.get(pk=root.id).owner_id, alice.id)
+        self.assertEqual(F.objects.get(pk=sub.id).owner_id, alice.id)  # NULL -> alice
+
+    def test_reiner_null_baum_bleibt(self):
+        old = self._migrate(self.migrate_from)
+        Folder = old.get_model("documents", "DocumentFolder")
+        root = Folder.objects.create(name="GlobalZ", owner=None)
+        sub = Folder.objects.create(name="GlobalSubZ", parent_id=root.id, owner=None)
+
+        F = self._migrate(self.migrate_to).get_model("documents", "DocumentFolder")
+        self.assertIsNone(F.objects.get(pk=root.id).owner_id)   # unverändert
+        self.assertIsNone(F.objects.get(pk=sub.id).owner_id)
