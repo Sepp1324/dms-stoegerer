@@ -576,6 +576,29 @@ def _prime_folder_ancestors(documents) -> None:
             current = parent
 
 
+class _DocumentPrimingListSerializer(serializers.ListSerializer):
+    """Prime die Ordner-Ahnen EINMAL für ALLE Objekte der Listenantwort (P2).
+
+    Ohne diesen Hook liefe ``_prime_folder_ancestors`` je Akte/Dossier separat –
+    die Query-Zahl skalierte mit *Anzahl Objekte × Ordnertiefe*. Hier werden alle
+    ``ordered_documents`` der Seite gesammelt und in EINEM Durchlauf geprimt
+    (Ancestor-Fetches je Ebene batch-weise über alle Objekte). Der Prime in
+    ``get_documents`` bleibt als Fallback (Einzelabruf/retrieve) – nach diesem
+    Vorlauf ist er kostenlos, weil die parent-Kette bereits im Speicher steht.
+    """
+
+    def to_representation(self, data):
+        instances = list(data)
+        all_docs = []
+        for obj in instances:
+            docs = getattr(obj, "ordered_documents", None)
+            if docs:
+                all_docs.extend(docs)
+        if all_docs:
+            _prime_folder_ancestors(all_docs)
+        return super().to_representation(instances)
+
+
 class CaseFileSerializer(serializers.ModelSerializer):
     """Vorgangsakte mit Dokument-Timeline und KI-/Heuristik-Zusammenfassung."""
 
@@ -586,6 +609,7 @@ class CaseFileSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = CaseFile
+        list_serializer_class = _DocumentPrimingListSerializer
         fields = (
             "id",
             "title",
@@ -651,6 +675,7 @@ class DossierSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Dossier
+        list_serializer_class = _DocumentPrimingListSerializer
         fields = (
             "id",
             "title",
