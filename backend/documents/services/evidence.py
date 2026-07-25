@@ -176,7 +176,7 @@ def _document_summary(document: Document, *, verify_hash: bool = False) -> dict[
         _risk(risks, "version_missing", "error", "Keine aktuelle Version vorhanden.")
         checks.append(_check("current_version", "error", "Aktuelle Version fehlt."))
     else:
-        checks.extend(_current_version_checks(current, risks))
+        checks.extend(_current_version_checks(current, risks, verify_hash=verify_hash))
 
     integrity = None
     if verify_hash:
@@ -228,7 +228,9 @@ def _document_summary(document: Document, *, verify_hash: bool = False) -> dict[
     }
 
 
-def _current_version_checks(version, risks: list[dict[str, str]]) -> list[dict[str, Any]]:
+def _current_version_checks(
+    version, risks: list[dict[str, str]], *, verify_hash: bool = False
+) -> list[dict[str, Any]]:
     checks = []
     file_present = os.path.exists(version.file_path)
     checks.append(
@@ -238,24 +240,30 @@ def _current_version_checks(version, risks: list[dict[str, str]]) -> list[dict[s
         _risk(risks, "original_missing", "error", "Originaldatei fehlt auf dem Speicher.")
 
     archive_present = bool(version.archive_path and os.path.exists(version.archive_path))
-    # Archiv-Integrität (P2): vorhandenes Archiv mit hinterlegtem Hash verifizieren –
-    # ein manipuliertes/beschädigtes Archiv darf NICHT als "ok" durchgehen.
-    archive_tampered = (
-        archive_present
-        and version.archive_sha256
-        and pipeline.sha256_of(version.archive_path) != version.archive_sha256
-    )
-    archive_state = "error" if archive_tampered else ("ok" if archive_present else "warn")
+    # Archiv-Integrität (P1/P2): Den vollen Archiv-SHA-256 NUR in der Detailansicht
+    # (``verify_hash``) frisch berechnen – die Übersicht (evidence_status) würde
+    # sonst pro Seitenaufruf JEDE Archivdatei komplett lesen (Timeout bei NFS/vielen
+    # Dokumenten). Ein Lesefehler (PermissionError/OSError/NFS) darf das Center NICHT
+    # mit 500 kippen – er IST der zu meldende Fehlerzustand.
+    archive_note = ""
+    archive_bad = False
+    if verify_hash and archive_present and version.archive_sha256:
+        try:
+            if pipeline.sha256_of(version.archive_path) != version.archive_sha256:
+                archive_bad = True
+                archive_note = " (Hash-Mismatch)"
+        except OSError:
+            archive_bad = True
+            archive_note = " (nicht lesbar)"
+    archive_state = "error" if archive_bad else ("ok" if archive_present else "warn")
     checks.append(
-        _check(
-            "archive_file",
-            archive_state,
-            (version.archive_path or "")
-            + (" (Hash-Mismatch)" if archive_tampered else ""),
-        )
+        _check("archive_file", archive_state, (version.archive_path or "") + archive_note)
     )
-    if archive_tampered:
-        _risk(risks, "archive_tampered", "error", "Archiv-PDF verändert (Hash stimmt nicht).")
+    if archive_bad:
+        _risk(
+            risks, "archive_tampered", "error",
+            "Archiv-PDF verändert oder nicht lesbar (Hash stimmt nicht).",
+        )
     elif not archive_present:
         _risk(risks, "archive_missing", "warn", "OCR-/Archiv-PDF fehlt.")
 

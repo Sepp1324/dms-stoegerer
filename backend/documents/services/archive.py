@@ -44,7 +44,16 @@ def verify_document_archive(document: Document, *, persist: bool = True) -> dict
             continue
         if not (version.archive_path and os.path.exists(version.archive_path)):
             errors.append(f"Archiv-PDF fehlt (v{version.version_no}).")
-        elif pipeline.sha256_of(version.archive_path) != version.archive_sha256:
+            continue
+        try:
+            actual = pipeline.sha256_of(version.archive_path)
+        except OSError:
+            # Datei/Mount/Rechte fielen zwischen exists() und Lesen aus – NICHT
+            # crashen (die Integritätsprüfung darf am Fehlerzustand nicht selbst
+            # kippen), sondern als Fehler melden.
+            errors.append(f"Archiv-PDF nicht lesbar (v{version.version_no}).")
+            continue
+        if actual != version.archive_sha256:
             errors.append(
                 f"Archiv-PDF verändert – Hash stimmt nicht (v{version.version_no})."
             )
