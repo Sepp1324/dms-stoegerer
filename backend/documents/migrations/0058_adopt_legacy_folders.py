@@ -45,7 +45,10 @@ def adopt_legacy_folders(apps, schema_editor):
         return out
 
     def unique_root_name(owner_id, name, pk):
-        base, candidate, i = name, name, 1
+        # Basisnamen kürzen, damit ``base + " (N)"`` die DB-Grenze (name max_length
+        # 255) nicht sprengt (sonst DataError beim Deploy). 245 lässt Platz für das
+        # Suffix.
+        base, candidate, i = name[:245], name, 1
         while (
             DocumentFolder.objects.filter(
                 parent__isnull=True, owner_id=owner_id, name=candidate
