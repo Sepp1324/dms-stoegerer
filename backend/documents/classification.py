@@ -136,8 +136,16 @@ def assign_folder_from_rules(document) -> str | None:
     text = _searchable_text(document)
     subject = getattr(document, "mail_subject", "") or ""
     sender = getattr(document, "mail_sender", "") or ""
+    # WICHTIG: owner__isnull=True erzwingen (P1). Der Erst-Lauf lief auf einem
+    # ownerlosen Triage-Dokument und konnte daher NUR globale Regeln (owner=None)
+    # matchen; ``classification["rules"]`` speichert aber nur den REGELNAMEN. Ohne
+    # Owner-Filter würde ``name__in`` auch eine gleichnamige FREMDE (owner-
+    # spezifische) Regel laden, die den Ordner bestimmen könnte – ein Owner-Leck
+    # über Namensgleichheit. Nur globale Regeln kommen für den Nachlauf infrage.
     rules = (
-        ClassificationRule.objects.filter(enabled=True, name__in=already_matched)
+        ClassificationRule.objects.filter(
+            enabled=True, owner__isnull=True, name__in=already_matched
+        )
         .order_by("priority", "name")
     )
     for rule in rules:
