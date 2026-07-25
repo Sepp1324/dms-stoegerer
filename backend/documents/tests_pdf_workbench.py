@@ -195,6 +195,60 @@ class PdfWorkbenchTests(APITestCase):
             AuditLogEntry.objects.filter(action="pdf_workbench_split").exists()
         )
 
+    def test_split_ungueltiger_teil_erzeugt_keine_teildokumente(self):
+        # P1: Teil 1 gültig, Teil 2 ungültig -> 400 und KEIN Teil-Dokument bleibt
+        # bestehen (frueher blieb Teil 1 -> Duplikate beim erneuten Versuch).
+        doc = self._doc("split-atomic", self.user, pages=3)
+        self.client.force_authenticate(self.user)
+
+        with mock.patch("documents.views.process_document_version.delay"):
+            resp = self.client.post(
+                f"/api/documents/{doc.id}/pdf-workbench/split/",
+                {
+                    "parts": [
+                        {"title": "TeilOK", "pages": [1]},
+                        {"title": "TeilBad", "pages": [99]},  # ausserhalb 1..3
+                    ]
+                },
+                format="json",
+            )
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertFalse(Document.objects.filter(title="TeilOK").exists())
+        self.assertFalse(Document.objects.filter(title="TeilBad").exists())
+
+    def test_split_ueber_seitenlimit_wird_abgelehnt(self):
+        from django.test import override_settings
+
+        doc = self._doc("split-limit", self.user, pages=4)
+        self.client.force_authenticate(self.user)
+        with override_settings(PDF_WORKBENCH_MAX_PAGES=2):
+            resp = self.client.post(
+                f"/api/documents/{doc.id}/pdf-workbench/split/",
+                {"parts": [{"title": "Gross", "pages": [1, 2, 3, 4]}]},
+                format="json",
+            )
+        self.assertEqual(resp.status_code, 400)
+        self.assertFalse(Document.objects.filter(title="Gross").exists())
+
+    def test_merge_ueber_dokumentlimit_wird_abgelehnt(self):
+        from django.test import override_settings
+
+        target = self._doc("m-target", self.user, pages=1)
+        a = self._doc("m-a", self.user, pages=1)
+        b = self._doc("m-b", self.user, pages=1)
+        self.client.force_authenticate(self.user)
+        with override_settings(PDF_WORKBENCH_MAX_DOCUMENTS=1):
+            resp = self.client.post(
+                f"/api/documents/{target.id}/pdf-workbench/merge/",
+                {"document_ids": [a.id, b.id]},  # target + 2 = 3 > Limit 1
+                format="json",
+            )
+        self.assertEqual(resp.status_code, 400)
+        target.refresh_from_db()
+        # Version unverändert (keine neue Merge-Version).
+        self.assertEqual(target.current_version.version_no, 1)
+
     def test_merge_creates_new_version_and_respects_owner_scope(self):
         target = self._doc("merge-target", self.user, pages=2)
         appendix = self._doc("merge-appendix", self.user, pages=1)
