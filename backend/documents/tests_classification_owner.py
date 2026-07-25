@@ -216,3 +216,41 @@ class TriageFolderAfterWorkflowOwnerTests(TestCase):
         self.assertNotIn(
             "AliceAblage", (doc.classification or {}).get("rules") or []
         )
+
+    def test_nachlauf_ignoriert_gleichnamige_fremde_regel(self):
+        # P1: Der Erst-Lauf (ownerlos) matcht NUR globale Regeln; gespeichert wird
+        # aber nur der REGELNAME. Existiert eine gleichnamige FREMDE (owner-
+        # spezifische) Regel, darf sie den Nachlauf-Ordner NICHT bestimmen.
+        from documents.classification import assign_folder_from_rules
+        from documents.models import DocumentVersion
+
+        bob = User.objects.create_user("tw_bob", password="pw", role="user")
+        doc = Document.objects.create(
+            title="Steuer 2026", owner=self.alice, folder=None,
+            classification={"rules": ["Ablage"]},
+        )
+        v = DocumentVersion.objects.create(
+            document=doc, version_no=1, file_path="/tmp/x.pdf", ocr_text="steuer",
+        )
+        doc.current_version = v
+        doc.save(update_fields=["current_version"])
+
+        # Globale Regel (griff im Erst-Lauf) -> Ordner "GlobalSteuer".
+        ClassificationRule.objects.create(
+            name="Ablage", enabled=True, owner=None, priority=10,
+            match={"text_contains": ["steuer"]}, then={"folder": "GlobalSteuer"},
+        )
+        # Gleichnamige FREMDE Regel mit HÖHERER Präzedenz (kleinere priority) ->
+        # würde ohne Owner-Filter den Ordner "BobSteuer" bestimmen.
+        ClassificationRule.objects.create(
+            name="Ablage", enabled=True, owner=bob, priority=1,
+            match={"text_contains": ["steuer"]}, then={"folder": "BobSteuer"},
+        )
+
+        path = assign_folder_from_rules(doc)
+
+        doc.refresh_from_db()
+        self.assertEqual(path, "GlobalSteuer")
+        self.assertIsNotNone(doc.folder)
+        self.assertEqual(doc.folder.full_path, "GlobalSteuer")
+        self.assertEqual(doc.folder.owner_id, self.alice.id)  # für den Doc-Owner angelegt

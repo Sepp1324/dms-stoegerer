@@ -1,3 +1,4 @@
+from django.db import transaction
 from rest_framework import serializers
 
 from .models import (
@@ -1412,17 +1413,23 @@ class WorkflowSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         trigger_data = validated_data.pop("trigger", None)
         actions_data = validated_data.pop("actions", None)
-        workflow = Workflow.objects.create(**validated_data)
-        self._write_nested(workflow, trigger_data, actions_data)
+        # Verschachtelter Schreibvorgang atomar (P2): _write_nested loescht beim
+        # Ersetzen zuerst ALLE Aktionen und legt sie einzeln neu an; ohne
+        # Transaktion hinterlaesst ein Fehler dabei einen halben/leeren Workflow
+        # (auch Trigger + M2M). So bleibt der Workflow bei einem Fehler unveraendert.
+        with transaction.atomic():
+            workflow = Workflow.objects.create(**validated_data)
+            self._write_nested(workflow, trigger_data, actions_data)
         return workflow
 
     def update(self, instance, validated_data):
         trigger_data = validated_data.pop("trigger", None)
         actions_data = validated_data.pop("actions", None)
-        for attr, value in validated_data.items():
-            setattr(instance, attr, value)
-        instance.save()
-        self._write_nested(instance, trigger_data, actions_data)
+        with transaction.atomic():
+            for attr, value in validated_data.items():
+                setattr(instance, attr, value)
+            instance.save()
+            self._write_nested(instance, trigger_data, actions_data)
         return instance
 
 
