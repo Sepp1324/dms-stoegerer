@@ -4176,6 +4176,53 @@ class WorkflowAPITests(APITestCase):
         self.assertEqual(wf.actions.count(), 1)
         self.assertEqual(wf.actions.first().assign_document_type, self.dt)
 
+    def test_update_ist_atomar_bei_fehler_im_aktionsaufbau(self):
+        # P2: _write_nested loescht beim Ersetzen zuerst alle Aktionen und legt
+        # sie einzeln neu an. Faellt der Neuaufbau mittendrin, darf der Workflow
+        # NICHT halb/leer zurueckbleiben – die Transaktion rollt alles zurueck.
+        from unittest import mock
+
+        from .models import Workflow, WorkflowAction, WorkflowTrigger
+
+        self.client.force_authenticate(self.user)
+        wf = Workflow.objects.create(name="WF-Atomic", order=1, owner=self.user)
+        WorkflowTrigger.objects.create(workflow=wf, trigger_type="document_added")
+        WorkflowAction.objects.create(
+            workflow=wf, order=10, action_type="assign", assign_correspondent=self.corr
+        )
+        payload = {
+            "name": "WF-Atomic",
+            "order": 2,
+            "enabled": False,
+            "trigger": {"trigger_type": "document_updated", "sources": "api"},
+            "actions": [
+                {"order": 5, "action_type": "assign", "assign_document_type": self.dt.id},
+                {"order": 6, "action_type": "assign", "assign_document_type": self.dt.id},
+            ],
+        }
+        real_create = WorkflowAction.objects.create
+        calls = {"n": 0}
+
+        def flaky_create(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 2:  # zweite neue Aktion scheitert
+                raise RuntimeError("boom")
+            return real_create(*args, **kwargs)
+
+        with mock.patch.object(
+            WorkflowAction.objects, "create", side_effect=flaky_create
+        ):
+            with self.assertRaises(RuntimeError):
+                self.client.put(f"/api/workflows/{wf.id}/", payload, format="json")
+
+        # Rollback: der urspruengliche Workflow bleibt vollstaendig erhalten.
+        wf.refresh_from_db()
+        self.assertTrue(wf.enabled)          # war True, PUT-Wert False verworfen
+        self.assertEqual(wf.order, 1)
+        self.assertEqual(wf.trigger.trigger_type, "document_added")
+        self.assertEqual(wf.actions.count(), 1)
+        self.assertEqual(wf.actions.first().assign_correspondent, self.corr)
+
     def test_delete_workflow(self):
         self.client.force_authenticate(self.user)
         from .models import Workflow, WorkflowTrigger
