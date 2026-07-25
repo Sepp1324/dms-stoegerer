@@ -73,6 +73,27 @@ class ArchiveServiceTests(ArchiveDocMixin, TestCase):
         self.assertEqual(doc.archive_status, Document.ArchiveStatus.ERROR)
         self.assertIn("Datei-Hash", doc.archive_error)
 
+    def test_verify_document_archive_detects_archive_tamper(self):
+        # Separates Archiv-PDF mit hinterlegtem archive_sha256.
+        doc, version, _path = self.make_ready_document()
+        apath = Path(self.tmpdir.name) / f"arch-{doc.id}.pdf"
+        apath.write_bytes(b"%PDF archiv original")
+        DocumentVersion.objects.filter(pk=version.pk).update(
+            archive_path=str(apath),
+            archive_sha256=hashlib.sha256(b"%PDF archiv original").hexdigest(),
+        )
+
+        # Unverändert -> OK.
+        self.assertEqual(
+            archive.verify_document_archive(doc)["status"], Document.ArchiveStatus.OK
+        )
+
+        # Archiv nachträglich manipuliert -> ERROR (Hash stimmt nicht).
+        apath.write_bytes(b"%PDF manipuliert")
+        report = archive.verify_document_archive(doc)
+        self.assertEqual(report["status"], Document.ArchiveStatus.ERROR)
+        self.assertTrue(any("Archiv-PDF verändert" in e for e in report["errors"]))
+
 
 class ArchiveApiTests(ArchiveDocMixin, APITestCase):
     def setUp(self):

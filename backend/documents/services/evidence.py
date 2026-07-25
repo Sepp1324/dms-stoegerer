@@ -238,14 +238,25 @@ def _current_version_checks(version, risks: list[dict[str, str]]) -> list[dict[s
         _risk(risks, "original_missing", "error", "Originaldatei fehlt auf dem Speicher.")
 
     archive_present = bool(version.archive_path and os.path.exists(version.archive_path))
+    # Archiv-Integrität (P2): vorhandenes Archiv mit hinterlegtem Hash verifizieren –
+    # ein manipuliertes/beschädigtes Archiv darf NICHT als "ok" durchgehen.
+    archive_tampered = (
+        archive_present
+        and version.archive_sha256
+        and pipeline.sha256_of(version.archive_path) != version.archive_sha256
+    )
+    archive_state = "error" if archive_tampered else ("ok" if archive_present else "warn")
     checks.append(
         _check(
             "archive_file",
-            "ok" if archive_present else "warn",
-            version.archive_path or "",
+            archive_state,
+            (version.archive_path or "")
+            + (" (Hash-Mismatch)" if archive_tampered else ""),
         )
     )
-    if not archive_present:
+    if archive_tampered:
+        _risk(risks, "archive_tampered", "error", "Archiv-PDF verändert (Hash stimmt nicht).")
+    elif not archive_present:
         _risk(risks, "archive_missing", "warn", "OCR-/Archiv-PDF fehlt.")
 
     thumbnail_present = bool(version.thumbnail_path and os.path.exists(version.thumbnail_path))
