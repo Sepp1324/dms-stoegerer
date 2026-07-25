@@ -3,7 +3,13 @@ from django.db import connection
 from django.test.utils import CaptureQueriesContext
 from rest_framework.test import APITestCase
 
-from .models import AuditLogEntry, CaseFile, Document, DocumentVersion
+from .models import (
+    AuditLogEntry,
+    CaseFile,
+    Document,
+    DocumentFolder,
+    DocumentVersion,
+)
 
 User = get_user_model()
 
@@ -132,10 +138,20 @@ class CaseFileTests(APITestCase):
         # P2: Die Query-Zahl der Aktenliste bleibt KONSTANT, egal wie viele
         # Dokumente die Akten enthalten. Frueher hing get_documents ein
         # order_by() an den Related Manager und verwarf den Prefetch-Cache -> je
-        # Dokument eine Extra-Query.
+        # Dokument eine Extra-Query. Die Dokumente liegen in VERSCHACHTELTEN
+        # Ordnern, damit auch folder.full_path (Eltern-Traversierung) vorgeladen
+        # sein muss und nicht je Ordnerebene erneut anfragt.
+        root = DocumentFolder.objects.create(name="Root", owner=self.owner)
+        child = DocumentFolder.objects.create(
+            name="Kind", parent=root, owner=self.owner
+        )
+        leaf = DocumentFolder.objects.create(
+            name="Blatt", parent=child, owner=self.owner
+        )
         case_file = CaseFile.objects.create(title="Sammelakte", owner=self.owner)
         self.owner_doc.case_file = case_file
-        self.owner_doc.save(update_fields=["case_file"])
+        self.owner_doc.folder = leaf
+        self.owner_doc.save(update_fields=["case_file", "folder"])
         self.client.force_authenticate(self.owner)
 
         with CaptureQueriesContext(connection) as ctx1:
@@ -143,14 +159,17 @@ class CaseFileTests(APITestCase):
         self.assertEqual(resp.status_code, 200)
         baseline = len(ctx1)
 
-        # Weitere Dokumente in dieselbe Akte -> darf die Query-Zahl NICHT erhoehen.
+        # Weitere Dokumente (ebenfalls im tiefen Ordner) -> Query-Zahl KONSTANT.
         for i in range(5):
             doc = self._doc(f"Beleg {i}", self.owner, "Inhalt")
             doc.case_file = case_file
-            doc.save(update_fields=["case_file"])
+            doc.folder = leaf
+            doc.save(update_fields=["case_file", "folder"])
 
         with CaptureQueriesContext(connection) as ctx2:
             resp = self.client.get("/api/case-files/")
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(len(resp.data["results"][0]["documents"]), 6)
+        docs = resp.data["results"][0]["documents"]
+        self.assertEqual(len(docs), 6)
+        self.assertEqual(docs[0]["folder_path"], "Root / Kind / Blatt")
         self.assertEqual(len(ctx2), baseline)

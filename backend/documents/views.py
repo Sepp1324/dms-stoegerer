@@ -4139,7 +4139,12 @@ class DossierViewSet(viewsets.ModelViewSet):
                     queryset=Document.objects.select_related(
                         "correspondent",
                         "document_type",
+                        # folder.full_path traversiert die Eltern-Kette; wie im
+                        # normalen Document-Queryset zwei Ebenen vorladen, sonst
+                        # je Dokument/Ordnerebene erneut eine Query (N+1).
                         "folder",
+                        "folder__parent",
+                        "folder__parent__parent",
                         "current_version",
                     ).order_by("-added_at", "-id"),
                     to_attr="ordered_documents",
@@ -4834,7 +4839,12 @@ class CaseFileViewSet(viewsets.ModelViewSet):
                     queryset=Document.objects.select_related(
                         "correspondent",
                         "document_type",
+                        # folder.full_path traversiert die Eltern-Kette; wie im
+                        # normalen Document-Queryset zwei Ebenen vorladen, sonst
+                        # je Dokument/Ordnerebene erneut eine Query (N+1).
                         "folder",
+                        "folder__parent",
+                        "folder__parent__parent",
                         "current_version",
                     ).order_by("-created_at", "-added_at", "-id"),
                     to_attr="ordered_documents",
