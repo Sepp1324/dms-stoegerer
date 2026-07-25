@@ -77,6 +77,20 @@ class HouseholdInvariantSequentialTests(TestCase):
         self.assertEqual(self.req_a.status, JoinRequestStatus.APPROVED)
         self.assertIn(self.target, self.house_a.members.all())
 
+    def test_zweite_entscheidung_derselben_anfrage_prallt_ab(self):
+        # Approve, dann reject DERSELBEN Anfrage: die zweite Entscheidung darf den
+        # Status nicht ueberschreiben (sonst „Mitglied, aber abgelehnt"). Da die
+        # Anfrage nicht mehr PENDING ist, liefert sie 404 und bleibt APPROVED.
+        r1 = self._decide(self.owner_a, self.house_a, self.req_a, decision="approve")
+        self.assertEqual(r1.status_code, 200, r1.data)
+
+        r2 = self._decide(self.owner_a, self.house_a, self.req_a, decision="reject")
+        self.assertEqual(r2.status_code, 404)
+
+        self.req_a.refresh_from_db()
+        self.assertEqual(self.req_a.status, JoinRequestStatus.APPROVED)
+        self.assertIn(self.target, self.house_a.members.all())
+
 
 class HouseholdCreateInvariantTests(TestCase):
     def setUp(self):
@@ -130,7 +144,7 @@ class HouseholdParallelApprovalTests(TransactionTestCase):
             household=self.house_b, user=self.target, status=JoinRequestStatus.PENDING
         )
 
-    def _approve(self, owner, house, req, results, idx, barrier):
+    def _approve(self, owner, house, req, results, errors, idx, barrier):
         try:
             barrier.wait(timeout=5)
             client = APIClient()
@@ -141,26 +155,39 @@ class HouseholdParallelApprovalTests(TransactionTestCase):
                 format="json",
             )
             results[idx] = resp.status_code
+        except Exception as exc:  # pragma: no cover - nur bei Testfehler relevant
+            # Exceptions aus dem Thread einsammeln, sonst verschwinden sie still
+            # und der Test wuerde einen Fehler als „bestanden" verschleiern.
+            errors[idx] = repr(exc)
         finally:
+            # Verbindung des Threads schliessen, damit die DB-Bereinigung des
+            # TransactionTestCase nicht durch offene Verbindungen blockiert.
             connections.close_all()
 
     def test_parallele_freigaben_ergeben_ein_mitglied(self):
         results = [None, None]
+        errors = [None, None]
         barrier = threading.Barrier(2)
         threads = [
             threading.Thread(
                 target=self._approve,
-                args=(self.owner_a, self.house_a, self.req_a, results, 0, barrier),
+                args=(self.owner_a, self.house_a, self.req_a, results, errors, 0, barrier),
             ),
             threading.Thread(
                 target=self._approve,
-                args=(self.owner_b, self.house_b, self.req_b, results, 1, barrier),
+                args=(self.owner_b, self.house_b, self.req_b, results, errors, 1, barrier),
             ),
         ]
         for t in threads:
             t.start()
         for t in threads:
             t.join(timeout=10)
+
+        # Kein Thread darf ueber das Testende hinaus laufen (sonst stoert er die
+        # DB-Bereinigung) und keiner darf still gescheitert sein.
+        for t in threads:
+            self.assertFalse(t.is_alive(), "Thread lief nach join(timeout) noch.")
+        self.assertEqual(errors, [None, None], f"Thread-Exceptions: {errors}")
 
         # Genau eine Freigabe gewinnt (200), die andere prallt an der Invariante
         # ab (400) – nie zwei Mitgliedschaften.
