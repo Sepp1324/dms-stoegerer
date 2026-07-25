@@ -2438,6 +2438,19 @@ class DocumentViewSet(viewsets.ModelViewSet):
                         {"detail": "Zielakte ist nicht sichtbar."},
                         status=status.HTTP_404_NOT_FOUND,
                     )
+                # Owner-Gleichlauf UNABHAENGIG von der Adminrolle (P1): add_documents
+                # erzwingt bereits owner-gleiche Zuordnung; ohne dieselbe Schranke
+                # hier koennte ein Admin (oder ein veralteter/inkonsistenter
+                # Kandidat) ein Dokument einer FREMDEN Akte zuweisen und den
+                # behobenen Owner-Mix wiederherstellen.
+                if case_file.owner_id != document.owner_id:
+                    return Response(
+                        {
+                            "detail": "Zielakte gehört nicht zum Eigentümer des "
+                            "Dokuments."
+                        },
+                        status=status.HTTP_409_CONFLICT,
+                    )
             else:
                 case_file = CaseFile.objects.create(
                     title=candidate.suggested_title or document.title,
