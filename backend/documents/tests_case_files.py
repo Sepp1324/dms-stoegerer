@@ -198,3 +198,43 @@ class CaseFileTests(APITestCase):
         self.assertEqual(len(docs), 6)
         self.assertEqual(docs[0]["folder_path"], "Root / Kind / Blatt")
         self.assertEqual(len(ctx2), baseline)
+
+    def test_akten_liste_kein_n_plus_1_bei_tiefen_ordnern(self):
+        # P3: full_path traversiert die GANZE Kette; select_related laedt nur zwei
+        # Ebenen. Bei tiefer Verschachtelung (hier 5 Ebenen) muss die Query-Zahl
+        # dank Ahnen-Priming trotzdem KONSTANT bleiben (haengt nur an der Tiefe,
+        # nicht an der Dokumentanzahl).
+        names = ["E1", "E2", "E3", "E4", "E5"]
+        parent = None
+        for name in names:
+            parent = DocumentFolder.objects.create(
+                name=name, parent=parent, owner=self.owner
+            )
+        leaf = parent
+        expected_path = " / ".join(names)
+
+        case_file = CaseFile.objects.create(title="Tiefakte", owner=self.owner)
+        self.owner_doc.case_file = case_file
+        self.owner_doc.folder = leaf
+        self.owner_doc.save(update_fields=["case_file", "folder"])
+        self.client.force_authenticate(self.owner)
+
+        with CaptureQueriesContext(connection) as ctx1:
+            resp = self.client.get("/api/case-files/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["results"][0]["documents"][0]["folder_path"], expected_path)
+        baseline = len(ctx1)
+
+        for i in range(5):
+            doc = self._doc(f"Tief {i}", self.owner, "Inhalt")
+            doc.case_file = case_file
+            doc.folder = leaf
+            doc.save(update_fields=["case_file", "folder"])
+
+        with CaptureQueriesContext(connection) as ctx2:
+            resp = self.client.get("/api/case-files/")
+        self.assertEqual(resp.status_code, 200)
+        docs = resp.data["results"][0]["documents"]
+        self.assertEqual(len(docs), 6)
+        self.assertTrue(all(d["folder_path"] == expected_path for d in docs))
+        self.assertEqual(len(ctx2), baseline)
