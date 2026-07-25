@@ -209,3 +209,55 @@ class ArchiveApiTests(ArchiveDocMixin, APITestCase):
         response = self.client.get(f"/api/documents/{self.doc.id}/evidence/")
 
         self.assertEqual(response.status_code, 404)
+
+
+class EvidenceArchiveHashGateTests(ArchiveDocMixin, TestCase):
+    """P1/P2: Der volle Archiv-Hash wird NUR in der Detailansicht berechnet; ein
+    Lesefehler kippt das Center nicht mit 500."""
+
+    def _doc_with_archive(self, content=b"%PDF archiv"):
+        doc, version, _ = self.make_ready_document()
+        apath = Path(self.tmpdir.name) / f"arch-{doc.id}.pdf"
+        apath.write_bytes(content)
+        DocumentVersion.objects.filter(pk=version.pk).update(
+            archive_path=str(apath),
+            archive_sha256=hashlib.sha256(content).hexdigest(),
+        )
+        return Document.objects.get(pk=doc.id), apath
+
+    def test_uebersicht_hasht_archiv_nicht(self):
+        from unittest import mock
+
+        from .services import evidence
+
+        doc, _ = self._doc_with_archive()
+        with mock.patch("documents.pipeline.sha256_of") as h:
+            evidence.evidence_status([doc])
+        h.assert_not_called()   # Übersicht liest keine Archivdatei (kein Timeout-Risiko)
+
+    def test_detail_erkennt_manipuliertes_archiv(self):
+        from .services import evidence
+
+        doc, apath = self._doc_with_archive()
+        apath.write_bytes(b"%PDF manipuliert")   # nach dem Setzen des Hashes
+        report = evidence.document_report(doc)
+        arch = next(c for c in report["checks"] if c["name"] == "archive_file")
+        self.assertEqual(arch["status"], "error")
+
+    def test_unlesbares_archiv_meldet_fehler_ohne_crash(self):
+        from unittest import mock
+
+        from documents import pipeline
+
+        doc, apath = self._doc_with_archive()
+        real = pipeline.sha256_of
+
+        def _se(p):
+            if str(p) == str(apath):
+                raise OSError("NFS weg")
+            return real(p)
+
+        with mock.patch("documents.pipeline.sha256_of", side_effect=_se):
+            report = archive.verify_document_archive(doc)
+        self.assertEqual(report["status"], Document.ArchiveStatus.ERROR)
+        self.assertTrue(any("nicht lesbar" in e for e in report["errors"]))
