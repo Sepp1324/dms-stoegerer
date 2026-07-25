@@ -101,6 +101,8 @@ def households(request):
             {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
             status=status.HTTP_403_FORBIDDEN,
         )
+    # Schneller Vorab-Check (spart den Lock im Normalfall); die verbindliche
+    # Pruefung erfolgt unten unter dem Row-Lock.
     if request.user.households.exists():
         return Response(
             {"detail": "Du bist bereits Mitglied eines Haushalts."},
@@ -112,10 +114,21 @@ def households(request):
             {"detail": "Feld 'name' ist erforderlich."},
             status=status.HTTP_400_BAD_REQUEST,
         )
-    household = Household.objects.create(
-        name=name[:120], created_by=request.user, owner=request.user
-    )
-    household.members.add(request.user)
+    # Die „hoechstens ein Haushalt"-Invariante race-frei durchsetzen: denselben
+    # Nutzer-Row-Lock nehmen wie household_request_decide(approve), damit
+    # gleichzeitiges Anlegen + Freigabe serialisiert werden und der Nutzer nicht
+    # in zwei Haushalten landet.
+    with transaction.atomic():
+        User.objects.select_for_update().get(pk=request.user.pk)
+        if request.user.households.exists():
+            return Response(
+                {"detail": "Du bist bereits Mitglied eines Haushalts."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        household = Household.objects.create(
+            name=name[:120], created_by=request.user, owner=request.user
+        )
+        household.members.add(request.user)
     return Response(
         _household_data(household, request), status=status.HTTP_201_CREATED
     )
@@ -224,23 +237,34 @@ def household_request_decide(request, pk, req_id):
         )
 
     target = join_request.user
-    if decision == "approve" and target.households.exists():
-        # Der Nutzer ist inzwischen anderswo beigetreten → Anfrage verfällt.
+
+    if decision == "reject":
         join_request.status = JoinRequestStatus.REJECTED
         join_request.decided_at = timezone.now()
         join_request.decided_by = request.user
         join_request.save(update_fields=["status", "decided_at", "decided_by"])
-        return Response(
-            {"detail": "Nutzer ist inzwischen Mitglied eines anderen Haushalts."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+        return Response(_household_data(household, request))
 
+    # approve: Die „hoechstens ein Haushalt"-Invariante muss RACE-frei geprueft
+    # werden. Bislang lief target.households.exists() VOR der Transaktion – zwei
+    # parallele Freigaben (oder eine Freigabe + gleichzeitiges Haushalt-Anlegen)
+    # passierten beide den Check und machten den Nutzer zum Mitglied ZWEIER
+    # Haushalte. Deshalb den Zielnutzer INNERHALB der Transaktion per
+    # select_for_update() sperren und dort erneut pruefen; das Anlegen eines
+    # Haushalts (household_create) nimmt denselben Row-Lock und serialisiert so.
     with transaction.atomic():
-        if decision == "approve":
-            household.members.add(target)
-            join_request.status = JoinRequestStatus.APPROVED
-        else:
+        User.objects.select_for_update().get(pk=target.pk)
+        if target.households.exists():
             join_request.status = JoinRequestStatus.REJECTED
+            join_request.decided_at = timezone.now()
+            join_request.decided_by = request.user
+            join_request.save(update_fields=["status", "decided_at", "decided_by"])
+            return Response(
+                {"detail": "Nutzer ist inzwischen Mitglied eines anderen Haushalts."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        household.members.add(target)
+        join_request.status = JoinRequestStatus.APPROVED
         join_request.decided_at = timezone.now()
         join_request.decided_by = request.user
         join_request.save(update_fields=["status", "decided_at", "decided_by"])
