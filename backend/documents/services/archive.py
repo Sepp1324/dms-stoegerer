@@ -21,9 +21,17 @@ from documents.services import version_snapshot
 RETENTION_DUE_SOON_DAYS = 90
 
 
-def verify_document_archive(document: Document, *, persist: bool = True) -> dict:
-    """Prüft ein Dokument vollständig und speichert optional die Archiv-Ampel."""
-    integrity = pipeline.verify_document_integrity(document)
+def verify_document_archive(
+    document: Document, *, persist: bool = True, integrity: dict | None = None
+) -> dict:
+    """Prüft ein Dokument vollständig und speichert optional die Archiv-Ampel.
+
+    ``integrity`` kann von einem Aufrufer (z. B. ``evidence.document_report``)
+    vorberechnet hereingereicht werden, damit die teure Original-Hash-Kette NICHT
+    zweimal ueber die Platte/NFS laeuft (P2). Fehlt sie, wird sie hier berechnet.
+    """
+    if integrity is None:
+        integrity = pipeline.verify_document_integrity(document)
     versions = list(document.versions.order_by("version_no"))
     seal_results = [_seal_result(version) for version in versions]
 
@@ -38,12 +46,19 @@ def verify_document_archive(document: Document, *, persist: bool = True) -> dict
 
     # Archiv-Integrität (P2): Ist ein archive_sha256 hinterlegt, muss das Archiv-PDF
     # exakt diesen Hash tragen – sonst wurde es verändert/beschädigt. Ohne diese
-    # Prüfung meldet die Ampel ein manipuliertes Archiv weiterhin als OK.
+    # Prüfung meldet die Ampel ein manipuliertes Archiv weiterhin als OK. Das
+    # Ergebnis wird je Version STRUKTURIERT festgehalten (archive_files), damit
+    # nachgelagerte Auswertungen (Evidence-Detail) das Archiv-PDF NICHT erneut
+    # hashen muessen.
+    archive_files: list[dict] = []
     for version in versions:
         if not version.archive_sha256:
             continue
+        entry = {"version_no": version.version_no, "present": True, "ok": True, "note": ""}
         if not (version.archive_path and os.path.exists(version.archive_path)):
             errors.append(f"Archiv-PDF fehlt (v{version.version_no}).")
+            entry.update(present=False, ok=False, note="fehlt")
+            archive_files.append(entry)
             continue
         try:
             actual = pipeline.sha256_of(version.archive_path)
@@ -52,11 +67,15 @@ def verify_document_archive(document: Document, *, persist: bool = True) -> dict
             # crashen (die Integritätsprüfung darf am Fehlerzustand nicht selbst
             # kippen), sondern als Fehler melden.
             errors.append(f"Archiv-PDF nicht lesbar (v{version.version_no}).")
+            entry.update(ok=False, note="nicht lesbar")
+            archive_files.append(entry)
             continue
         if actual != version.archive_sha256:
             errors.append(
                 f"Archiv-PDF verändert – Hash stimmt nicht (v{version.version_no})."
             )
+            entry.update(ok=False, note="Hash-Mismatch")
+        archive_files.append(entry)
 
     current = document.current_version
     if current is None:
@@ -80,6 +99,7 @@ def verify_document_archive(document: Document, *, persist: bool = True) -> dict
         "status": status,
         "checked_at": timezone.now().isoformat(),
         "integrity": integrity,
+        "archive_files": archive_files,
         "seals": seal_results,
         "retention": retention,
         "legal_hold": {

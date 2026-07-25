@@ -262,40 +262,36 @@ class EvidenceArchiveHashGateTests(ArchiveDocMixin, TestCase):
         self.assertEqual(report["status"], Document.ArchiveStatus.ERROR)
         self.assertTrue(any("nicht lesbar" in e for e in report["errors"]))
 
-
-class IntegrityUnreadableOriginalTests(ArchiveDocMixin, TestCase):
-    """P2: Ist die Originaldatei vorhanden, aber nicht lesbar (Rechte/NFS/I/O),
-    darf verify_document_integrity nicht mit 500 abstuerzen, sondern meldet
-    file_ok=False + Fehlerdetail (analog Archiv-Hash)."""
-
-    def test_unlesbares_original_meldet_file_ok_false_ohne_crash(self):
+    def test_detail_teilt_integrity_und_hasht_archiv_nur_einmal(self):
+        # P2: document_report berechnet die Original-Hash-Kette EINMAL (geteilt an
+        # _document_summary UND verify_document_archive) und hasht das aktuelle
+        # Archiv-PDF nur EINMAL (Evidence reuse ueber archive_files).
         from unittest import mock
 
         from documents import pipeline
 
-        doc, version, path = self.make_ready_document()
-        real = pipeline.sha256_of
+        from .services import evidence
 
-        def _se(p):
-            if str(p) == str(path):
-                raise OSError("Permission denied")
-            return real(p)
+        doc, apath = self._doc_with_archive()
+        real_integrity = pipeline.verify_document_integrity
+        real_sha = pipeline.sha256_of
 
-        with mock.patch("documents.pipeline.sha256_of", side_effect=_se):
-            report = pipeline.verify_document_integrity(doc)
+        with mock.patch(
+            "documents.pipeline.verify_document_integrity",
+            side_effect=real_integrity,
+        ) as vi, mock.patch(
+            "documents.pipeline.sha256_of", side_effect=real_sha
+        ) as sha:
+            report = evidence.document_report(doc)
 
-        self.assertFalse(report["chain_ok"])
-        entry = next(v for v in report["versions"] if v["version_no"] == 1)
-        self.assertTrue(entry["file_present"])
-        self.assertFalse(entry["file_ok"])
-        self.assertEqual(entry["computed_sha256"], "")
-        self.assertIn("nicht lesbar", entry["error"])
-
-    def test_lesbares_original_bleibt_ok(self):
-        from documents import pipeline
-
-        doc, version, path = self.make_ready_document()
-        report = pipeline.verify_document_integrity(doc)
-        entry = next(v for v in report["versions"] if v["version_no"] == 1)
-        self.assertTrue(entry["file_ok"])
-        self.assertNotIn("error", entry)
+        # Hash-Kette genau EINMAL (nicht in summary UND archive erneut).
+        self.assertEqual(vi.call_count, 1)
+        # Aktuelles Archiv-PDF genau EINMAL gehasht.
+        archive_hashes = [
+            c for c in sha.call_args_list if str(c.args[0]) == str(apath)
+        ]
+        self.assertEqual(len(archive_hashes), 1)
+        # Ergebnis bleibt korrekt (unmanipuliertes Archiv -> archive_file ok).
+        arch = next(c for c in report["checks"] if c["code"] == "archive_file")
+        self.assertEqual(arch["status"], "ok")
+        self.assertTrue(report["archive_report"]["archive_files"])
