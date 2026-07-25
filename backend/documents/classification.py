@@ -105,30 +105,39 @@ def _get_or_create_folder(path: str, owner):
 
 
 def assign_folder_from_rules(document) -> str | None:
-    """Wendet NUR den Ordner-Schritt der passenden Regeln an (owner-gebunden) und
-    protokolliert ihn revisionssicher.
+    """Zieht NUR den fehlenden Ordner-Schritt der bereits im ersten Lauf gematchten
+    Regeln nach (owner-gebunden) und protokolliert ihn revisionssicher.
 
-    Für den Triage-Nachlauf (P2): apply_rules überspringt den Ordner bei owner=None;
-    setzt ein Workflow danach den Owner, wird hier NUR die noch fehlende
-    Ordnerzuordnung nachgezogen. Damit KEIN doppelter ``classify``-Audit entsteht
-    (der Erst-Lauf hat bereits einen), wird der Nachlauf mit dem EIGENEN Audit-Typ
-    ``classify_folder`` protokolliert; zusätzlich wird ``document.classification``
-    konsolidiert (der persistierte Stand enthält den Ordner). Gibt den zugewiesenen
-    ``full_path`` zurueck oder ``None``.
+    Für den Triage-Nachlauf (P1/P2): apply_rules überspringt den Ordner bei
+    owner=None; setzt ein Workflow danach den Owner, wird hier NUR die noch fehlende
+    Ordnerzuordnung der SCHON gematchten (globalen) Regeln nachgezogen – neue
+    owner-spezifische Regeln werden NICHT teilweise angewendet. Damit KEIN doppelter
+    ``classify``-Audit entsteht (der Erst-Lauf hat bereits einen), wird der Nachlauf
+    mit dem EIGENEN Audit-Typ ``classify_folder`` protokolliert; zusätzlich wird
+    ``document.classification`` konsolidiert (der persistierte Stand enthält den
+    Ordner). Gibt den zugewiesenen ``full_path`` zurueck oder ``None``.
     """
-    from django.db.models import Q
-
     from .models import AuditLogEntry, ClassificationRule
 
     if document.folder is not None or document.owner_id is None:
+        return None
+
+    # NUR Regeln nachziehen, die BEREITS im ersten Lauf gematcht haben (in
+    # document.classification["rules"]). Diese Regeln griffen global (owner=None) und
+    # setzten alle ihre Aktionen AUSSER dem Ordner (bei owner=None übersprungen) –
+    # hier fehlt also nur noch der Ordner. NEUE, owner-spezifische Regeln hier NICHT
+    # anzuwenden: sonst würde nur ihr Ordner gesetzt (Typ/Korrespondent/Ablagepfad/
+    # Tags fehlten), obwohl die Regel als angewendet gälte -> inkonsistent. Ihre
+    # vollständige Anwendung bleibt einem echten Reclassify vorbehalten.
+    already_matched = set((document.classification or {}).get("rules") or [])
+    if not already_matched:
         return None
 
     text = _searchable_text(document)
     subject = getattr(document, "mail_subject", "") or ""
     sender = getattr(document, "mail_sender", "") or ""
     rules = (
-        ClassificationRule.objects.filter(enabled=True)
-        .filter(Q(owner__isnull=True) | Q(owner_id=document.owner_id))
+        ClassificationRule.objects.filter(enabled=True, name__in=already_matched)
         .order_by("priority", "name")
     )
     for rule in rules:
@@ -141,16 +150,12 @@ def assign_folder_from_rules(document) -> str | None:
         if folder is None:
             continue
         document.folder = folder
-        # Klassifizierungsstand konsolidieren: den Erst-Lauf-Stand um den Ordner
-        # (und die Regel) ergänzen, damit document.classification den Ordner spiegelt.
+        # Klassifizierungsstand konsolidieren: nur applied.folder ergänzen (die Regel
+        # steht bereits in classification["rules"]) -> DB-Stand spiegelt den Ordner.
         classification = dict(document.classification or {})
         applied = dict(classification.get("applied") or {})
         applied["folder"] = folder.full_path
         classification["applied"] = applied
-        rules_applied = list(classification.get("rules") or [])
-        if rule.name not in rules_applied:
-            rules_applied.append(rule.name)
-        classification["rules"] = rules_applied
         document.classification = classification
         document.save(update_fields=["folder", "classification"])
         # Eigener Audit-Typ (kein zweiter ``classify``): nachvollziehbar, dass die
