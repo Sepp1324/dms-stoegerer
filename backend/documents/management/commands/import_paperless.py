@@ -181,43 +181,70 @@ class Command(BaseCommand):
         tag_names,
     ):
         """Legt ein Dokument aus einer Originaldatei an und stößt die Pipeline an."""
-        # Original in den storage-Bereich kopieren (wie consume/mail), damit die
-        # Quelle unberührt bleibt und die Pipeline auf einer eigenen Datei arbeitet.
-        data = src_file.read_bytes()
-        target, detected_mime = storage.save_bytes(data, src_file.suffix)
+        import os
+        import shutil
+        import tempfile
 
-        with transaction.atomic():
-            document, version = pipeline.create_document_from_file(
-                str(target),
-                title=title,
-                owner=owner,
-                mime=detected_mime,
-                size=len(data),
-                ingest_source="paperless_import",
-            )
-            # Hash sofort setzen, damit weitere identische Dateien im selben Lauf
-            # zuverlässig dedupliziert werden (die Pipeline berechnet ihn später
-            # aus der Datei erneut – identischer Wert).
-            version.sha256 = sha
-            version.save(update_fields=["sha256"])
+        # Original STREAMEND in den storage-Bereich übernehmen (P2): kein
+        # read_bytes() der GESAMTEN Datei in den RAM (OOM-Risiko bei großen PDFs).
+        # Erst chunk-weise in eine Temp-Datei kopieren (Quelle bleibt unberührt),
+        # dann per storage.save_file übernehmen (Magic-Byte-Allowlist + Größe).
+        tmp = tempfile.NamedTemporaryFile(suffix=src_file.suffix, delete=False)
+        tmp_path = tmp.name
+        tmp.close()
+        try:
+            shutil.copyfile(src_file, tmp_path)
+            target, detected_mime = storage.save_file(tmp_path)
+        except Exception:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            raise
 
-            update_fields = []
-            if created is not None:
-                document.created_at = created
-                update_fields.append("created_at")
-            if corr_name:
-                document.correspondent = Correspondent.objects.get_or_create(name=corr_name)[0]
-                update_fields.append("correspondent")
-            if dtype_name:
-                document.document_type = DocumentType.objects.get_or_create(name=dtype_name)[0]
-                update_fields.append("document_type")
-            if update_fields:
-                document.save(update_fields=update_fields)
-            if tag_names:
-                tag_objs = [
-                    Tag.objects.get_or_create(name=name, parent=None)[0] for name in tag_names
-                ]
-                document.tags.set(tag_objs)
+        size = os.path.getsize(target)
+        try:
+            with transaction.atomic():
+                document, version = pipeline.create_document_from_file(
+                    str(target),
+                    title=title,
+                    owner=owner,
+                    mime=detected_mime,
+                    size=size,
+                    ingest_source="paperless_import",
+                )
+                # Hash sofort setzen, damit weitere identische Dateien im selben Lauf
+                # zuverlässig dedupliziert werden (die Pipeline berechnet ihn später
+                # aus der Datei erneut – identischer Wert).
+                version.sha256 = sha
+                version.save(update_fields=["sha256"])
+
+                update_fields = []
+                if created is not None:
+                    document.created_at = created
+                    update_fields.append("created_at")
+                if corr_name:
+                    document.correspondent = Correspondent.objects.get_or_create(
+                        name=corr_name
+                    )[0]
+                    update_fields.append("correspondent")
+                if dtype_name:
+                    document.document_type = DocumentType.objects.get_or_create(
+                        name=dtype_name
+                    )[0]
+                    update_fields.append("document_type")
+                if update_fields:
+                    document.save(update_fields=update_fields)
+                if tag_names:
+                    tag_objs = [
+                        Tag.objects.get_or_create(name=name, parent=None)[0]
+                        for name in tag_names
+                    ]
+                    document.tags.set(tag_objs)
+        except Exception:
+            # Scheitert das Metadaten-/Tag-Mapping, rollt die DB zurück – die
+            # bereits kopierte Originaldatei würde sonst OHNE DB-Eintrag verwaisen.
+            if os.path.exists(target):
+                os.unlink(target)
+            raise
 
         # Nachgelagerte Verarbeitung (OCR/Thumbnail/Klassifizierung) synchron –
         # ein Management-Command läuft nicht zwingend mit Celery-Worker.
