@@ -4919,7 +4919,11 @@ class CaseFileViewSet(viewsets.ModelViewSet):
         ids, error = self._parse_document_ids(request)
         if error is not None:
             return error
-        documents = self._visible_documents(ids)
+        # Owner-Gleichlauf erzwingen (P2): Auch fuer Admins darf eine Akte nur
+        # Dokumente DESSELBEN Eigentuemers buendeln. _visible_documents() liefert
+        # fuer Admins alle Dokumente owner-unabhaengig; ohne diesen Filter liessen
+        # sich fremde Dokumente in eine benutzereigene Akte legen (Owner-Mix).
+        documents = self._visible_documents(ids).filter(owner_id=case_file.owner_id)
         assigned_ids = list(documents.values_list("id", flat=True))
         documents.update(case_file=case_file)
         AuditLogEntry.objects.create(

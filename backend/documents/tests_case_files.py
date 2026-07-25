@@ -84,6 +84,31 @@ class CaseFileTests(APITestCase):
         self.assertIsNone(self.other_doc.case_file)
         self.assertEqual(resp.data["document_count"], 1)
 
+    def test_admin_darf_fremde_dokumente_nicht_in_benutzerakte_legen(self):
+        # P2: Fuer Admins liefert _visible_documents() alle Dokumente
+        # owner-unabhaengig. Trotzdem darf eine Akte nur Dokumente DESSELBEN
+        # Eigentuemers buendeln – sonst landet ein fremdes Dokument in einer
+        # benutzereigenen Akte (Owner-Mix).
+        admin = User.objects.create_user(
+            username="case_admin", password="pw", role="admin"
+        )
+        case_file = CaseFile.objects.create(title="Owner-Akte", owner=self.owner)
+        self.client.force_authenticate(admin)
+
+        resp = self.client.post(
+            f"/api/case-files/{case_file.id}/add-documents/",
+            {"ids": [self.owner_doc.id, self.other_doc.id]},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.owner_doc.refresh_from_db()
+        self.other_doc.refresh_from_db()
+        # Nur das Dokument des Akten-Eigentuemers wird verknuepft.
+        self.assertEqual(self.owner_doc.case_file, case_file)
+        self.assertIsNone(self.other_doc.case_file)
+        self.assertEqual(resp.data["document_count"], 1)
+
     def test_remove_documents_entfernt_zuordnung(self):
         case_file = CaseFile.objects.create(title="Versicherung", owner=self.owner)
         self.owner_doc.case_file = case_file
