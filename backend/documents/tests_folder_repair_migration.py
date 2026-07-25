@@ -6,7 +6,7 @@ Adoption) hinterlassen hätte, dann wird auf 0059 migriert und das Ergebnis gepr
 """
 from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
-from django.test import TransactionTestCase
+from django.test import TestCase, TransactionTestCase
 
 
 class Repair0059MigrationTests(TransactionTestCase):
@@ -187,3 +187,34 @@ class Repair0062NullOwnerMixTests(TransactionTestCase):
         F = self._migrate(self.migrate_to).get_model("documents", "DocumentFolder")
         self.assertIsNone(F.objects.get(pk=root.id).owner_id)   # unverändert
         self.assertIsNone(F.objects.get(pk=sub.id).owner_id)
+
+
+class MigrationLongRootNameTruncationTests(TestCase):
+    """P2: Bei einer Namenskollision langer Root-Namen darf das Zählsuffix die
+    255-Zeichen-Grenze (DataError) nicht sprengen."""
+
+    def test_0062_kollision_langer_name_kein_dataerror(self):
+        import importlib
+
+        from django.apps import apps as global_apps
+        from django.contrib.auth import get_user_model
+        from documents.models import Document, DocumentFolder
+
+        User = get_user_model()
+        alice = User.objects.create_user("lt_alice", password="pw", role="user")
+        long_name = "X" * 250
+        # Bereits vorhandener Root von alice mit dem langen Namen.
+        DocumentFolder.objects.create(name=long_name, owner=alice)
+        # Zu adoptierender ownerloser Root mit demselben Namen + alice-Dokument.
+        root2 = DocumentFolder.objects.create(name=long_name, owner=None)
+        Document.objects.create(title="D", owner=alice, folder=root2)
+
+        mod = importlib.import_module(
+            "documents.migrations.0062_repair_folder_null_owner_mix"
+        )
+        mod.repair_folder_null_owner_mix(global_apps, None)  # darf NICHT DataError werfen
+
+        root2.refresh_from_db()
+        self.assertEqual(root2.owner_id, alice.id)     # adoptiert
+        self.assertNotEqual(root2.name, long_name)     # entzerrt
+        self.assertLessEqual(len(root2.name), 255)     # innerhalb der Grenze
