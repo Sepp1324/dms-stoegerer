@@ -166,3 +166,53 @@ class TriageFolderAfterWorkflowOwnerTests(TestCase):
             ).count(),
             1,
         )
+
+    def test_neue_owner_regel_wird_nicht_teilweise_angewendet(self):
+        # Eine NUR dem neuen Owner gehoerende Regel matcht im ersten Lauf (owner=None)
+        # NICHT. Nach der Owner-Zuweisung darf sie NICHT nur mit ihrem Ordner
+        # angewendet werden (sonst inkonsistent: Ordner ja, Typ/Tags nein).
+        from unittest import mock
+
+        from documents import pipeline
+        from documents.models import (
+            ClassificationRule,
+            Document,
+            DocumentVersion,
+            Workflow,
+            WorkflowAction,
+            WorkflowTrigger,
+        )
+
+        doc = Document.objects.create(title="Steuer 2026", owner=None)  # Triage
+        v = DocumentVersion.objects.create(
+            document=doc, version_no=1, file_path="/tmp/x.pdf",
+            ocr_text="steuer", ingest_source="mail",
+            processing_state=DocumentVersion.ProcessingState.OCR_DONE,
+        )
+        doc.current_version = v
+        doc.save(update_fields=["current_version"])
+
+        ClassificationRule.objects.create(
+            name="AliceAblage", enabled=True, owner=self.alice,  # NICHT global
+            match={"text_contains": ["steuer"]},
+            then={"folder": "AliceSteuer", "document_type": "Rechnung"},
+        )
+        wf = Workflow.objects.create(name="Owner", order=10, enabled=True)
+        WorkflowTrigger.objects.create(workflow=wf, trigger_type="document_added", sources="")
+        WorkflowAction.objects.create(
+            workflow=wf, order=10, action_type="assign", assign_owner=self.alice
+        )
+
+        with mock.patch(
+            "documents.services.extraction.generate_candidates", return_value=0
+        ), mock.patch(
+            "documents.services.case_matching.generate_candidates", return_value=0
+        ):
+            pipeline.classify_version(v)
+
+        doc.refresh_from_db()
+        self.assertEqual(doc.owner_id, self.alice.id)
+        self.assertIsNone(doc.folder)   # alice-Regel NICHT teilweise angewendet
+        self.assertNotIn(
+            "AliceAblage", (doc.classification or {}).get("rules") or []
+        )
