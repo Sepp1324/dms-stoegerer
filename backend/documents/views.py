@@ -3727,10 +3727,37 @@ class DocumentViewSet(viewsets.ModelViewSet):
         except Exception as exc:  # noqa: BLE001
             return Response({"detail": str(exc)}, status=400)
 
+        # Best-effort ALLE Versionen einreihen (P1): Bislang brach die Schleife beim
+        # ersten Broker-Fehler ab – die betroffene Version wurde FAILED, alle
+        # nachfolgenden blieben dauerhaft UPLOADED (vom Retry-Endpoint nicht
+        # aufgreifbar). Jetzt wird jede Version einzeln eingereiht; ein Broker-
+        # Ausfall markiert die jeweilige Version FAILED (enqueue_processing) und der
+        # Split liefert ein STRUKTURIERTES 503 mit den erzeugten Dokument-IDs, damit
+        # der Client die bereits angelegten Teile kennt und nicht per Re-Split
+        # Duplikate erzeugt.
+        enqueue_failed = False
         for _created_document, version in created:
-            _enqueue_processing(version.id)
-        serializer = self.get_serializer([item[0] for item in created], many=True)
-        return Response({"documents": serializer.data}, status=status.HTTP_201_CREATED)
+            if not enqueue_processing(version):
+                enqueue_failed = True
+        documents_payload = self.get_serializer(
+            [item[0] for item in created], many=True
+        ).data
+        if enqueue_failed:
+            return Response(
+                {
+                    "detail": (
+                        "Teile wurden angelegt, konnten aber nicht vollständig zur "
+                        "Verarbeitung eingereiht werden (Broker nicht erreichbar). "
+                        "Die angelegten Dokumente bleiben bestehen – bitte die "
+                        "Verarbeitung später erneut anstoßen (KEIN erneuter Split, "
+                        "sonst entstehen Duplikate)."
+                    ),
+                    "documents": documents_payload,
+                    "document_ids": [item[0].id for item in created],
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        return Response({"documents": documents_payload}, status=status.HTTP_201_CREATED)
 
     # Bis zu so vielen Dokumenten wird synchron im Request klassifiziert;
     # größere Batches wandern in einen Celery-Task (Timeout-/Lastschutz).
