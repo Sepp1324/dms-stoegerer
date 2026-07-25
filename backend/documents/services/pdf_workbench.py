@@ -34,6 +34,11 @@ def _max_documents() -> int:
     return int(getattr(settings, "PDF_WORKBENCH_MAX_DOCUMENTS", 50))
 
 
+def merge_max_documents() -> int:
+    """Öffentliches Limit für die Merge-Payload (Views deckeln damit früh ab)."""
+    return _max_documents()
+
+
 def _max_pages() -> int:
     return int(getattr(settings, "PDF_WORKBENCH_MAX_PAGES", 2000))
 
