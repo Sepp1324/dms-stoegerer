@@ -84,26 +84,44 @@ def create_document_from_file(
     Führt (noch) keine OCR aus – das übernimmt die Pipeline anschließend.
     """
     path = Path(file_path)
-    document = Document.objects.create(title=title, owner=owner)
-    version = DocumentVersion.objects.create(
-        document=document,
-        version_no=1,
-        file_path=str(path),
-        mime_type=mime,
-        size=size if size is not None else path.stat().st_size,
-        created_by=owner,
-        ingest_source=ingest_source,
-    )
-    document.current_version = version
-    document.save(update_fields=["current_version"])
+    size = size if size is not None else path.stat().st_size
+    # Alle DB-Schritte atomar (P1): Dokument, erste Version, current_version und
+    # Audit-Eintrag gehoeren zusammen. Scheiterte ein spaeterer Schritt, blieben
+    # sonst unvollstaendige Dokumente/Versionen oder Versionen ohne Audit zurueck.
+    try:
+        with transaction.atomic():
+            document = Document.objects.create(title=title, owner=owner)
+            version = DocumentVersion.objects.create(
+                document=document,
+                version_no=1,
+                file_path=str(path),
+                mime_type=mime,
+                size=size,
+                created_by=owner,
+                ingest_source=ingest_source,
+            )
+            document.current_version = version
+            document.save(update_fields=["current_version"])
 
-    AuditLogEntry.objects.create(
-        actor=owner,
-        action="upload",
-        object_type="Document",
-        object_id=str(document.id),
-        detail={"filename": path.name, "size": version.size},
-    )
+            AuditLogEntry.objects.create(
+                actor=owner,
+                action="upload",
+                object_type="Document",
+                object_id=str(document.id),
+                detail={"filename": path.name, "size": version.size},
+            )
+    except Exception:
+        # Der Rollback laesst KEINE Teil-Zeilen zurueck; die bereits auf die Platte
+        # geschriebene Originaldatei wuerde aber verwaisen (kein DB-Verweis mehr,
+        # aber belegt Speicher). Daher hier zentral entfernen – so muss es nicht
+        # jeder Ingest-Aufrufer (Upload/Mail/Consume/Import) einzeln tun.
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning(
+                "Verwaiste Originaldatei nach Ingest-Fehler nicht entfernbar: %s", path
+            )
+        raise
     return document, version
 
 
