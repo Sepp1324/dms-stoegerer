@@ -238,3 +238,39 @@ class CaseFileTests(APITestCase):
         self.assertEqual(len(docs), 6)
         self.assertTrue(all(d["folder_path"] == expected_path for d in docs))
         self.assertEqual(len(ctx2), baseline)
+
+    def _case_with_deep_folder(self, idx):
+        # Eigene 4-stufige Ordnerkette + eigene Akte mit einem Dokument darin.
+        parent = None
+        for level in range(4):
+            parent = DocumentFolder.objects.create(
+                name=f"A{idx}-L{level}", parent=parent, owner=self.owner
+            )
+        case_file = CaseFile.objects.create(title=f"Akte {idx}", owner=self.owner)
+        doc = self._doc(f"Doc {idx}", self.owner, "Inhalt")
+        doc.case_file = case_file
+        doc.folder = parent
+        doc.save(update_fields=["case_file", "folder"])
+
+    def test_akten_liste_kein_n_plus_1_bei_vielen_akten(self):
+        # P2: Der Ancestor-Prime läuft auf LISTEN-Ebene (einmal für alle Akten der
+        # Antwort). Die Query-Zahl darf daher nicht mit der ANZAHL AKTEN skalieren.
+        self.owner_doc.delete()
+        self.other_doc.delete()
+        self.client.force_authenticate(self.owner)
+
+        self._case_with_deep_folder(0)
+        with CaptureQueriesContext(connection) as ctx1:
+            resp = self.client.get("/api/case-files/")
+        self.assertEqual(resp.status_code, 200)
+        baseline = len(ctx1)
+
+        for idx in range(1, 5):
+            self._case_with_deep_folder(idx)
+
+        with CaptureQueriesContext(connection) as ctx2:
+            resp = self.client.get("/api/case-files/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.data["results"]), 5)
+        # Konstante Query-Zahl trotz 5x so vieler Akten (jede mit tiefem Ordner).
+        self.assertEqual(len(ctx2), baseline)
