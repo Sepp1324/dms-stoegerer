@@ -261,3 +261,41 @@ class EvidenceArchiveHashGateTests(ArchiveDocMixin, TestCase):
             report = archive.verify_document_archive(doc)
         self.assertEqual(report["status"], Document.ArchiveStatus.ERROR)
         self.assertTrue(any("nicht lesbar" in e for e in report["errors"]))
+
+
+class IntegrityUnreadableOriginalTests(ArchiveDocMixin, TestCase):
+    """P2: Ist die Originaldatei vorhanden, aber nicht lesbar (Rechte/NFS/I/O),
+    darf verify_document_integrity nicht mit 500 abstuerzen, sondern meldet
+    file_ok=False + Fehlerdetail (analog Archiv-Hash)."""
+
+    def test_unlesbares_original_meldet_file_ok_false_ohne_crash(self):
+        from unittest import mock
+
+        from documents import pipeline
+
+        doc, version, path = self.make_ready_document()
+        real = pipeline.sha256_of
+
+        def _se(p):
+            if str(p) == str(path):
+                raise OSError("Permission denied")
+            return real(p)
+
+        with mock.patch("documents.pipeline.sha256_of", side_effect=_se):
+            report = pipeline.verify_document_integrity(doc)
+
+        self.assertFalse(report["chain_ok"])
+        entry = next(v for v in report["versions"] if v["version_no"] == 1)
+        self.assertTrue(entry["file_present"])
+        self.assertFalse(entry["file_ok"])
+        self.assertEqual(entry["computed_sha256"], "")
+        self.assertIn("nicht lesbar", entry["error"])
+
+    def test_lesbares_original_bleibt_ok(self):
+        from documents import pipeline
+
+        doc, version, path = self.make_ready_document()
+        report = pipeline.verify_document_integrity(doc)
+        entry = next(v for v in report["versions"] if v["version_no"] == 1)
+        self.assertTrue(entry["file_ok"])
+        self.assertNotIn("error", entry)
