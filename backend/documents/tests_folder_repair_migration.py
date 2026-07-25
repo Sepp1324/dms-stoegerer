@@ -21,8 +21,12 @@ class Repair0059MigrationTests(TransactionTestCase):
         return executor.loader.project_state([(self.app, target)]).apps
 
     def tearDown(self):
-        # DB nach dem Test wieder auf den aktuellen Stand bringen (0059 ist Leaf).
-        self._migrate(self.migrate_to)
+        # DB nach dem Test wieder auf den AKTUELLEN Leaf bringen (nicht nur migrate_to)
+        # – sonst fehlt nachfolgenden Tests z. B. archive_sha256 (0061+). ``migrate``
+        # ohne Ziel wandert dynamisch bis zum jeweils neuesten Leaf.
+        from django.core.management import call_command
+
+        call_command("migrate", self.app, verbosity=0)
 
     def test_upgrade_repariert_inkonsistente_und_verschachtelte_baeume(self):
         old = self._migrate(self.migrate_from)
@@ -98,7 +102,11 @@ class Repair0060NodeOwnerMigrationTests(TransactionTestCase):
         return executor.loader.project_state([(self.app, target)]).apps
 
     def tearDown(self):
-        self._migrate(self.migrate_to)
+        # Auf den AKTUELLEN Leaf migrieren (nicht nur migrate_to), damit spätere
+        # Tests die volle, aktuelle Struktur sehen.
+        from django.core.management import call_command
+
+        call_command("migrate", self.app, verbosity=0)
 
     def test_admin_unterordner_mit_alice_docs_wird_alice(self):
         old = self._migrate(self.migrate_from)
