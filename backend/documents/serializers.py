@@ -272,22 +272,115 @@ class ClassificationRuleSerializer(serializers.ModelSerializer):
     owner = serializers.PrimaryKeyRelatedField(read_only=True)
     owner_username = serializers.CharField(source="owner.username", read_only=True, default=None)
 
+    # Striktes Schema (P2): match/then akzeptierten bisher beliebige JSON-Strukturen.
+    # rule_matches erwartet aber ein Dict (sonst AttributeError), und fehlerhafte
+    # then-Aktionen wurden still ignoriert, während die Regel als Treffer galt.
+    _ALLOWED_MATCH_KEYS = {
+        "text_contains",
+        "subject_contains",
+        "from_contains",
+        "text_regex",
+    }
+    _ALLOWED_THEN_KEYS = {
+        "document_type",
+        "correspondent",
+        "storage_path",
+        "folder",
+        "tags",
+    }
+    _MAX_TERMS = 100
+    _MAX_TERM_LEN = 512
+    _MAX_TAGS = 50
+    _MAX_FIELD_LEN = 255
+
     class Meta:
         model = ClassificationRule
         fields = ("id", "name", "priority", "enabled", "match", "then", "owner", "owner_username")
 
-    def validate_match(self, value):
-        # ReDoS-Schutz beim Speichern (P1): Ein ``text_regex`` muss von RE2
-        # kompilierbar sein. So werden ungültige/nicht unterstützte (und damit
-        # zur Laufzeit wirkungslose) Muster früh und mit klarer Meldung abgelehnt,
-        # statt still ins Nichts zu laufen.
-        if isinstance(value, dict) and value.get("text_regex"):
-            try:
-                regex_safe.compile_user_regex(str(value["text_regex"]))
-            except regex_safe.InvalidRegex as exc:
+    def _validate_term_list(self, raw, key):
+        # text_contains/subject_contains/from_contains: String ODER Liste Strings.
+        if not isinstance(raw, (str, list)):
+            raise serializers.ValidationError(
+                {key: "muss ein String oder eine Liste von Strings sein."}
+            )
+        items = raw if isinstance(raw, list) else [raw]
+        if len(items) > self._MAX_TERMS:
+            raise serializers.ValidationError(
+                {key: f"zu viele Begriffe (> {self._MAX_TERMS})."}
+            )
+        for item in items:
+            if not isinstance(item, str):
                 raise serializers.ValidationError(
-                    {"text_regex": f"Ungültiges Regex-Muster (RE2): {exc}"}
+                    {key: "alle Begriffe müssen Strings sein."}
                 )
+            if len(item) > self._MAX_TERM_LEN:
+                raise serializers.ValidationError(
+                    {key: f"Begriff zu lang (> {self._MAX_TERM_LEN} Zeichen)."}
+                )
+
+    def validate_match(self, value):
+        if not isinstance(value, dict):
+            raise serializers.ValidationError("'match' muss ein Objekt sein.")
+        unknown = set(value) - self._ALLOWED_MATCH_KEYS
+        if unknown:
+            raise serializers.ValidationError(
+                f"Unbekannte match-Felder: {sorted(unknown)}."
+            )
+        for key in ("text_contains", "subject_contains", "from_contains"):
+            if key in value:
+                self._validate_term_list(value[key], key)
+        regex = value.get("text_regex")
+        if regex is not None:
+            if not isinstance(regex, str):
+                raise serializers.ValidationError(
+                    {"text_regex": "muss ein String sein."}
+                )
+            if regex:
+                # ReDoS-Schutz (P1): Muster muss von RE2 kompilierbar sein.
+                try:
+                    regex_safe.compile_user_regex(regex)
+                except regex_safe.InvalidRegex as exc:
+                    raise serializers.ValidationError(
+                        {"text_regex": f"Ungültiges Regex-Muster (RE2): {exc}"}
+                    )
+        return value
+
+    def validate_then(self, value):
+        if not isinstance(value, dict):
+            raise serializers.ValidationError("'then' muss ein Objekt sein.")
+        unknown = set(value) - self._ALLOWED_THEN_KEYS
+        if unknown:
+            raise serializers.ValidationError(
+                f"Unbekannte then-Felder: {sorted(unknown)}."
+            )
+        for key in ("document_type", "correspondent", "storage_path", "folder"):
+            if key not in value or value[key] is None:
+                continue
+            if not isinstance(value[key], str):
+                raise serializers.ValidationError({key: "muss ein String sein."})
+            if len(value[key]) > self._MAX_FIELD_LEN:
+                raise serializers.ValidationError(
+                    {key: f"zu lang (> {self._MAX_FIELD_LEN} Zeichen)."}
+                )
+        tags = value.get("tags")
+        if tags is not None:
+            if not isinstance(tags, list):
+                raise serializers.ValidationError(
+                    {"tags": "muss eine Liste von Strings sein."}
+                )
+            if len(tags) > self._MAX_TAGS:
+                raise serializers.ValidationError(
+                    {"tags": f"zu viele Tags (> {self._MAX_TAGS})."}
+                )
+            for tag in tags:
+                if not isinstance(tag, str):
+                    raise serializers.ValidationError(
+                        {"tags": "alle Tags müssen Strings sein."}
+                    )
+                if len(tag) > self._MAX_FIELD_LEN:
+                    raise serializers.ValidationError(
+                        {"tags": f"Tag zu lang (> {self._MAX_FIELD_LEN} Zeichen)."}
+                    )
         return value
 
 
