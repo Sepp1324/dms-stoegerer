@@ -207,8 +207,21 @@ EOF
 # Alt-Versionen OHNE archive_sha256 fallen auf die Plausibilisierung zurück: nicht
 # leer (Größe > 0) UND PDF-Magic (%PDF-).
 echo "[drill] prüfe DB-Archivpfade (archive_path) + SHA-256/Plausibilität ..."
+# archive_sha256 existiert erst ab Migration 0061. Ein AELTERES (gültiges) Backup
+# hat die Spalte nicht -> bedingungslose Abfrage würde unter ``set -e`` abbrechen.
+# Daher erst prüfen, ob die Spalte da ist, und die Auswahl entsprechend bauen
+# (fehlt sie, wird '' geliefert -> Fallback auf Größe/PDF-Magic pro Archiv).
+HAS_ASHA="$(kubectl -n "$NAMESPACE" exec "$POD" -- psql -U dms -d dms -tAc \
+  "select count(*) from information_schema.columns where table_name='documents_documentversion' and column_name='archive_sha256';" \
+  2>/dev/null | tr -d '[:space:]')"
+if [ "$HAS_ASHA" = "1" ]; then
+  ASHA_SEL="coalesce(archive_sha256,'')"
+else
+  echo "[drill] Hinweis: Spalte archive_sha256 fehlt (Backup vor 0061) -> nur Größe/PDF-Magic."
+  ASHA_SEL="''"
+fi
 ARCHIVES="$(kubectl -n "$NAMESPACE" exec "$POD" -- psql -U dms -d dms -tAF "$TAB" -c \
-  "select archive_path, coalesce(archive_sha256,'') from documents_documentversion where coalesce(archive_path,'') <> '' and archive_path <> coalesce(file_path,'');" \
+  "select archive_path, ${ASHA_SEL} from documents_documentversion where coalesce(archive_path,'') <> '' and archive_path <> coalesce(file_path,'');" \
   2>/dev/null)"
 arch_checked=0; arch_missing=0; arch_bad=0
 while IFS="$TAB" read -r apath asha; do
