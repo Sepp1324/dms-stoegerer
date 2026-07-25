@@ -32,6 +32,7 @@ from kombu.exceptions import OperationalError as BrokerOperationalError
 from rest_framework import status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.exceptions import APIException
+from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.filters import OrderingFilter
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import (
@@ -4301,9 +4302,30 @@ class ContractRecordViewSet(viewsets.ModelViewSet):
         if document is None or document.owner_id != user.id:
             raise Http404("Dokument nicht gefunden.")
 
+    def _ensure_case_file_consistent(self, document, case_file):
+        """Verhindert, dass ein Vertrag mit einer FREMDEN Akte verknüpft wird.
+
+        Das Feld ``case_file`` ist schreibbar und akzeptierte bislang jede Akte –
+        auch die eines anderen Nutzers. Der Owner-Check greift nur am Dokument, so
+        dass ein eigener Vertrag an eine fremde Akte gehängt werden konnte (und
+        deren Titel über ``case_file_title`` zurückkam = Datenleck). Akte und
+        Dokument müssen denselben Owner besitzen; damit ist die Akte für den
+        Request automatisch sichtbar (Nicht-Admin sieht nur eigene Dokumente, für
+        Admins bleibt der Owner-Gleichlauf die relevante Schranke).
+        """
+        if case_file is None:
+            return
+        if document is None or case_file.owner_id != document.owner_id:
+            raise DRFValidationError(
+                {"case_file": "Akte gehört nicht zum Eigentümer des Dokuments."}
+            )
+
     def perform_create(self, serializer):
         document = serializer.validated_data.get("document")
         self._ensure_document_visible(document)
+        self._ensure_case_file_consistent(
+            document, serializer.validated_data.get("case_file")
+        )
         record = serializer.save(source=ContractRecord.Source.MANUAL)
         contract_service.ensure_contract_reminders(record)
         if record.needs_review:
@@ -4323,6 +4345,14 @@ class ContractRecordViewSet(viewsets.ModelViewSet):
             "document", getattr(serializer.instance, "document", None)
         )
         self._ensure_document_visible(document)
+        # PATCH kann die Akte umhängen, ohne das Dokument mitzusenden – daher die
+        # effektive Akte (aus dem Request oder dem Bestand) gegen den Dokument-
+        # Owner prüfen, nicht nur bei Neuanlage.
+        _sentinel = object()
+        case_file = serializer.validated_data.get("case_file", _sentinel)
+        if case_file is _sentinel:
+            case_file = getattr(serializer.instance, "case_file", None)
+        self._ensure_case_file_consistent(document, case_file)
         record = serializer.save(source=ContractRecord.Source.MANUAL)
         contract_service.ensure_contract_reminders(record)
         if record.needs_review:
