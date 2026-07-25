@@ -238,36 +238,52 @@ def household_request_decide(request, pk, req_id):
 
     target = join_request.user
 
-    if decision == "reject":
-        join_request.status = JoinRequestStatus.REJECTED
-        join_request.decided_at = timezone.now()
-        join_request.decided_by = request.user
-        join_request.save(update_fields=["status", "decided_at", "decided_by"])
-        return Response(_household_data(household, request))
-
-    # approve: Die „hoechstens ein Haushalt"-Invariante muss RACE-frei geprueft
-    # werden. Bislang lief target.households.exists() VOR der Transaktion – zwei
-    # parallele Freigaben (oder eine Freigabe + gleichzeitiges Haushalt-Anlegen)
-    # passierten beide den Check und machten den Nutzer zum Mitglied ZWEIER
-    # Haushalte. Deshalb den Zielnutzer INNERHALB der Transaktion per
-    # select_for_update() sperren und dort erneut pruefen; das Anlegen eines
-    # Haushalts (household_create) nimmt denselben Row-Lock und serialisiert so.
+    # Beide Entscheidungen laufen in EINER Transaktion, die zuerst die
+    # Anfrage-Zeile sperrt und ihren PENDING-Status frisch liest. Zuvor wurde die
+    # Anfrage nur VOR der Transaktion (ungesperrt) als PENDING gelesen; zwei
+    # gleichzeitige Entscheidungen (approve+approve oder approve+reject) konnten
+    # sie daher widerspruechlich verarbeiten -> „Mitglied, aber Anfrage
+    # abgelehnt". Der Verlierer des Locks sieht den bereits geaenderten Status,
+    # findet keine PENDING-Zeile mehr und bekommt 404 (die Anfrage ist entschieden).
     with transaction.atomic():
+        locked_request = (
+            HouseholdJoinRequest.objects.select_for_update()
+            .filter(pk=join_request.pk, status=JoinRequestStatus.PENDING)
+            .first()
+        )
+        if locked_request is None:
+            raise NotFound("Offene Anfrage nicht gefunden.")
+
+        if decision == "reject":
+            locked_request.status = JoinRequestStatus.REJECTED
+            locked_request.decided_at = timezone.now()
+            locked_request.decided_by = request.user
+            locked_request.save(
+                update_fields=["status", "decided_at", "decided_by"]
+            )
+            return Response(_household_data(household, request))
+
+        # approve: Zusaetzlich den Zielnutzer sperren und die „hoechstens ein
+        # Haushalt"-Invariante race-frei pruefen (denselben Row-Lock nimmt
+        # household_create). Lock-Reihenfolge Anfrage -> Nutzer ist konsistent,
+        # daher deadlock-frei.
         User.objects.select_for_update().get(pk=target.pk)
         if target.households.exists():
-            join_request.status = JoinRequestStatus.REJECTED
-            join_request.decided_at = timezone.now()
-            join_request.decided_by = request.user
-            join_request.save(update_fields=["status", "decided_at", "decided_by"])
+            locked_request.status = JoinRequestStatus.REJECTED
+            locked_request.decided_at = timezone.now()
+            locked_request.decided_by = request.user
+            locked_request.save(
+                update_fields=["status", "decided_at", "decided_by"]
+            )
             return Response(
                 {"detail": "Nutzer ist inzwischen Mitglied eines anderen Haushalts."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         household.members.add(target)
-        join_request.status = JoinRequestStatus.APPROVED
-        join_request.decided_at = timezone.now()
-        join_request.decided_by = request.user
-        join_request.save(update_fields=["status", "decided_at", "decided_by"])
+        locked_request.status = JoinRequestStatus.APPROVED
+        locked_request.decided_at = timezone.now()
+        locked_request.decided_by = request.user
+        locked_request.save(update_fields=["status", "decided_at", "decided_by"])
 
     return Response(_household_data(household, request))
 
