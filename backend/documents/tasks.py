@@ -289,14 +289,21 @@ def prune_workbench_thumbnail_cache() -> dict:
             entries.append((st.st_mtime, st.st_size, fp))
 
     removed = 0
+    failed = 0
     kept: list[tuple[float, int, str]] = []
     for mtime, size, fp in entries:
         if now - mtime > ttl_seconds:
             try:
                 os.remove(fp)
                 removed += 1
-            except OSError:
-                pass
+            except FileNotFoundError:
+                pass  # schon weg -> ok
+            except OSError as exc:
+                # NICHT verschlucken (P2): sonst meldet der Task Erfolg, obwohl der
+                # Cache über dem Limit bleibt. Zählt weiter zur Größe -> Alarm unten.
+                logger.warning("Thumb-Cache-Prune: %s (TTL) nicht entfernbar: %s", fp, exc)
+                failed += 1
+                kept.append((mtime, size, fp))
         else:
             kept.append((mtime, size, fp))
 
@@ -310,9 +317,19 @@ def prune_workbench_thumbnail_cache() -> dict:
                 os.remove(fp)
                 removed += 1
                 total -= size
-            except OSError:
-                pass
+            except FileNotFoundError:
+                total -= size  # schon weg -> zählt als freigegeben
+            except OSError as exc:
+                logger.warning("Thumb-Cache-Prune: %s (Größe) nicht entfernbar: %s", fp, exc)
+                failed += 1
 
+    # P2: Konnten Dateien nicht entfernt werden ODER bleibt der Cache über dem
+    # Limit, endet der Task als FEHLER (Monitoring-Alarm) – NICHT still als Erfolg.
+    if failed or total > max_bytes:
+        raise OSError(
+            f"Thumb-Cache-Prune unvollständig: {failed} Löschfehler, "
+            f"Restgröße {total} > Limit {max_bytes} Bytes"
+        )
     return {"removed": removed}
 
 

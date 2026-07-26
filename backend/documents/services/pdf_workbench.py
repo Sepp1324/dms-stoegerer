@@ -10,6 +10,7 @@ from __future__ import annotations
 import io
 import os
 import tempfile
+import time
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -158,7 +159,17 @@ def render_page_thumbnail(version: DocumentVersion, page_no: int, *, dpi: int = 
     cache_path = _thumbnail_cache_path(version, page_no, dpi)
     try:
         if cache_path.exists():
-            return cache_path.read_bytes()
+            data = cache_path.read_bytes()
+            # Echte LRU (P2): mtime = ZUGRIFFSzeit setzen. Der Größen-Prune sortiert
+            # nach mtime; ohne dieses Bump spiegelte mtime nur den ERST-Render, und
+            # ein häufig gelesenes, aber altes Thumbnail flöge fälschlich als
+            # „ältestes" zuerst raus (bzw. würde per TTL verworfen).
+            try:
+                now = time.time()
+                os.utime(cache_path, (now, now))
+            except OSError:
+                pass  # mtime-Bump ist best-effort – Antwort trotzdem ausliefern.
+            return data
     except OSError:
         pass  # Cache ist best-effort – bei Lesefehler regulär rendern.
 
