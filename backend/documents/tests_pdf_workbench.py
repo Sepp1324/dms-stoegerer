@@ -331,54 +331,67 @@ class PdfWorkbenchTests(APITestCase):
                 DocumentVersion.ProcessingState.FAILED,
             )
 
-    def test_split_zu_viele_teile_ohne_pdf_oeffnungen(self):
-        # P1: Ein Payload mit zu vielen Teilen wird abgelehnt, OHNE das PDF je Teil
-        # zu öffnen (frueher tausende _page_count-Oeffnungen vor der Ablehnung).
-        from django.test import override_settings
-
-        from .services import pdf_workbench as pw
-
-        doc = self._doc("split-many", self.user, pages=3)
+    def test_rewrite_mit_veralteter_source_version_409(self):
+        # P2: Basiert die Aktion auf einer inzwischen veralteten Version, wird sie
+        # mit 409 abgelehnt (statt die parallele neue Version zu überschreiben).
+        doc = self._doc("stale", self.user, pages=2)
         self.client.force_authenticate(self.user)
-        parts = [{"title": f"T{i}", "pages": [1]} for i in range(60)]
 
-        with override_settings(PDF_WORKBENCH_MAX_DOCUMENTS=50), mock.patch.object(
-            pw, "_page_count", wraps=pw._page_count
-        ) as pc:
+        with mock.patch("documents.views.process_document_version.delay"):
             resp = self.client.post(
-                f"/api/documents/{doc.id}/pdf-workbench/split/",
-                {"parts": parts},
+                f"/api/documents/{doc.id}/pdf-workbench/rewrite/",
+                {"pages": [{"page": 1}], "source_version_id": 999999},
                 format="json",
             )
 
-        self.assertEqual(resp.status_code, 400)
-        self.assertIn("Zu viele Teile", resp.data["detail"])
-        pc.assert_not_called()  # gar nicht erst geoeffnet (View-Vorabdeckel)
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(doc.versions.count(), 1)  # keine neue Version
 
-    def test_split_kumuliertes_seitenlimit_oeffnet_pdf_nur_einmal(self):
-        from django.test import override_settings
-
-        from .services import pdf_workbench as pw
-
-        doc = self._doc("split-pages", self.user, pages=3)
+    def test_rewrite_mit_korrekter_source_version_gelingt(self):
+        doc = self._doc("fresh", self.user, pages=2)
         self.client.force_authenticate(self.user)
-        # 3 Teile x 3 Seiten = 9 > Limit 4.
-        parts = [{"title": f"T{i}", "pages": [1, 2, 3]} for i in range(3)]
 
-        with override_settings(PDF_WORKBENCH_MAX_PAGES=4), mock.patch.object(
-            pw, "_page_count", wraps=pw._page_count
-        ) as pc:
+        with mock.patch("documents.views.process_document_version.delay"):
             resp = self.client.post(
-                f"/api/documents/{doc.id}/pdf-workbench/split/",
-                {"parts": parts},
+                f"/api/documents/{doc.id}/pdf-workbench/rewrite/",
+                {
+                    "pages": [{"page": 1}],
+                    "source_version_id": doc.current_version.id,
+                },
                 format="json",
             )
 
-        self.assertEqual(resp.status_code, 400)
-        self.assertIn("Zu viele Seiten", resp.data["detail"])
-        # PDF genau EINMAL geoeffnet (nicht je Teil).
-        self.assertLessEqual(pc.call_count, 1)
-        self.assertFalse(Document.objects.filter(title__startswith="T").exists())
+        self.assertEqual(resp.status_code, 201, resp.data)
+        doc.refresh_from_db()
+        self.assertEqual(doc.versions.count(), 2)
+
+    def test_merge_limit_ohne_off_by_one(self):
+        # P3: Bei MAX_DOCUMENTS=2 sind hoechstens 1 ZUSAETZLICHES Dokument erlaubt
+        # (Ziel + 1 = 2). 2 zusaetzliche IDs -> schon der View lehnt ab (nicht erst
+        # der Service nach Aufbau).
+        from django.test import override_settings
+
+        target = self._doc("ob-target", self.user, pages=1)
+        a = self._doc("ob-a", self.user, pages=1)
+        b = self._doc("ob-b", self.user, pages=1)
+        self.client.force_authenticate(self.user)
+
+        with override_settings(PDF_WORKBENCH_MAX_DOCUMENTS=2):
+            with mock.patch("documents.views.process_document_version.delay"):
+                ok = self.client.post(
+                    f"/api/documents/{target.id}/pdf-workbench/merge/",
+                    {"document_ids": [a.id]},
+                    format="json",
+                )
+            self.assertEqual(ok.status_code, 201, ok.data)
+
+            blocked = self.client.post(
+                f"/api/documents/{target.id}/pdf-workbench/merge/",
+                {"document_ids": [a.id, b.id]},
+                format="json",
+            )
+            self.assertEqual(blocked.status_code, 400)
+            self.assertIn("Zu viele", blocked.data["detail"])
 
     def test_merge_creates_new_version_and_respects_owner_scope(self):
         target = self._doc("merge-target", self.user, pages=2)
