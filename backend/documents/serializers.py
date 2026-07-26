@@ -1494,6 +1494,7 @@ class ProcessedMailSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = ProcessedMail
+        list_serializer_class = _DocumentPrimingListSerializer
         fields = (
             "id",
             "account",
@@ -1533,13 +1534,21 @@ class ProcessedMailSerializer(serializers.ModelSerializer):
         return obj.get_status_display()
 
     def get_imported_documents(self, obj):
-        documents = obj.documents.select_related(
-            "correspondent",
-            "document_type",
-            "folder",
-            "current_version",
-        ).order_by("-added_at", "-id")
-        return CaseFileDocumentSerializer(documents, many=True).data
+        # Vorsortierte to_attr-Liste aus dem Viewset (kein N+1); Fallback für
+        # Einzelabrufe ohne diesen Prefetch. Ancestor-Priming übernimmt der
+        # _DocumentPrimingListSerializer (Liste) bzw. hier für den Einzelfall.
+        docs = getattr(obj, "ordered_documents", None)
+        if docs is None:
+            docs = list(
+                obj.documents.select_related(
+                    "correspondent",
+                    "document_type",
+                    "folder",
+                    "current_version",
+                ).order_by("-added_at", "-id")
+            )
+        _prime_folder_ancestors(docs)
+        return CaseFileDocumentSerializer(docs, many=True).data
 
 
 # ---------------------------------------------------------------------------

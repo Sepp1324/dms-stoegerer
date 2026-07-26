@@ -5624,10 +5624,23 @@ class ProcessedMailViewSet(viewsets.ReadOnlyModelViewSet):
         qs = (
             ProcessedMail.objects.select_related("account")
             .prefetch_related(
-                "documents__correspondent",
-                "documents__document_type",
-                "documents__folder",
-                "documents__current_version",
+                # Sortiert + mit FKs geladen als to_attr-Liste (P2). Zuvor hängte
+                # get_imported_documents select_related()/order_by() an den Related
+                # Manager und verwarf den Prefetch-Cache -> >=1 Extra-Query je Mail,
+                # bei tiefen Ordnern weitere je Dokument. folder__parent(__parent)
+                # deckt full_path zwei Ebenen ab (Rest via List-Priming).
+                Prefetch(
+                    "documents",
+                    queryset=Document.objects.select_related(
+                        "correspondent",
+                        "document_type",
+                        "folder",
+                        "folder__parent",
+                        "folder__parent__parent",
+                        "current_version",
+                    ).order_by("-added_at", "-id"),
+                    to_attr="ordered_documents",
+                )
             )
             .order_by("-processed_at", "-id")
         )
