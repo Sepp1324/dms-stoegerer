@@ -198,7 +198,7 @@ class ArchiveApiTests(ArchiveDocMixin, APITestCase):
         # Versionen entfernt (sonst blieben geloeschte Inhalte auf dem PVC).
         from unittest import mock
 
-        from . import tasks
+        from . import storage, tasks
 
         doc = Document.objects.create(title="MitDateien", owner=self.user)
         orig = Path(self.tmpdir.name) / "orig.pdf"
@@ -216,7 +216,11 @@ class ArchiveApiTests(ArchiveDocMixin, APITestCase):
         self.client.force_authenticate(self.user)
 
         # Cleanup-Task synchron ausfuehren (statt an Celery zu delegieren).
+        # DATA_DIR auf den Tmpdir patchen, damit die Testdateien den Root-Check
+        # bestehen (der Cleanup entfernt nur Pfade UNTER DATA_DIR).
         with mock.patch.object(
+            storage, "DATA_DIR", Path(self.tmpdir.name)
+        ), mock.patch.object(
             tasks.cleanup_artifact_files,
             "delay",
             side_effect=lambda paths: tasks.cleanup_artifact_files(paths),
