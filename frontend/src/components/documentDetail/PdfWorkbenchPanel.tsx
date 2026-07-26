@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   getDocuments,
   getPdfWorkbenchPageThumbnail,
@@ -84,6 +84,46 @@ function totalRotation(item: PageItem): number {
   return (item.rotation + item.rotationDelta) % 360;
 }
 
+// Begrenzte Parallelität für Thumbnail-Requests (P1): Jede Miniatur führt
+// serverseitig ein pdftoppm aus. Ohne Deckel starten bei einem Dokument mit
+// vielen Seiten hunderte Requests/Renderprozesse gleichzeitig und können den
+// Backend-Pod lahmlegen. Ein kleiner Queue-Gate lässt nur wenige gleichzeitig zu.
+const THUMBNAIL_CONCURRENCY = 4;
+let activeThumbnailFetches = 0;
+const thumbnailQueue: Array<() => void> = [];
+
+function pumpThumbnailQueue() {
+  while (
+    activeThumbnailFetches < THUMBNAIL_CONCURRENCY &&
+    thumbnailQueue.length > 0
+  ) {
+    const next = thumbnailQueue.shift();
+    if (!next) break;
+    activeThumbnailFetches += 1;
+    next();
+  }
+}
+
+function scheduleThumbnail<T>(task: () => Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    thumbnailQueue.push(() => {
+      task()
+        .then(resolve, reject)
+        .finally(() => {
+          activeThumbnailFetches -= 1;
+          pumpThumbnailQueue();
+        });
+    });
+    pumpThumbnailQueue();
+  });
+}
+
+// Session-Cache der erzeugten Objekt-URLs pro (Dokument, Seite). Der Seiteninhalt
+// einer Version ist unveränderlich, daher löst Scrollen/Neu-Mounten kein erneutes
+// (teures) Server-Rendern aus. Bewusst NICHT per revokeObjectURL freigegeben –
+// die Miniaturen bleiben für die (transiente) Werkbank-Sitzung gültig.
+const thumbnailCache = new Map<string, string>();
+
 function PageThumb({
   documentId,
   item,
@@ -91,29 +131,64 @@ function PageThumb({
   documentId: number;
   item: PageItem;
 }) {
-  const [src, setSrc] = useState<string | null>(null);
+  const cacheKey = `${documentId}-${item.page}`;
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [src, setSrc] = useState<string | null>(
+    () => thumbnailCache.get(cacheKey) ?? null,
+  );
 
   useEffect(() => {
+    if (src) return; // bereits (aus Cache) geladen
+    const node = containerRef.current;
+    if (!node) return;
+
     let active = true;
-    let url: string | null = null;
-    setSrc(null);
-    getPdfWorkbenchPageThumbnail(documentId, item.page)
-      .then((blob) => {
-        if (!active) return;
-        url = URL.createObjectURL(blob);
-        setSrc(url);
-      })
-      .catch(() => {
-        /* Fallback unten rendert Seitenzahl; Miniatur ist Komfort. */
-      });
+    let started = false;
+
+    const load = () => {
+      if (started) return;
+      started = true;
+      scheduleThumbnail(() =>
+        getPdfWorkbenchPageThumbnail(documentId, item.page),
+      )
+        .then((blob) => {
+          if (!active) return;
+          const url = URL.createObjectURL(blob);
+          thumbnailCache.set(cacheKey, url);
+          setSrc(url);
+        })
+        .catch(() => {
+          /* Fallback unten rendert Seitenzahl; Miniatur ist Komfort. */
+        });
+    };
+
+    // Lazy Loading: erst laden, wenn die Karte (fast) sichtbar ist. So entsteht
+    // KEIN Render-Sturm über alle Seiten auf einmal. Ohne IntersectionObserver
+    // (alte Browser/Test-Umgebung) sofort laden – der Concurrency-Gate greift.
+    if (typeof IntersectionObserver === "undefined") {
+      load();
+      return () => {
+        active = false;
+      };
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          observer.disconnect();
+          load();
+        }
+      },
+      { rootMargin: "300px" }, // etwas vorausladen für flüssiges Scrollen
+    );
+    observer.observe(node);
     return () => {
       active = false;
-      if (url) URL.revokeObjectURL(url);
+      observer.disconnect();
     };
-  }, [documentId, item.page]);
+  }, [documentId, item.page, cacheKey, src]);
 
   return (
-    <div className="pdf-page-card__thumb">
+    <div className="pdf-page-card__thumb" ref={containerRef}>
       {src ? (
         <img
           src={src}
