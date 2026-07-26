@@ -156,6 +156,65 @@ class ArchiveApiTests(ArchiveDocMixin, APITestCase):
 
         self.assertEqual(response.status_code, 403)
 
+    def test_versions_retention_blockt_loeschen_ohne_500_und_falschen_audit(self):
+        # P1: NUR die Version hat eine aktive Retention (Dokument selbst nicht,
+        # keine WORM-Version, kein Legal Hold). Frueher schrieb die View bereits
+        # "delete", dann warf das Model DjangoValidationError -> HTTP 500, das Doc
+        # blieb, im Audit stand aber „geloescht". Jetzt: 403 + retention_block,
+        # KEIN "delete"-Audit.
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        doc = Document.objects.create(title="RetDoc", owner=self.user)
+        version = DocumentVersion.objects.create(
+            document=doc, version_no=1, file_path="/tmp/x.pdf",
+            sha256="d" * 64, mime_type="application/pdf", size=1,
+            is_immutable=False,
+            retention_until=timezone.now().date() + timedelta(days=30),
+        )
+        doc.current_version = version
+        doc.save(update_fields=["current_version"])
+        self.client.force_authenticate(self.user)
+
+        resp = self.client.delete(f"/api/documents/{doc.id}/")
+
+        self.assertEqual(resp.status_code, 403)
+        self.assertIn("Aufbewahrungsfrist", str(resp.data["detail"]))
+        self.assertTrue(Document.objects.filter(pk=doc.pk).exists())
+        self.assertTrue(
+            AuditLogEntry.objects.filter(
+                action="retention_block", object_id=str(doc.id)
+            ).exists()
+        )
+        self.assertFalse(
+            AuditLogEntry.objects.filter(
+                action="delete", object_id=str(doc.id)
+            ).exists()
+        )
+
+    def test_loeschbares_dokument_wird_geloescht_und_auditiert(self):
+        # Happy Path: kein Block -> Doc geloescht, genau ein "delete"-Audit.
+        doc = Document.objects.create(title="Weg", owner=self.user)
+        version = DocumentVersion.objects.create(
+            document=doc, version_no=1, file_path="/tmp/y.pdf",
+            sha256="e" * 64, mime_type="application/pdf", size=1, is_immutable=False,
+        )
+        doc.current_version = version
+        doc.save(update_fields=["current_version"])
+        self.client.force_authenticate(self.user)
+
+        resp = self.client.delete(f"/api/documents/{doc.id}/")
+
+        self.assertEqual(resp.status_code, 204)
+        self.assertFalse(Document.objects.filter(pk=doc.pk).exists())
+        self.assertEqual(
+            AuditLogEntry.objects.filter(
+                action="delete", object_id=str(doc.id)
+            ).count(),
+            1,
+        )
+
     def test_archive_health_is_admin_only(self):
         archive.verify_document_archive(self.doc)
         self.client.force_authenticate(self.user)
