@@ -450,18 +450,29 @@ def match_and_reconcile(version, *, actor=None) -> dict:
         return {"matched": True, "asn": asn, "moved": False, "document_id": existing.pk}
 
     # Re-Scan eines anderen Dokuments → Version übernehmen, Duplikat vermeiden.
-    # Zuerst den OneToOne-Zeiger ``current_version`` des Quell-Dokuments lösen:
-    # die Version ist dort noch als current_version verlinkt; ohne das Lösen
-    # würden nach dem Umhängen ZWEI Dokumente dieselbe Version als current_version
-    # führen und den unique-Constraint verletzen.
-    Document.objects.filter(pk=current.pk).update(current_version=None)
-    current.current_version = None
+    # ATOMAR (P1): Zeiger lösen, Umhängen, Scan protokollieren und das leere
+    # Quelldokument entfernen gehören in EINE Transaktion. Scheitert das Umhängen
+    # (``_attach_version_to``), darf das Quelldokument nicht ohne current_version
+    # zurückbleiben, während die Version faktisch noch dort liegt (inkonsistenter
+    # Zustand). Beide Dokumente werden zuvor in stabiler pk-Reihenfolge gesperrt –
+    # Deadlock-Schutz und konsistent mit der systemweiten Document→Version-Ordnung
+    # (der Dokument-Lock kommt vor allen Versionssperren in ``_attach_version_to``).
+    with transaction.atomic():
+        lock_ids = sorted({current.pk, existing.pk})
+        list(Document.objects.select_for_update().filter(pk__in=lock_ids).order_by("pk"))
 
-    _attach_version_to(existing, version, actor=actor)
-    record_scan(existing, version, matched_by=matched_by)
+        # Zuerst den OneToOne-Zeiger ``current_version`` des Quell-Dokuments lösen:
+        # die Version ist dort noch als current_version verlinkt; ohne das Lösen
+        # führten nach dem Umhängen ZWEI Dokumente dieselbe Version als
+        # current_version und verletzten den unique-Constraint.
+        Document.objects.filter(pk=current.pk).update(current_version=None)
+        current.current_version = None
 
-    if not current.versions.exists():
-        # Das leere, versehentlich neu angelegte Dokument entfernen (keine Duplikate).
-        Document.objects.filter(pk=current.pk).delete()
+        _attach_version_to(existing, version, actor=actor)
+        record_scan(existing, version, matched_by=matched_by)
+
+        if not current.versions.exists():
+            # Das leere, versehentlich neu angelegte Dokument entfernen (keine Duplikate).
+            Document.objects.filter(pk=current.pk).delete()
 
     return {"matched": True, "asn": asn, "moved": True, "document_id": existing.pk}

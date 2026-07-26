@@ -201,6 +201,38 @@ class ASNReconcileTests(TestCase):
             ASNScan.objects.filter(document=existing, matched_by="OCR").exists()
         )
 
+    def test_reconcile_ist_atomar_bei_fehler(self):
+        """P1: Scheitert das Umhängen mitten im Reconcile, darf das Quelldokument
+        NICHT ohne current_version zurückbleiben – die ganze Übernahme rollt zurück.
+        """
+        from unittest import mock
+
+        existing = Document.objects.create(title="Ziel")
+        _assign(existing, 77)
+        _make_version(existing, version_no=1, sha256="a" * 64)
+
+        rescan = Document.objects.create(title="Scan")
+        v_new = _make_version(
+            rescan, version_no=1, ocr_text=f"Kopf {asn_service.format_asn(77)} Fuss"
+        )
+        rescan_pk = rescan.pk
+
+        with mock.patch.object(
+            asn_service, "_attach_version_to", side_effect=RuntimeError("boom")
+        ):
+            with self.assertRaises(RuntimeError):
+                asn_service.match_and_reconcile(v_new)
+
+        # Quelldokument unverändert konsistent: existiert noch, Version liegt noch
+        # dort, current_version zeigt weiterhin auf sie (nicht None).
+        self.assertTrue(Document.objects.filter(pk=rescan_pk).exists())
+        v_new.refresh_from_db()
+        self.assertEqual(v_new.document_id, rescan_pk)
+        rescan.refresh_from_db()
+        self.assertEqual(rescan.current_version_id, v_new.id)
+        # Kein halber Scan am Zieldokument.
+        self.assertFalse(ASNScan.objects.filter(document=existing).exists())
+
     def test_unknown_ocr_asn_is_not_claimed(self):
         """OCR-Text darf KEINE neue ASN beanspruchen (nur Barcode/QR)."""
         rescan = Document.objects.create(title="Scan")
