@@ -254,3 +254,38 @@ class TriageFolderAfterWorkflowOwnerTests(TestCase):
         self.assertIsNotNone(doc.folder)
         self.assertEqual(doc.folder.full_path, "GlobalSteuer")
         self.assertEqual(doc.folder.owner_id, self.alice.id)  # für den Doc-Owner angelegt
+
+    def test_nachlauf_mit_listen_then_bricht_nicht_ab(self):
+        # P2: Ein per Alt-DB gespeichertes ``then`` als LISTE darf assign_folder_
+        # from_rules NICHT mit AttributeError abbrechen lassen (sonst geht das
+        # Triage-Dokument in classify_version auf FAILED). Die kaputte Regel wird
+        # einfach uebersprungen.
+        from documents.classification import assign_folder_from_rules
+        from documents.models import DocumentVersion
+
+        doc = Document.objects.create(
+            title="Steuer", owner=self.alice, folder=None,
+            classification={"rules": ["Kaputt", "Ablage"]},
+        )
+        v = DocumentVersion.objects.create(
+            document=doc, version_no=1, file_path="/tmp/x.pdf", ocr_text="steuer",
+        )
+        doc.current_version = v
+        doc.save(update_fields=["current_version"])
+
+        # Kaputte globale Regel: then ist eine LISTE statt Dict.
+        ClassificationRule.objects.create(
+            name="Kaputt", enabled=True, owner=None, priority=1,
+            match={"text_contains": ["steuer"]}, then=["folder", "X"],
+        )
+        # Gueltige globale Regel danach.
+        ClassificationRule.objects.create(
+            name="Ablage", enabled=True, owner=None, priority=5,
+            match={"text_contains": ["steuer"]}, then={"folder": "GutOrdner"},
+        )
+
+        path = assign_folder_from_rules(doc)  # darf NICHT werfen
+
+        doc.refresh_from_db()
+        self.assertEqual(path, "GutOrdner")
+        self.assertEqual(doc.folder.full_path, "GutOrdner")
