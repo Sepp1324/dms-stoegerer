@@ -612,29 +612,34 @@ class Document(models.Model):
             list(self.versions.select_for_update())
 
             block = self.delete_block()
-            if block:
-                from .audit import log_delete_block
+            if block is None:
+                # Artefaktpfade (Original/Archiv/Thumbnail) der Versionen VOR dem
+                # DB-Löschen einsammeln – danach sind die Zeilen (CASCADE) weg (P2).
+                # Die Entfernung läuft NACH dem Commit als Retry-fähiger Task.
+                artifact_paths = [
+                    path
+                    for version in self.versions.all()
+                    for path in (
+                        version.file_path,
+                        version.archive_path,
+                        version.thumbnail_path,
+                    )
+                    if path
+                ]
+                super().delete(*args, **kwargs)
+                if artifact_paths:
+                    _schedule_artifact_cleanup(artifact_paths)
 
-                action, reason = block
-                log_delete_block("Document", self.pk, action=action, reason=reason)
-                raise ValidationError(f"Löschen gesperrt: {reason}")
+        # Block-Audit + Fehler AUSSERHALB der Sperr-Transaktion: würde der ``raise``
+        # innerhalb der ``atomic()`` erfolgen, rollte er das gerade geschriebene
+        # Block-Audit gleich wieder zurück. Der Lock diente nur der konsistenten
+        # ``delete_block``-Auswertung; ist gesperrt, wird NICHT gelöscht.
+        if block is not None:
+            from .audit import log_delete_block
 
-            # Artefaktpfade (Original/Archiv/Thumbnail) der Versionen VOR dem
-            # DB-Löschen einsammeln – danach sind die Zeilen (CASCADE) weg (P2). Die
-            # eigentliche Entfernung läuft NACH dem Commit als Retry-fähiger Task.
-            artifact_paths = [
-                path
-                for version in self.versions.all()
-                for path in (
-                    version.file_path,
-                    version.archive_path,
-                    version.thumbnail_path,
-                )
-                if path
-            ]
-            super().delete(*args, **kwargs)
-            if artifact_paths:
-                _schedule_artifact_cleanup(artifact_paths)
+            action, reason = block
+            log_delete_block("Document", self.pk, action=action, reason=reason)
+            raise ValidationError(f"Löschen gesperrt: {reason}")
 
 
 def _schedule_artifact_cleanup(paths: list[str]) -> None:
