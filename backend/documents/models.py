@@ -603,19 +603,23 @@ class Document(models.Model):
         könnte zwischen Prüfung und Löschen eine Version unveränderlich (WORM)
         werden und trotzdem gelöscht werden. Der Lock serialisiert beide Pfade.
 
-        Lock-Reihenfolge (P1): IDENTISCH zu ``seal_version`` – erst die
-        Versionszeilen, dann das Dokument. Sealing sperrt zuerst die Version und
-        aktualisiert danach das Dokument; würde ``delete`` in umgekehrter Reihenfolge
-        sperren, entstünde ein klassischer PostgreSQL-Deadlock.
+        Lock-Reihenfolge (P1): SYSTEMWEIT ``Document`` → ``DocumentVersion``. Das
+        Dokument wird ZUERST gesperrt – identisch zu ``add_version`` (sperrt das
+        Dokument, bevor es eine neue Version anlegt) und zu ``seal_version``. Würde
+        ``delete`` die Versionen zuerst sperren, entstünde ein gegenläufiger
+        PostgreSQL-Deadlock; zudem könnte ``add_version`` zwischen dem Versions-Lock
+        und dem Dokument-Lock noch eine NEUE Version einfügen, die dieses Löschen
+        nicht mehr erfasst. Der Dokument-Lock zuerst serialisiert beide sauber.
         """
         from django.db import transaction
 
         with transaction.atomic():
-            # Version- und Dokumentzeile sperren, BEVOR der Schutzstatus gelesen
-            # wird – in derselben Reihenfolge wie seal_version (Version zuerst).
-            # list() erzwingt die Auswertung (Sperrenaufbau) sofort.
-            list(self.versions.select_for_update())
+            # Dokument ZUERST sperren (systemweite Reihenfolge Document→Version),
+            # dann die Versionszeilen. So kann kein paralleles add_version zwischen
+            # den Sperren eine unerfasste neue Version anlegen. list() erzwingt die
+            # Auswertung (Sperrenaufbau) sofort.
             type(self).objects.select_for_update().get(pk=self.pk)
+            list(self.versions.select_for_update())
             # Schutzfelder UNTER der Sperre neu laden (P1): die evtl. VOR der Sperre
             # geladene ``self``-Instanz sähe ein zwischenzeitliches Sealing/Legal-Hold
             # nicht – erst nach dem refresh spiegelt ``delete_block`` den frischen,

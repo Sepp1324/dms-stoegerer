@@ -47,10 +47,12 @@ class DeleteUnderLockTests(TestCase):
         doc.delete()
         self.assertFalse(Document.objects.filter(pk=doc.pk).exists())
 
-    def test_lock_reihenfolge_version_vor_dokument(self):
-        """Deadlock-Schutz (P1): delete() muss die Sperren in DERSELBEN Reihenfolge
-        wie seal_version nehmen – erst DocumentVersion, dann Document. Gegenläufige
-        Reihenfolge zwischen Löschen und Sealing ergäbe einen PostgreSQL-Deadlock.
+    def test_lock_reihenfolge_dokument_vor_version(self):
+        """Deadlock-Schutz (P1): delete() sperrt SYSTEMWEIT in der Reihenfolge
+        Document → DocumentVersion – erst das Dokument, dann die Versionen. Identisch
+        zu add_version (sperrt das Dokument, bevor es eine Version anlegt) und
+        seal_version. Gegenläufige Reihenfolge ergäbe einen PostgreSQL-Deadlock und
+        ließe add_version eine unerfasste neue Version einschieben.
         """
         if connection.vendor != "postgresql":
             self.skipTest("FOR UPDATE nur unter PostgreSQL aussagekräftig")
@@ -62,9 +64,6 @@ class DeleteUnderLockTests(TestCase):
             for q in ctx.captured_queries
             if "for update" in q["sql"].lower()
         ]
-        version_first = next(
-            (i for i, s in enumerate(for_update) if "documentversion" in s), None
-        )
         document_first = next(
             (
                 i
@@ -73,10 +72,13 @@ class DeleteUnderLockTests(TestCase):
             ),
             None,
         )
-        self.assertIsNotNone(version_first, "Versionszeile wurde nicht gesperrt")
+        version_first = next(
+            (i for i, s in enumerate(for_update) if "documentversion" in s), None
+        )
         self.assertIsNotNone(document_first, "Dokumentzeile wurde nicht gesperrt")
+        self.assertIsNotNone(version_first, "Versionszeile wurde nicht gesperrt")
         self.assertLess(
-            version_first,
             document_first,
-            "delete() muss die Version VOR dem Dokument sperren (wie seal_version)",
+            version_first,
+            "delete() muss das Dokument VOR den Versionen sperren (Document→Version)",
         )
