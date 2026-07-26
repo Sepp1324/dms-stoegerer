@@ -2611,6 +2611,12 @@ class DocumentViewSet(viewsets.ModelViewSet):
         DjangoValidationError auf (HTTP 500), das Dokument blieb, aber im Audit
         stand „gelöscht". Jetzt: korrektes Block-Audit + 403, sonst Löschen und
         Erfolgs-Audit ATOMAR.
+
+        Race unter der Sperre (P1): Wird ein Block erst im gesperrten Model-
+        ``delete()`` erkannt (paralleles Sealing zwischen Vorabprüfung und Löschen),
+        wirft dieses eine DjangoValidationError. Sie wird hier in ein 403 übersetzt
+        (nicht 500) und der Block-Audit AUSSERHALB der zurückgerollten Transaktion
+        neu geschrieben – das Model-interne Audit fiele sonst dem Rollback zum Opfer.
         """
         from rest_framework.exceptions import PermissionDenied
 
@@ -2628,16 +2634,33 @@ class DocumentViewSet(viewsets.ModelViewSet):
 
         # Löschen + Erfolgs-Audit atomar. Die ID/Titel VOR dem Löschen sichern –
         # nach ``delete()`` setzt Django ``instance.pk`` auf None.
-        with transaction.atomic():
-            document_id, title = instance.id, instance.title
-            super().perform_destroy(instance)
+        document_id, title = instance.id, instance.title
+        try:
+            with transaction.atomic():
+                super().perform_destroy(instance)
+                AuditLogEntry.objects.create(
+                    actor=self.request.user,
+                    action="delete",
+                    object_type="Document",
+                    object_id=str(document_id),
+                    detail={"title": title},
+                )
+        except DjangoValidationError:
+            # Der Block wurde erst unter der Sperre sichtbar. Der atomic-Rollback
+            # hat den Erfolgs-Audit UND das Model-Block-Audit verworfen; den Block
+            # hier frisch bestimmen und mit Actor auditieren -> 403 statt 500.
+            block = instance.delete_block()
+            if not block:
+                raise
+            action, reason = block
             AuditLogEntry.objects.create(
                 actor=self.request.user,
-                action="delete",
+                action=action,
                 object_type="Document",
                 object_id=str(document_id),
-                detail={"title": title},
+                detail={"title": title, "reason": reason},
             )
+            raise PermissionDenied(f"Löschen gesperrt: {reason}")
 
     def _parse_document_ids(self, raw_ids):
         """Normalisiert eine ID-Liste für Mailroom-/Bulk-Actions.

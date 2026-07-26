@@ -254,6 +254,49 @@ class ArchiveApiTests(ArchiveDocMixin, APITestCase):
             1,
         )
 
+    def test_race_block_unter_sperre_gibt_403_statt_500(self):
+        # P1: Wird der Block ERST unter der Zeilensperre sichtbar (paralleles
+        # Sealing zwischen Vorabpruefung und Loeschen), wirft das Model eine
+        # DjangoValidationError. Die View muss das in 403 uebersetzen (nicht 500),
+        # den Block-Audit dauerhaft schreiben (kein Rollback-Verlust) und KEIN
+        # "delete"-Audit hinterlassen.
+        from unittest import mock
+
+        from django.core.exceptions import ValidationError as DjangoValidationError
+
+        doc = Document.objects.create(title="RaceDoc", owner=self.user)
+        version = DocumentVersion.objects.create(
+            document=doc, version_no=1, file_path="/tmp/z.pdf",
+            sha256="c" * 64, mime_type="application/pdf", size=1, is_immutable=False,
+        )
+        doc.current_version = version
+        doc.save(update_fields=["current_version"])
+        self.client.force_authenticate(self.user)
+
+        block = ("immutable_block", "Dokument enthält unveränderliche (WORM-)Versionen.")
+        # Vorabpruefung sieht (noch) keinen Block -> None; das gesperrte delete()
+        # scheitert (Sealing hat gewonnen); die Nachpruefung im except sieht ihn.
+        with mock.patch.object(
+            Document, "delete_block", side_effect=[None, block]
+        ), mock.patch.object(
+            Document, "delete", side_effect=DjangoValidationError("gesperrt")
+        ):
+            resp = self.client.delete(f"/api/documents/{doc.id}/")
+
+        self.assertEqual(resp.status_code, 403)
+        self.assertIn("WORM", str(resp.data["detail"]))
+        self.assertTrue(Document.objects.filter(pk=doc.pk).exists())
+        self.assertTrue(
+            AuditLogEntry.objects.filter(
+                action="immutable_block", object_id=str(doc.id)
+            ).exists()
+        )
+        self.assertFalse(
+            AuditLogEntry.objects.filter(
+                action="delete", object_id=str(doc.id)
+            ).exists()
+        )
+
     def test_archive_health_is_admin_only(self):
         archive.verify_document_archive(self.doc)
         self.client.force_authenticate(self.user)
