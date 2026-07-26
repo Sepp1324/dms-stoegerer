@@ -82,11 +82,42 @@ class PdfWorkbenchTests(APITestCase):
         ):
             resp = self.client.get(
                 f"/api/documents/{doc.id}/pdf-workbench/pages/1/thumbnail/"
+                f"?version_id={doc.current_version.id}"
             )
 
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp["Content-Type"], "image/jpeg")
         self.assertEqual(resp.content, b"jpeg-bytes")
+
+    def test_thumbnail_ohne_version_id_400(self):
+        doc = self._doc("thumb-noversion", self.user, pages=1)
+        self.client.force_authenticate(self.user)
+        resp = self.client.get(
+            f"/api/documents/{doc.id}/pdf-workbench/pages/1/thumbnail/"
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_thumbnail_fremde_version_404(self):
+        doc = self._doc("thumb-a", self.user, pages=1)
+        other = self._doc("thumb-b", self.user, pages=1)
+        self.client.force_authenticate(self.user)
+        resp = self.client.get(
+            f"/api/documents/{doc.id}/pdf-workbench/pages/1/thumbnail/"
+            f"?version_id={other.current_version.id}"
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_split_mit_veralteter_source_version_409(self):
+        doc = self._doc("split-stale", self.user, pages=2)
+        self.client.force_authenticate(self.user)
+        with mock.patch("documents.views.process_document_version.delay"):
+            resp = self.client.post(
+                f"/api/documents/{doc.id}/pdf-workbench/split/",
+                {"parts": [{"title": "T", "pages": [1]}], "source_version_id": 999999},
+                format="json",
+            )
+        self.assertEqual(resp.status_code, 409)
+        self.assertFalse(Document.objects.filter(title="T").exists())
 
     def test_thumbnail_cache_vermeidet_erneutes_rendern(self):
         # P1: Ein bereits gerendertes (version, page, dpi)-JPEG kommt beim zweiten
