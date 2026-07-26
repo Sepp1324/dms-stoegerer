@@ -94,7 +94,12 @@ class IsDmsAdmin(BasePermission):
 
 from . import classification, pipeline, storage
 from .filetypes import SNIFF_BYTES, UnsupportedFileType, detect, is_safe_inline
-from .throttling import AiRateThrottle, CaptureRateThrottle, UploadRateThrottle
+from .throttling import (
+    AiRateThrottle,
+    CaptureRateThrottle,
+    PdfThumbnailRateThrottle,
+    UploadRateThrottle,
+)
 from .services import version_compare
 from .models import (
     AuditLogEntry,
@@ -3591,6 +3596,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
         detail=True,
         methods=["get"],
         url_path=r"pdf-workbench/pages/(?P<page_no>[0-9]+)/thumbnail",
+        throttle_classes=[PdfThumbnailRateThrottle],  # serverseitiger Lastschutz (P1)
     )
     def pdf_workbench_page_thumbnail(self, request, pk=None, page_no=None):
         """JPEG-Miniatur einer einzelnen PDF-Seite für die visuelle Werkbank."""

@@ -98,8 +98,38 @@ def page_manifest(version: DocumentVersion) -> dict:
     }
 
 
+def _thumbnail_render_timeout() -> int:
+    """Sekunden-Timeout für das Poppler-Rendern einer Miniatur (P1)."""
+    return int(getattr(settings, "PDF_THUMBNAIL_TIMEOUT_SECONDS", 20))
+
+
+def _thumbnail_cache_path(version: DocumentVersion, page_no: int, dpi: int):
+    """Disk-Cache-Pfad einer Miniatur. Version-/seitenbasiert – der Seiteninhalt
+    einer Version ist unveränderlich, daher ist der Cache dauerhaft gültig."""
+    return (
+        storage.DATA_DIR
+        / "cache"
+        / "workbench_thumbs"
+        / str(version.id)
+        / f"{page_no}_{dpi}.jpg"
+    )
+
+
 def render_page_thumbnail(version: DocumentVersion, page_no: int, *, dpi: int = 110) -> bytes:
-    """Rendert eine einzelne PDF-Seite als kompaktes JPEG für die Werkbank."""
+    """Rendert eine einzelne PDF-Seite als kompaktes JPEG für die Werkbank.
+
+    Server-Cache (P1): Ein bereits gerendertes (version, page, dpi)-JPEG wird von
+    der Platte gelesen, statt Poppler erneut auszuführen – so kostet ein
+    Neu-Anfordern (mehrere Tabs, Reload, direkte API-Aufrufe) keinen weiteren
+    Renderprozess. Das Rendern selbst läuft mit hartem Timeout.
+    """
+    cache_path = _thumbnail_cache_path(version, page_no, dpi)
+    try:
+        if cache_path.exists():
+            return cache_path.read_bytes()
+    except OSError:
+        pass  # Cache ist best-effort – bei Lesefehler regulär rendern.
+
     count = _page_count(version)
     if page_no < 1 or page_no > count:
         raise ValidationError(f"Seite {page_no} liegt außerhalb von 1..{count}.")
@@ -112,6 +142,7 @@ def render_page_thumbnail(version: DocumentVersion, page_no: int, *, dpi: int = 
         first_page=page_no,
         last_page=page_no,
         fmt="jpeg",
+        timeout=_thumbnail_render_timeout(),
     )
     if not images:
         raise ValidationError(f"Seite {page_no} konnte nicht gerendert werden.")
@@ -119,7 +150,14 @@ def render_page_thumbnail(version: DocumentVersion, page_no: int, *, dpi: int = 
     image.thumbnail((360, 480))
     buffer = io.BytesIO()
     image.convert("RGB").save(buffer, format="JPEG", quality=82, optimize=True)
-    return buffer.getvalue()
+    data = buffer.getvalue()
+
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_bytes(data)
+    except OSError:
+        pass  # Cache-Schreibfehler darf die Antwort nicht verhindern.
+    return data
 
 
 def rewrite_as_new_version(
