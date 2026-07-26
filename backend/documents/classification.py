@@ -199,7 +199,14 @@ def assign_folder_from_rules(document) -> str | None:
     for rule in rules:
         if not rule_matches(rule, text, subject=subject, sender=sender):
             continue
-        folder_path = str((rule.then or {}).get("folder", "")).strip()
+        # Defensiv (P2): ``then`` MUSS ein Dict sein. Ein per Alt-DB/Fixture
+        # gespeichertes ``then`` als Liste (``or {}`` fängt nur falsy) würde sonst
+        # an ``.get`` mit AttributeError abbrechen – der Nachlauf läuft in
+        # classify_version, sodass ein Triage-Dokument NACH der Workflow-Owner-
+        # Zuweisung auf FAILED ginge. apply_rules ist bereits robust; hier
+        # nachziehen. (Neue Regeln werden vom Serializer strikt validiert.)
+        then = rule.then if isinstance(rule.then, dict) else {}
+        folder_path = _then_text(then, "folder")
         if not folder_path:
             continue
         folder = _get_or_create_folder(folder_path, document.owner)
