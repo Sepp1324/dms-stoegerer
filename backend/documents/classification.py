@@ -100,7 +100,10 @@ def _contains_any(match, key: str, haystack: str) -> bool | None:
 
 
 def rule_matches(rule, text: str, *, subject: str = "", sender: str = "") -> bool:
-    match = rule.match or {}
+    # Defensiv: ``match`` MUSS ein Dict sein. Ein per Fixture/Alt-DB gespeichertes
+    # ``match`` als Liste/Skalar (``or {}`` fängt nur falsy) würde sonst unten an
+    # ``.get`` mit AttributeError die ganze Klassifizierung abbrechen.
+    match = rule.match if isinstance(rule.match, dict) else {}
     checks = []
 
     for key, haystack in (
