@@ -331,6 +331,55 @@ class PdfWorkbenchTests(APITestCase):
                 DocumentVersion.ProcessingState.FAILED,
             )
 
+    def test_split_zu_viele_teile_ohne_pdf_oeffnungen(self):
+        # P1: Ein Payload mit zu vielen Teilen wird abgelehnt, OHNE das PDF je Teil
+        # zu öffnen (frueher tausende _page_count-Oeffnungen vor der Ablehnung).
+        from django.test import override_settings
+
+        from .services import pdf_workbench as pw
+
+        doc = self._doc("split-many", self.user, pages=3)
+        self.client.force_authenticate(self.user)
+        parts = [{"title": f"T{i}", "pages": [1]} for i in range(60)]
+
+        with override_settings(PDF_WORKBENCH_MAX_DOCUMENTS=50), mock.patch.object(
+            pw, "_page_count", wraps=pw._page_count
+        ) as pc:
+            resp = self.client.post(
+                f"/api/documents/{doc.id}/pdf-workbench/split/",
+                {"parts": parts},
+                format="json",
+            )
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("Zu viele Teile", resp.data["detail"])
+        pc.assert_not_called()  # gar nicht erst geoeffnet (View-Vorabdeckel)
+
+    def test_split_kumuliertes_seitenlimit_oeffnet_pdf_nur_einmal(self):
+        from django.test import override_settings
+
+        from .services import pdf_workbench as pw
+
+        doc = self._doc("split-pages", self.user, pages=3)
+        self.client.force_authenticate(self.user)
+        # 3 Teile x 3 Seiten = 9 > Limit 4.
+        parts = [{"title": f"T{i}", "pages": [1, 2, 3]} for i in range(3)]
+
+        with override_settings(PDF_WORKBENCH_MAX_PAGES=4), mock.patch.object(
+            pw, "_page_count", wraps=pw._page_count
+        ) as pc:
+            resp = self.client.post(
+                f"/api/documents/{doc.id}/pdf-workbench/split/",
+                {"parts": parts},
+                format="json",
+            )
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("Zu viele Seiten", resp.data["detail"])
+        # PDF genau EINMAL geoeffnet (nicht je Teil).
+        self.assertLessEqual(pc.call_count, 1)
+        self.assertFalse(Document.objects.filter(title__startswith="T").exists())
+
     def test_merge_creates_new_version_and_respects_owner_scope(self):
         target = self._doc("merge-target", self.user, pages=2)
         appendix = self._doc("merge-appendix", self.user, pages=1)

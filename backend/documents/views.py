@@ -3722,10 +3722,26 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN,
             )
         document = self.get_object()
+        from .services import pdf_workbench
+
         parts = request.data.get("parts")
         if not isinstance(parts, list) or not parts:
             return Response(
                 {"detail": "Feld 'parts' muss eine nicht-leere Liste sein."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        # Teileanzahl SOFORT deckeln (P1): Ohne diese Vorabprüfung würde der Service
+        # erst für JEDEN Teil das PDF öffnen und die Teile validieren, bevor das
+        # Limit greift – ein grosser Payload löst tausende PDF-Öffnungen aus, obwohl
+        # er ohnehin abgelehnt wird.
+        if len(parts) > pdf_workbench.merge_max_documents():
+            return Response(
+                {
+                    "detail": (
+                        "Zu viele Teile "
+                        f"({len(parts)} > Limit {pdf_workbench.merge_max_documents()})."
+                    )
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
         for idx, part in enumerate(parts, start=1):
@@ -3734,8 +3750,6 @@ class DocumentViewSet(viewsets.ModelViewSet):
                     {"detail": f"Teil {idx} braucht eine pages-Liste."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-
-        from .services import pdf_workbench
 
         try:
             created = pdf_workbench.split_into_documents(document, parts, actor=request.user)
