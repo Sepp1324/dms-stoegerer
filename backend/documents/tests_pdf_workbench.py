@@ -142,6 +142,34 @@ class PdfWorkbenchTests(APITestCase):
         self.assertEqual(first, second)
         conv.assert_called_once()  # zweiter Aufruf aus dem Cache, kein Re-Render
 
+    def test_thumbnail_cache_read_aktualisiert_mtime_lru(self):
+        # P2: Echte LRU – ein Cache-TREFFER (Lesezugriff) muss die mtime auffrischen,
+        # damit der Größen-Prune (sortiert nach mtime) häufig gelesene, aber alte
+        # Thumbnails nicht fälschlich als „ältestes" verwirft.
+        import os
+        import time
+
+        from PIL import Image
+
+        from .services import pdf_workbench
+
+        doc = self._doc("lru", self.user, pages=1)
+        version = doc.current_version
+
+        with mock.patch.object(storage, "DATA_DIR", Path(self.tmp.name)), mock.patch(
+            "pdf2image.convert_from_path",
+            return_value=[Image.new("RGB", (20, 20), "white")],
+        ):
+            pdf_workbench.render_page_thumbnail(version, 1)  # rendert + schreibt Cache
+            cache_path = pdf_workbench._thumbnail_cache_path(version, 1, 110)
+            self.assertTrue(cache_path.exists())
+            # mtime künstlich alt setzen, dann Cache-Treffer auslösen.
+            old = time.time() - 30 * 86400
+            os.utime(cache_path, (old, old))
+            pdf_workbench.render_page_thumbnail(version, 1)  # Cache-Treffer
+
+        self.assertGreater(cache_path.stat().st_mtime, old + 86400)
+
     def test_thumbnail_render_bekommt_timeout(self):
         from PIL import Image
 

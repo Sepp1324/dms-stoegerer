@@ -3,6 +3,7 @@ import os
 import tempfile
 import time
 from pathlib import Path
+from unittest import mock
 
 from django.test import TestCase, override_settings
 
@@ -51,3 +52,15 @@ class ThumbnailCachePruneTests(TestCase):
         self.assertFalse(a.exists())  # aelteste -> LRU-Opfer
         self.assertTrue(b.exists())
         self.assertTrue(c.exists())
+
+    def test_loeschfehler_wird_als_fehler_gemeldet(self):
+        # P2: Schlaegt eine Loeschung fehl, darf der Task NICHT still Erfolg melden
+        # (sonst bliebe der Speicherverlust im Monitoring unsichtbar) -> Task-Fehler.
+        self._write("v/old.jpg", size=10, age_days=30)
+        with override_settings(
+            WORKBENCH_THUMB_CACHE_DIR=str(self.root),
+            WORKBENCH_THUMB_CACHE_TTL_DAYS=14,
+            WORKBENCH_THUMB_CACHE_MAX_MB=1024,
+        ), mock.patch.object(tasks.os, "remove", side_effect=OSError("EACCES")):
+            with self.assertRaises(OSError):
+                tasks.prune_workbench_thumbnail_cache()
