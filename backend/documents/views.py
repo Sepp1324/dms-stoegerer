@@ -3614,18 +3614,39 @@ class DocumentViewSet(viewsets.ModelViewSet):
         throttle_classes=[PdfThumbnailRateThrottle],  # serverseitiger Lastschutz (P1)
     )
     def pdf_workbench_page_thumbnail(self, request, pk=None, page_no=None):
-        """JPEG-Miniatur einer einzelnen PDF-Seite für die visuelle Werkbank."""
+        """JPEG-Miniatur einer einzelnen PDF-Seite für die visuelle Werkbank.
+
+        ``version_id`` ist verpflichtend (P1): Es wird GENAU die Version gerendert,
+        auf der das Manifest des Clients beruht – nicht pauschal die (evtl.
+        inzwischen neue) aktuelle Version, sonst zeigte ein alter Tab die Seiten
+        einer fremden Version. Fehlt/ungültig -> 400; gehört die Version nicht zum
+        Dokument -> 404.
+        """
         document = self.get_object()
-        if document.current_version is None:
+        raw_version = request.query_params.get("version_id")
+        if not raw_version:
             return Response(
-                {"detail": "Dokument hat keine aktuelle Version."},
+                {"detail": "Query-Parameter 'version_id' ist erforderlich."},
                 status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            version_id = int(raw_version)
+        except (TypeError, ValueError):
+            return Response(
+                {"detail": "'version_id' muss eine Zahl sein."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        version = document.versions.filter(pk=version_id).first()
+        if version is None:
+            return Response(
+                {"detail": "Version gehört nicht zu diesem Dokument."},
+                status=status.HTTP_404_NOT_FOUND,
             )
         from .services import pdf_workbench
 
         try:
             data = pdf_workbench.render_page_thumbnail(
-                document.current_version,
+                version,
                 int(page_no),
             )
         except DjangoValidationError as exc:
@@ -3783,7 +3804,14 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 )
 
         try:
-            created = pdf_workbench.split_into_documents(document, parts, actor=request.user)
+            created = pdf_workbench.split_into_documents(
+                document,
+                parts,
+                actor=request.user,
+                expected_version_id=_workbench_source_version_id(request),
+            )
+        except pdf_workbench.StaleWorkbenchVersion as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
         except DjangoValidationError as exc:
             return Response({"detail": "; ".join(exc.messages)}, status=400)
         except Exception as exc:  # noqa: BLE001

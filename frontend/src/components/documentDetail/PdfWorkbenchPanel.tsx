@@ -144,9 +144,11 @@ function evictOtherVersionThumbnails(documentId: number, keepVersionId: number) 
 function PageThumb({
   documentId,
   item,
+  versionId,
 }: {
   documentId: number;
   item: PageItem;
+  versionId: number;
 }) {
   // Version-genauer Cache-Key: ``item.key`` ist ``${versionId}-${page}``, davor
   // die Dokument-ID -> nach einer neuen Version wird NICHT die alte Miniatur
@@ -169,7 +171,7 @@ function PageThumb({
       if (started) return;
       started = true;
       scheduleThumbnail(() =>
-        getPdfWorkbenchPageThumbnail(documentId, item.page),
+        getPdfWorkbenchPageThumbnail(documentId, item.page, versionId),
       )
         .then((blob) => {
           if (!active) return;
@@ -205,7 +207,7 @@ function PageThumb({
       active = false;
       observer.disconnect();
     };
-  }, [documentId, item.page, cacheKey, src]);
+  }, [documentId, item.page, versionId, cacheKey, src]);
 
   return (
     <div className="pdf-page-card__thumb" ref={containerRef}>
@@ -357,7 +359,13 @@ export function PdfWorkbenchPanel({
     setMessage(null);
     try {
       if (!items.length) throw new Error("Mindestens eine Seite ist erforderlich.");
-      await rewritePdfDocument(documentId, specsFromItems(items), "PDF-Werkbank");
+      if (!manifest) throw new Error("Seiten sind noch nicht geladen.");
+      await rewritePdfDocument(
+        documentId,
+        specsFromItems(items),
+        manifest.version_id,
+        "PDF-Werkbank",
+      );
       setMessage("Neue Version wurde erstellt und zur Verarbeitung eingereiht.");
       onChanged();
       load();
@@ -402,7 +410,12 @@ export function PdfWorkbenchPanel({
       const pages = selectedPages(items, selected);
       if (!pages.length) throw new Error("Bitte zuerst Seiten auswählen.");
       const title = splitTitle.trim() || `Auszug ${pages.join(",")}`;
-      const result = await splitPdfDocument(documentId, [{ title, pages }]);
+      if (!manifest) throw new Error("Seiten sind noch nicht geladen.");
+      const result = await splitPdfDocument(
+        documentId,
+        [{ title, pages }],
+        manifest.version_id,
+      );
       setMessage(`${result.documents.length} neues Dokument wurde erstellt.`);
       setSplitTitle("");
       setSelected(new Set());
@@ -421,8 +434,9 @@ export function PdfWorkbenchPanel({
     setError(null);
     setMessage(null);
     try {
+      if (!manifest) throw new Error("Seiten sind noch nicht geladen.");
       const parts = parseSplitPlan(splitPlan);
-      const result = await splitPdfDocument(documentId, parts);
+      const result = await splitPdfDocument(documentId, parts, manifest.version_id);
       setMessage(`${result.documents.length} neue Dokumente wurden erstellt.`);
       setSplitPlan("");
       onChanged();
@@ -441,7 +455,13 @@ export function PdfWorkbenchPanel({
     setMessage(null);
     try {
       if (!mergeIds.length) throw new Error("Mindestens ein Dokument auswählen.");
-      await mergePdfDocuments(documentId, mergeIds, "PDF-Werkbank");
+      if (!manifest) throw new Error("Seiten sind noch nicht geladen.");
+      await mergePdfDocuments(
+        documentId,
+        mergeIds,
+        manifest.version_id,
+        "PDF-Werkbank",
+      );
       setMessage("Zusammenführung wurde als neue Version erstellt.");
       setMergeIds([]);
       setMergeQuery("");
@@ -511,7 +531,11 @@ export function PdfWorkbenchPanel({
               />
               Seite {item.page}
             </label>
-            <PageThumb documentId={documentId} item={item} />
+            <PageThumb
+              documentId={documentId}
+              item={item}
+              versionId={manifest?.version_id ?? 0}
+            />
             <div className="pdf-page-card__meta">
               <span>#{index + 1}</span>
               <span>{totalRotation(item)}°</span>

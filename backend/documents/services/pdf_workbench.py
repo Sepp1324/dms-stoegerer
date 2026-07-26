@@ -316,9 +316,14 @@ def split_into_documents(
     parts: list[dict],
     *,
     actor,
+    expected_version_id=None,
 ) -> list[tuple[Document, DocumentVersion]]:
     """Erzeugt aus Seitenbereichen neue Dokumente und kopiert Kernmetadaten."""
     source = _current_pdf(source_document)
+    # Konfliktprüfung (P1): Der Split beruht auf einer bestimmten Quellversion.
+    # Hat inzwischen eine parallele Aktion eine neue aktuelle Version erzeugt,
+    # würden die Seitenbereiche auf eine FREMDE Version angewendet -> 409.
+    _ensure_current_version(source_document, expected_version_id)
 
     # Ressourcengrenzen ZUERST und BILLIG prüfen (P1):
     #  * Teileanzahl vor der Schleife (je Teil ein neues Dokument),

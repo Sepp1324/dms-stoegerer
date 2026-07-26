@@ -1712,9 +1712,13 @@ export async function getPdfWorkbenchPages(
 export async function getPdfWorkbenchPageThumbnail(
   id: number,
   pageNo: number,
+  versionId: number,
 ): Promise<Blob> {
+  // version_id verpflichtend mitsenden (P1): Der Endpunkt rendert damit GENAU die
+  // Version, auf der das Manifest beruht – nicht immer die (evtl. inzwischen neue)
+  // aktuelle Version.
   const res = await apiFetch(
-    `/documents/${id}/pdf-workbench/pages/${pageNo}/thumbnail/`,
+    `/documents/${id}/pdf-workbench/pages/${pageNo}/thumbnail/?version_id=${versionId}`,
   );
   if (!res.ok) {
     throw new Error(`Seitenminiatur nicht verfügbar (HTTP ${res.status})`);
@@ -1725,32 +1729,37 @@ export async function getPdfWorkbenchPageThumbnail(
 export function rewritePdfDocument(
   id: number,
   pages: PdfWorkbenchPageSpec[],
+  sourceVersionId: number,
   reason = "",
 ): Promise<DocumentDetail> {
   return postJson<DocumentDetail>(`/documents/${id}/pdf-workbench/rewrite/`, {
     pages,
     reason,
+    source_version_id: sourceVersionId,
   });
 }
 
 export function mergePdfDocuments(
   id: number,
   documentIds: number[],
+  sourceVersionId: number,
   reason = "",
 ): Promise<DocumentDetail> {
   return postJson<DocumentDetail>(`/documents/${id}/pdf-workbench/merge/`, {
     document_ids: documentIds,
     reason,
+    source_version_id: sourceVersionId,
   });
 }
 
 export function splitPdfDocument(
   id: number,
   parts: PdfWorkbenchSplitPart[],
+  sourceVersionId: number,
 ): Promise<{ documents: DocumentDetail[] }> {
   return postJson<{ documents: DocumentDetail[] }>(
     `/documents/${id}/pdf-workbench/split/`,
-    { parts },
+    { parts, source_version_id: sourceVersionId },
   );
 }
 
