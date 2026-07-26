@@ -4967,6 +4967,29 @@ class ImportPaperlessCommandTests(TestCase):
             call_command("import_paperless", source=str(self.source), owner="gibtsnicht")
         self.assertEqual(Document.objects.count(), 0)
 
+    def test_fehler_im_import_laesst_keine_verwaiste_datei(self):
+        # P2: Scheitert die DB-Anlage nach dem Kopieren der Datei, rollt die DB
+        # zurueck – die kopierte Originaldatei darf NICHT ohne DB-Eintrag
+        # verwaisen (wird im storage-Bereich wieder entfernt).
+        from unittest import mock
+
+        from django.core.management import call_command
+
+        from . import pipeline, storage
+
+        with mock.patch.object(
+            storage, "ORIGINALS_DIR", self.originals
+        ), mock.patch.object(pipeline, "process_version"), mock.patch.object(
+            pipeline, "create_document_from_file", side_effect=RuntimeError("boom")
+        ):
+            call_command("import_paperless", source=str(self.source), owner="importeur")
+
+        self.assertEqual(Document.objects.count(), 0)
+        # Keine verwaiste Kopie im storage-Bereich.
+        self.assertEqual(list(self.originals.iterdir()), [])
+        # Die Quelldateien bleiben unberuehrt.
+        self.assertTrue((self.source / "rechnung.pdf").exists())
+
 
 class SearchSnippetTests(APITestCase):
     """Suchergebnis-Snippets mit Highlighting via ts_headline (STOAA-368/370).
