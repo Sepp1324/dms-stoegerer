@@ -266,30 +266,56 @@ def cleanup_artifact_files(self, paths: list[str]) -> dict:
     Läuft NACH dem Commit der Löschung (``Document.delete`` reiht via
     ``transaction.on_commit`` ein). Bereits fehlende Dateien sind ok; bei einem
     transienten I/O-/NFS-Fehler wird die GESAMTE Liste (nur die noch vorhandenen
-    Dateien) mit begrenztem Backoff erneut versucht, statt Artefakte liegen zu
-    lassen. Der DB-Zustand ist zu diesem Zeitpunkt bereits konsistent (kein
-    Verweis mehr) – hier geht es nur noch um den Speicher.
+    Dateien) mit begrenztem Backoff erneut versucht.
+
+    Sicherheit (P1): Ein Pfad wird NUR entfernt, wenn (a) KEINE andere
+    ``DocumentVersion`` ihn noch referenziert (geteilte Datei/Altbestand/manuelle
+    DB-Einträge dürfen kein noch gültiges Dokument beschädigen) und (b) er nach
+    Kanonisierung UNTERHALB des DMS-Datenverzeichnisses liegt (kein ``os.remove``
+    auf beliebige Serverpfade).
     """
+    from django.db.models import Q
+
+    from .models import DocumentVersion
+
+    data_root = os.path.realpath(str(storage.DATA_DIR))
     removed = 0
     failed: list[str] = []
     for path in paths:
         if not path:
             continue
+        # (a) Noch von einer anderen Version referenziert? -> NICHT entfernen.
+        if DocumentVersion.objects.filter(
+            Q(file_path=path) | Q(archive_path=path) | Q(thumbnail_path=path)
+        ).exists():
+            logger.info("Artefakt %s noch referenziert – nicht entfernt.", path)
+            continue
+        # (b) Pfad kanonisieren und hart auf DATA_DIR begrenzen.
+        real = os.path.realpath(path)
+        if real != data_root and not real.startswith(data_root + os.sep):
+            logger.warning(
+                "Artefakt-Cleanup: Pfad ausserhalb DATA_DIR abgelehnt: %s", path
+            )
+            continue
         try:
-            os.remove(path)
+            os.remove(real)
             removed += 1
         except FileNotFoundError:
             pass  # schon weg -> ok
         except OSError as exc:
-            logger.warning("Artefakt-Cleanup: %s nicht entfernbar: %s", path, exc)
+            logger.warning("Artefakt-Cleanup: %s nicht entfernbar: %s", real, exc)
             failed.append(path)
-    if failed and self.request.retries < self.max_retries:
-        raise self.retry(
-            args=[failed],
-            countdown=min(600, 60 * (2 ** self.request.retries)),
-            exc=OSError(f"Artefakt-Cleanup unvollständig: {failed}"),
-        )
-    return {"removed": removed, "failed": failed}
+    if failed:
+        if self.request.retries < self.max_retries:
+            raise self.retry(
+                args=[failed],
+                countdown=min(600, 60 * (2 ** self.request.retries)),
+                exc=OSError(f"Artefakt-Cleanup unvollständig: {failed}"),
+            )
+        # Retries erschöpft (P2): NICHT als Erfolg durchfallen – sonst bliebe der
+        # Speicherverlust im Monitoring unsichtbar. Als Task-FEHLER enden.
+        raise OSError(f"Artefakt-Cleanup endgültig fehlgeschlagen: {failed}")
+    return {"removed": removed, "failed": []}
 
 
 @shared_task(bind=True, max_retries=5)
