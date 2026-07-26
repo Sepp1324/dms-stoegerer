@@ -12,6 +12,11 @@ data:
   POSTGRES_HOST: "postgres"
   POSTGRES_PORT: "5432"
   REDIS_URL: "redis://redis:6379/0"
+  # Django-Cache clusterweit auf Redis (P2): Ohne CACHE_URL nutzt Django den
+  # PROZESSLOKALEN LocMemCache – jeder Gunicorn-Worker führte dann eigene Rate-
+  # Limit-Zähler (Upload/AI/Thumbnail), sodass das Limit effektiv pro Worker statt
+  # pro Nutzer gilt. Eigene Redis-DB (1), getrennt vom Celery-Broker (DB 0).
+  CACHE_URL: "redis://redis:6379/1"
   DMS_DATA_DIR: "/data"
   # onnxruntime/OpenMP-Threads deckeln: ungedeckelt startet onnxruntime so viele
   # Threads wie die NODE CPUs (nicht das Container-Limit), jeder mit Speicher-

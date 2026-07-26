@@ -258,6 +258,40 @@ def _sync_document_flashcards(document_id: int) -> dict:
     }
 
 
+@shared_task(bind=True, max_retries=5, default_retry_delay=60)
+def cleanup_artifact_files(self, paths: list[str]) -> dict:
+    """Entfernt verwaiste Artefaktdateien (Original/Archiv/Thumbnail) eines
+    gelöschten Dokuments von der Platte/dem PVC (P2).
+
+    Läuft NACH dem Commit der Löschung (``Document.delete`` reiht via
+    ``transaction.on_commit`` ein). Bereits fehlende Dateien sind ok; bei einem
+    transienten I/O-/NFS-Fehler wird die GESAMTE Liste (nur die noch vorhandenen
+    Dateien) mit begrenztem Backoff erneut versucht, statt Artefakte liegen zu
+    lassen. Der DB-Zustand ist zu diesem Zeitpunkt bereits konsistent (kein
+    Verweis mehr) – hier geht es nur noch um den Speicher.
+    """
+    removed = 0
+    failed: list[str] = []
+    for path in paths:
+        if not path:
+            continue
+        try:
+            os.remove(path)
+            removed += 1
+        except FileNotFoundError:
+            pass  # schon weg -> ok
+        except OSError as exc:
+            logger.warning("Artefakt-Cleanup: %s nicht entfernbar: %s", path, exc)
+            failed.append(path)
+    if failed and self.request.retries < self.max_retries:
+        raise self.retry(
+            args=[failed],
+            countdown=min(600, 60 * (2 ** self.request.retries)),
+            exc=OSError(f"Artefakt-Cleanup unvollständig: {failed}"),
+        )
+    return {"removed": removed, "failed": failed}
+
+
 @shared_task(bind=True, max_retries=5)
 def push_document_flashcards(self, document_id: int) -> dict:
     """Erzeugt aus der aktuellen Dokumentversion MC-Lernkarten und pusht sie an

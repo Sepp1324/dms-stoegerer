@@ -28,7 +28,12 @@ function toItems(manifest: PdfWorkbenchManifest | null): PageItem[] {
   }));
 }
 
-function parsePages(value: string): number[] {
+// Sicherheitsobergrenze für die Gesamtzahl an Seiten in einem Split-Plan (P2):
+// Ohne sie baute eine Eingabe wie ``1-999999999`` SYNCHRON ein riesiges Array auf
+// und fror den Browser ein, bevor das Backend-Limit greifen konnte.
+const MAX_SPLIT_PLAN_PAGES = 5000;
+
+function parsePages(value: string, maxPage: number): number[] {
   const pages: number[] = [];
   for (const raw of value.split(",")) {
     const item = raw.trim();
@@ -38,17 +43,32 @@ function parsePages(value: string): number[] {
       const start = Number(range[1]);
       const end = Number(range[2]);
       if (start < 1 || end < start) throw new Error(`Ungültiger Bereich: ${item}`);
-      for (let page = start; page <= end; page += 1) pages.push(page);
+      // Endseite VOR der Expansion gegen die Dokument-Seitenzahl prüfen – so wird
+      // ``1-999999999`` sofort abgelehnt statt Millionen Einträge zu erzeugen.
+      if (end > maxPage)
+        throw new Error(`Seite ${end} liegt außerhalb von 1..${maxPage}.`);
+      for (let page = start; page <= end; page += 1) {
+        pages.push(page);
+        if (pages.length > MAX_SPLIT_PLAN_PAGES)
+          throw new Error("Zu viele Seiten im Split-Plan.");
+      }
       continue;
     }
     const page = Number(item);
     if (!Number.isInteger(page) || page < 1) throw new Error(`Ungültige Seite: ${item}`);
+    if (page > maxPage)
+      throw new Error(`Seite ${page} liegt außerhalb von 1..${maxPage}.`);
     pages.push(page);
+    if (pages.length > MAX_SPLIT_PLAN_PAGES)
+      throw new Error("Zu viele Seiten im Split-Plan.");
   }
   return pages;
 }
 
-function parseSplitPlan(value: string): PdfWorkbenchSplitPart[] {
+function parseSplitPlan(value: string, maxPage: number): PdfWorkbenchSplitPart[] {
+  if (!maxPage || maxPage < 1)
+    throw new Error("Seiten sind noch nicht geladen.");
+  let cumulative = 0;
   const parts = value
     .split("\n")
     .map((line) => line.trim())
@@ -58,8 +78,11 @@ function parseSplitPlan(value: string): PdfWorkbenchSplitPart[] {
         ? line.split(/:(.+)/).filter(Boolean)
         : [`Teil ${idx + 1}`, line];
       const title = titlePart.trim() || `Teil ${idx + 1}`;
-      const pages = parsePages((pagesPart ?? "").trim());
+      const pages = parsePages((pagesPart ?? "").trim(), maxPage);
       if (!pages.length) throw new Error(`Teil "${title}" hat keine Seiten.`);
+      cumulative += pages.length;
+      if (cumulative > MAX_SPLIT_PLAN_PAGES)
+        throw new Error("Split-Plan hat insgesamt zu viele Seiten.");
       return { title, pages };
     });
   if (!parts.length) throw new Error("Mindestens ein Split-Teil ist erforderlich.");

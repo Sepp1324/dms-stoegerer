@@ -2593,56 +2593,41 @@ class DocumentViewSet(viewsets.ModelViewSet):
 
         Audit-Einträge referenzieren die ID als String (keine FK) und überleben
         die Löschung des Dokuments – das Protokoll bleibt append-only lückenlos.
+
+        Löschsperre (P1): EINE Quelle (``delete_block()``) prüft Legal Hold, WORM
+        UND die Retention von Dokument **und** einzelnen Versionen. Frűher prüfte
+        die View nur die Dokument-Retention und schrieb dann bereits ``delete``;
+        eine aktive VERSIONS-Retention flog erst im Model-``delete()`` als
+        DjangoValidationError auf (HTTP 500), das Dokument blieb, aber im Audit
+        stand „gelöscht". Jetzt: korrektes Block-Audit + 403, sonst Löschen und
+        Erfolgs-Audit ATOMAR.
         """
         from rest_framework.exceptions import PermissionDenied
 
-        if instance.legal_hold:
+        block = instance.delete_block()
+        if block:
+            action, reason = block
             AuditLogEntry.objects.create(
                 actor=self.request.user,
-                action="legal_hold_block",
+                action=action,
                 object_type="Document",
                 object_id=str(instance.id),
-                detail={"title": instance.title, "reason": instance.legal_hold_reason},
+                detail={"title": instance.title, "reason": reason},
             )
-            raise PermissionDenied(
-                "Dokument steht unter Legal Hold und kann nicht gelöscht werden."
-            )
+            raise PermissionDenied(f"Löschen gesperrt: {reason}")
 
-        # WORM: Dokument mit unveränderlichen Versionen darf nicht gelöscht werden.
-        if instance.versions.filter(is_immutable=True).exists():
+        # Löschen + Erfolgs-Audit atomar. Die ID/Titel VOR dem Löschen sichern –
+        # nach ``delete()`` setzt Django ``instance.pk`` auf None.
+        with transaction.atomic():
+            document_id, title = instance.id, instance.title
+            super().perform_destroy(instance)
             AuditLogEntry.objects.create(
                 actor=self.request.user,
-                action="immutable_block",
+                action="delete",
                 object_type="Document",
-                object_id=str(instance.id),
-                detail={"title": instance.title, "reason": "unveränderliche Version vorhanden"},
+                object_id=str(document_id),
+                detail={"title": title},
             )
-            raise PermissionDenied(
-                "Dokument enthält unveränderliche Versionen und kann nicht gelöscht werden."
-            )
-
-        # Aufbewahrungsfrist: retention_until am Dokument prüfen.
-        today = timezone.now().date()
-        if instance.retention_until and today < instance.retention_until:
-            AuditLogEntry.objects.create(
-                actor=self.request.user,
-                action="retention_block",
-                object_type="Document",
-                object_id=str(instance.id),
-                detail={"title": instance.title, "retention_until": str(instance.retention_until)},
-            )
-            raise PermissionDenied(
-                f"Aufbewahrungsfrist bis {instance.retention_until} aktiv – Löschen gesperrt."
-            )
-
-        AuditLogEntry.objects.create(
-            actor=self.request.user,
-            action="delete",
-            object_type="Document",
-            object_id=str(instance.id),
-            detail={"title": instance.title},
-        )
-        super().perform_destroy(instance)
 
     def _parse_document_ids(self, raw_ids):
         """Normalisiert eine ID-Liste für Mailroom-/Bulk-Actions.

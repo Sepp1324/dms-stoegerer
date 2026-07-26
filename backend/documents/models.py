@@ -554,37 +554,97 @@ class Document(models.Model):
         """
         super().save(*args, **kwargs)
 
-    def delete_block_reason(self):
-        """Zentrale Löschsperre (WORM / Aufbewahrung / Legal Hold) – EINE Quelle
-        für API, Django-Admin und programmatische Pfade. Gibt einen Grund-Text
-        zurück, wenn das Dokument NICHT gelöscht werden darf, sonst ``None``."""
+    def delete_block(self):
+        """Zentrale Löschsperre – EINE Quelle für API, Django-Admin und
+        programmatische Pfade. Gibt ``(audit_action, grund_text)`` zurück, wenn das
+        Dokument NICHT gelöscht werden darf, sonst ``None``.
+
+        Der ``audit_action`` benennt den KONKRETEN Blockiergrund (legal_hold_block/
+        immutable_block/retention_block), damit er korrekt auditiert wird (P1) –
+        NICHT pauschal als immutable_block. Prüft insbesondere auch die Retention
+        einzelner VERSIONEN (nicht nur des Dokuments)."""
         if self.legal_hold:
-            return "Dokument steht unter Legal Hold."
+            return ("legal_hold_block", "Dokument steht unter Legal Hold.")
         if self.versions.filter(is_immutable=True).exists():
-            return "Dokument enthält unveränderliche (WORM-)Versionen."
+            return (
+                "immutable_block",
+                "Dokument enthält unveränderliche (WORM-)Versionen.",
+            )
         today = timezone.now().date()
         if self.retention_until and today < self.retention_until:
-            return f"Aufbewahrungsfrist bis {self.retention_until} aktiv."
+            return (
+                "retention_block",
+                f"Aufbewahrungsfrist bis {self.retention_until} aktiv.",
+            )
         for version in self.versions.all():
             if version.retention_until and today < version.retention_until:
                 return (
+                    "retention_block",
                     f"Version {version.version_no}: Aufbewahrungsfrist bis "
-                    f"{version.retention_until} aktiv."
+                    f"{version.retention_until} aktiv.",
                 )
         return None
+
+    def delete_block_reason(self):
+        """Rückwärtskompatibler Grund-Text (oder ``None``) – delegiert an
+        ``delete_block()``."""
+        block = self.delete_block()
+        return block[1] if block else None
 
     def delete(self, *args, **kwargs):
         """Guard gegen programmatisches Löschen WORM-/retention-/legal-hold-
         geschützter Dokumente. Der Django-Admin umgeht ``delete()`` bewusst über
         den Collector – dort greift stattdessen ``has_delete_permission`` (gesperrt,
         siehe admin.py). Die API prüft zusätzlich in ``perform_destroy`` (Audit)."""
-        reason = self.delete_block_reason()
-        if reason:
-            from .audit import log_immutable_block
+        block = self.delete_block()
+        if block:
+            from .audit import log_delete_block
 
-            log_immutable_block("Document", self.pk)
+            action, reason = block
+            log_delete_block("Document", self.pk, action=action, reason=reason)
             raise ValidationError(f"Löschen gesperrt: {reason}")
+
+        # Artefaktpfade (Original/Archiv/Thumbnail) der Versionen VOR dem DB-Löschen
+        # einsammeln – danach sind die Zeilen (CASCADE) weg (P2). Die eigentliche
+        # Entfernung läuft NACH dem Commit als Retry-fähiger Task, damit gelöschte
+        # Inhalte nicht dauerhaft auf dem PVC liegen bleiben.
+        artifact_paths = [
+            path
+            for version in self.versions.all()
+            for path in (
+                version.file_path,
+                version.archive_path,
+                version.thumbnail_path,
+            )
+            if path
+        ]
         super().delete(*args, **kwargs)
+        if artifact_paths:
+            _schedule_artifact_cleanup(artifact_paths)
+
+
+def _schedule_artifact_cleanup(paths: list[str]) -> None:
+    """Reiht den Artefakt-Cleanup NACH dem Commit ein (P2).
+
+    Erst nach erfolgreichem Commit werden Dateien entfernt (sonst gingen bei einem
+    Rollback Dateien verloren, deren DB-Verweis noch existiert). Ist der Broker
+    nicht erreichbar, wird best-effort inline entfernt (kein Retry, aber die
+    Artefakte verwaisen nicht dauerhaft)."""
+    from django.db import transaction
+
+    def _dispatch():
+        from .tasks import cleanup_artifact_files
+
+        try:
+            cleanup_artifact_files.delay(paths)
+        except Exception:  # noqa: BLE001 – Broker-Ausfall: inline aufräumen
+            for path in paths:
+                try:
+                    os.remove(path)
+                except OSError:
+                    logger.warning("Artefakt-Cleanup (inline) fehlgeschlagen: %s", path)
+
+    transaction.on_commit(_dispatch)
 
 
 class DocumentVersion(models.Model):
