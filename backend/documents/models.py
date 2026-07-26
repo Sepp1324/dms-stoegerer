@@ -662,23 +662,29 @@ def _schedule_artifact_cleanup(paths: list[str]) -> None:
 
     Erst nach erfolgreichem Commit werden Dateien entfernt (sonst gingen bei einem
     Rollback Dateien verloren, deren DB-Verweis noch existiert). Ist der Broker
-    nicht erreichbar, wird best-effort inline entfernt (kein Retry, aber die
-    Artefakte verwaisen nicht dauerhaft)."""
+    nicht erreichbar, wird der Auftrag DAUERHAFT als ``ArtifactCleanupJob``-Zeile
+    hinterlegt (Outbox) und von einem periodischen Sweeper abgearbeitet – so
+    verwaisen Artefakte auch bei Broker-Ausfall nicht (zuverlässiger als ein
+    Best-Effort-Inline-``os.remove``, das bei einem weiteren Fehler nur geloggt
+    hätte)."""
     from django.db import transaction
 
     def _dispatch():
-        from .tasks import cleanup_artifact_files, safe_remove_artifacts
+        from .tasks import cleanup_artifact_files
 
         try:
             cleanup_artifact_files.delay(paths)
-        except Exception:  # noqa: BLE001 – Broker-Ausfall: inline aufräumen
-            # WICHTIG (P1): identische Sicherheitsprüfungen wie im Task – Referenz-
-            # und DATA_DIR-Schutz. Der Fallback darf NICHT blind ``os.remove``
-            # aufrufen (sonst umginge ein Redis-Ausfall genau diese Prüfungen).
-            _removed, failed = safe_remove_artifacts(paths)
-            if failed:
-                logger.warning(
-                    "Artefakt-Cleanup (inline) unvollständig, verwaist: %s", failed
+        except Exception:  # noqa: BLE001 – Broker-Ausfall: dauerhaften Auftrag schreiben
+            # Persistente Outbox statt Best-Effort-Inline: der Sweeper
+            # (process_artifact_cleanup_jobs) arbeitet den Auftrag später mit
+            # denselben Sicherheitsprüfungen (safe_remove_artifacts) ab und löscht
+            # die Zeile erst nach vollständigem Erfolg.
+            try:
+                ArtifactCleanupJob.objects.create(paths=list(paths))
+            except Exception:  # noqa: BLE001 – letzte Instanz: wenigstens sichtbar loggen
+                logger.exception(
+                    "Artefakt-Cleanup-Outbox nicht schreibbar, Artefakte verwaisen: %s",
+                    paths,
                 )
 
     transaction.on_commit(_dispatch)
@@ -2410,3 +2416,34 @@ class DocumentChunk(models.Model):
 
     def __str__(self) -> str:
         return f"Chunk {self.chunk_index} von Dokument #{self.document_id}"
+
+
+class ArtifactCleanupJob(models.Model):
+    """Dauerhafter Auftrag zum Entfernen verwaister Artefaktdateien (P2, Outbox).
+
+    Der Löschpfad reiht den Artefakt-Cleanup normalerweise nach dem Commit als
+    Celery-Task ein (``_schedule_artifact_cleanup``). Kann der Task bei einem
+    Broker-/Redis-Ausfall NICHT eingereiht werden, wird stattdessen ein solcher
+    DB-Eintrag geschrieben. Ein periodischer Sweeper
+    (``tasks.process_artifact_cleanup_jobs``) arbeitet offene Aufträge mit
+    denselben Sicherheitsprüfungen (``safe_remove_artifacts``) ab und löscht die
+    Zeile erst nach vollständigem Erfolg. So verwaisen Artefakte auch bei
+    Broker-Ausfall nicht dauerhaft – zuverlässiger als ``on_commit`` +
+    Best-Effort-Inline (das bei einem zusätzlichen Fehler nur geloggt hätte)."""
+
+    paths = models.JSONField(default=list)
+    attempts = models.PositiveIntegerField(default=0)
+    last_error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Artefakt-Cleanup-Auftrag"
+        verbose_name_plural = "Artefakt-Cleanup-Aufträge"
+        ordering = ["created_at"]
+
+    def __str__(self) -> str:
+        return (
+            f"CleanupJob #{self.pk} ({len(self.paths or [])} Pfade, "
+            f"{self.attempts} Versuche)"
+        )

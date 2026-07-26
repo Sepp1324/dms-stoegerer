@@ -434,6 +434,40 @@ def cleanup_artifact_files(self, paths: list[str]) -> dict:
     return {"removed": removed, "failed": []}
 
 
+@shared_task
+def process_artifact_cleanup_jobs() -> dict:
+    """Arbeitet persistente Artefakt-Cleanup-Aufträge ab (Outbox-Sweeper, P2).
+
+    Für Aufträge, die bei einem Broker-/Redis-Ausfall nur als ``ArtifactCleanupJob``
+    hinterlegt werden konnten (``Document.delete`` → ``_schedule_artifact_cleanup``).
+    Jeder Auftrag wird mit denselben Sicherheitsprüfungen wie der reguläre Task
+    verarbeitet (:func:`safe_remove_artifacts`). Nach vollständigem Erfolg wird die
+    Zeile gelöscht; bleiben Pfade (transient) offen, werden nur diese für den
+    nächsten Lauf behalten und ``attempts``/``last_error`` fortgeschrieben.
+    """
+    from .models import ArtifactCleanupJob
+
+    processed = 0
+    remaining = 0
+    for job in ArtifactCleanupJob.objects.order_by("created_at").iterator():
+        removed, failed = safe_remove_artifacts(job.paths or [])
+        if failed:
+            ArtifactCleanupJob.objects.filter(pk=job.pk).update(
+                paths=failed,
+                attempts=models.F("attempts") + 1,
+                last_error=f"{len(failed)} Pfad(e) nicht entfernbar",
+            )
+            remaining += 1
+        else:
+            job.delete()
+            processed += 1
+    if remaining:
+        logger.warning(
+            "Artefakt-Cleanup-Outbox: %s Auftrag/Aufträge weiterhin offen.", remaining
+        )
+    return {"processed": processed, "remaining": remaining}
+
+
 @shared_task(bind=True, max_retries=5)
 def push_document_flashcards(self, document_id: int) -> dict:
     """Erzeugt aus der aktuellen Dokumentversion MC-Lernkarten und pusht sie an
