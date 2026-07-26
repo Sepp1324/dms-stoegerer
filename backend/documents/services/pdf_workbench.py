@@ -64,6 +64,14 @@ def _enforce_source_limits(versions: list[DocumentVersion], *, total_pages: int)
         )
 
 
+def _unlink_quietly(path) -> None:
+    """Entfernt eine Datei, ohne bei Fehlern zu werfen (Cleanup nach Rollback)."""
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
 @dataclass(frozen=True)
 class PageSpec:
     page: int
@@ -119,26 +127,40 @@ def rewrite_as_new_version(
     """Erzeugt aus Seitenreihenfolge/-Rotation eine neue Version desselben Dokuments."""
     source = _current_pdf(document)
     _validate_specs(source, specs)
+    # Ressourcengrenzen AUCH beim Rewrite prüfen (P1): sonst könnte eine direkte
+    # API-Anfrage dieselbe Quellseite tausendfach wiederholen und erst nach dem
+    # vollständigen PDF-Aufbau am 200-MB-Limit scheitern (OOM-Risiko davor).
+    _enforce_source_limits([source], total_pages=len(specs))
     dest = _write_pdf_from_specs([(source, specs)])
-    version = pipeline.create_version_for_document(
-        document,
-        str(dest),
-        created_by=actor,
-        mime="application/pdf",
-        size=dest.stat().st_size,
-    )
-    AuditLogEntry.objects.create(
-        actor=actor,
-        action="pdf_workbench_rewrite",
-        object_type="Document",
-        object_id=str(document.id),
-        detail={
-            "source_version": source.version_no,
-            "new_version": version.version_no,
-            "pages": [{"page": item.page, "rotation": item.rotation} for item in specs],
-            "reason": reason[:255],
-        },
-    )
+    # Version + Audit als EINE Operation (P2): scheitert der Audit nach dem
+    # Versions-Insert, bliebe sonst eine neue aktuelle Version bestehen, obwohl die
+    # API 400 liefert und nichts einreiht. Bei Rollback wird die PDF-Datei entfernt.
+    try:
+        with transaction.atomic():
+            version = pipeline.create_version_for_document(
+                document,
+                str(dest),
+                created_by=actor,
+                mime="application/pdf",
+                size=dest.stat().st_size,
+            )
+            AuditLogEntry.objects.create(
+                actor=actor,
+                action="pdf_workbench_rewrite",
+                object_type="Document",
+                object_id=str(document.id),
+                detail={
+                    "source_version": source.version_no,
+                    "new_version": version.version_no,
+                    "pages": [
+                        {"page": item.page, "rotation": item.rotation} for item in specs
+                    ],
+                    "reason": reason[:255],
+                },
+            )
+    except Exception:
+        _unlink_quietly(dest)
+        raise
     return version
 
 
@@ -164,24 +186,30 @@ def merge_as_new_version(
     )
 
     dest = _write_pdf_from_specs(sources)
-    version = pipeline.create_version_for_document(
-        target,
-        str(dest),
-        created_by=actor,
-        mime="application/pdf",
-        size=dest.stat().st_size,
-    )
-    AuditLogEntry.objects.create(
-        actor=actor,
-        action="pdf_workbench_merge",
-        object_type="Document",
-        object_id=str(target.id),
-        detail={
-            "source_documents": [document.id for document in ordered_documents],
-            "new_version": version.version_no,
-            "reason": reason[:255],
-        },
-    )
+    # Version + Audit atomar (P2), Datei-Cleanup bei Rollback – wie beim Rewrite.
+    try:
+        with transaction.atomic():
+            version = pipeline.create_version_for_document(
+                target,
+                str(dest),
+                created_by=actor,
+                mime="application/pdf",
+                size=dest.stat().st_size,
+            )
+            AuditLogEntry.objects.create(
+                actor=actor,
+                action="pdf_workbench_merge",
+                object_type="Document",
+                object_id=str(target.id),
+                detail={
+                    "source_documents": [doc.id for doc in ordered_documents],
+                    "new_version": version.version_no,
+                    "reason": reason[:255],
+                },
+            )
+    except Exception:
+        _unlink_quietly(dest)
+        raise
     return version
 
 
