@@ -595,32 +595,46 @@ class Document(models.Model):
         """Guard gegen programmatisches Löschen WORM-/retention-/legal-hold-
         geschützter Dokumente. Der Django-Admin umgeht ``delete()`` bewusst über
         den Collector – dort greift stattdessen ``has_delete_permission`` (gesperrt,
-        siehe admin.py). Die API prüft zusätzlich in ``perform_destroy`` (Audit)."""
-        block = self.delete_block()
-        if block:
-            from .audit import log_delete_block
+        siehe admin.py). Die API prüft zusätzlich in ``perform_destroy`` (Audit).
 
-            action, reason = block
-            log_delete_block("Document", self.pk, action=action, reason=reason)
-            raise ValidationError(f"Löschen gesperrt: {reason}")
+        Race-Schutz gegen paralleles Sealing (P1): Der Schutzstatus (``delete_block``)
+        wird UNTER Zeilensperre auf Dokument UND Versionen ausgewertet. ``seal_version``
+        sperrt dieselbe Versionszeile per ``select_for_update()``; ohne diesen Lock
+        könnte zwischen Prüfung und Löschen eine Version unveränderlich (WORM)
+        werden und trotzdem gelöscht werden. Der Lock serialisiert beide Pfade.
+        """
+        from django.db import transaction
 
-        # Artefaktpfade (Original/Archiv/Thumbnail) der Versionen VOR dem DB-Löschen
-        # einsammeln – danach sind die Zeilen (CASCADE) weg (P2). Die eigentliche
-        # Entfernung läuft NACH dem Commit als Retry-fähiger Task, damit gelöschte
-        # Inhalte nicht dauerhaft auf dem PVC liegen bleiben.
-        artifact_paths = [
-            path
-            for version in self.versions.all()
-            for path in (
-                version.file_path,
-                version.archive_path,
-                version.thumbnail_path,
-            )
-            if path
-        ]
-        super().delete(*args, **kwargs)
-        if artifact_paths:
-            _schedule_artifact_cleanup(artifact_paths)
+        with transaction.atomic():
+            # Dokument- und Versionszeilen sperren, BEVOR der Schutzstatus gelesen
+            # wird. list() erzwingt die Auswertung (Sperrenaufbau) sofort.
+            type(self).objects.select_for_update().get(pk=self.pk)
+            list(self.versions.select_for_update())
+
+            block = self.delete_block()
+            if block:
+                from .audit import log_delete_block
+
+                action, reason = block
+                log_delete_block("Document", self.pk, action=action, reason=reason)
+                raise ValidationError(f"Löschen gesperrt: {reason}")
+
+            # Artefaktpfade (Original/Archiv/Thumbnail) der Versionen VOR dem
+            # DB-Löschen einsammeln – danach sind die Zeilen (CASCADE) weg (P2). Die
+            # eigentliche Entfernung läuft NACH dem Commit als Retry-fähiger Task.
+            artifact_paths = [
+                path
+                for version in self.versions.all()
+                for path in (
+                    version.file_path,
+                    version.archive_path,
+                    version.thumbnail_path,
+                )
+                if path
+            ]
+            super().delete(*args, **kwargs)
+            if artifact_paths:
+                _schedule_artifact_cleanup(artifact_paths)
 
 
 def _schedule_artifact_cleanup(paths: list[str]) -> None:
