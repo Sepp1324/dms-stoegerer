@@ -4974,8 +4974,8 @@ class ImportPaperlessCommandTests(TestCase):
 
         from django.core.management import call_command
 
-        # Geheime Datei AUSSERHALB des Exports.
-        outside = Path(self._tmp.name) / "geheim.pdf"
+        # Geheime Datei AUSSERHALB des Exports (self.source = <root>/export).
+        outside = self.source.parent / "geheim.pdf"
         outside.write_bytes(b"%PDF-1.4 geheim")
 
         manifest = [
