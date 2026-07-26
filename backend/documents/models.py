@@ -603,7 +603,48 @@ class Document(models.Model):
             action, reason = block
             log_delete_block("Document", self.pk, action=action, reason=reason)
             raise ValidationError(f"Löschen gesperrt: {reason}")
+
+        # Artefaktpfade (Original/Archiv/Thumbnail) der Versionen VOR dem DB-Löschen
+        # einsammeln – danach sind die Zeilen (CASCADE) weg (P2). Die eigentliche
+        # Entfernung läuft NACH dem Commit als Retry-fähiger Task, damit gelöschte
+        # Inhalte nicht dauerhaft auf dem PVC liegen bleiben.
+        artifact_paths = [
+            path
+            for version in self.versions.all()
+            for path in (
+                version.file_path,
+                version.archive_path,
+                version.thumbnail_path,
+            )
+            if path
+        ]
         super().delete(*args, **kwargs)
+        if artifact_paths:
+            _schedule_artifact_cleanup(artifact_paths)
+
+
+def _schedule_artifact_cleanup(paths: list[str]) -> None:
+    """Reiht den Artefakt-Cleanup NACH dem Commit ein (P2).
+
+    Erst nach erfolgreichem Commit werden Dateien entfernt (sonst gingen bei einem
+    Rollback Dateien verloren, deren DB-Verweis noch existiert). Ist der Broker
+    nicht erreichbar, wird best-effort inline entfernt (kein Retry, aber die
+    Artefakte verwaisen nicht dauerhaft)."""
+    from django.db import transaction
+
+    def _dispatch():
+        from .tasks import cleanup_artifact_files
+
+        try:
+            cleanup_artifact_files.delay(paths)
+        except Exception:  # noqa: BLE001 – Broker-Ausfall: inline aufräumen
+            for path in paths:
+                try:
+                    os.remove(path)
+                except OSError:
+                    logger.warning("Artefakt-Cleanup (inline) fehlgeschlagen: %s", path)
+
+    transaction.on_commit(_dispatch)
 
 
 class DocumentVersion(models.Model):

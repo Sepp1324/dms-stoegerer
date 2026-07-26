@@ -193,6 +193,41 @@ class ArchiveApiTests(ArchiveDocMixin, APITestCase):
             ).exists()
         )
 
+    def test_delete_entfernt_artefaktdateien(self):
+        # P2: Beim Loeschen werden Original-/Archiv-/Thumbnail-Dateien der
+        # Versionen entfernt (sonst blieben geloeschte Inhalte auf dem PVC).
+        from unittest import mock
+
+        from . import tasks
+
+        doc = Document.objects.create(title="MitDateien", owner=self.user)
+        orig = Path(self.tmpdir.name) / "orig.pdf"
+        arch = Path(self.tmpdir.name) / "arch.pdf"
+        thumb = Path(self.tmpdir.name) / "thumb.jpg"
+        for p in (orig, arch, thumb):
+            p.write_bytes(b"x")
+        version = DocumentVersion.objects.create(
+            document=doc, version_no=1, file_path=str(orig),
+            archive_path=str(arch), thumbnail_path=str(thumb),
+            sha256="f" * 64, mime_type="application/pdf", size=1, is_immutable=False,
+        )
+        doc.current_version = version
+        doc.save(update_fields=["current_version"])
+        self.client.force_authenticate(self.user)
+
+        # Cleanup-Task synchron ausfuehren (statt an Celery zu delegieren).
+        with mock.patch.object(
+            tasks.cleanup_artifact_files,
+            "delay",
+            side_effect=lambda paths: tasks.cleanup_artifact_files(paths),
+        ), self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.delete(f"/api/documents/{doc.id}/")
+
+        self.assertEqual(resp.status_code, 204)
+        self.assertFalse(orig.exists())
+        self.assertFalse(arch.exists())
+        self.assertFalse(thumb.exists())
+
     def test_loeschbares_dokument_wird_geloescht_und_auditiert(self):
         # Happy Path: kein Block -> Doc geloescht, genau ein "delete"-Audit.
         doc = Document.objects.create(title="Weg", owner=self.user)
