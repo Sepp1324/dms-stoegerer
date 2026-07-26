@@ -170,6 +170,75 @@ class PdfWorkbenchTests(APITestCase):
 
         self.assertGreater(cache_path.stat().st_mtime, old + 86400)
 
+    def test_thumbnail_singleflight_rendert_nur_einmal(self):
+        # P2: Zwei gleichzeitige Erst-Misses desselben (version, page, dpi) dürfen
+        # Poppler NUR EINMAL starten (Singleflight-Sperre pro Cache-Key), statt
+        # mehrere Renderprozesse zu starten und dieselbe Datei parallel zu schreiben.
+        import threading
+        import time as _time
+
+        from PIL import Image
+
+        from django.db import connection
+        from .services import pdf_workbench
+
+        doc = self._doc("sf", self.user, pages=1)
+        version = doc.current_version
+        calls: list[int] = []
+
+        def fake_convert(*args, **kwargs):
+            calls.append(1)
+            _time.sleep(0.3)  # Renderfenster offen halten, damit der 2. Thread wartet
+            return [Image.new("RGB", (20, 20), "white")]
+
+        barrier = threading.Barrier(2, timeout=10)
+        results: dict[str, object] = {}
+
+        def worker(name):
+            try:
+                barrier.wait()
+                results[name] = pdf_workbench.render_page_thumbnail(version, 1)
+            except Exception as exc:  # noqa: BLE001
+                results[name] = exc
+            finally:
+                connection.close()
+
+        with mock.patch.object(storage, "DATA_DIR", Path(self.tmp.name)), mock.patch(
+            "pdf2image.convert_from_path", side_effect=fake_convert
+        ), mock.patch.object(pdf_workbench, "_page_count", return_value=1):
+            threads = [threading.Thread(target=worker, args=(n,)) for n in ("a", "b")]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(15)
+
+        self.assertEqual(len(calls), 1, "Singleflight: Poppler darf nur einmal laufen")
+        self.assertEqual(results["a"], results["b"])
+        self.assertIsInstance(results["a"], (bytes, bytearray))
+
+    def test_thumbnail_atomar_veroeffentlicht_ohne_temp_reste(self):
+        # P2: Nach dem Rendern liegt genau das fertige JPEG im Cache und KEINE
+        # temporäre (.tmp-*) Datei bleibt zurück (atomare Veröffentlichung).
+        from PIL import Image
+
+        from .services import pdf_workbench
+
+        doc = self._doc("atomic", self.user, pages=1)
+        version = doc.current_version
+
+        with mock.patch.object(storage, "DATA_DIR", Path(self.tmp.name)), mock.patch(
+            "pdf2image.convert_from_path",
+            return_value=[Image.new("RGB", (20, 20), "white")],
+        ):
+            data = pdf_workbench.render_page_thumbnail(version, 1)
+            # Cache-Pfad UNTER dem DATA_DIR-Patch bestimmen (sonst zeigte er auf das
+            # echte Datenverzeichnis, nicht auf den Tmpdir).
+            cache_path = pdf_workbench._thumbnail_cache_path(version, 1, 110)
+            self.assertTrue(cache_path.exists())
+            self.assertEqual(cache_path.read_bytes(), data)
+            leftovers = list(cache_path.parent.glob(".tmp-*"))
+            self.assertEqual(leftovers, [], f"Temp-Reste geblieben: {leftovers}")
+
     def test_thumbnail_render_bekommt_timeout(self):
         from PIL import Image
 

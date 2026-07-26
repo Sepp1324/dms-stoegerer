@@ -10,6 +10,7 @@ from __future__ import annotations
 import io
 import os
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from typing import Iterable
@@ -148,59 +149,115 @@ def _thumbnail_cache_path(version: DocumentVersion, page_no: int, dpi: int):
     return thumbnail_cache_root() / str(version.id) / f"{page_no}_{dpi}.jpg"
 
 
-def render_page_thumbnail(version: DocumentVersion, page_no: int, *, dpi: int = 110) -> bytes:
-    """Rendert eine einzelne PDF-Seite als kompaktes JPEG für die Werkbank.
+# Prozesslokale Singleflight-Sperren pro Cache-Key (P2). Verhindern, dass mehrere
+# gleichzeitige Cache-Misses denselben Poppler-Render starten UND dieselbe Datei
+# parallel schreiben. Der Dict-Zugriff selbst ist unter ``_render_locks_guard``.
+_render_locks_guard = threading.Lock()
+_render_locks: dict[str, threading.Lock] = {}
 
-    Server-Cache (P1): Ein bereits gerendertes (version, page, dpi)-JPEG wird von
-    der Platte gelesen, statt Poppler erneut auszuführen – so kostet ein
-    Neu-Anfordern (mehrere Tabs, Reload, direkte API-Aufrufe) keinen weiteren
-    Renderprozess. Das Rendern selbst läuft mit hartem Timeout.
-    """
-    cache_path = _thumbnail_cache_path(version, page_no, dpi)
+
+def _cache_key_lock(key: str) -> threading.Lock:
+    with _render_locks_guard:
+        lock = _render_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _render_locks[key] = lock
+        return lock
+
+
+def _read_cached_thumbnail(cache_path) -> bytes | None:
+    """Liest ein Cache-JPEG und frischt seine mtime auf (echte LRU, P2). Gibt
+    ``None`` bei Cache-Miss oder Lesefehler zurück (dann regulär rendern)."""
     try:
         if cache_path.exists():
             data = cache_path.read_bytes()
-            # Echte LRU (P2): mtime = ZUGRIFFSzeit setzen. Der Größen-Prune sortiert
-            # nach mtime; ohne dieses Bump spiegelte mtime nur den ERST-Render, und
-            # ein häufig gelesenes, aber altes Thumbnail flöge fälschlich als
-            # „ältestes" zuerst raus (bzw. würde per TTL verworfen).
+            # mtime = ZUGRIFFSzeit: der Größen-Prune sortiert nach mtime; ohne den
+            # Bump flöge ein häufig gelesenes, aber altes Thumbnail fälschlich raus.
             try:
                 now = time.time()
                 os.utime(cache_path, (now, now))
             except OSError:
-                pass  # mtime-Bump ist best-effort – Antwort trotzdem ausliefern.
+                pass  # mtime-Bump ist best-effort.
             return data
     except OSError:
         pass  # Cache ist best-effort – bei Lesefehler regulär rendern.
+    return None
 
-    count = _page_count(version)
-    if page_no < 1 or page_no > count:
-        raise ValidationError(f"Seite {page_no} liegt außerhalb von 1..{count}.")
 
-    from pdf2image import convert_from_path
-
-    images = convert_from_path(
-        version.file_path,
-        dpi=dpi,
-        first_page=page_no,
-        last_page=page_no,
-        fmt="jpeg",
-        timeout=_thumbnail_render_timeout(),
-    )
-    if not images:
-        raise ValidationError(f"Seite {page_no} konnte nicht gerendert werden.")
-    image = images[0]
-    image.thumbnail((360, 480))
-    buffer = io.BytesIO()
-    image.convert("RGB").save(buffer, format="JPEG", quality=82, optimize=True)
-    data = buffer.getvalue()
-
+def _publish_thumbnail_atomic(cache_path, data: bytes) -> None:
+    """Veröffentlicht das JPEG ATOMAR (P2): in eine temporäre Datei im selben
+    Verzeichnis schreiben und per ``os.replace()`` an die Zielposition ziehen. Ein
+    gleichzeitiger Leser sieht so NIE eine halb geschriebene (gekürzte) Datei –
+    entweder die alte oder die vollständige neue. Schreibfehler sind best-effort
+    (der Cache darf die Antwort nicht verhindern)."""
     try:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_bytes(data)
+        fd, tmp = tempfile.mkstemp(
+            dir=str(cache_path.parent), prefix=".tmp-", suffix=".jpg"
+        )
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+            os.replace(tmp, cache_path)  # atomar auf demselben Dateisystem
+        except OSError:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
     except OSError:
         pass  # Cache-Schreibfehler darf die Antwort nicht verhindern.
-    return data
+
+
+def render_page_thumbnail(version: DocumentVersion, page_no: int, *, dpi: int = 110) -> bytes:
+    """Rendert eine einzelne PDF-Seite als kompaktes JPEG für die Werkbank.
+
+    Server-Cache (P1): Ein bereits gerendertes (version, page, dpi)-JPEG wird von
+    der Platte gelesen, statt Poppler erneut auszuführen. Das Rendern läuft mit
+    hartem Timeout.
+
+    Singleflight + atomare Veröffentlichung (P2): Pro Cache-Key wird gesperrt, damit
+    gleichzeitige Erst-Misses NICHT mehrfach rendern und dieselbe Datei parallel
+    schreiben; das fertige JPEG wird per Temp-Datei + ``os.replace`` atomar
+    veröffentlicht (kein Leser sieht eine gekürzte Datei).
+    """
+    cache_path = _thumbnail_cache_path(version, page_no, dpi)
+    cached = _read_cached_thumbnail(cache_path)
+    if cached is not None:
+        return cached
+
+    lock = _cache_key_lock(str(cache_path))
+    with lock:
+        # Doppelprüfung UNTER der Sperre: Ein anderer Thread könnte inzwischen
+        # gerendert haben -> dann seinen Cache nutzen statt erneut zu rendern.
+        cached = _read_cached_thumbnail(cache_path)
+        if cached is not None:
+            return cached
+
+        count = _page_count(version)
+        if page_no < 1 or page_no > count:
+            raise ValidationError(f"Seite {page_no} liegt außerhalb von 1..{count}.")
+
+        from pdf2image import convert_from_path
+
+        images = convert_from_path(
+            version.file_path,
+            dpi=dpi,
+            first_page=page_no,
+            last_page=page_no,
+            fmt="jpeg",
+            timeout=_thumbnail_render_timeout(),
+        )
+        if not images:
+            raise ValidationError(f"Seite {page_no} konnte nicht gerendert werden.")
+        image = images[0]
+        image.thumbnail((360, 480))
+        buffer = io.BytesIO()
+        image.convert("RGB").save(buffer, format="JPEG", quality=82, optimize=True)
+        data = buffer.getvalue()
+
+        _publish_thumbnail_atomic(cache_path, data)
+        return data
 
 
 def _ensure_current_version(document: Document, expected_version_id) -> None:
