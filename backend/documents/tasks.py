@@ -348,6 +348,13 @@ def safe_remove_artifacts(paths: list[str]) -> tuple[int, list[str]]:
     * (b) der Pfad liegt nach Kanonisierung UNTERHALB des DMS-Datenverzeichnisses
       (kein ``os.remove`` auf beliebige Serverpfade).
 
+    Kanonisierung (P1): Die Referenzprüfung (a) vergleicht KANONISCH. Gelöscht wird
+    der mit ``realpath`` aufgelöste Pfad; würde (a) nur den rohen String prüfen,
+    entginge eine Version, die dieselbe Datei über eine nicht-kanonische Form
+    (z. B. ``originals/../originals/a.pdf``) referenziert, der Prüfung – und die
+    gemeinsam genutzte Datei würde gelöscht. Daher wird gegen den rohen UND den
+    kanonisierten Pfad geprüft.
+
     Bereits fehlende Dateien sind ok; ein transienter I/O-/NFS-Fehler landet in
     der zurückgegebenen Fehlerliste.
     """
@@ -361,14 +368,29 @@ def safe_remove_artifacts(paths: list[str]) -> tuple[int, list[str]]:
     for path in paths:
         if not path:
             continue
-        # (a) Noch von einer anderen Version referenziert? -> NICHT entfernen.
-        if DocumentVersion.objects.filter(
-            Q(file_path=path) | Q(archive_path=path) | Q(thumbnail_path=path)
-        ).exists():
+        # Pfad zuerst kanonisieren – sowohl für die Referenzprüfung (a) als auch
+        # für die tatsächliche Löschung, damit BEIDE denselben Pfad meinen.
+        real = os.path.realpath(path)
+        # (a) Noch von einer anderen Version referenziert? KANONISCH prüfen: ein
+        # reiner String-Vergleich griffe daneben, wenn eine Version dieselbe Datei
+        # über eine abweichende Schreibweise (z. B. ``a/../a.pdf`` oder Symlink)
+        # referenziert. Daher per Dateiname grob vorfiltern und die gespeicherten
+        # Pfade dann via ``realpath`` mit dem Kandidaten vergleichen.
+        basename = os.path.basename(real)
+        possible = DocumentVersion.objects.filter(
+            Q(file_path__endswith=basename)
+            | Q(archive_path__endswith=basename)
+            | Q(thumbnail_path__endswith=basename)
+        ).values_list("file_path", "archive_path", "thumbnail_path")
+        still_referenced = any(
+            stored and os.path.realpath(stored) == real
+            for row in possible.iterator()
+            for stored in row
+        )
+        if still_referenced:
             logger.info("Artefakt %s noch referenziert – nicht entfernt.", path)
             continue
-        # (b) Pfad kanonisieren und hart auf DATA_DIR begrenzen.
-        real = os.path.realpath(path)
+        # (b) Kanonisierten Pfad hart auf DATA_DIR begrenzen.
         if real != data_root and not real.startswith(data_root + os.sep):
             logger.warning(
                 "Artefakt-Cleanup: Pfad ausserhalb DATA_DIR abgelehnt: %s", path

@@ -42,6 +42,27 @@ class CleanupArtifactSafetyTests(TestCase):
             tasks.cleanup_artifact_files([str(f)])
         self.assertTrue(f.exists())  # noch referenziert -> nicht entfernt
 
+    def test_nicht_kanonische_referenz_schuetzt_datei(self):
+        # P1: Eine Version referenziert die gemeinsame Datei über eine NICHT-
+        # kanonische Schreibweise (a/../a.pdf). Der Cleanup-Kandidat ist der
+        # kanonische Pfad. Ein reiner String-Vergleich uebersaehe die Referenz und
+        # loeschte die geteilte Datei -> muss KANONISCH erkannt werden.
+        sub = self.root / "originals"
+        sub.mkdir()
+        f = sub / "a.pdf"
+        f.write_bytes(b"x")
+        noncanonical = str(sub / ".." / "originals" / "a.pdf")
+        self.assertNotEqual(noncanonical, str(f))  # wirklich nicht-kanonisch
+
+        doc = Document.objects.create(title="Shared", owner=self.user)
+        DocumentVersion.objects.create(
+            document=doc, version_no=1, file_path=noncanonical, sha256="a" * 64
+        )
+        with self._patch_data_dir():
+            res = tasks.cleanup_artifact_files([str(f)])  # kanonischer Kandidat
+        self.assertTrue(f.exists())  # trotz abweichender Schreibweise geschuetzt
+        self.assertEqual(res["removed"], 0)
+
     def test_pfad_ausserhalb_data_dir_wird_abgelehnt(self):
         outside = tempfile.NamedTemporaryFile(delete=False)
         outside.write(b"x")
