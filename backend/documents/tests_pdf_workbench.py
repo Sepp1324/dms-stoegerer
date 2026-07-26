@@ -292,6 +292,45 @@ class PdfWorkbenchTests(APITestCase):
         # Version unverändert (keine neue Merge-Version).
         self.assertEqual(target.current_version.version_no, 1)
 
+    def test_split_broker_ausfall_reiht_alle_ein_und_liefert_strukturiertes_503(self):
+        # P1: Scheitert der Broker beim Enqueue, werden trotzdem ALLE erzeugten
+        # Versionen best-effort eingereiht (jede Fehl-Version -> FAILED, nicht
+        # UPLOADED), und die Antwort ist ein strukturiertes 503 mit den erzeugten
+        # Dokument-IDs (damit kein Re-Split -> Duplikate).
+        from kombu.exceptions import OperationalError
+
+        doc = self._doc("split-broker", self.user, pages=4)
+        self.client.force_authenticate(self.user)
+
+        with mock.patch(
+            "documents.views.process_document_version.delay",
+            side_effect=OperationalError("broker down"),
+        ):
+            resp = self.client.post(
+                f"/api/documents/{doc.id}/pdf-workbench/split/",
+                {
+                    "parts": [
+                        {"title": "BrokerA", "pages": [1, 2]},
+                        {"title": "BrokerB", "pages": [3, 4]},
+                    ]
+                },
+                format="json",
+            )
+
+        self.assertEqual(resp.status_code, 503)
+        created = list(Document.objects.filter(title__in=["BrokerA", "BrokerB"]))
+        self.assertEqual(len(created), 2)  # Teile bleiben bestehen
+        self.assertEqual(
+            sorted(resp.data["document_ids"]), sorted(d.id for d in created)
+        )
+        # Beide neuen Versionen sind FAILED (retry-fähig), keine haengt in UPLOADED.
+        for document in created:
+            document.refresh_from_db()
+            self.assertEqual(
+                document.current_version.processing_state,
+                DocumentVersion.ProcessingState.FAILED,
+            )
+
     def test_merge_creates_new_version_and_respects_owner_scope(self):
         target = self._doc("merge-target", self.user, pages=2)
         appendix = self._doc("merge-appendix", self.user, pages=1)
