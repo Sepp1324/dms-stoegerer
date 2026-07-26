@@ -160,6 +160,23 @@ class PdfWorkbenchTests(APITestCase):
         self.assertIn("timeout", conv.call_args.kwargs)
         self.assertGreater(conv.call_args.kwargs["timeout"], 0)
 
+    def test_operation_ohne_source_version_id_400(self):
+        # P2: source_version_id ist fuer alle mutierenden Werkbank-Endpunkte
+        # verpflichtend (direkte API-Aufrufe duerfen den Konfliktschutz nicht
+        # umgehen). Fehlt oder nicht positiv -> 400, keine neue Version.
+        doc = self._doc("noversion-op", self.user, pages=2)
+        self.client.force_authenticate(self.user)
+        for body in (
+            {"pages": [{"page": 1}]},  # fehlt
+            {"pages": [{"page": 1}], "source_version_id": 0},  # nicht positiv
+            {"pages": [{"page": 1}], "source_version_id": "abc"},  # keine Zahl
+        ):
+            resp = self.client.post(
+                f"/api/documents/{doc.id}/pdf-workbench/rewrite/", body, format="json"
+            )
+            self.assertEqual(resp.status_code, 400, body)
+        self.assertEqual(doc.versions.count(), 1)
+
     def test_rewrite_creates_new_version_with_reordered_rotated_pages(self):
         doc = self._doc("rewrite", self.user, pages=3)
         self.client.force_authenticate(self.user)
@@ -168,6 +185,7 @@ class PdfWorkbenchTests(APITestCase):
             resp = self.client.post(
                 f"/api/documents/{doc.id}/pdf-workbench/rewrite/",
                 {
+                    "source_version_id": doc.current_version.id,
                     "pages": [
                         {"page": 3},
                         {"page": 1, "rotation": 90},
@@ -207,7 +225,7 @@ class PdfWorkbenchTests(APITestCase):
         ):
             resp = self.client.post(
                 f"/api/documents/{doc.id}/pdf-workbench/rewrite/",
-                {"pages": [{"page": 1}]},
+                {"pages": [{"page": 1}], "source_version_id": doc.current_version.id},
                 format="json",
             )
 
@@ -229,7 +247,7 @@ class PdfWorkbenchTests(APITestCase):
 
         resp = self.client.post(
             f"/api/documents/{doc.id}/pdf-workbench/rewrite/",
-            {"pages": [{"page": 9}]},
+            {"pages": [{"page": 9}], "source_version_id": doc.current_version.id},
             format="json",
         )
 
@@ -246,7 +264,7 @@ class PdfWorkbenchTests(APITestCase):
         with override_settings(PDF_WORKBENCH_MAX_PAGES=1):
             resp = self.client.post(
                 f"/api/documents/{doc.id}/pdf-workbench/rewrite/",
-                {"pages": [{"page": 1}, {"page": 2}]},
+                {"pages": [{"page": 1}, {"page": 2}], "source_version_id": doc.current_version.id},
                 format="json",
             )
         self.assertEqual(resp.status_code, 400)
@@ -270,7 +288,7 @@ class PdfWorkbenchTests(APITestCase):
         ), mock.patch("documents.views.process_document_version.delay"):
             resp = self.client.post(
                 f"/api/documents/{doc.id}/pdf-workbench/rewrite/",
-                {"pages": [{"page": 1}]},
+                {"pages": [{"page": 1}], "source_version_id": doc.current_version.id},
                 format="json",
             )
 
@@ -289,6 +307,7 @@ class PdfWorkbenchTests(APITestCase):
             resp = self.client.post(
                 f"/api/documents/{doc.id}/pdf-workbench/split/",
                 {
+                    "source_version_id": doc.current_version.id,
                     "parts": [
                         {"title": "Teil A", "pages": [1, 2]},
                         {"title": "Teil B", "pages": [3, 4]},
@@ -320,6 +339,7 @@ class PdfWorkbenchTests(APITestCase):
             resp = self.client.post(
                 f"/api/documents/{doc.id}/pdf-workbench/split/",
                 {
+                    "source_version_id": doc.current_version.id,
                     "parts": [
                         {"title": "TeilOK", "pages": [1]},
                         {"title": "TeilBad", "pages": [99]},  # ausserhalb 1..3
@@ -340,7 +360,7 @@ class PdfWorkbenchTests(APITestCase):
         with override_settings(PDF_WORKBENCH_MAX_PAGES=2):
             resp = self.client.post(
                 f"/api/documents/{doc.id}/pdf-workbench/split/",
-                {"parts": [{"title": "Gross", "pages": [1, 2, 3, 4]}]},
+                {"parts": [{"title": "Gross", "pages": [1, 2, 3, 4]}], "source_version_id": doc.current_version.id},
                 format="json",
             )
         self.assertEqual(resp.status_code, 400)
@@ -356,7 +376,7 @@ class PdfWorkbenchTests(APITestCase):
         with override_settings(PDF_WORKBENCH_MAX_DOCUMENTS=1):
             resp = self.client.post(
                 f"/api/documents/{target.id}/pdf-workbench/merge/",
-                {"document_ids": [a.id, b.id]},  # target + 2 = 3 > Limit 1
+                {"document_ids": [a.id, b.id], "source_version_id": target.current_version.id},  # target + 2 = 3 > Limit 1
                 format="json",
             )
         self.assertEqual(resp.status_code, 400)
@@ -381,6 +401,7 @@ class PdfWorkbenchTests(APITestCase):
             resp = self.client.post(
                 f"/api/documents/{doc.id}/pdf-workbench/split/",
                 {
+                    "source_version_id": doc.current_version.id,
                     "parts": [
                         {"title": "BrokerA", "pages": [1, 2]},
                         {"title": "BrokerB", "pages": [3, 4]},
@@ -452,14 +473,14 @@ class PdfWorkbenchTests(APITestCase):
             with mock.patch("documents.views.process_document_version.delay"):
                 ok = self.client.post(
                     f"/api/documents/{target.id}/pdf-workbench/merge/",
-                    {"document_ids": [a.id]},
+                    {"document_ids": [a.id], "source_version_id": target.current_version.id},
                     format="json",
                 )
             self.assertEqual(ok.status_code, 201, ok.data)
 
             blocked = self.client.post(
                 f"/api/documents/{target.id}/pdf-workbench/merge/",
-                {"document_ids": [a.id, b.id]},
+                {"document_ids": [a.id, b.id], "source_version_id": target.current_version.id},
                 format="json",
             )
             self.assertEqual(blocked.status_code, 400)
@@ -473,7 +494,7 @@ class PdfWorkbenchTests(APITestCase):
 
         blocked = self.client.post(
             f"/api/documents/{target.id}/pdf-workbench/merge/",
-            {"document_ids": [foreign.id]},
+            {"document_ids": [foreign.id], "source_version_id": target.current_version.id},
             format="json",
         )
         self.assertEqual(blocked.status_code, 404)
@@ -481,7 +502,7 @@ class PdfWorkbenchTests(APITestCase):
         with mock.patch("documents.views.process_document_version.delay") as delay:
             resp = self.client.post(
                 f"/api/documents/{target.id}/pdf-workbench/merge/",
-                {"document_ids": [appendix.id]},
+                {"document_ids": [appendix.id], "source_version_id": target.current_version.id},
                 format="json",
             )
 
@@ -504,7 +525,7 @@ class PdfWorkbenchTests(APITestCase):
         with override_settings(PDF_WORKBENCH_MAX_DOCUMENTS=1):
             resp = self.client.post(
                 f"/api/documents/{target.id}/pdf-workbench/merge/",
-                {"document_ids": [999999, 888888]},  # 2 > Limit 1, existieren nicht
+                {"document_ids": [999999, 888888], "source_version_id": target.current_version.id},  # 2 > Limit 1, existieren nicht
                 format="json",
             )
         self.assertEqual(resp.status_code, 400)
@@ -516,7 +537,7 @@ class PdfWorkbenchTests(APITestCase):
 
         resp = self.client.post(
             f"/api/documents/{doc.id}/pdf-workbench/rewrite/",
-            {"pages": [{"page": 1}]},
+            {"pages": [{"page": 1}], "source_version_id": doc.current_version.id},
             format="json",
         )
 

@@ -200,19 +200,29 @@ class _ProcessingUnavailable(APIException):
     default_code = "processing_unavailable"
 
 
-def _workbench_source_version_id(request):
-    """Optionale ``source_version_id`` aus dem Request (Konflikt-Guard, P2).
+def _require_source_version_id(request):
+    """VERPFLICHTENDE ``source_version_id`` aus dem Request (Konflikt-Guard, P2).
 
-    Der Client sendet die Version, auf der sein Seiten-Manifest beruht. Ungültige
-    Werte werden als „nicht mitgesendet" (None) behandelt – der Guard ist dann aus.
+    Der Client sendet die Version, auf der sein Seiten-Manifest beruht. Fehlt der
+    Wert oder ist er nicht positiv, wurde der Konfliktschutz bislang still
+    deaktiviert (direkte API-Aufrufe umgingen ihn). Für alle mutierenden Werkbank-
+    Endpunkte ist er jetzt Pflicht. Gibt ``(version_id, None)`` bzw.
+    ``(None, error_response)`` zurück.
     """
     raw = request.data.get("source_version_id")
-    if raw is None:
-        return None
     try:
-        return int(raw)
+        value = int(raw)
     except (TypeError, ValueError):
-        return None
+        return None, Response(
+            {"detail": "Feld 'source_version_id' ist erforderlich (positive Zahl)."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    if value <= 0:
+        return None, Response(
+            {"detail": "'source_version_id' muss positiv sein."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    return value, None
 
 
 def _enqueue_processing(version_id) -> None:
@@ -3652,6 +3662,9 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN,
             )
         document = self.get_object()
+        expected_version_id, err = _require_source_version_id(request)
+        if err is not None:
+            return err
         from .services import pdf_workbench
 
         try:
@@ -3661,7 +3674,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 specs,
                 actor=request.user,
                 reason=str(request.data.get("reason", "")),
-                expected_version_id=_workbench_source_version_id(request),
+                expected_version_id=expected_version_id,
             )
         except pdf_workbench.StaleWorkbenchVersion as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
@@ -3683,6 +3696,9 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN,
             )
         document = self.get_object()
+        expected_version_id, err = _require_source_version_id(request)
+        if err is not None:
+            return err
         from .services import pdf_workbench
 
         raw_ids = request.data.get("document_ids")
@@ -3737,7 +3753,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 ordered,
                 actor=request.user,
                 reason=str(request.data.get("reason", "")),
-                expected_version_id=_workbench_source_version_id(request),
+                expected_version_id=expected_version_id,
             )
         except pdf_workbench.StaleWorkbenchVersion as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
@@ -3759,6 +3775,9 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN,
             )
         document = self.get_object()
+        expected_version_id, err = _require_source_version_id(request)
+        if err is not None:
+            return err
         from .services import pdf_workbench
 
         parts = request.data.get("parts")
@@ -3793,7 +3812,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 document,
                 parts,
                 actor=request.user,
-                expected_version_id=_workbench_source_version_id(request),
+                expected_version_id=expected_version_id,
             )
         except pdf_workbench.StaleWorkbenchVersion as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
