@@ -231,12 +231,13 @@ class PdfWorkbenchTests(APITestCase):
             return_value=[Image.new("RGB", (20, 20), "white")],
         ):
             data = pdf_workbench.render_page_thumbnail(version, 1)
-
-        cache_path = pdf_workbench._thumbnail_cache_path(version, 1, 110)
-        self.assertTrue(cache_path.exists())
-        self.assertEqual(cache_path.read_bytes(), data)
-        leftovers = list(cache_path.parent.glob(".tmp-*"))
-        self.assertEqual(leftovers, [], f"Temp-Reste geblieben: {leftovers}")
+            # Cache-Pfad UNTER dem DATA_DIR-Patch bestimmen (sonst zeigte er auf das
+            # echte Datenverzeichnis, nicht auf den Tmpdir).
+            cache_path = pdf_workbench._thumbnail_cache_path(version, 1, 110)
+            self.assertTrue(cache_path.exists())
+            self.assertEqual(cache_path.read_bytes(), data)
+            leftovers = list(cache_path.parent.glob(".tmp-*"))
+            self.assertEqual(leftovers, [], f"Temp-Reste geblieben: {leftovers}")
 
     def test_thumbnail_render_bekommt_timeout(self):
         from PIL import Image
