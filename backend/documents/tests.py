@@ -4967,6 +4967,74 @@ class ImportPaperlessCommandTests(TestCase):
             call_command("import_paperless", source=str(self.source), owner="gibtsnicht")
         self.assertEqual(Document.objects.count(), 0)
 
+    def test_pfad_traversal_wird_abgelehnt(self):
+        # P2: Ein Manifest-Eintrag mit ../-Pfad darf keine Datei ausserhalb des
+        # Exportverzeichnisses importieren.
+        import json
+
+        from django.core.management import call_command
+
+        # Geheime Datei AUSSERHALB des Exports.
+        outside = Path(self._tmp.name) / "geheim.pdf"
+        outside.write_bytes(b"%PDF-1.4 geheim")
+
+        manifest = [
+            {
+                "model": "documents.document",
+                "pk": 99,
+                "__exported_file_name__": "../geheim.pdf",
+                "fields": {"title": "Boese", "correspondent": None,
+                           "document_type": None, "tags": [], "created": None},
+            }
+        ]
+        (self.source / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+        from unittest import mock
+
+        from . import pipeline, storage
+
+        with mock.patch.object(storage, "ORIGINALS_DIR", self.originals), mock.patch.object(
+            pipeline, "process_version"
+        ):
+            call_command("import_paperless", source=str(self.source), owner="importeur")
+
+        self.assertEqual(Document.objects.count(), 0)
+        self.assertTrue(outside.exists())  # Quelle unberuehrt, nicht importiert
+
+    def test_uebergrosse_datei_wird_vor_kopie_abgelehnt(self):
+        import json
+        from unittest import mock
+
+        from django.core.management import call_command
+        from django.test import override_settings
+
+        from . import pipeline, storage
+
+        big = self.source / "gross.pdf"
+        big.write_bytes(b"%PDF-1.4 " + b"x" * 5000)
+        manifest = [
+            {
+                "model": "documents.document",
+                "pk": 77,
+                "__exported_file_name__": "gross.pdf",
+                "fields": {"title": "Gross", "correspondent": None,
+                           "document_type": None, "tags": [], "created": None},
+            }
+        ]
+        (self.source / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+        # sha256_of duerfte bei korrekter Reihenfolge gar nicht erst aufgerufen
+        # werden (Groesse vor Hash/Kopie geprueft).
+        with override_settings(UPLOAD_MAX_FILE_MB=0), mock.patch.object(
+            storage, "ORIGINALS_DIR", self.originals
+        ), mock.patch.object(pipeline, "process_version"), mock.patch.object(
+            pipeline, "sha256_of", wraps=pipeline.sha256_of
+        ) as sha:
+            call_command("import_paperless", source=str(self.source), owner="importeur")
+
+        self.assertEqual(Document.objects.count(), 0)
+        sha.assert_not_called()  # gar nicht gehasht/kopiert
+
     def test_fehler_im_import_laesst_keine_verwaiste_datei(self):
         # P2: Scheitert die DB-Anlage nach dem Kopieren der Datei, rollt die DB
         # zurueck – die kopierte Originaldatei darf NICHT ohne DB-Eintrag
