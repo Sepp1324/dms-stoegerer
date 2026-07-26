@@ -321,6 +321,22 @@ class PdfWorkbenchTests(APITestCase):
             AuditLogEntry.objects.filter(action="pdf_workbench_merge").exists()
         )
 
+    def test_merge_payload_ueber_limit_wird_frueh_abgelehnt(self):
+        # P1: Ein zu langer document_ids-Payload wird SOFORT (vor SQL-IN/Sort)
+        # mit 400 abgelehnt – auch wenn die IDs gar nicht existieren.
+        from django.test import override_settings
+
+        target = self._doc("merge-guard", self.user, pages=1)
+        self.client.force_authenticate(self.user)
+        with override_settings(PDF_WORKBENCH_MAX_DOCUMENTS=1):
+            resp = self.client.post(
+                f"/api/documents/{target.id}/pdf-workbench/merge/",
+                {"document_ids": [999999, 888888]},  # 2 > Limit 1, existieren nicht
+                format="json",
+            )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("Zu viele", resp.data["detail"])
+
     def test_guest_cannot_write_pdf_workbench_actions(self):
         doc = self._doc("guest", self.guest, pages=2)
         self.client.force_authenticate(self.guest)

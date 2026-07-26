@@ -3653,10 +3653,26 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN,
             )
         document = self.get_object()
+        from .services import pdf_workbench
+
         raw_ids = request.data.get("document_ids")
         if not isinstance(raw_ids, list) or not raw_ids:
             return Response(
                 {"detail": "Feld 'document_ids' muss eine nicht-leere Liste sein."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        # Payload-Länge SOFORT deckeln (P1): Ohne diese Vorabprüfung würde ein
+        # riesiger ID-Payload erst normalisiert (großes SQL-IN) und mit
+        # wiederholtem ids.index() O(n²) sortiert, bevor das Dokumentlimit im
+        # Service greift – DB/Webprozess-Last für einen ohnehin abgelehnten Request.
+        if len(raw_ids) > pdf_workbench.merge_max_documents():
+            return Response(
+                {
+                    "detail": (
+                        "Zu viele Merge-Dokumente "
+                        f"({len(raw_ids)} > Limit {pdf_workbench.merge_max_documents()})."
+                    )
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
         try:
@@ -3677,8 +3693,9 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        ordered = sorted(visible, key=lambda item: ids.index(item.id))
-        from .services import pdf_workbench
+        # O(n)-Sortierung über eine Positions-Map statt ids.index() je Element.
+        id_position = {doc_id: pos for pos, doc_id in enumerate(ids)}
+        ordered = sorted(visible, key=lambda item: id_position[item.id])
 
         try:
             version = pdf_workbench.merge_as_new_version(
