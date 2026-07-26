@@ -126,16 +126,25 @@ def _thumbnail_render_timeout() -> int:
     return int(getattr(settings, "PDF_THUMBNAIL_TIMEOUT_SECONDS", 20))
 
 
+def thumbnail_cache_root():
+    """Wurzel des Werkbank-Thumbnail-Caches.
+
+    Konfigurierbar über ``WORKBENCH_THUMB_CACHE_DIR`` (z. B. ein begrenztes
+    Volume), Default unter dem Datenverzeichnis. Ein periodischer Prune-Task
+    (``tasks.prune_workbench_thumbnail_cache``) begrenzt den Cache per TTL/Größe –
+    sonst wüchse er unbegrenzt (der Lösch-Cleanup erfasst ihn NICHT)."""
+    from pathlib import Path
+
+    configured = getattr(settings, "WORKBENCH_THUMB_CACHE_DIR", "")
+    if configured:
+        return Path(configured)
+    return storage.DATA_DIR / "cache" / "workbench_thumbs"
+
+
 def _thumbnail_cache_path(version: DocumentVersion, page_no: int, dpi: int):
     """Disk-Cache-Pfad einer Miniatur. Version-/seitenbasiert – der Seiteninhalt
     einer Version ist unveränderlich, daher ist der Cache dauerhaft gültig."""
-    return (
-        storage.DATA_DIR
-        / "cache"
-        / "workbench_thumbs"
-        / str(version.id)
-        / f"{page_no}_{dpi}.jpg"
-    )
+    return thumbnail_cache_root() / str(version.id) / f"{page_no}_{dpi}.jpg"
 
 
 def render_page_thumbnail(version: DocumentVersion, page_no: int, *, dpi: int = 110) -> bytes:

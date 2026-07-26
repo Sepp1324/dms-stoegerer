@@ -387,7 +387,20 @@ CELERY_BEAT_SCHEDULE = {
         "task": "documents.tasks.reap_unindexed_versions",
         "schedule": float(os.getenv("INDEX_RECONCILE_INTERVAL", "600")),
     },
+    # Werkbank-Thumbnail-Cache begrenzen (P2): TTL + Größenobergrenze, sonst
+    # wüchse der persistente Cache unbegrenzt auf dem PVC.
+    "prune-workbench-thumbnail-cache": {
+        "task": "documents.tasks.prune_workbench_thumbnail_cache",
+        "schedule": float(os.getenv("THUMB_CACHE_PRUNE_INTERVAL", "86400")),
+    },
 }
+
+# Werkbank-Thumbnail-Cache: optionaler eigener Pfad (z. B. begrenztes Volume;
+# leer = <DMS_DATA_DIR>/cache/workbench_thumbs) sowie TTL/Größenobergrenze für den
+# periodischen Prune (documents.tasks.prune_workbench_thumbnail_cache).
+WORKBENCH_THUMB_CACHE_DIR = os.getenv("WORKBENCH_THUMB_CACHE_DIR", "")
+WORKBENCH_THUMB_CACHE_TTL_DAYS = int(os.getenv("WORKBENCH_THUMB_CACHE_TTL_DAYS", "14"))
+WORKBENCH_THUMB_CACHE_MAX_MB = int(os.getenv("WORKBENCH_THUMB_CACHE_MAX_MB", "512"))
 
 # Findbarkeits-Reconciler: ab wann eine READY-Version ohne indexed_at nachindexiert
 # wird (der Erst-Lauf nach READY bekommt Zeit) und wie viele pro Beat-Lauf.
