@@ -458,7 +458,7 @@ export function PdfWorkbenchPanel({
     setMessage(null);
     try {
       if (!manifest) throw new Error("Seiten sind noch nicht geladen.");
-      const parts = parseSplitPlan(splitPlan);
+      const parts = parseSplitPlan(splitPlan, manifest.page_count);
       const result = await splitPdfDocument(documentId, parts, manifest.version_id);
       setMessage(`${result.documents.length} neue Dokumente wurden erstellt.`);
       setSplitPlan("");
