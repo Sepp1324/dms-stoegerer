@@ -56,6 +56,10 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         source = Path(options["source"]).expanduser()
+        # Export-Root aufgelöst festhalten (P2, Path-Traversal-Schutz): Manifest-
+        # Dateinamen dürfen NICHT aus diesem Verzeichnis ausbrechen (absolute Pfade
+        # oder ``../``).
+        source_root = source.resolve()
         dry_run = options["dry_run"]
         with_tags = options["with_tags"]
 
@@ -100,10 +104,36 @@ class Command(BaseCommand):
                 self.stderr.write(f"  FEHLER „{title}“: keine Originaldatei im Manifest-Eintrag.")
                 continue
 
-            src_file = (source / rel)
+            # Path-Traversal-Schutz (P2): Der Manifest-Dateiname wird mit ``source``
+            # kombiniert und danach AUFGELÖST gegen den Export-Root geprüft. Ein
+            # absoluter Pfad (``/etc/passwd``) oder ``../`` würde sonst aus dem
+            # Export ausbrechen und beliebige Serverdateien importieren.
+            src_file = (source / rel).resolve()
+            if not src_file.is_relative_to(source_root):
+                failed += 1
+                self.stderr.write(
+                    f"  FEHLER „{title}“: Pfad ausserhalb des Exports abgelehnt: {rel}"
+                )
+                continue
             if not src_file.is_file():
                 failed += 1
                 self.stderr.write(f"  FEHLER „{title}“: Datei fehlt: {rel}")
+                continue
+
+            # Größe VOR Hash/Kopie prüfen (P2): Sonst würde eine übergroße Datei erst
+            # vollständig nach /tmp kopiert, bevor storage.save_file() das Limit zieht.
+            try:
+                file_size = src_file.stat().st_size
+            except OSError as exc:
+                failed += 1
+                self.stderr.write(f"  FEHLER „{title}“: Größe nicht lesbar: {exc}")
+                continue
+            if file_size > storage._max_upload_bytes():
+                failed += 1
+                self.stderr.write(
+                    f"  FEHLER „{title}“: Datei zu groß ({file_size} Bytes > Limit "
+                    f"{storage._max_upload_bytes()} Bytes)."
+                )
                 continue
 
             try:
