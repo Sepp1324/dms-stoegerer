@@ -393,6 +393,13 @@ CELERY_BEAT_SCHEDULE = {
         "task": "documents.tasks.prune_workbench_thumbnail_cache",
         "schedule": float(os.getenv("THUMB_CACHE_PRUNE_INTERVAL", "86400")),
     },
+    # Artefakt-Cleanup-Outbox abarbeiten (P2): Aufträge, die bei einem
+    # Broker-Ausfall nur als DB-Zeile hinterlegt werden konnten, damit verwaiste
+    # Artefaktdateien nicht dauerhaft liegen bleiben.
+    "process-artifact-cleanup-jobs": {
+        "task": "documents.tasks.process_artifact_cleanup_jobs",
+        "schedule": float(os.getenv("ARTIFACT_CLEANUP_SWEEP_INTERVAL", "600")),
+    },
 }
 
 # Werkbank-Thumbnail-Cache: optionaler eigener Pfad (z. B. begrenztes Volume;
