@@ -7,7 +7,9 @@ blockt das Löschen weiterhin (der gesperrte Pfad wertet delete_block korrekt au
 """
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
+from django.db import connection
 from django.test import TestCase
+from django.test.utils import CaptureQueriesContext
 
 from .models import AuditLogEntry, Document, DocumentVersion
 
@@ -44,3 +46,37 @@ class DeleteUnderLockTests(TestCase):
         doc = self._doc_with_version(immutable=False)
         doc.delete()
         self.assertFalse(Document.objects.filter(pk=doc.pk).exists())
+
+    def test_lock_reihenfolge_version_vor_dokument(self):
+        """Deadlock-Schutz (P1): delete() muss die Sperren in DERSELBEN Reihenfolge
+        wie seal_version nehmen – erst DocumentVersion, dann Document. Gegenläufige
+        Reihenfolge zwischen Löschen und Sealing ergäbe einen PostgreSQL-Deadlock.
+        """
+        if connection.vendor != "postgresql":
+            self.skipTest("FOR UPDATE nur unter PostgreSQL aussagekräftig")
+        doc = self._doc_with_version(immutable=False)
+        with CaptureQueriesContext(connection) as ctx:
+            doc.delete()
+        for_update = [
+            q["sql"].lower()
+            for q in ctx.captured_queries
+            if "for update" in q["sql"].lower()
+        ]
+        version_first = next(
+            (i for i, s in enumerate(for_update) if "documentversion" in s), None
+        )
+        document_first = next(
+            (
+                i
+                for i, s in enumerate(for_update)
+                if "documentversion" not in s and "documents_document" in s
+            ),
+            None,
+        )
+        self.assertIsNotNone(version_first, "Versionszeile wurde nicht gesperrt")
+        self.assertIsNotNone(document_first, "Dokumentzeile wurde nicht gesperrt")
+        self.assertLess(
+            version_first,
+            document_first,
+            "delete() muss die Version VOR dem Dokument sperren (wie seal_version)",
+        )

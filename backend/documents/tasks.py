@@ -316,21 +316,23 @@ def prune_workbench_thumbnail_cache() -> dict:
     return {"removed": removed}
 
 
-@shared_task(bind=True, max_retries=5, default_retry_delay=60)
-def cleanup_artifact_files(self, paths: list[str]) -> dict:
-    """Entfernt verwaiste Artefaktdateien (Original/Archiv/Thumbnail) eines
-    gelöschten Dokuments von der Platte/dem PVC (P2).
+def safe_remove_artifacts(paths: list[str]) -> tuple[int, list[str]]:
+    """Entfernt verwaiste Artefaktpfade SICHER und gibt ``(entfernt, fehlgeschlagen)``
+    zurück – Letzteres die (transient) NICHT entfernbaren Pfade für einen Retry.
 
-    Läuft NACH dem Commit der Löschung (``Document.delete`` reiht via
-    ``transaction.on_commit`` ein). Bereits fehlende Dateien sind ok; bei einem
-    transienten I/O-/NFS-Fehler wird die GESAMTE Liste (nur die noch vorhandenen
-    Dateien) mit begrenztem Backoff erneut versucht.
+    Gemeinsame Sicherheitslogik (P1) für BEIDE Aufrufwege – den Celery-Task
+    ``cleanup_artifact_files`` UND den Inline-Fallback in ``Document.delete``
+    (Broker-/Redis-Ausfall). So gelten dieselben Prüfungen überall, statt im
+    Fallback blind ``os.remove`` aufzurufen:
 
-    Sicherheit (P1): Ein Pfad wird NUR entfernt, wenn (a) KEINE andere
-    ``DocumentVersion`` ihn noch referenziert (geteilte Datei/Altbestand/manuelle
-    DB-Einträge dürfen kein noch gültiges Dokument beschädigen) und (b) er nach
-    Kanonisierung UNTERHALB des DMS-Datenverzeichnisses liegt (kein ``os.remove``
-    auf beliebige Serverpfade).
+    * (a) KEINE andere ``DocumentVersion`` referenziert den Pfad noch (geteilte
+      Datei/Altbestand/manuelle DB-Einträge dürfen kein gültiges Dokument
+      beschädigen), und
+    * (b) der Pfad liegt nach Kanonisierung UNTERHALB des DMS-Datenverzeichnisses
+      (kein ``os.remove`` auf beliebige Serverpfade).
+
+    Bereits fehlende Dateien sind ok; ein transienter I/O-/NFS-Fehler landet in
+    der zurückgegebenen Fehlerliste.
     """
     from django.db.models import Q
 
@@ -363,6 +365,23 @@ def cleanup_artifact_files(self, paths: list[str]) -> dict:
         except OSError as exc:
             logger.warning("Artefakt-Cleanup: %s nicht entfernbar: %s", real, exc)
             failed.append(path)
+    return removed, failed
+
+
+@shared_task(bind=True, max_retries=5, default_retry_delay=60)
+def cleanup_artifact_files(self, paths: list[str]) -> dict:
+    """Entfernt verwaiste Artefaktdateien (Original/Archiv/Thumbnail) eines
+    gelöschten Dokuments von der Platte/dem PVC (P2).
+
+    Läuft NACH dem Commit der Löschung (``Document.delete`` reiht via
+    ``transaction.on_commit`` ein). Bereits fehlende Dateien sind ok; bei einem
+    transienten I/O-/NFS-Fehler wird die GESAMTE Liste (nur die noch vorhandenen
+    Dateien) mit begrenztem Backoff erneut versucht.
+
+    Die Sicherheitsprüfungen (Referenz- + DATA_DIR-Schutz) liegen gemeinsam in
+    :func:`safe_remove_artifacts`, damit der Inline-Fallback dieselben nutzt.
+    """
+    removed, failed = safe_remove_artifacts(paths)
     if failed:
         if self.request.retries < self.max_retries:
             raise self.retry(

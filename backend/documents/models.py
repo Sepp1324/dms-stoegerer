@@ -602,14 +602,25 @@ class Document(models.Model):
         sperrt dieselbe Versionszeile per ``select_for_update()``; ohne diesen Lock
         könnte zwischen Prüfung und Löschen eine Version unveränderlich (WORM)
         werden und trotzdem gelöscht werden. Der Lock serialisiert beide Pfade.
+
+        Lock-Reihenfolge (P1): IDENTISCH zu ``seal_version`` – erst die
+        Versionszeilen, dann das Dokument. Sealing sperrt zuerst die Version und
+        aktualisiert danach das Dokument; würde ``delete`` in umgekehrter Reihenfolge
+        sperren, entstünde ein klassischer PostgreSQL-Deadlock.
         """
         from django.db import transaction
 
         with transaction.atomic():
-            # Dokument- und Versionszeilen sperren, BEVOR der Schutzstatus gelesen
-            # wird. list() erzwingt die Auswertung (Sperrenaufbau) sofort.
-            type(self).objects.select_for_update().get(pk=self.pk)
+            # Version- und Dokumentzeile sperren, BEVOR der Schutzstatus gelesen
+            # wird – in derselben Reihenfolge wie seal_version (Version zuerst).
+            # list() erzwingt die Auswertung (Sperrenaufbau) sofort.
             list(self.versions.select_for_update())
+            type(self).objects.select_for_update().get(pk=self.pk)
+            # Schutzfelder UNTER der Sperre neu laden (P1): die evtl. VOR der Sperre
+            # geladene ``self``-Instanz sähe ein zwischenzeitliches Sealing/Legal-Hold
+            # nicht – erst nach dem refresh spiegelt ``delete_block`` den frischen,
+            # gesperrten Zustand wider.
+            self.refresh_from_db()
 
             block = self.delete_block()
             if block is None:
@@ -652,16 +663,19 @@ def _schedule_artifact_cleanup(paths: list[str]) -> None:
     from django.db import transaction
 
     def _dispatch():
-        from .tasks import cleanup_artifact_files
+        from .tasks import cleanup_artifact_files, safe_remove_artifacts
 
         try:
             cleanup_artifact_files.delay(paths)
         except Exception:  # noqa: BLE001 – Broker-Ausfall: inline aufräumen
-            for path in paths:
-                try:
-                    os.remove(path)
-                except OSError:
-                    logger.warning("Artefakt-Cleanup (inline) fehlgeschlagen: %s", path)
+            # WICHTIG (P1): identische Sicherheitsprüfungen wie im Task – Referenz-
+            # und DATA_DIR-Schutz. Der Fallback darf NICHT blind ``os.remove``
+            # aufrufen (sonst umginge ein Redis-Ausfall genau diese Prüfungen).
+            _removed, failed = safe_remove_artifacts(paths)
+            if failed:
+                logger.warning(
+                    "Artefakt-Cleanup (inline) unvollständig, verwaist: %s", failed
+                )
 
     transaction.on_commit(_dispatch)
 
