@@ -195,6 +195,21 @@ class _ProcessingUnavailable(APIException):
     default_code = "processing_unavailable"
 
 
+def _workbench_source_version_id(request):
+    """Optionale ``source_version_id`` aus dem Request (Konflikt-Guard, P2).
+
+    Der Client sendet die Version, auf der sein Seiten-Manifest beruht. Ungültige
+    Werte werden als „nicht mitgesendet" (None) behandelt – der Guard ist dann aus.
+    """
+    raw = request.data.get("source_version_id")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def _enqueue_processing(version_id) -> None:
     """``process_document_version`` anstoßen; Broker-Ausfall → sauberes 503.
 
@@ -3634,7 +3649,10 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 specs,
                 actor=request.user,
                 reason=str(request.data.get("reason", "")),
+                expected_version_id=_workbench_source_version_id(request),
             )
+        except pdf_workbench.StaleWorkbenchVersion as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
         except DjangoValidationError as exc:
             return Response({"detail": "; ".join(exc.messages)}, status=400)
         except Exception as exc:  # noqa: BLE001
@@ -3665,12 +3683,16 @@ class DocumentViewSet(viewsets.ModelViewSet):
         # riesiger ID-Payload erst normalisiert (großes SQL-IN) und mit
         # wiederholtem ids.index() O(n²) sortiert, bevor das Dokumentlimit im
         # Service greift – DB/Webprozess-Last für einen ohnehin abgelehnten Request.
-        if len(raw_ids) > pdf_workbench.merge_max_documents():
+        # Off-by-one-Fix (P3): Der Service zählt das Zieldokument mit, daher darf
+        # der Payload höchstens (_max_documents - 1) ZUSÄTZLICHE IDs enthalten –
+        # sonst passiert genau das Limit den View, scheitert aber im Service.
+        max_sources = pdf_workbench.merge_max_source_documents()
+        if len(raw_ids) > max_sources:
             return Response(
                 {
                     "detail": (
                         "Zu viele Merge-Dokumente "
-                        f"({len(raw_ids)} > Limit {pdf_workbench.merge_max_documents()})."
+                        f"({len(raw_ids)} > Limit {max_sources} zusätzlich zum Ziel)."
                     )
                 },
                 status=status.HTTP_400_BAD_REQUEST,
@@ -3703,7 +3725,10 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 ordered,
                 actor=request.user,
                 reason=str(request.data.get("reason", "")),
+                expected_version_id=_workbench_source_version_id(request),
             )
+        except pdf_workbench.StaleWorkbenchVersion as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
         except DjangoValidationError as exc:
             return Response({"detail": "; ".join(exc.messages)}, status=400)
         except Exception as exc:  # noqa: BLE001

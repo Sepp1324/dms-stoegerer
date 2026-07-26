@@ -39,6 +39,29 @@ def merge_max_documents() -> int:
     return _max_documents()
 
 
+def merge_max_source_documents() -> int:
+    """Max. ZUSÄTZLICHE Dokumente für einen Merge (ohne das Zieldokument).
+
+    Off-by-one-Fix (P3): Der Service zählt beim Merge das Zieldokument mit
+    (``[target, *sources]``) gegen ``_max_documents()``. Der View muss die
+    ``document_ids`` daher gegen ``_max_documents() - 1`` deckeln, sonst würde ein
+    Payload mit genau ``_max_documents()`` IDs den View passieren, aber im Service
+    (Ziel + IDs = Limit + 1) mit einer ANDEREN Meldung scheitern – nach Aufbau.
+    """
+    return max(0, _max_documents() - 1)
+
+
+class StaleWorkbenchVersion(Exception):
+    """Die Werkbank-Aktion basiert auf einer inzwischen veralteten Quellversion.
+
+    Der Client sendet die Version, auf der sein Seiten-Manifest beruht
+    (``source_version_id``). Hat eine parallele Aktion inzwischen eine neue
+    aktuelle Version erzeugt, würde die Werkbank eine spätere Version auf Basis
+    eines veralteten Originals erzeugen und die parallele Version überschreiben.
+    Der View übersetzt das in ``409 Conflict``.
+    """
+
+
 def _max_pages() -> int:
     return int(getattr(settings, "PDF_WORKBENCH_MAX_PAGES", 2000))
 
@@ -122,15 +145,29 @@ def render_page_thumbnail(version: DocumentVersion, page_no: int, *, dpi: int = 
     return buffer.getvalue()
 
 
+def _ensure_current_version(document: Document, expected_version_id) -> None:
+    """Wirft StaleWorkbenchVersion, wenn ``expected_version_id`` nicht (mehr) die
+    aktuelle Version des Dokuments ist. Frühe, billige Prüfung vor dem Aufbau."""
+    if expected_version_id is None:
+        return
+    if document.current_version_id != int(expected_version_id):
+        raise StaleWorkbenchVersion(
+            "Das Dokument wurde zwischenzeitlich geändert – bitte neu laden."
+        )
+
+
 def rewrite_as_new_version(
     document: Document,
     specs: list[PageSpec],
     *,
     actor,
     reason: str = "",
+    expected_version_id=None,
 ) -> DocumentVersion:
     """Erzeugt aus Seitenreihenfolge/-Rotation eine neue Version desselben Dokuments."""
     source = _current_pdf(document)
+    # Frühe Konfliktprüfung (P2), spart den Aufbau bei bereits veralteter Version.
+    _ensure_current_version(document, expected_version_id)
     _validate_specs(source, specs)
     # Ressourcengrenzen AUCH beim Rewrite prüfen (P1): sonst könnte eine direkte
     # API-Anfrage dieselbe Quellseite tausendfach wiederholen und erst nach dem
@@ -142,8 +179,16 @@ def rewrite_as_new_version(
     # API 400 liefert und nichts einreiht. Bei Rollback wird die PDF-Datei entfernt.
     try:
         with transaction.atomic():
+            # Zeilensperre + erneuter Vergleich (P2, Race-frei): zwischen der frühen
+            # Prüfung und hier könnte eine parallele Aktion die aktuelle Version
+            # geändert haben – dann NICHT überschreiben, sondern 409.
+            locked = Document.objects.select_for_update().get(pk=document.pk)
+            if locked.current_version_id != source.id:
+                raise StaleWorkbenchVersion(
+                    "Das Dokument wurde zwischenzeitlich geändert – bitte neu laden."
+                )
             version = pipeline.create_version_for_document(
-                document,
+                locked,
                 str(dest),
                 created_by=actor,
                 mime="application/pdf",
@@ -175,8 +220,12 @@ def merge_as_new_version(
     *,
     actor,
     reason: str = "",
+    expected_version_id=None,
 ) -> DocumentVersion:
     """Merged target + weitere Dokumente in eine neue Version des Ziel-Dokuments."""
+    target_source = _current_pdf(target)
+    # Frühe Konfliktprüfung auf das Zieldokument (P2).
+    _ensure_current_version(target, expected_version_id)
     ordered_documents = [target, *list(documents)]
     sources = []
     for document in ordered_documents:
@@ -194,8 +243,14 @@ def merge_as_new_version(
     # Version + Audit atomar (P2), Datei-Cleanup bei Rollback – wie beim Rewrite.
     try:
         with transaction.atomic():
+            # Zeilensperre + erneuter Vergleich auf das Ziel (P2, Race-frei).
+            locked = Document.objects.select_for_update().get(pk=target.pk)
+            if locked.current_version_id != target_source.id:
+                raise StaleWorkbenchVersion(
+                    "Das Dokument wurde zwischenzeitlich geändert – bitte neu laden."
+                )
             version = pipeline.create_version_for_document(
-                target,
+                locked,
                 str(dest),
                 created_by=actor,
                 mime="application/pdf",
