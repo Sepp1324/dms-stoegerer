@@ -88,6 +88,47 @@ class PdfWorkbenchTests(APITestCase):
         self.assertEqual(resp["Content-Type"], "image/jpeg")
         self.assertEqual(resp.content, b"jpeg-bytes")
 
+    def test_thumbnail_cache_vermeidet_erneutes_rendern(self):
+        # P1: Ein bereits gerendertes (version, page, dpi)-JPEG kommt beim zweiten
+        # Aufruf aus dem Disk-Cache – Poppler wird NICHT erneut ausgeführt.
+        from PIL import Image
+
+        from .services import pdf_workbench
+
+        doc = self._doc("cache", self.user, pages=1)
+        version = doc.current_version
+
+        def fake_convert(*args, **kwargs):
+            return [Image.new("RGB", (20, 20), "white")]
+
+        with mock.patch.object(storage, "DATA_DIR", Path(self.tmp.name)), mock.patch(
+            "pdf2image.convert_from_path", side_effect=fake_convert
+        ) as conv:
+            first = pdf_workbench.render_page_thumbnail(version, 1)
+            second = pdf_workbench.render_page_thumbnail(version, 1)
+
+        self.assertTrue(first)
+        self.assertEqual(first, second)
+        conv.assert_called_once()  # zweiter Aufruf aus dem Cache, kein Re-Render
+
+    def test_thumbnail_render_bekommt_timeout(self):
+        from PIL import Image
+
+        from .services import pdf_workbench
+
+        doc = self._doc("timeout", self.user, pages=1)
+        version = doc.current_version
+
+        with mock.patch.object(storage, "DATA_DIR", Path(self.tmp.name)), mock.patch(
+            "pdf2image.convert_from_path",
+            return_value=[Image.new("RGB", (10, 10), "white")],
+        ) as conv:
+            pdf_workbench.render_page_thumbnail(version, 1)
+
+        # Poppler-Rendern läuft mit hartem Timeout (P1).
+        self.assertIn("timeout", conv.call_args.kwargs)
+        self.assertGreater(conv.call_args.kwargs["timeout"], 0)
+
     def test_rewrite_creates_new_version_with_reordered_rotated_pages(self):
         doc = self._doc("rewrite", self.user, pages=3)
         self.client.force_authenticate(self.user)

@@ -243,6 +243,8 @@ REST_FRAMEWORK = {
         "capture": os.getenv("THROTTLE_CAPTURE_RATE", "60/minute"),
         # KI-Endpunkte (Copilot/semantische Suche): teuer (Provider-Kosten, CPU/RAM).
         "ai": os.getenv("THROTTLE_AI_RATE", "30/minute"),
+        # PDF-Werkbank-Thumbnails: jede Miniatur rendert serverseitig mit Poppler.
+        "pdf_thumbnail": os.getenv("THROTTLE_PDF_THUMBNAIL_RATE", "240/minute"),
     },
 }
 

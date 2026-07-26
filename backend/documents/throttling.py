@@ -42,3 +42,13 @@ class AiRateThrottle(_PerUserScopeThrottle):
     (auch versehentlich schleifende) Nutzer, ohne Listen/Suche zu drosseln."""
 
     scope = "ai"
+
+
+class PdfThumbnailRateThrottle(_PerUserScopeThrottle):
+    """Limit für den PDF-Werkbank-Thumbnail-Endpunkt (Scope ``pdf_thumbnail``).
+
+    Jede Miniatur rendert serverseitig mit Poppler. Der browserseitige
+    Concurrency-Gate schützt nur EINEN Tab; mehrere Tabs/Nutzer/direkte
+    API-Aufrufe umgehen ihn. Diese Drossel greift serverseitig (P1)."""
+
+    scope = "pdf_thumbnail"
