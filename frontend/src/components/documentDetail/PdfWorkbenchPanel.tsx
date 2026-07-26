@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  ApiError,
   getDocuments,
   getPdfWorkbenchPageThumbnail,
   getPdfWorkbenchPages,
@@ -124,6 +125,22 @@ function scheduleThumbnail<T>(task: () => Promise<T>): Promise<T> {
 // die Miniaturen bleiben für die (transiente) Werkbank-Sitzung gültig.
 const thumbnailCache = new Map<string, string>();
 
+// Gibt die gecachten Objekt-URLs FRÜHERER Versionen dieses Dokuments frei (P1).
+// Der Cache-Key enthält die Version (``item.key`` = ``versionId-page``); nach
+// einem Rewrite/Merge (neue Version) würden sonst die alten Miniaturen im Speicher
+// bleiben – und, schlimmer, ein Key ohne Version hätte die ALTE Vorschau für die
+// NEUE Version geliefert (falsche Seiten -> versehentliches Löschen/Umordnen).
+function evictOtherVersionThumbnails(documentId: number, keepVersionId: number) {
+  const docPrefix = `${documentId}-`;
+  const keepPrefix = `${documentId}-${keepVersionId}-`;
+  for (const [key, url] of thumbnailCache) {
+    if (key.startsWith(docPrefix) && !key.startsWith(keepPrefix)) {
+      URL.revokeObjectURL(url);
+      thumbnailCache.delete(key);
+    }
+  }
+}
+
 function PageThumb({
   documentId,
   item,
@@ -131,7 +148,10 @@ function PageThumb({
   documentId: number;
   item: PageItem;
 }) {
-  const cacheKey = `${documentId}-${item.page}`;
+  // Version-genauer Cache-Key: ``item.key`` ist ``${versionId}-${page}``, davor
+  // die Dokument-ID -> nach einer neuen Version wird NICHT die alte Miniatur
+  // wiederverwendet (P1).
+  const cacheKey = `${documentId}-${item.key}`;
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [src, setSrc] = useState<string | null>(
     () => thumbnailCache.get(cacheKey) ?? null,
@@ -246,6 +266,9 @@ export function PdfWorkbenchPanel({
     setError(null);
     getPdfWorkbenchPages(documentId)
       .then((data) => {
+        // Miniaturen früherer Versionen dieses Dokuments freigeben (P1): nach
+        // Rewrite/Merge zeigt das Manifest eine neue version_id.
+        evictOtherVersionThumbnails(documentId, data.version_id);
         setManifest(data);
         setItems(toItems(data));
         setSelected(new Set());
@@ -345,6 +368,32 @@ export function PdfWorkbenchPanel({
     }
   }
 
+  // Split-503 (P2): Das Backend hat die Teil-Dokumente ANGELEGT, konnte die
+  // Verarbeitung aber nicht vollständig einreihen (Broker-Ausfall). Der Payload
+  // trägt die erzeugten IDs – wir zeigen sie an und aktualisieren die Liste, statt
+  // nur einen Fehler zu werfen (sonst würde der Nutzer versehentlich erneut
+  // splitten und Duplikate erzeugen). Gibt true zurück, wenn behandelt.
+  function handleSplitOutcome(err: unknown): boolean {
+    if (err instanceof ApiError && err.status === 503) {
+      const payload = err.payload as { document_ids?: number[] } | null;
+      const ids = payload?.document_ids ?? [];
+      if (ids.length) {
+        setMessage(
+          `${ids.length} Teil-Dokument(e) wurden angelegt, aber die Verarbeitung ` +
+            `konnte nicht eingereiht werden (Dienst überlastet). Bitte NICHT erneut ` +
+            `splitten – die erzeugten Dokumente sind bereits in der Liste; die ` +
+            `Verarbeitung kann später erneut angestoßen werden.`,
+        );
+        setSplitTitle("");
+        setSplitPlan("");
+        setSelected(new Set());
+        onChanged(); // Liste aktualisieren -> erzeugte Dokumente werden sichtbar
+        return true;
+      }
+    }
+    return false;
+  }
+
   async function runSplitSelected() {
     setBusy("split-selected");
     setError(null);
@@ -359,7 +408,9 @@ export function PdfWorkbenchPanel({
       setSelected(new Set());
       onChanged();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (!handleSplitOutcome(err)) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
     } finally {
       setBusy(null);
     }
@@ -376,7 +427,9 @@ export function PdfWorkbenchPanel({
       setSplitPlan("");
       onChanged();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (!handleSplitOutcome(err)) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
     } finally {
       setBusy(null);
     }

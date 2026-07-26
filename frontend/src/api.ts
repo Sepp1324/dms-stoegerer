@@ -3474,6 +3474,21 @@ function parseContentDispositionFilename(disposition: string | null): string {
   return plain ? plain[1].trim() : fallback;
 }
 
+// Typisierter API-Fehler: trägt HTTP-Status UND den geparsten Antwort-Payload,
+// damit Aufrufer strukturierte Fehler (z. B. das Split-503 mit den bereits
+// erzeugten Dokumenten) auswerten können. ``extends Error`` -> ``.message``
+// bleibt für bestehende ``catch``-Stellen unverändert nutzbar.
+export class ApiError extends Error {
+  readonly status: number;
+  readonly payload: unknown;
+  constructor(status: number, message: string, payload: unknown) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.payload = payload;
+  }
+}
+
 // --- Stammdaten inline anlegen ---
 async function postJson<T>(path: string, body: unknown): Promise<T> {
   const res = await apiFetch(path, {
@@ -3483,13 +3498,15 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
   });
   if (!res.ok) {
     let detail = `HTTP ${res.status}`;
+    let payload: unknown = null;
     try {
-      const data = await res.json();
-      detail = data.detail || JSON.stringify(data);
+      payload = await res.json();
+      const data = payload as { detail?: string } | null;
+      detail = data?.detail || JSON.stringify(payload);
     } catch {
       /* keine JSON-Fehlermeldung */
     }
-    throw new Error(detail);
+    throw new ApiError(res.status, detail, payload);
   }
   return res.json();
 }
