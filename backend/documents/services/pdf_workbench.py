@@ -227,6 +227,18 @@ def split_into_documents(
     """Erzeugt aus Seitenbereichen neue Dokumente und kopiert Kernmetadaten."""
     source = _current_pdf(source_document)
 
+    # Ressourcengrenzen ZUERST und BILLIG prüfen (P1):
+    #  * Teileanzahl vor der Schleife (je Teil ein neues Dokument),
+    #  * Seitenzahl der Quelle GENAU EINMAL bestimmen (statt _validate_specs, das
+    #    das PDF je Teil erneut öffnete – tausende Öffnungen bei grossem Payload),
+    #  * kumuliertes Seitenlimit WÄHREND der Schleife abbrechen.
+    if len(parts) > _max_documents():
+        raise ValidationError(
+            f"Zu viele Teile ({len(parts)} > Limit {_max_documents()})."
+        )
+    source_page_count = _page_count(source)
+    max_pages = _max_pages()
+
     # 1) ALLE Teile ZUERST vollständig validieren (P1): Bislang wurden die Teile
     # nacheinander validiert UND gespeichert – war Teil 1 gültig und Teil 2
     # ungültig, blieb Teil 1 als Dokument bestehen (ein erneuter Versuch erzeugte
@@ -239,15 +251,23 @@ def split_into_documents(
             specs = [PageSpec(page=int(page)) for page in part.get("pages", [])]
         except (TypeError, ValueError) as exc:
             raise ValidationError(f"Teil {idx}: Seiten müssen Zahlen sein.") from exc
-        _validate_specs(source, specs)
+        if not specs:
+            raise ValidationError(f"Teil {idx}: Mindestens eine Seite ist erforderlich.")
+        for spec in specs:
+            if spec.page < 1 or spec.page > source_page_count:
+                raise ValidationError(
+                    f"Teil {idx}: Seite {spec.page} liegt außerhalb von "
+                    f"1..{source_page_count}."
+                )
         total_pages += len(specs)
+        if total_pages > max_pages:
+            raise ValidationError(
+                f"Zu viele Seiten insgesamt (> Limit {max_pages})."
+            )
         prepared.append((title, specs))
 
-    # Ressourcengrenzen (P1, OOM-Schutz): je Teil ein neues Dokument.
-    if len(prepared) > _max_documents():
-        raise ValidationError(
-            f"Zu viele Teile ({len(prepared)} > Limit {_max_documents()})."
-        )
+    # Eingabegröße der Quelle prüfen (Bytes-Limit); Seiten/Anzahl sind oben schon
+    # billig geprüft.
     _enforce_source_limits([source], total_pages=total_pages)
 
     # 2) Erst nach vollständiger Validierung erzeugen – in EINER äußeren
