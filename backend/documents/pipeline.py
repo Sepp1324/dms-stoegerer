@@ -1060,6 +1060,13 @@ def _seal_version(version: DocumentVersion) -> None:
 
     finalized_at = timezone.now()
     with transaction.atomic():
+        # Lock-Reihenfolge SYSTEMWEIT Document→DocumentVersion (P1): erst das
+        # Dokument sperren, dann die Version. seal_version aktualisiert unten auch
+        # die Dokument-Retention; würde es die Version zuerst und das Dokument
+        # danach sperren, entstünde ein gegenläufiger Deadlock mit delete/add_version.
+        from .models import Document
+
+        Document.objects.select_for_update().get(pk=version.document_id)
         locked = DocumentVersion.objects.select_for_update().get(pk=version.pk)
         if locked.seal_finalized_at is not None:
             # Ein paralleler Lauf hat bereits vollständig gesiegelt.
