@@ -258,6 +258,64 @@ def _sync_document_flashcards(document_id: int) -> dict:
     }
 
 
+@shared_task
+def prune_workbench_thumbnail_cache() -> dict:
+    """Begrenzt den persistenten Werkbank-Thumbnail-Cache per TTL + Größe (P2).
+
+    Der Cache (jede bearbeitete Version hinterlässt Miniaturen) wird vom
+    Lösch-Cleanup NICHT erfasst und wüchse sonst unbegrenzt auf dem PVC. Periodisch
+    (Beat) werden Dateien älter als ``WORKBENCH_THUMB_CACHE_TTL_DAYS`` entfernt und
+    – falls der Cache die Größenobergrenze überschreitet – die ältesten (LRU nach
+    mtime) gelöscht, bis er wieder darunter liegt.
+    """
+    from documents.services import pdf_workbench
+
+    root = str(pdf_workbench.thumbnail_cache_root())
+    if not os.path.isdir(root):
+        return {"removed": 0, "reason": "kein Cache-Verzeichnis"}
+
+    ttl_seconds = int(getattr(settings, "WORKBENCH_THUMB_CACHE_TTL_DAYS", 14)) * 86400
+    max_bytes = int(getattr(settings, "WORKBENCH_THUMB_CACHE_MAX_MB", 512)) * 1024 * 1024
+    now = time.time()
+
+    entries: list[tuple[float, int, str]] = []
+    for dirpath, _dirs, filenames in os.walk(root):
+        for name in filenames:
+            fp = os.path.join(dirpath, name)
+            try:
+                st = os.stat(fp)
+            except OSError:
+                continue
+            entries.append((st.st_mtime, st.st_size, fp))
+
+    removed = 0
+    kept: list[tuple[float, int, str]] = []
+    for mtime, size, fp in entries:
+        if now - mtime > ttl_seconds:
+            try:
+                os.remove(fp)
+                removed += 1
+            except OSError:
+                pass
+        else:
+            kept.append((mtime, size, fp))
+
+    total = sum(size for _m, size, _p in kept)
+    if total > max_bytes:
+        kept.sort(key=lambda t: t[0])  # älteste zuerst (LRU)
+        for _mtime, size, fp in kept:
+            if total <= max_bytes:
+                break
+            try:
+                os.remove(fp)
+                removed += 1
+                total -= size
+            except OSError:
+                pass
+
+    return {"removed": removed}
+
+
 @shared_task(bind=True, max_retries=5, default_retry_delay=60)
 def cleanup_artifact_files(self, paths: list[str]) -> dict:
     """Entfernt verwaiste Artefaktdateien (Original/Archiv/Thumbnail) eines
