@@ -2129,9 +2129,20 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 {"detail": str(exc)},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        version = pipeline.create_version_for_document(
-            document, file_path, created_by=request.user, mime=mime, size=size
-        )
+        try:
+            version = pipeline.create_version_for_document(
+                document, file_path, created_by=request.user, mime=mime, size=size
+            )
+        except Exception:
+            # Die Datei wurde VOR der DB-Transaktion auf die Platte geschrieben
+            # (storage.save_upload). Scheitert das Anlegen der Version, verwaist sie
+            # sonst (kein DB-Verweis, belegt aber Speicher). Analog zum Erst-Ingest
+            # (pipeline.create_document_from_file) hier best-effort entfernen.
+            try:
+                os.remove(file_path)
+            except OSError:
+                pass
+            raise
         # OCR/Hash-Kette asynchron im Celery-Worker.
         _enqueue_processing(version.id)
 
