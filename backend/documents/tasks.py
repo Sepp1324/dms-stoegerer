@@ -1230,51 +1230,57 @@ def check_due_reminders() -> dict:
         if claimed:
             notified += 1
 
-    # --- E-Mail: eigener Versandstatus + atomarer Claim ----------------------
-    # email_sent_at ist GETRENNT von notified_at: ein fehlgeschlagener Versand
-    # bleibt email_sent_at=NULL und wird beim nächsten Lauf erneut versucht (das
-    # In-App-Dedupe blockiert das nicht mehr). Der Claim per select_for_update
-    # (skip_locked) verhindert, dass zwei parallele Beats dieselbe Mail senden;
-    # email_sent_at wird ERST nach BESTÄTIGTEM Versand (send_mail > 0) gesetzt.
+    # --- E-Mail: Outbox mit Lease (P2) --------------------------------------
+    # ``email_sent_at`` bedeutet BESTÄTIGT versendet und wird ERST nach
+    # erfolgreichem SMTP-Versand gesetzt (Feldsemantik). Ein In-Flight-Lease
+    # (``email_claimed_at``) verhindert Doppelversand durch parallele Beats, OHNE
+    # eine Mail dauerhaft zu verlieren: Stirbt der Worker nach dem Claim (vor dem
+    # bestätigten Versand), läuft die Lease ab und ein späterer Lauf sendet erneut
+    # (at-least-once; ein Duplikat ist SMTP-inhärent unvermeidbar, aber besser als
+    # eine verlorene Erinnerung – die frühere at-most-once-Variante verlor sie).
     emailed = 0
     if smtp_configured:
+        lease = timedelta(minutes=int(getattr(settings, "REMINDER_EMAIL_LEASE_MINUTES", 30)))
+        stale = now - lease
+        # Kandidaten: noch nicht bestätigt versendet UND (Lease frei ODER abgelaufen).
+        claimable = models.Q(email_claimed_at__isnull=True) | models.Q(
+            email_claimed_at__lt=stale
+        )
         email_candidates = list(
             DocumentReminder.objects.filter(
                 done=False, remind_on__lte=today, email_sent_at__isnull=True
-            ).values_list("pk", flat=True)
+            )
+            .filter(claimable)
+            .values_list("pk", flat=True)
         )
         for pk in email_candidates:
             try:
-                # 1) CLAIM (at-most-once, P2): ``email_sent_at`` unter Zeilensperre
-                #    setzen und COMMITTEN, BEVOR extern gesendet wird. Bislang lief
-                #    der SMTP-Versand VOR dem Commit – stirbt der Worker nach
-                #    erfolgreichem Versand, blieb email_sent_at=NULL und die nächste
-                #    Runde sendete dieselbe Mail erneut. Mit dem vorgezogenen,
-                #    committeten Claim ist ein Doppelversand ausgeschlossen.
-                with transaction.atomic():
-                    # KEIN select_related: select_for_update + Outer Join auf die
-                    # NULLBARE FK created_by scheitert auf Postgres.
-                    reminder = (
-                        DocumentReminder.objects.select_for_update(skip_locked=True)
-                        .filter(pk=pk, email_sent_at__isnull=True)
-                        .first()
+                # 1) CLAIM per CAS: nur gewinnen, wenn NICHT bestätigt versendet und
+                #    Lease frei/abgelaufen. Rowcount 1 == diese Runde besitzt die Mail.
+                claimed = (
+                    DocumentReminder.objects.filter(
+                        pk=pk, email_sent_at__isnull=True
                     )
-                    if reminder is None:
-                        continue  # anderer Worker hat die Zeile (oder schon versendet)
-                    recipient = getattr(reminder.created_by, "email", "") or ""
-                    if not recipient:
-                        continue  # kein Empfänger -> nichts zu senden (kein Retry nötig)
-                    subject = f"Wiedervorlage fällig: Dokument #{reminder.document_id}"
-                    message = (
-                        f"Die Wiedervorlage für Dokument #{reminder.document_id} ist "
-                        f"seit {reminder.remind_on.isoformat()} fällig.\n\n"
-                        f"{reminder.note}".strip()
-                    )
-                    DocumentReminder.objects.filter(pk=pk).update(
-                        email_sent_at=now, updated_at=now
-                    )
+                    .filter(claimable)
+                    .update(email_claimed_at=now, updated_at=now)
+                )
+                if not claimed:
+                    continue  # anderer Worker hat die Lease inzwischen
+                reminder = DocumentReminder.objects.select_related("created_by").get(pk=pk)
+                recipient = getattr(reminder.created_by, "email", "") or ""
+                if not recipient:
+                    # Kein Empfänger -> Lease freigeben (kein Dauerclaim), nichts senden.
+                    DocumentReminder.objects.filter(pk=pk).update(email_claimed_at=None)
+                    continue
+                subject = f"Wiedervorlage fällig: Dokument #{reminder.document_id}"
+                message = (
+                    f"Die Wiedervorlage für Dokument #{reminder.document_id} ist "
+                    f"seit {reminder.remind_on.isoformat()} fällig.\n\n"
+                    f"{reminder.note}".strip()
+                )
 
-                # 2) NACH dem Commit senden (externer Effekt außerhalb der Sperre).
+                # 2) Senden. Erfolg -> email_sent_at (bestätigt). Fehler -> Lease
+                #    freigeben, nächster Lauf versucht erneut.
                 try:
                     sent = send_mail(
                         subject=subject,
@@ -1284,10 +1290,7 @@ def check_due_reminders() -> dict:
                         fail_silently=False,
                     )
                 except SoftTimeLimitExceeded:
-                    # Claim zurücknehmen, damit der nächste Lauf erneut versucht.
-                    DocumentReminder.objects.filter(
-                        pk=pk, email_sent_at=now
-                    ).update(email_sent_at=None)
+                    DocumentReminder.objects.filter(pk=pk).update(email_claimed_at=None)
                     raise
                 except Exception:
                     sent = 0
@@ -1297,13 +1300,12 @@ def check_due_reminders() -> dict:
                     )
 
                 if sent:
+                    DocumentReminder.objects.filter(pk=pk).update(
+                        email_sent_at=now, updated_at=now
+                    )
                     emailed += 1
                 else:
-                    # Kein bestätigter Versand -> Claim zurücknehmen (nur den eigenen),
-                    # damit der nächste Lauf erneut sendet (at-least-once im Fehlerfall).
-                    DocumentReminder.objects.filter(
-                        pk=pk, email_sent_at=now
-                    ).update(email_sent_at=None)
+                    DocumentReminder.objects.filter(pk=pk).update(email_claimed_at=None)
             except SoftTimeLimitExceeded:
                 raise  # Soft-Time-Limit nicht verschlucken (s. scan_consume_folder).
             except Exception:

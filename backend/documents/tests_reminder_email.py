@@ -43,20 +43,44 @@ class ReminderEmailTests(TestCase):
         self.assertEqual(res2["emailed"], 1)
         self.assertEqual(res2["notified"], 0)  # In-App nicht erneut
 
-    def test_claim_wird_vor_versand_committet(self):
-        # P2 (at-most-once): email_sent_at muss BEREITS gesetzt sein, wenn send_mail
-        # aufgerufen wird. Stirbt der Worker danach, verhindert der committete Claim
-        # einen Doppelversand beim nächsten Lauf.
+    def test_email_sent_at_erst_nach_bestaetigtem_versand(self):
+        # P2: email_sent_at bedeutet BESTÄTIGT versendet. Während send_mail läuft, ist
+        # es noch NULL (nur die Lease email_claimed_at ist gesetzt); erst NACH Erfolg.
         seen = {}
 
         def fake_send(**kwargs):
             reminder = DocumentReminder.objects.get(pk=self.reminder.pk)
-            seen["claimed_before_send"] = reminder.email_sent_at is not None
+            seen["sent_at_during_send"] = reminder.email_sent_at
+            seen["claimed_during_send"] = reminder.email_claimed_at
             return 1
 
         with mock.patch("django.core.mail.send_mail", side_effect=fake_send):
             check_due_reminders()
-        self.assertTrue(seen.get("claimed_before_send"))
+        self.assertIsNone(seen["sent_at_during_send"])       # noch NICHT bestätigt
+        self.assertIsNotNone(seen["claimed_during_send"])    # aber geclaimt (Lease)
+        self.reminder.refresh_from_db()
+        self.assertIsNotNone(self.reminder.email_sent_at)    # nach Erfolg bestätigt
+
+    def test_abgelaufene_lease_wird_neu_versucht(self):
+        # P2 (kein dauerhafter Verlust): Simuliert Worker-Crash NACH dem Claim, VOR
+        # dem bestätigten Versand -> abgelaufene Lease, email_sent_at NULL. Der nächste
+        # Lauf muss erneut senden.
+        old = timezone.now() - timedelta(hours=2)
+        DocumentReminder.objects.filter(pk=self.reminder.pk).update(email_claimed_at=old)
+        with mock.patch("django.core.mail.send_mail", return_value=1) as sm:
+            check_due_reminders()
+        sm.assert_called_once()  # trotz (abgelaufener) Vor-Lease erneut gesendet
+        self.reminder.refresh_from_db()
+        self.assertIsNotNone(self.reminder.email_sent_at)
+
+    def test_frische_lease_wird_nicht_doppelt_versendet(self):
+        # Eine frische Lease (anderer Worker in-flight) darf NICHT erneut senden.
+        DocumentReminder.objects.filter(pk=self.reminder.pk).update(
+            email_claimed_at=timezone.now()
+        )
+        with mock.patch("django.core.mail.send_mail", return_value=1) as sm:
+            check_due_reminders()
+        sm.assert_not_called()
 
     def test_null_zustellung_markiert_nicht_versendet(self):
         # send_mail liefert 0 (nichts zugestellt) -> NICHT als versendet markieren.
