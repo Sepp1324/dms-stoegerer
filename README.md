@@ -73,25 +73,48 @@ npm run dev          # http://localhost:5173, proxyt /api an :8000
 
 ## Deployment auf k3s
 
-```bash
-# 1. Images bauen und in k3s importieren (containerd)
-docker build -t dms-backend:latest ./backend
-docker build -t dms-frontend:latest ./frontend
-docker save dms-backend:latest | sudo k3s ctr images import -
-docker save dms-frontend:latest | sudo k3s ctr images import -
+> ⚠️ **Nicht** lokale `:latest`-Images bauen/importieren und `kubectl apply -k deploy/k8s`
+> von `main` ausführen. Die Kustomize-Basis pinnt bewusst **versionierte
+> Registry-Tags** (`registry.stoegerer-home.at/dms-backend:<git-sha>`) und ignoriert
+> lokal importierte `:latest`-Images vollständig. In `main` bleiben diese Tags
+> absichtlich veraltet – ein Apply von `main` würde eine **alte** Version ausrollen.
+> Die Wahrheit über die real in der Registry liegenden Images steht ausschließlich
+> im GitOps-Branch **`cluster-state`**.
 
-# 2. Secret vorbereiten
+### Normalfall: CI/CD (automatisch)
+
+Ein Merge auf `main` löst den Self-hosted-Runner-Workflow aus
+([.github/workflows/deploy.yml](.github/workflows/deploy.yml)):
+Backend/Frontend werden gebaut, unter dem **Git-SHA** in die Registry gepusht und
+– nach in der Registry verifiziertem Push – wird der `newTag` in
+[deploy/k8s/base/kustomization.yaml](deploy/k8s/base/kustomization.yaml) gesetzt und
+auf `cluster-state` gepusht, von wo der Cluster `apply -k` fährt. Details:
+[docs/ci-cd.md](docs/ci-cd.md).
+
+### Einmaliges Bootstrap (Admin)
+
+```bash
+# Namespace + ServiceAccount/Rollen (cluster-scoped, nur einmal)
+kubectl apply -k deploy/k8s/bootstrap
+
+# Secret vorbereiten (nie ins Repo committen)
 cp deploy/k8s/secret.example.yaml deploy/k8s/secret.yaml
 # Werte in secret.yaml eintragen
 kubectl apply -f deploy/k8s/secret.yaml
-
-# 3. Alles ausrollen
-kubectl apply -k deploy/k8s
-
-# 4. dms.local in /etc/hosts auf die Node-IP zeigen lassen
 ```
 
-Danach ist das DMS unter `http://dms.local` erreichbar (Traefik-Ingress).
+### Manueller Apply (Notfall)
+
+```bash
+# WICHTIG: vom GitOps-Branch cluster-state, NICHT von main – nur er trägt die
+# echten, in der Registry vorhandenen Image-Tags.
+git fetch origin cluster-state
+git checkout cluster-state
+kubectl apply -k deploy/k8s
+```
+
+Danach ist das DMS unter `http://dms.local` erreichbar (Traefik-Ingress) –
+`dms.local` in `/etc/hosts` auf die Node-IP zeigen lassen.
 
 ## psychosr-Integration (Auto-Lernkarten)
 
