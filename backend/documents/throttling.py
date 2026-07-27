@@ -52,3 +52,13 @@ class PdfThumbnailRateThrottle(_PerUserScopeThrottle):
     API-Aufrufe umgehen ihn. Diese Drossel greift serverseitig (P1)."""
 
     scope = "pdf_thumbnail"
+
+
+class RevisionExportRateThrottle(_PerUserScopeThrottle):
+    """Limit für den Revisionspaket-Export (Scope ``revision_export``).
+
+    Der Export baut SYNCHRON ein ZIP über alle Versionen/Archive eines Dokuments
+    und kann bei nur zwei Gunicorn-Workern beide binden. Diese Drossel begrenzt
+    die Frequenz pro Nutzer (P2)."""
+
+    scope = "revision_export"

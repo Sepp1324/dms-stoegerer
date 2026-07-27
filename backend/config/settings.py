@@ -245,8 +245,16 @@ REST_FRAMEWORK = {
         "ai": os.getenv("THROTTLE_AI_RATE", "30/minute"),
         # PDF-Werkbank-Thumbnails: jede Miniatur rendert serverseitig mit Poppler.
         "pdf_thumbnail": os.getenv("THROTTLE_PDF_THUMBNAIL_RATE", "240/minute"),
+        # Revisionspaket-Export: baut synchron ein ZIP über ALLE Versionen/Archive.
+        # Bewusst niedrig – ein einzelner Nutzer soll nicht beide Webworker binden.
+        "revision_export": os.getenv("THROTTLE_REVISION_EXPORT_RATE", "6/minute"),
     },
 }
+
+# Revisionspaket-Export (P2): Obergrenzen gegen Blockade der Webworker/Temp-Platte.
+# Der Export läuft synchron im Request; sehr große Pakete werden mit 413 abgelehnt.
+REVISION_PACKAGE_MAX_MB = int(os.getenv("REVISION_PACKAGE_MAX_MB", "500"))
+REVISION_PACKAGE_MAX_VERSIONS = int(os.getenv("REVISION_PACKAGE_MAX_VERSIONS", "200"))
 
 # Größenobergrenze für Nicht-Datei-Formfelder eines Requests (DoS gegen riesige
 # Metadaten-Payloads). Datei-Uploads werden separat in ``storage.save_upload``
