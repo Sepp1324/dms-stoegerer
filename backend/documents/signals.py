@@ -9,10 +9,11 @@ from __future__ import annotations
 import logging
 
 from django.conf import settings
-from django.db.models.signals import m2m_changed, post_save
+from django.db import transaction
+from django.db.models.signals import m2m_changed, post_save, pre_delete
 from django.dispatch import receiver
 
-from .models import Document
+from .models import Correspondent, Document, DocumentType, Tag
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,63 @@ def on_document_tags_changed_refresh_vector(
             _refresh_search_vector(document_id)
     else:
         _refresh_search_vector(instance.pk)
+
+
+def _reindex_documents(document_ids) -> None:
+    """Reindiziert die genannten Dokumente NACH dem Commit.
+
+    ``document_ids`` wird SOFORT ausgewertet (der Aufrufer ruft dies bei
+    ``pre_delete`` auf, solange die Verknüpfung noch existiert); der Suchvektor
+    wird erst ``on_commit`` neu geschrieben, wenn die Stammdatenänderung (Rename)
+    bzw. das SET_NULL/M2M-Cascade (Delete) sichtbar ist."""
+    ids = [pk for pk in dict.fromkeys(document_ids) if pk]
+    if not ids:
+        return
+
+    def _run():
+        for document_id in ids:
+            _refresh_search_vector(document_id)
+
+    transaction.on_commit(_run)
+
+
+# Stammdaten (Tag/Korrespondent/Dokumenttyp) fließen materialisiert in den
+# Suchvektor ein (services/search_vector.py). Ein Rename ODER Löschen aktualisiert
+# über die reinen Document-/M2M-Signale NICHT die betroffenen Dokumente – der alte
+# Name bliebe im Index, der neue würde nicht gefunden. Diese Signale schließen die
+# Lücke (P2).
+@receiver(post_save, sender=Correspondent)
+@receiver(post_save, sender=DocumentType)
+def on_master_data_saved_reindex(sender, instance, created=False, **kwargs):
+    if created:
+        return  # neue Stammdaten haben noch keine Dokumente
+    field = "correspondent_id" if sender is Correspondent else "document_type_id"
+    _reindex_documents(
+        Document.objects.filter(**{field: instance.pk}).values_list("pk", flat=True)
+    )
+
+
+@receiver(pre_delete, sender=Correspondent)
+@receiver(pre_delete, sender=DocumentType)
+def on_master_data_deleted_reindex(sender, instance, **kwargs):
+    # Vor dem Löschen die referenzierenden Dokumente erfassen; nach dem Commit
+    # (FK dann SET_NULL) den Vektor ohne den alten Namen neu schreiben.
+    field = "correspondent_id" if sender is Correspondent else "document_type_id"
+    _reindex_documents(
+        Document.objects.filter(**{field: instance.pk}).values_list("pk", flat=True)
+    )
+
+
+@receiver(post_save, sender=Tag)
+def on_tag_saved_reindex(sender, instance, created=False, **kwargs):
+    if created:
+        return
+    _reindex_documents(instance.documents.values_list("pk", flat=True))
+
+
+@receiver(pre_delete, sender=Tag)
+def on_tag_deleted_reindex(sender, instance, **kwargs):
+    _reindex_documents(instance.documents.values_list("pk", flat=True))
 
 
 def _trigger_tag() -> str:
