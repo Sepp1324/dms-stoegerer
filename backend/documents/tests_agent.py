@@ -230,7 +230,10 @@ class AgentUndoTests(TestCase):
 
         res = agent.undo(self.user, audit_id)
 
-        self.assertEqual(res["status"], "ok")
+        # Kein Zurücksetzen möglich -> "skipped" (nicht "ok"): der Vorgänger ist
+        # unzulässig geworden, daher wird nichts geändert und kein agent_undo-Audit
+        # geschrieben.
+        self.assertEqual(res["status"], "skipped")
         doc.refresh_from_db()
         self.assertEqual(doc.folder_id, ziel.id)  # NICHT auf prev zurückgesetzt
 
@@ -248,6 +251,76 @@ class AgentUndoTests(TestCase):
         res = agent.undo(self.other, audit_id)
 
         self.assertEqual(res["status"], "not_found")
+
+    # --- P1: Undo überschreibt KEINE zwischenzeitliche Nutzeränderung ---------
+    def test_undo_set_note_respektiert_nutzeraenderung(self):
+        doc = _doc(self.user, "UndoNoteRace")
+        doc.note = "Alt"
+        doc.save(update_fields=["note"])
+        audit_id = self._apply(doc, "set_note", {"note": "Agent"})
+        # Nutzer ändert die Notiz NACH der Agent-Aktion.
+        doc.refresh_from_db()
+        doc.note = "Nutzer"
+        doc.save(update_fields=["note"])
+
+        res = agent.undo(self.user, audit_id)
+
+        self.assertEqual(res["status"], "skipped")
+        doc.refresh_from_db()
+        self.assertEqual(doc.note, "Nutzer")  # NICHT auf "Alt" zurückgesetzt
+
+    def test_undo_move_respektiert_nutzeraenderung(self):
+        andere = DocumentFolder.objects.create(name="Andere", owner=self.user)
+        DocumentFolder.objects.create(name="AgentZiel", owner=self.user)
+        doc = _doc(self.user, "UndoMoveRace")
+        audit_id = self._apply(doc, "move_to_folder", {"folder": "AgentZiel"})
+        # Nutzer verschiebt danach selbst woanders hin.
+        doc.refresh_from_db()
+        doc.folder = andere
+        doc.save(update_fields=["folder"])
+
+        res = agent.undo(self.user, audit_id)
+
+        self.assertEqual(res["status"], "skipped")
+        doc.refresh_from_db()
+        self.assertEqual(doc.folder_id, andere.id)  # Nutzerwahl bleibt
+
+    def test_undo_correspondent_respektiert_nutzeraenderung(self):
+        doc = _doc(self.user, "UndoCorrRace")
+        audit_id = self._apply(doc, "set_correspondent", {"name": "AgentCorr"})
+        # Nutzer setzt danach einen anderen Korrespondenten.
+        user_corr = Correspondent.objects.create(name="NutzerCorr")
+        doc.refresh_from_db()
+        doc.correspondent = user_corr
+        doc.save(update_fields=["correspondent"])
+
+        res = agent.undo(self.user, audit_id)
+
+        self.assertEqual(res["status"], "skipped")
+        doc.refresh_from_db()
+        self.assertEqual(doc.correspondent_id, user_corr.id)
+
+    # --- P1: Mutation + Audit atomar -----------------------------------------
+    def test_execute_rollt_mutation_ohne_audit_zurueck(self):
+        from unittest import mock
+
+        doc = _doc(self.user, "AtomicNote")
+        doc.note = "Original"
+        doc.save(update_fields=["note"])
+
+        # Audit-Schreiben schlägt fehl -> die Notizänderung muss zurückrollen.
+        with mock.patch(
+            "documents.services.agent.AuditLogEntry.objects.create",
+            side_effect=RuntimeError("audit down"),
+        ):
+            with self.assertRaises(RuntimeError):
+                agent.execute(
+                    self.user,
+                    [{"action": "set_note", "document": doc.id, "params": {"note": "Neu"}}],
+                )
+
+        doc.refresh_from_db()
+        self.assertEqual(doc.note, "Original")  # keine Änderung ohne Audit
         self.assertTrue(doc.tags.filter(name="Meins").exists())
 
 
