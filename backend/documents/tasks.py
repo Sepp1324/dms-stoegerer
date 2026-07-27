@@ -1338,8 +1338,20 @@ def check_due_reminders() -> dict:
                 )
                 if not claimed:
                     continue  # anderer Worker hat die Lease inzwischen
-                reminder = DocumentReminder.objects.select_related("created_by").get(pk=pk)
-                recipient = getattr(reminder.created_by, "email", "") or ""
+                reminder = DocumentReminder.objects.select_related(
+                    "document__owner", "created_by"
+                ).get(pk=pk)
+                # Empfänger = AKTUELLER Dokument-Eigentümer (P1): Die API-Sichtbarkeit
+                # richtet sich nach ``document.owner``. ``created_by`` würde nach einer
+                # Dokumentübertragung dem FRÜHEREN Besitzer weiter Dokumentnummer +
+                # Erinnerungsnotiz schicken. Fallback auf created_by nur, wenn das
+                # Dokument (Triage) keinen Owner hat.
+                owner = reminder.document.owner if reminder.document_id else None
+                recipient = (
+                    getattr(owner, "email", "")
+                    or getattr(reminder.created_by, "email", "")
+                    or ""
+                )
                 if not recipient:
                     # Kein Empfänger -> Lease freigeben (kein Dauerclaim), nichts senden.
                     DocumentReminder.objects.filter(pk=pk).update(email_claimed_at=None)
