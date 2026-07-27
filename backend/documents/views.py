@@ -4557,9 +4557,15 @@ class DossierViewSet(viewsets.ModelViewSet):
             qs = qs.filter(owner=self.request.user)
         return qs
 
-    @action(detail=True, methods=["post"])
+    @action(detail=True, methods=["post"], throttle_classes=[AiRateThrottle])
     def generate(self, request, pk=None):
-        """Generiert das Dossier aus sichtbaren Dokumentquellen."""
+        """Generiert das Dossier aus sichtbaren Dokumentquellen.
+
+        AI-Drosselung (P2): führt einen externen Provider-Aufruf aus. Race gegen
+        Finalisierung (P2): Der Service prüft VOR dem Speichern unter Zeilensperre
+        erneut auf FINAL – wird das Dossier während des KI-Aufrufs finalisiert,
+        überschreibt dieser Request es NICHT (409 statt stillem Zurücksetzen).
+        """
         if not getattr(request.user, "can_write", False):
             return Response(
                 {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
@@ -4575,6 +4581,12 @@ class DossierViewSet(viewsets.ModelViewSet):
             dossier,
             self._visible_documents().distinct()[:400],
         )
+        if generated.status == Dossier.Status.FINAL:
+            # Während des KI-Aufrufs parallel finalisiert -> nicht überschrieben.
+            return Response(
+                {"detail": "Dossier wurde zwischenzeitlich finalisiert."},
+                status=status.HTTP_409_CONFLICT,
+            )
         AuditLogEntry.objects.create(
             actor=request.user,
             action="dossier_generate",
@@ -5376,7 +5388,12 @@ class CaseFileViewSet(viewsets.ModelViewSet):
         )
         return Response(self._serialized(case_file), status=status.HTTP_200_OK)
 
-    @action(detail=True, methods=["post"], url_path="summarize")
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path="summarize",
+        throttle_classes=[AiRateThrottle],  # externer Provider-Aufruf (P2)
+    )
     def summarize(self, request, pk=None):
         """Erzeugt eine quellengebundene Zusammenfassung für die Akte."""
         if not getattr(request.user, "can_write", False):

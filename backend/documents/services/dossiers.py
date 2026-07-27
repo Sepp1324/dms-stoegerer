@@ -20,7 +20,16 @@ _DOSSIER_SYSTEM = (
 
 
 def generate_dossier(dossier: Dossier, documents_qs, *, limit: int = 14) -> Dossier:
-    """Generiert ein Dossier aus sichtbaren Dokumenten und speichert es."""
+    """Generiert ein Dossier aus sichtbaren Dokumenten und speichert es.
+
+    Race gegen Finalisierung (P2): Der (ggf. langsame) KI-Aufruf läuft ohne Sperre;
+    das Persistieren erfolgt dann UNTER ``select_for_update`` mit erneuter
+    FINAL-Prüfung. Wurde das Dossier während des KI-Aufrufs finalisiert, wird es
+    NICHT auf GENERATED zurückgesetzt – die (unveränderte, finale) Instanz kommt
+    zurück, der View übersetzt das in 409.
+    """
+    from django.db import transaction
+
     retrieval = retrieve_context(dossier.query, documents_qs, limit=limit)
     sources = retrieval["sources"]
     timeline = build_timeline(sources)
@@ -28,29 +37,33 @@ def generate_dossier(dossier: Dossier, documents_qs, *, limit: int = 14) -> Doss
     contracts = build_contracts(sources)
     summary, source = build_summary(dossier, sources, timeline, entities, contracts)
 
-    dossier.summary = summary
-    dossier.sources = sources
-    dossier.timeline = timeline
-    dossier.entities = entities
-    dossier.contracts = contracts
-    dossier.status = Dossier.Status.GENERATED
-    dossier.generated_source = source
-    dossier.generated_at = timezone.now()
-    dossier.save(
-        update_fields=[
-            "summary",
-            "sources",
-            "timeline",
-            "entities",
-            "contracts",
-            "status",
-            "generated_source",
-            "generated_at",
-            "updated_at",
-        ]
-    )
-    dossier.documents.set(dict.fromkeys(source["document"] for source in sources))
-    return dossier
+    with transaction.atomic():
+        locked = Dossier.objects.select_for_update().get(pk=dossier.pk)
+        if locked.status == Dossier.Status.FINAL:
+            return locked  # zwischenzeitlich finalisiert -> nicht überschreiben
+        locked.summary = summary
+        locked.sources = sources
+        locked.timeline = timeline
+        locked.entities = entities
+        locked.contracts = contracts
+        locked.status = Dossier.Status.GENERATED
+        locked.generated_source = source
+        locked.generated_at = timezone.now()
+        locked.save(
+            update_fields=[
+                "summary",
+                "sources",
+                "timeline",
+                "entities",
+                "contracts",
+                "status",
+                "generated_source",
+                "generated_at",
+                "updated_at",
+            ]
+        )
+        locked.documents.set(dict.fromkeys(src["document"] for src in sources))
+    return locked
 
 
 def build_summary(
