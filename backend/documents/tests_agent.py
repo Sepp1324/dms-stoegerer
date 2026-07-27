@@ -251,6 +251,7 @@ class AgentUndoTests(TestCase):
         res = agent.undo(self.other, audit_id)
 
         self.assertEqual(res["status"], "not_found")
+        self.assertTrue(doc.tags.filter(name="Meins").exists())
 
     # --- P1: Undo überschreibt KEINE zwischenzeitliche Nutzeränderung ---------
     def test_undo_set_note_respektiert_nutzeraenderung(self):
@@ -321,7 +322,6 @@ class AgentUndoTests(TestCase):
 
         doc.refresh_from_db()
         self.assertEqual(doc.note, "Original")  # keine Änderung ohne Audit
-        self.assertTrue(doc.tags.filter(name="Meins").exists())
 
 
 class AgentPlanTests(TestCase):
