@@ -138,6 +138,12 @@ export default function MailCenterPage({
   const [q, setQ] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Serverseitige Paginierung (P2): ohne Navigation waren nur die ersten 25 Mails
+  // sichtbar. Wir werten count/next/previous aus und blättern über ?page=.
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [hasNext, setHasNext] = useState(false);
+  const [hasPrev, setHasPrev] = useState(false);
 
   const query = useMemo(
     () => ({ q: q.trim(), status, account }),
@@ -148,12 +154,15 @@ export default function MailCenterPage({
     setLoading(true);
     setError(null);
     Promise.all([
-      getProcessedMails(query),
+      getProcessedMails({ ...query, page }),
       getProcessedMailSummary(),
       getMailAccounts(),
     ])
       .then(([mails, nextSummary, nextAccounts]) => {
         setItems(mails.results);
+        setTotal(mails.count);
+        setHasNext(Boolean(mails.next));
+        setHasPrev(Boolean(mails.previous));
         setSummary(nextSummary);
         setAccounts(nextAccounts);
       })
@@ -163,7 +172,7 @@ export default function MailCenterPage({
 
   useEffect(() => {
     if (tab === "center") load();
-  }, [tab, query]);
+  }, [tab, query, page]);
 
   return (
     <section className="mail-center">
@@ -204,13 +213,17 @@ export default function MailCenterPage({
               className="search"
               placeholder="Mail suchen …"
               value={q}
-              onChange={(event) => setQ(event.target.value)}
+              onChange={(event) => {
+                setQ(event.target.value);
+                setPage(1); // Filteränderung -> zurück auf Seite 1
+              }}
             />
             <select
               value={status}
-              onChange={(event) =>
-                setStatus(event.target.value as ProcessedMailStatus | "")
-              }
+              onChange={(event) => {
+                setStatus(event.target.value as ProcessedMailStatus | "");
+                setPage(1);
+              }}
             >
               {STATUS_OPTIONS.map((option) => (
                 <option key={option.value || "all"} value={option.value}>
@@ -220,9 +233,10 @@ export default function MailCenterPage({
             </select>
             <select
               value={account}
-              onChange={(event) =>
-                setAccount(event.target.value ? Number(event.target.value) : "")
-              }
+              onChange={(event) => {
+                setAccount(event.target.value ? Number(event.target.value) : "");
+                setPage(1);
+              }}
             >
               <option value="">Alle Konten</option>
               {accounts.map((mailAccount) => (
@@ -250,17 +264,42 @@ export default function MailCenterPage({
             </div>
           )}
           {!loading && !error && items.length > 0 && (
-            <div className="mail-center-list">
-              {items.map((item) => (
-                <MailRow
-                  key={item.id}
-                  item={item}
-                  canEdit={canEdit}
-                  onOpenDocument={onOpenDocument}
-                  onChanged={load}
-                />
-              ))}
-            </div>
+            <>
+              <div className="mail-center-list">
+                {items.map((item) => (
+                  <MailRow
+                    key={item.id}
+                    item={item}
+                    canEdit={canEdit}
+                    onOpenDocument={onOpenDocument}
+                    onChanged={load}
+                  />
+                ))}
+              </div>
+              {(hasPrev || hasNext) && (
+                <div className="mail-center-pagination">
+                  <button
+                    type="button"
+                    className="link"
+                    disabled={!hasPrev || loading}
+                    onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  >
+                    Zurück
+                  </button>
+                  <span className="muted">
+                    Seite {page} · {total} Mails gesamt
+                  </span>
+                  <button
+                    type="button"
+                    className="link"
+                    disabled={!hasNext || loading}
+                    onClick={() => setPage((p) => p + 1)}
+                  >
+                    Weiter
+                  </button>
+                </div>
+              )}
+            </>
           )}
         </>
       )}
