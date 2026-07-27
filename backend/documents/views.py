@@ -98,6 +98,7 @@ from .throttling import (
     AiRateThrottle,
     CaptureRateThrottle,
     PdfThumbnailRateThrottle,
+    RevisionExportRateThrottle,
     UploadRateThrottle,
 )
 from .services import version_compare
@@ -1867,10 +1868,56 @@ class DocumentViewSet(viewsets.ModelViewSet):
             raise Http404("Keine Version vorhanden.")
         return _serve_version_download(document, version)
 
-    @action(detail=True, methods=["get"], url_path="revision-package")
+    @action(
+        detail=True,
+        methods=["get"],
+        url_path="revision-package",
+        throttle_classes=[RevisionExportRateThrottle],  # P2: Frequenz begrenzen
+    )
     def revision_package(self, request, pk=None):
-        """Exportiert ein prüfbares ZIP-Paket für Steuer/Anwalt/Behörde."""
+        """Exportiert ein prüfbares ZIP-Paket für Steuer/Anwalt/Behörde.
+
+        Grenzen (P2): Das ZIP wird SYNCHRON im Request über ALLE Versionen/Archive
+        gebaut; ohne Deckel könnten zwei große Exporte beide Webworker binden und
+        die Temp-Platte füllen. Vor dem Bau werden Versionsanzahl und geschätzte
+        Gesamtgröße geprüft und sehr große Pakete mit 413 abgelehnt. (Ein voller
+        asynchroner Export bleibt als Folge-PR offen.)
+        """
         document = self.get_object()
+
+        max_versions = int(getattr(settings, "REVISION_PACKAGE_MAX_VERSIONS", 200))
+        max_bytes = int(getattr(settings, "REVISION_PACKAGE_MAX_MB", 500)) * 1024 * 1024
+        versions = list(document.versions.all())
+        if len(versions) > max_versions:
+            return Response(
+                {
+                    "detail": (
+                        f"Revisionspaket zu groß: {len(versions)} Versionen "
+                        f"(Limit {max_versions})."
+                    )
+                },
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
+        total_bytes = 0
+        for version in versions:
+            for path in (version.file_path, version.archive_path):
+                if not path:
+                    continue
+                try:
+                    total_bytes += os.path.getsize(path)
+                except OSError:
+                    continue  # fehlende Datei fließt als Hinweis ins Manifest
+        if total_bytes > max_bytes:
+            return Response(
+                {
+                    "detail": (
+                        f"Revisionspaket zu groß: ~{total_bytes // (1024 * 1024)} MB "
+                        f"(Limit {max_bytes // (1024 * 1024)} MB)."
+                    )
+                },
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
+
         # Paket ZUERST bauen (kann scheitern) und die Temp-Datei öffnen; erst danach
         # den Audit-Eintrag schreiben. Sonst protokollierten wir einen "Export", der
         # gar nicht stattfand. Der Service räumt eine halbfertige Temp-Datei bei einem
