@@ -5672,10 +5672,17 @@ class DocumentShareLinkViewSet(viewsets.ModelViewSet):
         document = self._get_owned_document(request.data.get("document"))
         expires_at = self._parse_future_expiry(request.data.get("expires_at"))
 
+        # Versionsbindung (P1): Standardmäßig wird die AKTUELLE Version gepinnt,
+        # damit der Link keine späteren (evtl. vertraulichen) Versionen offenlegt.
+        # ``always_latest=true`` wählt bewusst „immer aktuelle Version" (version=NULL).
+        always_latest = bool(request.data.get("always_latest", False))
+        pinned_version = None if always_latest else document.current_version
+
         # ≥32 Zeichen Entropie; nur der Hash landet in der DB.
         token = secrets.token_urlsafe(32)
         link = DocumentShareLink.objects.create(
             document=document,
+            version=pinned_version,
             token_hash=DocumentShareLink.hash_token(token),
             expires_at=expires_at,
             created_by=request.user,
@@ -5685,7 +5692,12 @@ class DocumentShareLinkViewSet(viewsets.ModelViewSet):
             action="share_link_create",
             object_type="Document",
             object_id=str(document.id),
-            detail={"share_link_id": link.id, "expires_at": expires_at.isoformat()},
+            detail={
+                "share_link_id": link.id,
+                "expires_at": expires_at.isoformat(),
+                "version_id": pinned_version.id if pinned_version else None,
+                "always_latest": always_latest,
+            },
         )
 
         data = self.get_serializer(link).data
@@ -5737,7 +5749,7 @@ def _resolve_valid_share_link(token: str):
         return None
     link = (
         DocumentShareLink.objects.select_related(
-            "document", "document__current_version"
+            "document", "document__current_version", "version"
         )
         .filter(token_hash=DocumentShareLink.hash_token(token))
         .first()
@@ -5794,7 +5806,8 @@ class SharePreviewView(_ShareAccessView):
     audit_action = "share_preview"
 
     def _serve(self, request, link):
-        version = link.document.current_version
+        # Gepinnte Version bevorzugen (P1); NULL = bewusst „immer aktuelle".
+        version = link.version or link.document.current_version
         if version is None:
             raise Http404("Keine Version vorhanden.")
         return _serve_version_preview(version)
@@ -5806,7 +5819,8 @@ class ShareDownloadView(_ShareAccessView):
     audit_action = "share_download"
 
     def _serve(self, request, link):
-        version = link.document.current_version
+        # Gepinnte Version bevorzugen (P1); NULL = bewusst „immer aktuelle".
+        version = link.version or link.document.current_version
         if version is None:
             raise Http404("Keine Version vorhanden.")
         return _serve_version_download(link.document, version)

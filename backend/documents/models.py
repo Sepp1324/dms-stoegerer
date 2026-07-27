@@ -1767,6 +1767,21 @@ class DocumentShareLink(models.Model):
     document = models.ForeignKey(
         Document, on_delete=models.CASCADE, related_name="share_links"
     )
+    # Gepinnte Version (P1): Ein Freigabelink liefert standardmäßig GENAU die beim
+    # Erstellen aktuelle Version aus – nicht automatisch jede spätere. Sonst könnte
+    # ein für Version 1 erstellter Link später vertrauliche Inhalte aus Version 2
+    # offenlegen. NULL = bewusst „immer aktuelle Version" (per ``always_latest``).
+    version = models.ForeignKey(
+        "DocumentVersion",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="share_links",
+        help_text=(
+            "Gepinnte Version, die dieser Link ausliefert. NULL = immer die "
+            "aktuelle Version des Dokuments."
+        ),
+    )
     token_hash = models.CharField(
         max_length=64,
         unique=True,  # unique impliziert bereits einen Index (Lookup beim Abruf)

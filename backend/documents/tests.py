@@ -2254,6 +2254,76 @@ class ShareAccessRouteTests(APITestCase):
             b"".join(resp.streaming_content), b"%PDF-1.4 share test"
         )
 
+    def _add_version_two(self) -> str:
+        """Legt eine neue aktuelle Version (v2) mit ANDEREM Inhalt an."""
+        tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+        tmp.write(b"%PDF-1.4 VERSION TWO")
+        tmp.close()
+        self.addCleanup(lambda: os.path.exists(tmp.name) and os.remove(tmp.name))
+        v2 = DocumentVersion.objects.create(
+            document=self.doc, version_no=2, file_path=tmp.name, sha256="c" * 64
+        )
+        self.doc.current_version = v2
+        self.doc.save(update_fields=["current_version"])
+        return tmp.name
+
+    def test_gepinnter_link_liefert_nicht_neue_version(self):
+        # P1: Link auf v1 gepinnt -> nach v2 weiterhin v1 (keine Offenlegung von v2).
+        DocumentShareLink.objects.create(
+            document=self.doc,
+            version=self.version,
+            token_hash=DocumentShareLink.hash_token("tpin"),
+            expires_at=timezone.now() + timedelta(days=7),
+            created_by=self.owner,
+        )
+        self._add_version_two()
+        self.client.force_authenticate(self.viewer)
+        resp = self.client.get("/api/share/tpin/download")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(b"".join(resp.streaming_content), b"%PDF-1.4 share test")
+
+    def test_always_latest_link_liefert_neueste_version(self):
+        # Bewusste Opt-in-Variante: version=NULL -> immer aktuelle Version.
+        DocumentShareLink.objects.create(
+            document=self.doc,
+            version=None,
+            token_hash=DocumentShareLink.hash_token("tlatest"),
+            expires_at=timezone.now() + timedelta(days=7),
+            created_by=self.owner,
+        )
+        self._add_version_two()
+        self.client.force_authenticate(self.viewer)
+        resp = self.client.get("/api/share/tlatest/download")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(b"".join(resp.streaming_content), b"%PDF-1.4 VERSION TWO")
+
+    def test_create_pinnt_standardmaessig_aktuelle_version(self):
+        self.client.force_authenticate(self.owner)
+        resp = self.client.post(
+            "/api/document-share-links/",
+            {
+                "document": self.doc.id,
+                "expires_at": (timezone.now() + timedelta(days=3)).isoformat(),
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data["version"], self.version.id)  # gepinnt
+
+    def test_create_always_latest_ohne_version(self):
+        self.client.force_authenticate(self.owner)
+        resp = self.client.post(
+            "/api/document-share-links/",
+            {
+                "document": self.doc.id,
+                "expires_at": (timezone.now() + timedelta(days=3)).isoformat(),
+                "always_latest": True,
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertIsNone(resp.data["version"])
+
     def test_preview_liefert_inline(self):
         self._link(token="t3")
         self.client.force_authenticate(self.viewer)
