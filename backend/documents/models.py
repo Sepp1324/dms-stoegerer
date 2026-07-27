@@ -2080,9 +2080,18 @@ class DocumentReminder(models.Model):
         null=True,
         blank=True,
         help_text=(
-            "Wann die Erinnerungs-E-Mail BESTÄTIGT versendet wurde. Getrennt von "
-            "notified_at (In-App), damit ein fehlgeschlagener Versand erneut "
-            "versucht wird und nicht am In-App-Dedupe hängen bleibt."
+            "Wann die Erinnerungs-E-Mail BESTÄTIGT versendet wurde – gesetzt ERST "
+            "nach erfolgreichem SMTP-Versand. Getrennt von notified_at (In-App)."
+        ),
+    )
+    email_claimed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text=(
+            "In-Flight-Lease des E-Mail-Versands (Outbox): Ein Worker setzt dies per "
+            "CAS, BEVOR er sendet. email_sent_at wird erst NACH Erfolg gesetzt. "
+            "Stirbt der Worker dazwischen, läuft die Lease ab und ein späterer Lauf "
+            "versucht erneut – so geht keine Mail dauerhaft verloren."
         ),
     )
     created_at = models.DateTimeField(auto_now_add=True)
