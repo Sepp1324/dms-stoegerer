@@ -115,6 +115,27 @@ class ReapUnindexedVersionsTests(TestCase):
         v.refresh_from_db()
         self.assertIsNone(v.indexed_at)  # kombinierte Markierung bleibt NULL
 
+    @override_settings(EMBEDDING_ENABLED=False)
+    def test_dokument_mit_mehreren_ready_versionen_nur_einmal(self):
+        # P2: Nur die AKTUELLE Version je Dokument ist Kandidat – sonst enthielte die
+        # Liste ein Dokument mit mehreren READY-Versionen mehrfach.
+        v1 = _ready_version(indexed_at=None, changed_min_ago=30)
+        doc = v1.document
+        v2 = DocumentVersion.objects.create(
+            document=doc, version_no=2, file_path="/tmp/y.pdf", sha256="b" * 64,
+            ocr_text="Inhalt2", processing_state=DocumentVersion.ProcessingState.READY,
+        )
+        doc.current_version = v2
+        doc.save(update_fields=["current_version"])
+        Document.objects.filter(pk=doc.pk).update(search_vector=None)
+        DocumentVersion.objects.filter(document=doc).update(
+            processing_state_changed_at=timezone.now() - timedelta(minutes=30)
+        )
+        with mock.patch(SEM), mock.patch(self.FTS) as fts:
+            res = tasks.reap_unindexed_versions()
+        self.assertEqual(res["candidates"], 1)  # NICHT 2
+        fts.assert_called_once_with(doc)
+
     def test_reindexiert_ready_ohne_indexed_at(self):
         v = _ready_version(indexed_at=None, changed_min_ago=30)
         with mock.patch(SEARCH), mock.patch(SEM, return_value={"status": "indexed"}):

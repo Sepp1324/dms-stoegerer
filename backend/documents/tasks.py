@@ -728,11 +728,16 @@ def reap_unindexed_versions() -> dict:
     if not getattr(settings, "EMBEDDING_ENABLED", True):
         from .services import search_vector as search_vector_service
 
+        # NUR die AKTUELLE Version je Dokument (P2): Der Suchvektor ist dokument-,
+        # nicht versionsweit. Ohne diesen Filter enthielte die Liste ein Dokument
+        # mit mehreren READY-Versionen mehrfach und könnte den ganzen Batch für
+        # dasselbe Dokument verbrauchen.
         versions = list(
             DocumentVersion.objects.select_related("document")
             .filter(
                 processing_state=PS.READY,
                 document__search_vector__isnull=True,
+                document__current_version_id=models.F("id"),
                 processing_state_changed_at__lt=threshold,
             )
             .order_by("processing_state_changed_at")[:limit]
