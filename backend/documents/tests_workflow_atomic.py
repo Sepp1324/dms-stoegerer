@@ -5,7 +5,9 @@ from rest_framework import serializers as drf_serializers
 
 from .models import (
     AuditLogEntry,
+    Correspondent,
     Document,
+    Tag,
     Workflow,
     WorkflowAction,
     WorkflowTrigger,
@@ -79,4 +81,59 @@ class WorkflowAtomicTests(TestCase):
             AuditLogEntry.objects.filter(
                 action="workflow", object_id=str(doc.id)
             ).exists()
+        )
+
+    def test_save_ueberschreibt_parallele_notizaenderung_nicht(self):
+        # P1: Der Workflow ändert nur den Titel -> eine parallele Notizänderung darf
+        # nicht durch ein save() ALLER Felder verloren gehen.
+        self._workflow_with_action("Neuer Titel")
+        doc = Document.objects.create(title="Alt", note="Nutzer-A", owner=self.user)
+        wf_doc = Document.objects.get(pk=doc.pk)  # lädt note=Nutzer-A in memory
+        Document.objects.filter(pk=doc.pk).update(note="Nutzer-B")  # parallele Änderung
+
+        run_workflows(wf_doc, trigger_type="document_added", source="upload", text="")
+
+        doc.refresh_from_db()
+        self.assertEqual(doc.title, "Neuer Titel")  # Titel gesetzt
+        self.assertEqual(doc.note, "Nutzer-B")       # Notiz NICHT überschrieben
+
+    def test_rollback_refresht_dokument_fuer_naechsten_workflow(self):
+        # P1: Eine Aktion mutiert das document in-memory, eine spätere scheitert ->
+        # Rollback. Danach muss die in-memory-Instanz frisch aus der DB geladen sein,
+        # sonst sähe der nächste Workflow verworfene Werte.
+        corr = Correspondent.objects.create(name="Finanzamt")
+        wf = Workflow.objects.create(name="A", order=10, enabled=True)
+        WorkflowTrigger.objects.create(workflow=wf, trigger_type="document_added")
+        WorkflowAction.objects.create(
+            workflow=wf, order=10, action_type="assign", assign_correspondent=corr
+        )
+        WorkflowAction.objects.create(
+            workflow=wf, order=20, action_type="assign", assign_title="{unknown}"
+        )
+        doc = Document.objects.create(title="D", owner=self.user)
+
+        run_workflows(doc, trigger_type="document_added", source="upload", text="")
+
+        # in-memory (nach refresh) UND DB: Korrespondent zurückgerollt.
+        self.assertIsNone(doc.correspondent_id)
+        doc.refresh_from_db()
+        self.assertIsNone(doc.correspondent_id)
+
+    def test_audit_sammelt_tags_mehrerer_aktionen(self):
+        # P2: applied.update() würde tags_added der ersten Aktion überschreiben.
+        t1 = Tag.objects.create(name="T1")
+        t2 = Tag.objects.create(name="T2")
+        wf = Workflow.objects.create(name="Tags", order=10, enabled=True)
+        WorkflowTrigger.objects.create(workflow=wf, trigger_type="document_added")
+        a1 = WorkflowAction.objects.create(workflow=wf, order=10, action_type="assign")
+        a1.assign_tags.set([t1])
+        a2 = WorkflowAction.objects.create(workflow=wf, order=20, action_type="assign")
+        a2.assign_tags.set([t2])
+        doc = Document.objects.create(title="D", owner=self.user)
+
+        run_workflows(doc, trigger_type="document_added", source="upload", text="")
+
+        audit = AuditLogEntry.objects.get(action="workflow", object_id=str(doc.id))
+        self.assertEqual(
+            sorted(audit.detail["applied"]["tags_added"]), ["T1", "T2"]
         )

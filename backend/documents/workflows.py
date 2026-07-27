@@ -84,6 +84,23 @@ def _trigger_matches(trigger, *, source: str, document, text: str) -> bool:
     return True
 
 
+def _merge_applied(applied: dict, changed: dict) -> None:
+    """Führt die Ergebnisse mehrerer Aktionen VERLUSTFREI zusammen (P2).
+
+    ``applied.update(changed)`` würde gleichnamige Sammel-Einträge früherer
+    Aktionen überschreiben (z. B. ``tags_added``/``custom_fields``): die DB-Änderung
+    fände statt, das Audit wäre aber unvollständig. Listen werden daher verlängert,
+    Dicts gemerged; skalare Felder (Titel …) behalten „last wins"."""
+    for key, value in changed.items():
+        existing = applied.get(key)
+        if isinstance(value, list) and isinstance(existing, list):
+            existing.extend(value)
+        elif isinstance(value, dict) and isinstance(existing, dict):
+            existing.update(value)
+        else:
+            applied[key] = value
+
+
 def _apply_action(action, document) -> dict:
     """Führt eine einzelne Aktion aus; gibt dict der geänderten Felder zurück."""
     from .models import CustomField, CustomFieldValue
@@ -199,7 +216,7 @@ def run_workflows(document, *, trigger_type: str, source: str, text: str | None 
                 action_errors = []
                 for action in wf.actions.order_by("order"):
                     try:
-                        applied.update(_apply_action(action, document))
+                        _merge_applied(applied, _apply_action(action, document))
                     except SoftTimeLimitExceeded:
                         raise  # Soft-Time-Limit nicht verschlucken.
                     except Exception as exc:  # noqa: BLE001
@@ -207,13 +224,17 @@ def run_workflows(document, *, trigger_type: str, source: str, text: str | None 
                 if action_errors:
                     raise _WorkflowActionFailed(action_errors)
 
-                # Dokument speichern (Tags sind schon via M2M direkt gesetzt)
+                # Dokument speichern (Tags sind schon via M2M direkt gesetzt).
                 update_fields = []
                 for field in ("title", "correspondent_id", "document_type_id", "storage_path_id", "owner_id"):
                     if field.rstrip("_id") in applied or field in applied:
                         update_fields.append(field)
-                if update_fields or {"title", "correspondent_id", "document_type_id", "storage_path_id", "owner_id"} & set(applied):
-                    document.save()
+                if update_fields:
+                    # NUR die vom Workflow geänderten Felder schreiben (P1): ein
+                    # ``document.save()`` ohne update_fields würde ALLE geladenen
+                    # Felder zurückschreiben und parallele Nutzeränderungen an
+                    # Notiz/Ordner/Status überschreiben.
+                    document.save(update_fields=update_fields)
 
                 AuditLogEntry.objects.create(
                     action="workflow",
@@ -224,7 +245,11 @@ def run_workflows(document, *, trigger_type: str, source: str, text: str | None 
         except SoftTimeLimitExceeded:
             raise
         except _WorkflowActionFailed as failed:
-            # Rollback ist erfolgt; den Fehler SICHTBAR auditieren (kein Erfolg).
+            # Rollback ist erfolgt; die in-memory ``document``-Instanz trägt aber noch
+            # die zurückgerollten Mutationen (P1). OHNE refresh würde der NÄCHSTE
+            # Workflow diese verworfenen Werte sehen und ggf. persistieren -> aus dem
+            # DB-Zustand neu laden.
+            document.refresh_from_db()
             logger.warning(
                 "Workflow %r abgebrochen (Aktion fehlgeschlagen): %s", wf.name, failed.errors
             )
