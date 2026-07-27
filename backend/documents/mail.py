@@ -20,6 +20,7 @@ import email as email_mod
 import hashlib
 import imaplib
 import logging
+import re
 from email.header import decode_header, make_header
 from email.message import Message
 from email.utils import parsedate_to_datetime, parseaddr
@@ -67,6 +68,42 @@ ALLOWED_MIME_PREFIXES = ("application/pdf", "image/")
 # Socket-Timeout (Sekunden) für die IMAP-Verbindung – verhindert, dass ein
 # nicht antwortender Server den Abruf-Worker unbegrenzt blockiert.
 IMAP_TIMEOUT = 30
+
+# Speicher-/DoS-Schutz (P1): Eine einzelne Mail wird komplett per RFC822 in den RAM
+# geladen, Anhänge zusätzlich dekodiert. Ohne Grenzen kann eine riesige Mail den
+# Worker per OOM beenden. Vor dem Vollabruf wird RFC822.SIZE geprüft; zusätzlich
+# werden Anzahl und Gesamtgröße der verarbeiteten Anhänge gedeckelt. Alle Grenzen
+# sind per Settings anpassbar.
+_RFC822_SIZE_RE = re.compile(rb"RFC822\.SIZE\s+(\d+)", re.IGNORECASE)
+
+
+def _mail_max_message_bytes() -> int:
+    return int(getattr(settings, "MAIL_MAX_MESSAGE_MB", 25)) * 1024 * 1024
+
+
+def _mail_max_attachments() -> int:
+    return int(getattr(settings, "MAIL_MAX_ATTACHMENTS", 20))
+
+
+def _mail_max_attachment_total_bytes() -> int:
+    return int(getattr(settings, "MAIL_MAX_ATTACHMENT_TOTAL_MB", 50)) * 1024 * 1024
+
+
+def _fetch_message_size(conn, uid) -> int | None:
+    """Liest die Servergröße (RFC822.SIZE) einer Nachricht, ohne den Body zu laden.
+
+    Gibt ``None`` zurück, wenn der Server keine verwertbare Größe liefert (dann
+    fällt der Aufrufer auf den regulären Abruf zurück)."""
+    typ, data = conn.fetch(uid, "(RFC822.SIZE)")
+    if typ != "OK" or not data:
+        return None
+    raw = data[0]
+    if isinstance(raw, (tuple, list)):
+        raw = raw[0]
+    if not isinstance(raw, (bytes, bytearray)):
+        return None
+    match = _RFC822_SIZE_RE.search(raw)
+    return int(match.group(1)) if match else None
 
 
 def _decode(value: str | None) -> str:
@@ -209,7 +246,25 @@ def ingest_message(account, raw_bytes: bytes) -> int | None:
     attachment_names: list[str] = []
     imported_documents = []
     recovered_documents = []
+    max_attachments = _mail_max_attachments()
+    max_total_bytes = _mail_max_attachment_total_bytes()
+    total_attachment_bytes = 0
     for filename, payload, ctype in iter_attachments(msg):
+        # DoS-/Speicher-Schutz (P1): Anzahl und Gesamtgröße der verarbeiteten
+        # Anhänge deckeln – der Rest wird übersprungen (kein weiteres Dekodieren).
+        if attachment_count >= max_attachments:
+            logger.warning(
+                "Mail hat mehr als %d Anhänge – restliche übersprungen (%s).",
+                max_attachments, account,
+            )
+            break
+        total_attachment_bytes += len(payload)
+        if total_attachment_bytes > max_total_bytes:
+            logger.warning(
+                "Anhang-Gesamtgröße überschreitet Limit (%d Bytes) – Rest "
+                "übersprungen (%s).", max_total_bytes, account,
+            )
+            break
         attachment_count += 1
         attachment_names.append(filename)
         sha = hashlib.sha256(payload).hexdigest()
@@ -356,8 +411,22 @@ def fetch_account(account) -> dict:
         if typ != "OK":
             raise RuntimeError(f"SEARCH UNSEEN fehlgeschlagen: {typ}")
         uids = data[0].split() if data and data[0] else []
+        max_message_bytes = _mail_max_message_bytes()
         for uid in uids:
             try:
+                # OOM-Schutz (P1): Größe VOR dem Vollabruf prüfen – eine riesige
+                # Mail wird nicht in den RAM geladen. Sie bleibt bewusst ungelesen
+                # (kein \Seen) und wird zur menschlichen Nacharbeit übersprungen; der
+                # erneute SIZE-Check im nächsten Lauf ist billig (kein Body-Transfer).
+                size = _fetch_message_size(conn, uid)
+                if size is not None and size > max_message_bytes:
+                    logger.warning(
+                        "Mail uid=%s zu groß (%d Bytes > Limit %d) – übersprungen, "
+                        "NICHT als gelesen markiert (%s).",
+                        uid, size, max_message_bytes, account,
+                    )
+                    stats["skipped"] += 1
+                    continue
                 typ, msg_data = conn.fetch(uid, "(RFC822)")
                 if typ != "OK" or not msg_data or not msg_data[0]:
                     raise RuntimeError(f"FETCH {uid!r} fehlgeschlagen: {typ}")
