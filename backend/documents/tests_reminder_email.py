@@ -11,6 +11,7 @@ from unittest import mock
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 from django.utils import timezone
+from rest_framework.test import APITestCase
 
 from .models import Document, DocumentReminder
 from .tasks import check_due_reminders
@@ -26,6 +27,24 @@ class ReminderEmailTests(TestCase):
         self.reminder = DocumentReminder.objects.create(
             document=self.doc, created_by=self.user, remind_on=timezone.localdate()
         )
+
+    def test_empfaenger_ist_aktueller_dokument_owner(self):
+        # P1: Nach Besitzerwechsel geht die Mail an den AKTUELLEN Owner, nicht mehr
+        # an created_by (den früheren Besitzer).
+        new_owner = User.objects.create_user(
+            "neu", password="pw", email="neu@example.com"
+        )
+        self.doc.owner = new_owner
+        self.doc.save(update_fields=["owner"])
+        captured = {}
+
+        def fake_send(**kwargs):
+            captured["to"] = kwargs["recipient_list"]
+            return 1
+
+        with mock.patch("django.core.mail.send_mail", side_effect=fake_send):
+            check_due_reminders()
+        self.assertEqual(captured["to"], ["neu@example.com"])
 
     def test_fehlgeschlagener_versand_wird_erneut_versucht(self):
         with mock.patch("django.core.mail.send_mail", side_effect=Exception("smtp down")):
@@ -114,3 +133,42 @@ class ReminderWithoutSmtpTests(TestCase):
         sm.assert_not_called()
         self.assertEqual(res["notified"], 1)
         self.assertEqual(res["emailed"], 0)
+
+
+class ReminderRescheduleTests(APITestCase):
+    """P2: Neu-Terminierung/Wiedereröffnung setzt die Versandmarker zurück."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("resched", password="pw", role="user")
+        self.doc = Document.objects.create(title="Vertrag", owner=self.user)
+        self.reminder = DocumentReminder.objects.create(
+            document=self.doc, created_by=self.user, remind_on=timezone.localdate()
+        )
+        # Bereits benachrichtigt + versendet.
+        DocumentReminder.objects.filter(pk=self.reminder.pk).update(
+            notified_at=timezone.now(),
+            email_sent_at=timezone.now(),
+            email_claimed_at=timezone.now(),
+        )
+        self.client.force_authenticate(self.user)
+
+    def test_neues_datum_resetet_marker(self):
+        new_date = (timezone.localdate() + timedelta(days=5)).isoformat()
+        resp = self.client.patch(
+            f"/api/reminders/{self.reminder.id}/", {"remind_on": new_date}, format="json"
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.reminder.refresh_from_db()
+        self.assertIsNone(self.reminder.notified_at)
+        self.assertIsNone(self.reminder.email_sent_at)
+        self.assertIsNone(self.reminder.email_claimed_at)
+
+    def test_gleiches_datum_laesst_marker_bestehen(self):
+        same = self.reminder.remind_on.isoformat()
+        resp = self.client.patch(
+            f"/api/reminders/{self.reminder.id}/", {"note": "nur Notiz", "remind_on": same},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.reminder.refresh_from_db()
+        self.assertIsNotNone(self.reminder.email_sent_at)  # unverändert

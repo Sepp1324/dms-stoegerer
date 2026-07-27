@@ -5648,7 +5648,23 @@ class DocumentReminderViewSet(viewsets.ModelViewSet):
         if not getattr(user, "is_dms_admin", False):
             if document is None or document.owner_id != user.id:
                 raise Http404("Dokument nicht gefunden.")
-        serializer.save()
+        # Neu-Terminierung / Wiedereröffnung setzt die Versandmarker zurück (P2):
+        # Bleiben notified_at/email_sent_at/email_claimed_at nach einer Änderung von
+        # ``remind_on`` (oder ``done: true -> false``) erhalten, würde die bereits
+        # ausgelöste Erinnerung am NEUEN Datum nie erneut benachrichtigt/versendet.
+        old_remind_on = getattr(serializer.instance, "remind_on", None)
+        old_done = getattr(serializer.instance, "done", None)
+        with transaction.atomic():
+            reminder = serializer.save()
+            reopened = bool(old_done) and not reminder.done
+            rescheduled = old_remind_on != reminder.remind_on
+            if reopened or rescheduled:
+                DocumentReminder.objects.filter(pk=reminder.pk).update(
+                    notified_at=None,
+                    email_sent_at=None,
+                    email_claimed_at=None,
+                    updated_at=timezone.now(),
+                )
 
     @action(detail=True, methods=["post"])
     def done(self, request, pk=None):
