@@ -3231,6 +3231,14 @@ class DocumentViewSet(viewsets.ModelViewSet):
         Nach dem Übergang wird ``status`` gespeichert und genau ein
         ``AuditLogEntry`` mit ``from``/``to`` geschrieben. Antwort: 200 mit
         dem serialisierten Dokument (das FE erhält den neuen Status direkt).
+
+        Nebenläufigkeit (P1): Statuslesung, Übergangsprüfung, Speichern und Audit
+        laufen in EINER Transaktion unter ``select_for_update()`` auf der
+        Dokumentzeile. Ohne die Sperre könnten paralleles „Genehmigen" und
+        „Ablehnen" beide denselben Ausgangsstatus lesen, beide ein Erfolgs-Audit
+        schreiben und der letzte Write den Endstatus unkontrolliert bestimmen. Mit
+        der Sperre gewinnt genau EINER; der zweite liest den bereits geänderten
+        Status und erhält 409.
         """
         if not request.user.can_write:
             return Response(
@@ -3238,31 +3246,35 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
+        # get_object() erzwingt das Owner-Scoping (Berechtigung); die verbindliche
+        # Statusprüfung erfolgt darunter unter der Zeilensperre.
         document = self.get_object()
-        old_status = document.status
-        if old_status not in allowed_from:
-            return Response(
-                {
-                    "detail": (
-                        f"Übergang aus Status '{old_status}' nach '{new_status}' "
-                        "nicht erlaubt."
-                    ),
-                    "status": old_status,
-                },
-                status=status.HTTP_409_CONFLICT,
-            )
+        with transaction.atomic():
+            locked = Document.objects.select_for_update().get(pk=document.pk)
+            old_status = locked.status
+            if old_status not in allowed_from:
+                return Response(
+                    {
+                        "detail": (
+                            f"Übergang aus Status '{old_status}' nach '{new_status}' "
+                            "nicht erlaubt."
+                        ),
+                        "status": old_status,
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
 
-        reason = request.data.get("reason") if action_name == "reject" else None
-        document.status = new_status
-        document.save(update_fields=["status"])
-        AuditLogEntry.objects.create(
-            actor=request.user,
-            action=action_name,
-            object_type="Document",
-            object_id=str(document.id),
-            detail={"from": old_status, "to": new_status, "reason": reason or None},
-        )
-        return Response(self.get_serializer(document).data)
+            reason = request.data.get("reason") if action_name == "reject" else None
+            locked.status = new_status
+            locked.save(update_fields=["status"])
+            AuditLogEntry.objects.create(
+                actor=request.user,
+                action=action_name,
+                object_type="Document",
+                object_id=str(locked.id),
+                detail={"from": old_status, "to": new_status, "reason": reason or None},
+            )
+        return Response(self.get_serializer(locked).data)
 
     @action(detail=True, methods=["post"], url_path="submit")
     def submit(self, request, pk=None):
