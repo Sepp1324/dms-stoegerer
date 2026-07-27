@@ -43,6 +43,21 @@ class ReminderEmailTests(TestCase):
         self.assertEqual(res2["emailed"], 1)
         self.assertEqual(res2["notified"], 0)  # In-App nicht erneut
 
+    def test_claim_wird_vor_versand_committet(self):
+        # P2 (at-most-once): email_sent_at muss BEREITS gesetzt sein, wenn send_mail
+        # aufgerufen wird. Stirbt der Worker danach, verhindert der committete Claim
+        # einen Doppelversand beim nächsten Lauf.
+        seen = {}
+
+        def fake_send(**kwargs):
+            reminder = DocumentReminder.objects.get(pk=self.reminder.pk)
+            seen["claimed_before_send"] = reminder.email_sent_at is not None
+            return 1
+
+        with mock.patch("django.core.mail.send_mail", side_effect=fake_send):
+            check_due_reminders()
+        self.assertTrue(seen.get("claimed_before_send"))
+
     def test_null_zustellung_markiert_nicht_versendet(self):
         # send_mail liefert 0 (nichts zugestellt) -> NICHT als versendet markieren.
         with mock.patch("django.core.mail.send_mail", return_value=0):
