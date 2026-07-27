@@ -17,11 +17,12 @@ class StoragePathTemplateValidationTests(TestCase):
     def test_erlaubte_platzhalter_ok(self):
         self.assertTrue(self._valid("{jahr}/{korrespondent}/{titel}"))
         self.assertTrue(self._valid("archiv/{jahr}"))
-        self.assertTrue(self._valid("{jahr:04d}/{titel}"))
 
     def test_unbekannter_platzhalter_abgelehnt(self):
         self.assertFalse(self._valid("{foo}/{titel}"))
         self.assertFalse(self._valid("{}"))  # positional -> nicht erlaubt
+        # Format-Spezifikation enthält ':' -> greift bereits der Pfadausbruch-Guard.
+        self.assertFalse(self._valid("{jahr:04d}/{titel}"))
 
     def test_kaputte_klammer_abgelehnt(self):
         self.assertFalse(self._valid("{jahr"))  # unvollständige Klammer
