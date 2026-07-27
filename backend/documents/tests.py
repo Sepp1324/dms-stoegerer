@@ -1571,6 +1571,30 @@ class ConsumeFolderScanTests(TestCase):
         self.assertEqual(Document.objects.count(), 1)
         self.assertEqual(Document.objects.get().title, "reif")
         delay.assert_called_once()
+        # P2: Der per Magic-Byte ERKANNTE MIME wird gesetzt (nicht mehr leer).
+        self.assertEqual(
+            Document.objects.get().current_version.mime_type, "application/pdf"
+        )
+
+    def test_ungueltiger_dateityp_landet_in_failed(self):
+        """P2: Consume nutzt dieselbe Magic-Byte-Allowlist wie Upload/Mail –
+        eine als PDF getarnte HTML-Datei wird abgewiesen und nach _failed/
+        verschoben, ohne ein Dokument anzulegen."""
+        import os
+        import time
+
+        with self.settings(CONSUME_MIN_AGE=15):
+            bad = self.consume / "schad.pdf"
+            bad.write_bytes(b"<html><script>alert(1)</script></html>")
+            old = time.time() - 3600
+            os.utime(bad, (old, old))
+            result, delay = self._run_scan()
+
+        self.assertEqual(result["failed"], 1)
+        self.assertTrue((self.consume / "_failed" / "schad.pdf").exists())
+        self.assertFalse((self.consume / "_processed" / "schad.pdf").exists())
+        self.assertEqual(Document.objects.count(), 0)
+        delay.assert_not_called()
 
     def test_fehlerhafte_datei_landet_in_failed_und_scan_laeuft_weiter(self):
         """(c) Fehlerpfad -> _failed/ + die übrigen Dateien werden verarbeitet."""

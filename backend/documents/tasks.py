@@ -1097,14 +1097,18 @@ def _ingest_consume_dir(
                 continue
 
             title = entry.stem
-            # In den originals-Bereich kopieren, Original aus dem Eingang entfernen.
-            storage.ORIGINALS_DIR.mkdir(parents=True, exist_ok=True)
-            target = _unique(storage.ORIGINALS_DIR / entry.name)
-            target.write_bytes(data)
+            # Zentrale Magic-Byte-Allowlist wie Upload/Mail (P2): NICHT die Bytes
+            # ungeprüft nach originals schreiben. ``storage.save_bytes`` prüft den
+            # Typ am Byte-Header und liefert den ERKANNTEN MIME (nie den anhand der
+            # Endung geratenen). Unerlaubte Dateien werfen ``UnsupportedFileType``
+            # und werden vom breiten Except unten nach ``_failed/`` verschoben –
+            # so umgeht der Consume-Import den Typ-Check nicht mehr, und der MIME
+            # bleibt nicht leer.
+            saved_path, detected_mime = storage.save_bytes(data, ext=entry.suffix)
 
             document, version = pipeline.create_document_from_file(
-                str(target), title=title, size=target.stat().st_size, owner=owner,
-                ingest_source="consume",
+                str(saved_path), title=title, size=len(data), owner=owner,
+                mime=detected_mime, ingest_source="consume",
             )
             # Owner-Herkunft explizit machen (STOAA-295): Flat-Fallback ->
             # ``owner_fallback``, ohne Owner -> ``triage_ingest``. Per-User-Pfad
