@@ -668,19 +668,48 @@ def reap_unindexed_versions() -> dict:
     """
     from datetime import timedelta
 
-    # Pause bei bewusst deaktivierten Embeddings (P2): Ohne AI liefert
-    # sync_document_embeddings dauerhaft status="disabled" -> ensure_findability_index
-    # bleibt erfolglos, indexed_at wird nie gesetzt. Ohne diese Pause nähme der Beat
-    # alle N Minuten dieselben ältesten Versionen und berechnete auch den
-    # Volltextindex sinnlos neu (Dauerlast). Bei aktivierter AI holt der Reconciler
-    # dann alles nach (die Kandidaten haben weiterhin indexed_at IS NULL).
-    if not getattr(settings, "EMBEDDING_ENABLED", True):
-        return {"candidates": 0, "reindexed": 0, "skipped": "embeddings_disabled"}
-
     PS = DocumentVersion.ProcessingState
     minutes = float(getattr(settings, "INDEX_RECONCILE_AFTER_MINUTES", 15))
     limit = int(getattr(settings, "INDEX_RECONCILE_BATCH", 50))
     threshold = timezone.now() - timedelta(minutes=minutes)
+
+    # Volltext- und semantischer Index werden GETRENNT reconciled (P2): Der
+    # Volltext-Suchvektor braucht KEINE Embeddings. Sind diese bewusst deaktiviert,
+    # wird NUR der Semantik-Index pausiert – der Volltextindex wird weiter
+    # repariert. Kandidaten sind dann READY-Versionen, deren Dokument noch KEINEN
+    # ``search_vector`` hat (kein Dauerlast: sobald gesetzt, fällt es raus; die
+    # kombinierte ``indexed_at``-Markierung greift hier bewusst nicht, weil sie ohne
+    # den semantischen Teil nie gesetzt würde).
+    if not getattr(settings, "EMBEDDING_ENABLED", True):
+        from .services import search_vector as search_vector_service
+
+        versions = list(
+            DocumentVersion.objects.select_related("document")
+            .filter(
+                processing_state=PS.READY,
+                document__search_vector__isnull=True,
+                processing_state_changed_at__lt=threshold,
+            )
+            .order_by("processing_state_changed_at")[:limit]
+        )
+        reindexed = 0
+        for version in versions:
+            try:
+                search_vector_service.update_document_search_vector(version.document)
+                reindexed += 1
+            except SoftTimeLimitExceeded:
+                raise
+            except Exception:  # noqa: BLE001 – pro Version isoliert, Beat läuft weiter
+                logger.exception(
+                    "reap_unindexed_versions: Volltext-Reparatur fehlgeschlagen für %s",
+                    version.id,
+                )
+        if reindexed:
+            logger.info(
+                "reap_unindexed_versions: %d Volltextindizes repariert (Semantik "
+                "pausiert – Embeddings deaktiviert).", reindexed
+            )
+        return {"candidates": len(versions), "reindexed": reindexed, "mode": "fts_only"}
 
     versions = list(
         DocumentVersion.objects.select_related("document")

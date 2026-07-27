@@ -86,18 +86,34 @@ class EnsureFindabilityIndexTests(TestCase):
     INDEX_RECONCILE_AFTER_MINUTES=15, INDEX_RECONCILE_BATCH=50, EMBEDDING_ENABLED=True
 )
 class ReapUnindexedVersionsTests(TestCase):
+    FTS = "documents.services.search_vector.update_document_search_vector"
+
     @override_settings(EMBEDDING_ENABLED=False)
-    def test_pausiert_bei_deaktivierten_embeddings(self):
-        # Kandidat vorhanden, aber AI aus -> keine Dauerlast, indexed_at bleibt NULL.
+    def test_semantik_pausiert_aber_fts_wird_repariert(self):
+        # P2: AI aus -> Semantik pausiert, ABER der Volltextindex wird UNABHÄNGIG
+        # repariert. Hier fehlt der search_vector -> FTS-Reparatur läuft.
         v = _ready_version(indexed_at=None, changed_min_ago=30)
-        with mock.patch(SEARCH) as search, mock.patch(SEM) as sem:
+        Document.objects.filter(pk=v.document_id).update(search_vector=None)
+        with mock.patch(SEM) as sem, mock.patch(self.FTS) as fts:
             res = tasks.reap_unindexed_versions()
-        self.assertEqual(res.get("skipped"), "embeddings_disabled")
+        self.assertEqual(res["mode"], "fts_only")
+        self.assertEqual(res["reindexed"], 1)
+        fts.assert_called_once_with(v.document)
+        sem.assert_not_called()  # Semantik-Index bleibt pausiert
+
+    @override_settings(EMBEDDING_ENABLED=False)
+    def test_fts_vorhanden_keine_dauerlast(self):
+        # Hat das Dokument schon einen search_vector (vom Signal), ist es KEIN
+        # Kandidat mehr -> kein sinnloser Neuaufbau (kein Dauerlast).
+        v = _ready_version(indexed_at=None, changed_min_ago=30)
+        with mock.patch(SEM) as sem, mock.patch(self.FTS) as fts:
+            res = tasks.reap_unindexed_versions()
+        self.assertEqual(res["mode"], "fts_only")
         self.assertEqual(res["candidates"], 0)
-        search.assert_not_called()   # kein Volltext-Neuaufbau
+        fts.assert_not_called()
         sem.assert_not_called()
         v.refresh_from_db()
-        self.assertIsNone(v.indexed_at)
+        self.assertIsNone(v.indexed_at)  # kombinierte Markierung bleibt NULL
 
     def test_reindexiert_ready_ohne_indexed_at(self):
         v = _ready_version(indexed_at=None, changed_min_ago=30)
