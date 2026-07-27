@@ -6,6 +6,7 @@ from django.utils import timezone
 from rest_framework.test import APITestCase
 
 from .models import (
+    AuditLogEntry,
     ContractRecord,
     Document,
     DocumentReminder,
@@ -84,6 +85,39 @@ class TimelineTests(APITestCase):
         self.assertFalse(
             any(item["document"] == self.foreign.id for item in response.data["items"])
         )
+
+    def test_offene_freigabe_nutzt_einreichungsdatum_nicht_upload(self):
+        # P2: Ein Monate ALT hochgeladenes, aber HEUTE eingereichtes Dokument darf
+        # nicht sofort als monatelang überfällig erscheinen. Maßgeblich ist der
+        # jüngste submit-Audit, nicht added_at.
+        today = timezone.localdate()
+        doc = Document.objects.create(
+            title="Alt hochgeladen, heute eingereicht",
+            owner=self.owner,
+            status=Document.ApprovalStatus.ZUR_FREIGABE,
+        )
+        Document.objects.filter(pk=doc.pk).update(
+            added_at=timezone.now() - timedelta(days=200)
+        )
+        AuditLogEntry.objects.create(
+            actor=self.owner,
+            action="submit",
+            object_type="Document",
+            object_id=str(doc.id),
+            detail={"to": "zur_freigabe"},
+        )
+        self.client.force_authenticate(self.owner)
+
+        resp = self.client.get("/api/timeline/?days=30")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        item = next(
+            i
+            for i in resp.data["items"]
+            if i["kind"] == "approval_pending" and i["document"] == doc.id
+        )
+        # Einreichungsdatum (heute), NICHT das 200 Tage alte Upload-Datum.
+        self.assertEqual(item["date"], today.isoformat())
 
     def test_timeline_horizon_filtert_spaetere_termine(self):
         self.client.force_authenticate(self.owner)
