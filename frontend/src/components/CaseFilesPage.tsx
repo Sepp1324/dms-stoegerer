@@ -29,11 +29,14 @@ export default function CaseFilesPage({
   onOpenDocument: (documentId: number, page?: number | null) => void;
 }) {
   const [caseFiles, setCaseFiles] = useState<CaseFile[]>([]);
-  const [documents, setDocuments] = useState<DocumentItem[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
-  const [addDocumentId, setAddDocumentId] = useState("");
+  // Dokument-Autocomplete (P2): serverseitige Suche statt Vollladen der ersten
+  // 25 Dokumente – so lassen sich auch ältere Dokumente zur Akte hinzufügen.
+  const [docSearch, setDocSearch] = useState("");
+  const [docResults, setDocResults] = useState<DocumentItem[]>([]);
+  const [docSearching, setDocSearching] = useState(false);
   const [sourcesByCase, setSourcesByCase] = useState<Record<number, AskSource[]>>({});
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -42,13 +45,9 @@ export default function CaseFilesPage({
   function load() {
     setLoading(true);
     setError(null);
-    Promise.all([
-      getCaseFiles(),
-      getDocuments({ ordering: "-added_at" }),
-    ])
-      .then(([cases, docs]) => {
+    getCaseFiles()
+      .then((cases) => {
         setCaseFiles(cases);
-        setDocuments(docs.results);
         setSelectedId((current) => current ?? cases[0]?.id ?? null);
       })
       .catch((err) => setError(err instanceof Error ? err.message : String(err)))
@@ -64,11 +63,35 @@ export default function CaseFilesPage({
     [caseFiles, selectedId],
   );
 
-  const availableDocuments = useMemo(() => {
-    if (!selected) return documents;
-    const selectedDocIds = new Set(selected.documents.map((doc) => doc.id));
-    return documents.filter((doc) => !selectedDocIds.has(doc.id));
-  }, [documents, selected]);
+  // Serverseitige Dokumentsuche (debounced + Stale-Guard). Bereits in der Akte
+  // enthaltene Dokumente werden aus den Treffern gefiltert.
+  useEffect(() => {
+    const term = docSearch.trim();
+    if (term.length < 2) {
+      setDocResults([]);
+      return;
+    }
+    let cancelled = false;
+    setDocSearching(true);
+    const handle = setTimeout(() => {
+      getDocuments({ q: term, ordering: "-added_at" })
+        .then((res) => {
+          if (cancelled) return;
+          const inCase = new Set(selected?.documents.map((doc) => doc.id) ?? []);
+          setDocResults(res.results.filter((doc) => !inCase.has(doc.id)));
+        })
+        .catch(() => {
+          if (!cancelled) setDocResults([]);
+        })
+        .finally(() => {
+          if (!cancelled) setDocSearching(false);
+        });
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(handle);
+    };
+  }, [docSearch, selected]);
 
   function replaceCaseFile(updated: CaseFile) {
     setCaseFiles((current) =>
@@ -110,21 +133,15 @@ export default function CaseFilesPage({
     }
   }
 
-  async function addDocument() {
-    if (!selected || !addDocumentId) return;
+  async function addDocument(docId: number) {
+    if (!selected || !docId) return;
     setBusy(true);
     setError(null);
     try {
-      const updated = await addDocumentsToCaseFile(selected.id, [Number(addDocumentId)]);
+      const updated = await addDocumentsToCaseFile(selected.id, [docId]);
       replaceCaseFile(updated);
-      setDocuments((current) =>
-        current.map((doc) =>
-          doc.id === Number(addDocumentId)
-            ? { ...doc, case_file: updated.id, case_file_title: updated.title }
-            : doc,
-        ),
-      );
-      setAddDocumentId("");
+      setDocSearch("");
+      setDocResults([]);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -139,13 +156,6 @@ export default function CaseFilesPage({
     try {
       const updated = await removeDocumentsFromCaseFile(selected.id, [documentId]);
       replaceCaseFile(updated);
-      setDocuments((current) =>
-        current.map((doc) =>
-          doc.id === documentId
-            ? { ...doc, case_file: null, case_file_title: null }
-            : doc,
-        ),
-      );
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -335,21 +345,32 @@ export default function CaseFilesPage({
                   <h3>Timeline</h3>
                   {canEdit && (
                     <div className="case-add-doc">
-                      <select
-                        value={addDocumentId}
-                        onChange={(event) => setAddDocumentId(event.target.value)}
+                      <input
+                        className="search"
+                        value={docSearch}
+                        onChange={(event) => setDocSearch(event.target.value)}
+                        placeholder="Dokument suchen (Titel/Inhalt) …"
                         disabled={busy}
-                      >
-                        <option value="">Dokument hinzufügen …</option>
-                        {availableDocuments.map((doc) => (
-                          <option key={doc.id} value={doc.id}>
-                            {doc.title}
-                          </option>
-                        ))}
-                      </select>
-                      <button onClick={addDocument} disabled={busy || !addDocumentId}>
-                        Hinzufügen
-                      </button>
+                      />
+                      {docSearch.trim().length >= 2 && (
+                        <ul className="case-add-doc__results">
+                          {docSearching && <li className="muted">Suche …</li>}
+                          {!docSearching && docResults.length === 0 && (
+                            <li className="muted">Keine Treffer</li>
+                          )}
+                          {docResults.map((doc) => (
+                            <li key={doc.id}>
+                              <button
+                                type="button"
+                                onClick={() => addDocument(doc.id)}
+                                disabled={busy}
+                              >
+                                {doc.title}
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
                     </div>
                   )}
                 </div>
