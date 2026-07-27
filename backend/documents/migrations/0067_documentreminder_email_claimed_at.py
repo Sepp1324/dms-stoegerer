@@ -23,4 +23,17 @@ class Migration(migrations.Migration):
                 null=True,
             ),
         ),
+        migrations.AlterField(
+            model_name="documentreminder",
+            name="email_sent_at",
+            field=models.DateTimeField(
+                blank=True,
+                help_text=(
+                    "Wann die Erinnerungs-E-Mail BESTÄTIGT versendet wurde – gesetzt "
+                    "ERST nach erfolgreichem SMTP-Versand. Getrennt von notified_at "
+                    "(In-App)."
+                ),
+                null=True,
+            ),
+        ),
     ]
