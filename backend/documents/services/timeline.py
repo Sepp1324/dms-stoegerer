@@ -11,10 +11,17 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any
 
-from django.db.models import QuerySet
+from django.db.models import CharField, DateTimeField, F, OuterRef, QuerySet, Subquery
+from django.db.models.functions import Cast, Coalesce
 from django.utils import timezone
 
-from documents.models import ContractRecord, Document, DocumentReminder, DocumentReviewTask
+from documents.models import (
+    AuditLogEntry,
+    ContractRecord,
+    Document,
+    DocumentReminder,
+    DocumentReviewTask,
+)
 
 
 TimelineBucket = str
@@ -277,13 +284,33 @@ def _approval_items(
     horizon: date,
 ) -> list[TimelineItem]:
     lower_bound = today - timedelta(days=365)
-    qs = (
-        documents.filter(
-            status=Document.ApprovalStatus.ZUR_FREIGABE,
-            added_at__date__gte=lower_bound,
-            added_at__date__lte=horizon,
+    # Maßgeblich ist der EINREICHUNGSzeitpunkt, nicht das Upload-Datum (P2): ein
+    # Monate altes Dokument, das heute eingereicht wird, ist heute fällig – nicht
+    # sofort „Monate überfällig". Der jüngste ``submit``-Audit liefert diesen
+    # Zeitpunkt; fehlt er (Altbestand), fällt es auf ``added_at`` zurück.
+    # ``object_id`` ist ein String -> die PK wird für den Vergleich gecastet.
+    latest_submit = (
+        AuditLogEntry.objects.filter(
+            object_type="Document",
+            action="submit",
+            object_id=Cast(OuterRef("pk"), output_field=CharField()),
         )
-        .order_by("added_at", "id")
+        .order_by("-timestamp")
+        .values("timestamp")[:1]
+    )
+    qs = (
+        documents.filter(status=Document.ApprovalStatus.ZUR_FREIGABE)
+        .annotate(
+            submitted_at=Coalesce(
+                Subquery(latest_submit, output_field=DateTimeField()),
+                F("added_at"),
+            )
+        )
+        .filter(
+            submitted_at__date__gte=lower_bound,
+            submitted_at__date__lte=horizon,
+        )
+        .order_by("submitted_at", "id")
     )
     return [
         TimelineItem(
@@ -292,7 +319,7 @@ def _approval_items(
             kind="approval_pending",
             title="Freigabe offen",
             description="Dokument wartet auf Freigabe.",
-            date=timezone.localtime(document.added_at).date(),
+            date=timezone.localtime(document.submitted_at).date(),
             document_id=document.id,
             document_title=document.title,
             severity="medium",
