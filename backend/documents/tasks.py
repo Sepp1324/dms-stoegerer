@@ -1288,16 +1288,36 @@ def check_due_reminders() -> dict:
 def bulk_classify_documents(document_ids, actor_id=None) -> dict:
     """Wendet die Klassifizierungsregeln asynchron auf viele Dokumente an.
 
-    Für große Batches (>10 Dokumente) aus ``DocumentViewSet.bulk_classify``. Die
-    ``document_ids`` sind bereits owner-gescopet (der View filtert vor dem
-    Dispatch über ``get_queryset``), daher lädt der Task sie ohne weitere
-    Rechteprüfung. Zählt ``updated``/``unchanged`` und sammelt Teilfehler in
-    ``errors`` (gemeinsame Kernlogik ``classification.classify_documents``).
+    Für große Batches (>10 Dokumente) aus ``DocumentViewSet.bulk_classify``.
+
+    Rechte-Neuprüfung zum AUSFÜHRUNGSzeitpunkt (P2): Zwischen Request und Task-Lauf
+    kann sich der Owner eines Dokuments ändern. Der Task lädt die IDs daher NICHT
+    ungefiltert, sondern re-scoped am ``actor``: ein Nicht-Admin sieht nur noch
+    eigene Dokumente, ein Admin alle. So klassifiziert ein alter Auftrag kein
+    inzwischen fremdes Dokument. Ist der Actor unbekannt (gelöscht/fehlend), wird
+    nichts verarbeitet (fail-closed).
     """
+    from django.contrib.auth import get_user_model
+
     from . import classification
     from .models import AuditLogEntry, Document
 
-    documents = list(Document.objects.filter(id__in=document_ids))
+    actor = (
+        get_user_model().objects.filter(pk=actor_id).first() if actor_id else None
+    )
+    qs = Document.objects.filter(id__in=document_ids)
+    if actor is None:
+        documents = []  # fail-closed: ohne Actor kein Scope
+    elif getattr(actor, "is_dms_admin", False):
+        documents = list(qs)
+    else:
+        documents = list(qs.filter(owner=actor))
+    dropped = len(set(document_ids)) - len(documents)
+    if dropped > 0:
+        logger.warning(
+            "bulk_classify: %s Dokument(e) beim Ausführen nicht mehr im Scope von "
+            "actor=%s – übersprungen.", dropped, actor_id
+        )
     result = classification.classify_documents(documents)
 
     if documents:
