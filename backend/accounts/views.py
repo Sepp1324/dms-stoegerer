@@ -309,6 +309,20 @@ def household_leave(request, pk):
             # Ein paralleler Austritt hat den (leeren) Haushalt bereits gelöscht.
             return Response(status=status.HTTP_204_NO_CONTENT)
         locked.members.remove(request.user)
+        # Freigaben widerrufen (P1): ``shared_with_household`` ist nur ein Boolean;
+        # die Sichtbarkeit wird stets am AKTUELLEN Haushalt berechnet. Blieben die
+        # Flags beim Austritt bestehen, würden die alten Dokumente/Ordner nach dem
+        # Beitritt zu einem ANDEREN Haushalt dort sofort sichtbar. Daher hier für den
+        # austretenden Nutzer zurücksetzen (lazy Import vermeidet App-Zyklus).
+        from documents.models import Document, DocumentFolder
+
+        Document.objects.filter(
+            owner=request.user, shared_with_household=True
+        ).update(shared_with_household=False)
+        DocumentFolder.objects.filter(
+            owner=request.user, shared_with_household=True
+        ).update(shared_with_household=False)
+
         remaining = locked.members.order_by("pk").first()
         if remaining is None:
             locked.delete()
