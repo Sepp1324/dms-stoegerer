@@ -3534,12 +3534,13 @@ export const createStoragePath = (name: string) =>
 export const createFolder = (name: string, parent: number | null = null) =>
   postJson<FolderRef>("/folders/", { name, parent });
 
-// Hilfsfunktion: paginierte Liste in ein flaches Array einsammeln (erste Seite genügt hier).
+// Hilfsfunktion: eine vollständige Liste einsammeln (P2). Früher wurde nur die
+// ERSTE Seite (data.results) zurückgegeben – ab Eintrag 26 fehlten Werte in
+// Filtern/Admin-Oberflächen (Tags, Korrespondenten, Ordner, Workflows, Regeln,
+// Zusatzfelder, gespeicherte Ansichten …). Diese Selects müssen vollständig sein,
+// daher folgt listAll jetzt der Paginierung über ALLE Seiten.
 async function listAll<T>(path: string): Promise<T[]> {
-  const res = await apiFetch(path);
-  if (!res.ok) throw new Error(`Laden fehlgeschlagen: HTTP ${res.status}`);
-  const data = await res.json();
-  return Array.isArray(data) ? data : data.results;
+  return listAllPages<T>(path);
 }
 
 // Wie listAll, folgt aber der Paginierung über alle Seiten (``next``). Nötig,
