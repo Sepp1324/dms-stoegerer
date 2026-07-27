@@ -298,12 +298,22 @@ def household_leave(request, pk):
     damit der Haushalt nicht führungslos zurückbleibt.
     """
     household = _member_household_or_404(request.user, pk)
-    household.members.remove(request.user)
-    remaining = household.members.order_by("pk").first()
-    if remaining is None:
-        household.delete()
-        return Response(status=status.HTTP_204_NO_CONTENT)
-    if household.owner_id == request.user.id:
-        household.owner = remaining
-        household.save(update_fields=["owner"])
+    # Atomar + gesperrt (P2): Entfernen, verbleibenden Owner bestimmen und ggf.
+    # Löschen liefen bisher ohne Transaktion/Zeilensperre. Traten Owner und letztes
+    # Mitglied gleichzeitig aus, waren 500-Fehler nach bereits erfolgter Änderung
+    # oder ein führungsloser Haushalt möglich. Die Haushaltszeile serialisiert
+    # konkurrierende Austritte.
+    with transaction.atomic():
+        locked = Household.objects.select_for_update().filter(pk=household.pk).first()
+        if locked is None:
+            # Ein paralleler Austritt hat den (leeren) Haushalt bereits gelöscht.
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        locked.members.remove(request.user)
+        remaining = locked.members.order_by("pk").first()
+        if remaining is None:
+            locked.delete()
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        if locked.owner_id == request.user.id:
+            locked.owner = remaining
+            locked.save(update_fields=["owner"])
     return Response(status=status.HTTP_204_NO_CONTENT)
