@@ -1627,6 +1627,36 @@ class WorkflowActionSerializer(serializers.ModelSerializer):
             "remove_tags",
         )
 
+    def validate_assign_title(self, value):
+        """Titel-Template FRÜH validieren (P2): ``{unknown}`` oder eine kaputte
+        Klammer scheiterten sonst erst zur Laufzeit bei ``format()`` in der
+        Workflow-Engine – der Fehler wurde geschluckt, der Workflow trotzdem als
+        ausgeführt auditiert. Erlaubt sind nur die von der Engine gefüllten
+        Platzhalter."""
+        import string
+
+        if not value:
+            return value
+        allowed = {"correspondent", "created", "doc_type"}
+        try:
+            used = {
+                name
+                for _text, name, _spec, _conv in string.Formatter().parse(value)
+                if name is not None
+            }
+        except ValueError as exc:
+            raise serializers.ValidationError(
+                f"Ungültige geschweifte Klammer im Titel-Template: {exc}"
+            )
+        unknown = used - allowed
+        if unknown:
+            raise serializers.ValidationError(
+                "Unbekannte Platzhalter im Titel-Template: "
+                f"{', '.join('{' + u + '}' for u in sorted(unknown))}. "
+                "Erlaubt sind nur {correspondent}, {created}, {doc_type}."
+            )
+        return value
+
 
 class WorkflowSerializer(serializers.ModelSerializer):
     """Workflow mit verschachteltem Trigger (1:1) und Aktionsliste (1:n).

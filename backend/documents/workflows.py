@@ -13,8 +13,18 @@ import fnmatch
 import logging
 
 from celery.exceptions import SoftTimeLimitExceeded
+from django.db import transaction
 
 logger = logging.getLogger(__name__)
+
+
+class _WorkflowActionFailed(Exception):
+    """Interne Ausnahme: mind. eine Aktion eines Workflows ist fehlgeschlagen ->
+    der gesamte Workflow wird atomar zurückgerollt."""
+
+    def __init__(self, errors):
+        self.errors = errors
+        super().__init__(f"{len(errors)} Workflow-Aktion(en) fehlgeschlagen")
 
 
 def _trigger_matches(trigger, *, source: str, document, text: str) -> bool:
@@ -179,31 +189,53 @@ def run_workflows(document, *, trigger_type: str, source: str, text: str | None 
         if not _trigger_matches(trigger, source=source, document=document, text=text_lower):
             continue
 
-        # Alle Aktionen in Reihenfolge anwenden
+        # Pro Workflow ATOMAR (P2): Aktionen + Speichern + Erfolgs-Audit laufen in
+        # EINER Transaktion. Schlägt eine Aktion fehl, wird der GESAMTE Workflow
+        # zurückgerollt (auch bereits gesetzte Tags) und als ``workflow_failed``
+        # auditiert – NICHT als sauberer Erfolg mit partiellem Ergebnis.
         applied: dict = {}
-        for action in wf.actions.order_by("order"):
-            try:
-                changed = _apply_action(action, document)
-                applied.update(changed)
-            except SoftTimeLimitExceeded:
-                raise  # Soft-Time-Limit nicht verschlucken (läuft ggf. im Task).
-            except Exception:
-                logger.exception("Workflow-Aktion %s fehlgeschlagen (Workflow: %s)", action.pk, wf.name)
+        try:
+            with transaction.atomic():
+                action_errors = []
+                for action in wf.actions.order_by("order"):
+                    try:
+                        applied.update(_apply_action(action, document))
+                    except SoftTimeLimitExceeded:
+                        raise  # Soft-Time-Limit nicht verschlucken.
+                    except Exception as exc:  # noqa: BLE001
+                        action_errors.append({"action": action.pk, "error": str(exc)})
+                if action_errors:
+                    raise _WorkflowActionFailed(action_errors)
 
-        # Dokument speichern (Tags sind schon via M2M direkt gesetzt)
-        update_fields = []
-        for field in ("title", "correspondent_id", "document_type_id", "storage_path_id", "owner_id"):
-            if field.rstrip("_id") in applied or field in applied:
-                update_fields.append(field)
-        if update_fields or {"title", "correspondent_id", "document_type_id", "storage_path_id", "owner_id"} & set(applied):
-            document.save()
+                # Dokument speichern (Tags sind schon via M2M direkt gesetzt)
+                update_fields = []
+                for field in ("title", "correspondent_id", "document_type_id", "storage_path_id", "owner_id"):
+                    if field.rstrip("_id") in applied or field in applied:
+                        update_fields.append(field)
+                if update_fields or {"title", "correspondent_id", "document_type_id", "storage_path_id", "owner_id"} & set(applied):
+                    document.save()
 
-        AuditLogEntry.objects.create(
-            action="workflow",
-            object_type="Document",
-            object_id=str(document.id),
-            detail={"workflow": wf.name, "applied": applied},
-        )
+                AuditLogEntry.objects.create(
+                    action="workflow",
+                    object_type="Document",
+                    object_id=str(document.id),
+                    detail={"workflow": wf.name, "applied": applied},
+                )
+        except SoftTimeLimitExceeded:
+            raise
+        except _WorkflowActionFailed as failed:
+            # Rollback ist erfolgt; den Fehler SICHTBAR auditieren (kein Erfolg).
+            logger.warning(
+                "Workflow %r abgebrochen (Aktion fehlgeschlagen): %s", wf.name, failed.errors
+            )
+            AuditLogEntry.objects.create(
+                action="workflow_failed",
+                object_type="Document",
+                object_id=str(document.id),
+                detail={"workflow": wf.name, "errors": failed.errors},
+            )
+            continue
+
         fired.append(wf.name)
         logger.info("Workflow %r auf Dokument %s angewandt (%s)", wf.name, document.id, applied)
 
