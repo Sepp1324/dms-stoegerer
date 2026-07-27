@@ -2365,14 +2365,22 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN,
             )
         document = self.get_object()
-        candidate = self._get_candidate(document, candidate_id)
-        if candidate.status != ExtractionCandidate.Status.PENDING:
-            return Response(
-                {"detail": "Dieser Vorschlag ist nicht mehr offen."},
-                status=status.HTTP_409_CONFLICT,
-            )
-
+        # Atomarer Row-Lock (P1): Kandidat UNTER der Transaktion sperren und den
+        # PENDING-Status erst dort prüfen. Sonst passierten zwei parallele Requests
+        # beide die Vorabprüfung und wendeten denselben Vorschlag doppelt an.
         with transaction.atomic():
+            candidate = (
+                document.extraction_candidates.select_for_update()
+                .filter(pk=candidate_id)
+                .first()
+            )
+            if candidate is None:
+                raise Http404("Extraktionsvorschlag nicht vorhanden.")
+            if candidate.status != ExtractionCandidate.Status.PENDING:
+                return Response(
+                    {"detail": "Dieser Vorschlag ist nicht mehr offen."},
+                    status=status.HTTP_409_CONFLICT,
+                )
             target = self._apply_candidate_value(document, candidate)
             if target is None:
                 return Response(
@@ -2412,28 +2420,37 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN,
             )
         document = self.get_object()
-        candidate = self._get_candidate(document, candidate_id)
-        if candidate.status != ExtractionCandidate.Status.PENDING:
-            return Response(
-                {"detail": "Dieser Vorschlag ist nicht mehr offen."},
-                status=status.HTTP_409_CONFLICT,
+        # Atomarer Row-Lock (P1) wie beim Apply – verhindert widersprüchliches
+        # paralleles Übernehmen/Verwerfen desselben Kandidaten.
+        with transaction.atomic():
+            candidate = (
+                document.extraction_candidates.select_for_update()
+                .filter(pk=candidate_id)
+                .first()
             )
-        candidate.status = ExtractionCandidate.Status.DISMISSED
-        candidate.dismissed_at = timezone.now()
-        candidate.save(update_fields=["status", "dismissed_at"])
-        AuditLogEntry.objects.create(
-            actor=request.user,
-            action="dismiss_extraction_candidate",
-            object_type="Document",
-            object_id=str(document.id),
-            detail={
-                "candidate": candidate.id,
-                "field": candidate.field,
-                "value": candidate.value,
-                "normalized_value": candidate.normalized_value,
-            },
-        )
-        review_task_service.sync_document_review_tasks(document)
+            if candidate is None:
+                raise Http404("Extraktionsvorschlag nicht vorhanden.")
+            if candidate.status != ExtractionCandidate.Status.PENDING:
+                return Response(
+                    {"detail": "Dieser Vorschlag ist nicht mehr offen."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            candidate.status = ExtractionCandidate.Status.DISMISSED
+            candidate.dismissed_at = timezone.now()
+            candidate.save(update_fields=["status", "dismissed_at"])
+            AuditLogEntry.objects.create(
+                actor=request.user,
+                action="dismiss_extraction_candidate",
+                object_type="Document",
+                object_id=str(document.id),
+                detail={
+                    "candidate": candidate.id,
+                    "field": candidate.field,
+                    "value": candidate.value,
+                    "normalized_value": candidate.normalized_value,
+                },
+            )
+            review_task_service.sync_document_review_tasks(document)
         return Response(ExtractionCandidateSerializer(candidate).data)
 
     @action(detail=True, methods=["get", "post"], url_path="case-candidates")
@@ -2531,14 +2548,21 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN,
             )
         document = self.get_object()
-        candidate = self._get_case_candidate(document, candidate_id)
-        if candidate.status != CaseFileCandidate.Status.PENDING:
-            return Response(
-                {"detail": "Dieser Aktenvorschlag ist nicht mehr offen."},
-                status=status.HTTP_409_CONFLICT,
-            )
-
+        # Atomarer Row-Lock (P1): sonst könnten zwei parallele Requests denselben
+        # „Neue Akte"-Vorschlag übernehmen und ZWEI Akten anlegen (eine verwaist).
         with transaction.atomic():
+            candidate = (
+                document.case_file_candidates.select_for_update()
+                .filter(pk=candidate_id)
+                .first()
+            )
+            if candidate is None:
+                raise Http404("Aktenvorschlag nicht vorhanden.")
+            if candidate.status != CaseFileCandidate.Status.PENDING:
+                return Response(
+                    {"detail": "Dieser Aktenvorschlag ist nicht mehr offen."},
+                    status=status.HTTP_409_CONFLICT,
+                )
             if candidate.kind == CaseFileCandidate.Kind.EXISTING_CASE:
                 case_file = candidate.case_file
                 if case_file is None:
@@ -2617,29 +2641,37 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN,
             )
         document = self.get_object()
-        candidate = self._get_case_candidate(document, candidate_id)
-        if candidate.status != CaseFileCandidate.Status.PENDING:
-            return Response(
-                {"detail": "Dieser Aktenvorschlag ist nicht mehr offen."},
-                status=status.HTTP_409_CONFLICT,
+        # Atomarer Row-Lock (P1) wie beim Apply.
+        with transaction.atomic():
+            candidate = (
+                document.case_file_candidates.select_for_update()
+                .filter(pk=candidate_id)
+                .first()
             )
-        candidate.status = CaseFileCandidate.Status.DISMISSED
-        candidate.dismissed_at = timezone.now()
-        candidate.save(update_fields=["status", "dismissed_at"])
-        AuditLogEntry.objects.create(
-            actor=request.user,
-            action="dismiss_case_file_candidate",
-            object_type="Document",
-            object_id=str(document.id),
-            detail={
-                "candidate": candidate.id,
-                "kind": candidate.kind,
-                "case_file": candidate.case_file_id,
-                "suggested_title": candidate.suggested_title,
-                "score": candidate.score,
-            },
-        )
-        review_task_service.sync_document_review_tasks(document)
+            if candidate is None:
+                raise Http404("Aktenvorschlag nicht vorhanden.")
+            if candidate.status != CaseFileCandidate.Status.PENDING:
+                return Response(
+                    {"detail": "Dieser Aktenvorschlag ist nicht mehr offen."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            candidate.status = CaseFileCandidate.Status.DISMISSED
+            candidate.dismissed_at = timezone.now()
+            candidate.save(update_fields=["status", "dismissed_at"])
+            AuditLogEntry.objects.create(
+                actor=request.user,
+                action="dismiss_case_file_candidate",
+                object_type="Document",
+                object_id=str(document.id),
+                detail={
+                    "candidate": candidate.id,
+                    "kind": candidate.kind,
+                    "case_file": candidate.case_file_id,
+                    "suggested_title": candidate.suggested_title,
+                    "score": candidate.score,
+                },
+            )
+            review_task_service.sync_document_review_tasks(document)
         return Response(CaseFileCandidateSerializer(candidate).data)
 
     def _metadata_snapshot(self, document) -> dict:
