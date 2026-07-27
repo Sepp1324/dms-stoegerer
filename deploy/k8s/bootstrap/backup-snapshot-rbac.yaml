@@ -1,0 +1,50 @@
+# RBAC für das snapshot-basierte Backup (P1: konsistenter Zeitpunkt).
+#
+# Der Snapshot-Backup-Job orchestriert per kubectl einen koordinierten
+# Longhorn/CSI-Snapshot des Daten-PVC und tart aus dem daraus restaurierten,
+# UNVERÄNDERLICHEN Volume – so ändert sich /data während des tar nicht mehr.
+# Dafür braucht der Job (anders als das alte live-tar-Backup) API-Rechte auf
+# VolumeSnapshots + temporäre PVCs + einen Helfer-Job. Bewusst least-privilege
+# und namespaced.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dms-backup
+  namespace: dms
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dms-backup
+  namespace: dms
+rules:
+  # Snapshot des Daten-PVC anlegen/prüfen/aufräumen.
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshots"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  # Temporäres Restore-PVC aus dem Snapshot anlegen/aufräumen.
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  # Helfer-Job, der das restaurierte Volume tart + zur NAS überträgt.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dms-backup
+  namespace: dms
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: dms-backup
+subjects:
+  - kind: ServiceAccount
+    name: dms-backup
+    namespace: dms
