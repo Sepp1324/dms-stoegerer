@@ -346,12 +346,21 @@ def fetch_account(account) -> dict:
         return stats
 
     try:
-        conn.select(account.folder)
+        # IMAP-Rückgabestatus prüfen (P2): SELECT/SEARCH/FETCH melden Erfolg über
+        # ``typ == "OK"``. Wurde das ignoriert, konnte ein fehlgeschlagenes SELECT
+        # („kein Postfach") oder SEARCH trotzdem als „ok" enden.
+        typ, _sel = conn.select(account.folder)
+        if typ != "OK":
+            raise RuntimeError(f"SELECT '{account.folder}' fehlgeschlagen: {typ}")
         typ, data = conn.search(None, "UNSEEN")
+        if typ != "OK":
+            raise RuntimeError(f"SEARCH UNSEEN fehlgeschlagen: {typ}")
         uids = data[0].split() if data and data[0] else []
         for uid in uids:
             try:
                 typ, msg_data = conn.fetch(uid, "(RFC822)")
+                if typ != "OK" or not msg_data or not msg_data[0]:
+                    raise RuntimeError(f"FETCH {uid!r} fehlgeschlagen: {typ}")
                 raw = msg_data[0][1]
                 result = ingest_message(account, raw)
                 if result is None:
@@ -366,14 +375,34 @@ def fetch_account(account) -> dict:
                 stats["errors"] += 1
                 logger.exception("Fehler beim Verarbeiten einer Mail (uid=%s, %s)", uid, account)
                 continue
+    except SoftTimeLimitExceeded:
+        raise
+    except Exception as exc:
+        # SELECT/SEARCH-Fehler o. Ä.: als Abruf-Fehler festhalten, NICHT als ok.
+        logger.exception("IMAP-Abruf fehlgeschlagen für %s", account)
+        account.last_error = f"{type(exc).__name__}: {exc}"
+        account.last_checked_at = timezone.now()
+        account.save(update_fields=["last_error", "last_checked_at"])
+        stats["status"] = "error"
+        stats["error"] = str(exc)
+        return stats
     finally:
         try:
             conn.logout()
         except Exception:  # pragma: no cover
             pass
 
+    # Abschluss (P2): Teilfehler NICHT als „ok" verschleiern. Schlugen einzelne
+    # Mails fehl (stats["errors"] > 0), bleibt ein sichtbarer last_error stehen
+    # und der Status ist „partial_error" – sonst würde last_error fälschlich
+    # geleert und status auf „ok" gesetzt.
     account.last_checked_at = timezone.now()
-    account.last_error = ""
-    account.save(update_fields=["last_checked_at", "last_error"])
-    stats["status"] = "ok"
+    if stats["errors"]:
+        account.last_error = f"{stats['errors']} Mail(s) beim Abruf fehlgeschlagen"
+        account.save(update_fields=["last_checked_at", "last_error"])
+        stats["status"] = "partial_error"
+    else:
+        account.last_error = ""
+        account.save(update_fields=["last_checked_at", "last_error"])
+        stats["status"] = "ok"
     return stats
