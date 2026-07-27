@@ -2575,28 +2575,36 @@ class DocumentViewSet(viewsets.ModelViewSet):
         }
 
     def perform_update(self, serializer):
-        """Speichert, protokolliert Metadaten-Änderungen und feuert Workflow-Engine."""
+        """Speichert, protokolliert Metadaten-Änderungen und feuert Workflow-Engine.
+
+        Atomar (P1): Speichern (inkl. Custom-Field-Werte im Serializer), Audit,
+        Workflow-Engine und Review-Task-Sync laufen in EINER Transaktion. Scheiterte
+        ein späterer Schritt, blieben sonst Teile der Änderung dauerhaft gespeichert
+        (möglicherweise ohne Audit-Eintrag), während der Client einen Fehler erhielt.
+        Jetzt: entweder alles oder nichts.
+        """
         before = self._metadata_snapshot(serializer.instance)
-        super().perform_update(serializer)
-        document = serializer.instance
-        after = self._metadata_snapshot(document)
-        changes = {
-            field: {"from": before[field], "to": after[field]}
-            for field in before
-            if before[field] != after[field]
-        }
-        if changes:
-            AuditLogEntry.objects.create(
-                actor=self.request.user,
-                action="update",
-                object_type="Document",
-                object_id=str(document.id),
-                detail={"changes": changes},
-            )
-        # Workflow-Engine: document_updated
-        from . import workflows
-        workflows.run_workflows(document, trigger_type="document_updated", source="api")
-        review_task_service.sync_document_review_tasks(document)
+        with transaction.atomic():
+            super().perform_update(serializer)
+            document = serializer.instance
+            after = self._metadata_snapshot(document)
+            changes = {
+                field: {"from": before[field], "to": after[field]}
+                for field in before
+                if before[field] != after[field]
+            }
+            if changes:
+                AuditLogEntry.objects.create(
+                    actor=self.request.user,
+                    action="update",
+                    object_type="Document",
+                    object_id=str(document.id),
+                    detail={"changes": changes},
+                )
+            # Workflow-Engine: document_updated
+            from . import workflows
+            workflows.run_workflows(document, trigger_type="document_updated", source="api")
+            review_task_service.sync_document_review_tasks(document)
 
     def perform_destroy(self, instance):
         """Protokolliert die Löschung, bevor das Dokument entfernt wird.
