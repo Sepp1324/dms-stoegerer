@@ -1084,6 +1084,7 @@ class HybridSearchView(APIView):
     """
 
     permission_classes = [IsAuthenticated]
+    throttle_classes = [AiRateThrottle]  # Embedding-Suche: KI-Last begrenzen (P2)
 
     def get(self, request):
         return self._run(request, request.query_params)
@@ -1122,6 +1123,9 @@ class AgentPlanView(APIView):
     """
 
     permission_classes = [IsAuthenticated]
+    # Der Plan führt Embedding-Suche UND einen externen Provider-Aufruf aus –
+    # dieselbe KI-Drosselung wie Ask/Semantic/Hybrid (P2).
+    throttle_classes = [AiRateThrottle]
 
     def post(self, request):
         if not request.user.can_write:
@@ -1136,9 +1140,16 @@ class AgentPlanView(APIView):
 
 
 class AgentExecuteView(APIView):
-    """Führt vom Nutzer bestätigte Agent-Aktionen deterministisch aus (owner-scoped)."""
+    """Führt vom Nutzer bestätigte Agent-Aktionen deterministisch aus (owner-scoped).
+
+    Die Aktionsliste wird VOR der Ausführung begrenzt (P2): ``actions`` muss eine
+    Liste sein und darf höchstens ``MAX_ACTIONS`` Einträge enthalten. Der Service
+    führt jeden Eintrag synchron aus (Mutation + Stammdaten + Audit); ohne Deckel
+    könnte ein einzelner Request Tausende Änderungen und Audit-Einträge erzeugen.
+    """
 
     permission_classes = [IsAuthenticated]
+    MAX_ACTIONS = 50
 
     def post(self, request):
         if not request.user.can_write:
@@ -1146,9 +1157,25 @@ class AgentExecuteView(APIView):
                 {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
                 status=status.HTTP_403_FORBIDDEN,
             )
+        actions = request.data.get("actions", [])
+        if not isinstance(actions, list):
+            return Response(
+                {"detail": "Feld 'actions' muss eine Liste sein."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(actions) > self.MAX_ACTIONS:
+            return Response(
+                {
+                    "detail": (
+                        f"Zu viele Aktionen ({len(actions)} > Limit "
+                        f"{self.MAX_ACTIONS})."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         from .services import agent
 
-        result = agent.execute(request.user, request.data.get("actions", []))
+        result = agent.execute(request.user, actions)
         return Response(result)
 
 
