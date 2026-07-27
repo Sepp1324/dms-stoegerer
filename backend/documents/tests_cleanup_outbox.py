@@ -47,6 +47,27 @@ class CleanupOutboxTests(TestCase):
         self.assertIn(str(f), job.paths)
         self.assertTrue(f.exists())  # noch nicht entfernt – erst der Sweeper räumt
 
+    def test_outbox_entsteht_atomar_mit_loeschung(self):
+        # P2: Die Outbox-Zeile wird IN der Lösch-Transaktion angelegt – nicht erst
+        # im on_commit-Callback. Stirbt der Prozess direkt nach dem Commit (hier:
+        # on_commit wird NICHT ausgeführt), existiert der Auftrag trotzdem.
+        doc = Document.objects.create(title="Atomar", owner=self.user)
+        f = self.root / "orig.pdf"
+        f.write_bytes(b"x")
+        version = DocumentVersion.objects.create(
+            document=doc, version_no=1, file_path=str(f),
+            sha256="b" * 64, mime_type="application/pdf", size=1, is_immutable=False,
+        )
+        doc.current_version = version
+        doc.save(update_fields=["current_version"])
+
+        with self.captureOnCommitCallbacks(execute=False):  # Dispatch NICHT ausführen
+            doc.delete()
+
+        self.assertFalse(Document.objects.filter(pk=doc.pk).exists())
+        job = ArtifactCleanupJob.objects.get()  # trotz nicht-dispatchtem on_commit
+        self.assertIn(str(f), job.paths)
+
     def test_sweeper_entfernt_dateien_und_loescht_job(self):
         f = self.root / "a.pdf"
         f.write_bytes(b"x")
