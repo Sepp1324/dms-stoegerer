@@ -661,31 +661,38 @@ def _schedule_artifact_cleanup(paths: list[str]) -> None:
     """Reiht den Artefakt-Cleanup NACH dem Commit ein (P2).
 
     Erst nach erfolgreichem Commit werden Dateien entfernt (sonst gingen bei einem
-    Rollback Dateien verloren, deren DB-Verweis noch existiert). Ist der Broker
-    nicht erreichbar, wird der Auftrag DAUERHAFT als ``ArtifactCleanupJob``-Zeile
-    hinterlegt (Outbox) und von einem periodischen Sweeper abgearbeitet – so
-    verwaisen Artefakte auch bei Broker-Ausfall nicht (zuverlässiger als ein
-    Best-Effort-Inline-``os.remove``, das bei einem weiteren Fehler nur geloggt
-    hätte)."""
+    Rollback Dateien verloren, deren DB-Verweis noch existiert).
+
+    Durable Outbox IMMER (P2): Vor dem Dispatch wird ein persistenter
+    ``ArtifactCleanupJob`` angelegt; der Task löscht ihn erst nach VOLLSTÄNDIGER
+    Bereinigung. So verwaisen Artefakte weder bei Broker-Ausfall (Task lässt sich
+    nicht einreihen) NOCH wenn der Task angenommen wird, aber alle Dateisystem-
+    Retries scheitern – in beiden Fällen bleibt der Job liegen und der periodische
+    Sweeper (``process_artifact_cleanup_jobs``) arbeitet ihn weiter ab."""
     from django.db import transaction
 
     def _dispatch():
         from .tasks import cleanup_artifact_files
 
+        # 1) Outbox-Zeile ZUERST anlegen (Quelle der Wahrheit). Scheitert schon das,
+        #    kann nur noch geloggt werden.
         try:
-            cleanup_artifact_files.delay(paths)
-        except Exception:  # noqa: BLE001 – Broker-Ausfall: dauerhaften Auftrag schreiben
-            # Persistente Outbox statt Best-Effort-Inline: der Sweeper
-            # (process_artifact_cleanup_jobs) arbeitet den Auftrag später mit
-            # denselben Sicherheitsprüfungen (safe_remove_artifacts) ab und löscht
-            # die Zeile erst nach vollständigem Erfolg.
-            try:
-                ArtifactCleanupJob.objects.create(paths=list(paths))
-            except Exception:  # noqa: BLE001 – letzte Instanz: wenigstens sichtbar loggen
-                logger.exception(
-                    "Artefakt-Cleanup-Outbox nicht schreibbar, Artefakte verwaisen: %s",
-                    paths,
-                )
+            job = ArtifactCleanupJob.objects.create(paths=list(paths))
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Artefakt-Cleanup-Outbox nicht schreibbar, Artefakte verwaisen: %s",
+                paths,
+            )
+            return
+
+        # 2) Task einreihen. Broker weg? -> Job bleibt bestehen, Sweeper übernimmt.
+        try:
+            cleanup_artifact_files.delay(paths, job_id=job.id)
+        except Exception:  # noqa: BLE001 – Broker-Ausfall: Outbox bleibt, Sweeper räumt
+            logger.warning(
+                "Artefakt-Cleanup konnte nicht eingereiht werden (Broker?); "
+                "Outbox-Job %s bleibt für den Sweeper.", job.id
+            )
 
     transaction.on_commit(_dispatch)
 

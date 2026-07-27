@@ -223,7 +223,9 @@ class ArchiveApiTests(ArchiveDocMixin, APITestCase):
         ), mock.patch.object(
             tasks.cleanup_artifact_files,
             "delay",
-            side_effect=lambda paths: tasks.cleanup_artifact_files(paths),
+            side_effect=lambda paths, job_id=None: tasks.cleanup_artifact_files(
+                paths, job_id=job_id
+            ),
         ), self.captureOnCommitCallbacks(execute=True):
             resp = self.client.delete(f"/api/documents/{doc.id}/")
 
