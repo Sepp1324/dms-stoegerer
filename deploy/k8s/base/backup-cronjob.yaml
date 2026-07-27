@@ -112,11 +112,19 @@ spec:
                   fi
 
                   echo "--- pg_dump: postgres/${POSTGRES_DB} → ${DB_BACKUP}"
+                  # Fehler-Erkennung (P1): NICHT ``pg_dump | gzip`` verwenden – bei
+                  # einer Pipe wertet POSIX-sh nur den Exit-Code von gzip aus. Ein
+                  # fehlgeschlagenes pg_dump ergäbe ein gültiges, aber leeres Gzip
+                  # und der Lauf liefe als "erfolgreich" durch. Deshalb erst
+                  # UNKOMPRIMIERT in eine Temp-Datei dumpen (``set -e`` bricht bei
+                  # pg_dump != 0 sofort ab), dann separat komprimieren.
+                  DB_DUMP_TMP="${BACKUP_DIR}/db-${TIMESTAMP}.sql"
                   PGPASSWORD="${POSTGRES_PASSWORD}" pg_dump \
                     -h "${POSTGRES_HOST}" \
                     -U "${POSTGRES_USER}" \
                     -d "${POSTGRES_DB}" \
-                    | gzip > "${DB_BACKUP}"
+                    > "${DB_DUMP_TMP}"
+                  gzip "${DB_DUMP_TMP}"   # erzeugt ${DB_DUMP_TMP}.gz == ${DB_BACKUP}
 
                   echo "--- tar: /data → ${DATA_BACKUP}"
                   # WICHTIG: ``originals`` MUSS mit gesichert werden – dort liegen die
@@ -153,6 +161,16 @@ spec:
                     name: dms-secrets
                 - secretRef:
                     name: dms-backup-secrets
+              # Ephemeral-Storage begrenzen (P2): DB-Dump + vollständiges Daten-TAR
+              # liegen gleichzeitig im emptyDir. Ohne Limit könnte ein großer Lauf
+              # den k3s-Node vollschreiben (STOAA-Vorfall). Mit einem Limit wird
+              # stattdessen NUR dieser Pod evictet – der Node bleibt geschützt.
+              # Beim Wachsen von /data ggf. anheben (muss > DB-Dump + Daten-TAR sein).
+              resources:
+                requests:
+                  ephemeral-storage: "2Gi"
+                limits:
+                  ephemeral-storage: "20Gi"
               volumeMounts:
                 - name: data
                   mountPath: /data
@@ -164,4 +182,8 @@ spec:
               persistentVolumeClaim:
                 claimName: dms-data
             - name: backup-tmp
-              emptyDir: {}
+              # Größenobergrenze (P2): kappt das Backup-Scratch hart; überschreitet
+              # der Lauf sie, wird der Pod evictet statt den Node zu füllen. Muss
+              # mit dem ephemeral-storage-Limit oben zusammenpassen.
+              emptyDir:
+                sizeLimit: 20Gi
