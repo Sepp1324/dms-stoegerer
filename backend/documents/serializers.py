@@ -1,3 +1,5 @@
+import string
+
 from django.db import transaction
 from rest_framework import serializers
 
@@ -96,6 +98,30 @@ class StoragePathSerializer(serializers.ModelSerializer):
                 "Ungültiges Ablage-Template: keine absoluten Pfade, kein '..', "
                 "kein ':' oder '\\'. Erlaubt sind relative Segmente + die "
                 "Platzhalter {jahr}/{korrespondent}/{titel}."
+            )
+        # Platzhalter FRÜH validieren (P2): Bislang passierten ``{foo}`` oder eine
+        # unvollständige ``{`` die API und scheiterten erst später bei ``format()``
+        # in ``build_archive_path`` – der Fehler wurde nur geloggt, das Archiv-PDF
+        # blieb aus. ``string.Formatter().parse()`` erkennt kaputte Klammern
+        # (ValueError) und liefert die verwendeten Feldnamen; erlaubt ist nur die
+        # feste Whitelist.
+        allowed = {"jahr", "korrespondent", "titel"}
+        try:
+            used = {
+                name
+                for _text, name, _spec, _conv in string.Formatter().parse(v)
+                if name is not None
+            }
+        except ValueError as exc:
+            raise serializers.ValidationError(
+                f"Ungültige geschweifte Klammer im Ablage-Template: {exc}"
+            )
+        unknown = used - allowed
+        if unknown:
+            raise serializers.ValidationError(
+                "Unbekannte Platzhalter im Ablage-Template: "
+                f"{', '.join('{' + u + '}' for u in sorted(unknown))}. "
+                "Erlaubt sind nur {jahr}, {korrespondent}, {titel}."
             )
         return v
 
