@@ -358,36 +358,36 @@ def safe_remove_artifacts(paths: list[str]) -> tuple[int, list[str]]:
     Bereits fehlende Dateien sind ok; ein transienter I/O-/NFS-Fehler landet in
     der zurückgegebenen Fehlerliste.
     """
-    from django.db.models import Q
-
     from .models import DocumentVersion
 
     data_root = os.path.realpath(str(storage.DATA_DIR))
+
+    # Alle noch referenzierten Artefaktpfade EINMAL kanonisch sammeln (P1,
+    # symlink-sicher): Der frühere Basename-Vorfilter (``__endswith``) übersah eine
+    # Referenz über einen ANDERS BENANNTEN Symlink auf dieselbe Datei – die
+    # gemeinsam genutzte Datei wäre gelöscht worden. ``realpath`` löst Symlinks UND
+    # nicht-kanonische Formen auf; ein Pfad wird nur entfernt, wenn KEIN
+    # gespeicherter Pfad denselben aufgelösten Pfad ergibt.
+    referenced = set()
+    for stored_file, stored_archive, stored_thumb in (
+        DocumentVersion.objects.values_list(
+            "file_path", "archive_path", "thumbnail_path"
+        ).iterator()
+    ):
+        for stored in (stored_file, stored_archive, stored_thumb):
+            if stored:
+                referenced.add(os.path.realpath(stored))
+
     removed = 0
     failed: list[str] = []
     for path in paths:
         if not path:
             continue
-        # Pfad zuerst kanonisieren – sowohl für die Referenzprüfung (a) als auch
-        # für die tatsächliche Löschung, damit BEIDE denselben Pfad meinen.
+        # Pfad kanonisieren – für Referenzprüfung UND Löschung derselbe Pfad.
         real = os.path.realpath(path)
-        # (a) Noch von einer anderen Version referenziert? KANONISCH prüfen: ein
-        # reiner String-Vergleich griffe daneben, wenn eine Version dieselbe Datei
-        # über eine abweichende Schreibweise (z. B. ``a/../a.pdf`` oder Symlink)
-        # referenziert. Daher per Dateiname grob vorfiltern und die gespeicherten
-        # Pfade dann via ``realpath`` mit dem Kandidaten vergleichen.
-        basename = os.path.basename(real)
-        possible = DocumentVersion.objects.filter(
-            Q(file_path__endswith=basename)
-            | Q(archive_path__endswith=basename)
-            | Q(thumbnail_path__endswith=basename)
-        ).values_list("file_path", "archive_path", "thumbnail_path")
-        still_referenced = any(
-            stored and os.path.realpath(stored) == real
-            for row in possible.iterator()
-            for stored in row
-        )
-        if still_referenced:
+        # (a) Noch von einer anderen Version referenziert? Kanonisch (realpath) –
+        # unabhängig von Schreibweise oder Symlink-Namen.
+        if real in referenced:
             logger.info("Artefakt %s noch referenziert – nicht entfernt.", path)
             continue
         # (b) Kanonisierten Pfad hart auf DATA_DIR begrenzen.
@@ -408,7 +408,7 @@ def safe_remove_artifacts(paths: list[str]) -> tuple[int, list[str]]:
 
 
 @shared_task(bind=True, max_retries=5, default_retry_delay=60)
-def cleanup_artifact_files(self, paths: list[str]) -> dict:
+def cleanup_artifact_files(self, paths: list[str], job_id: int | None = None) -> dict:
     """Entfernt verwaiste Artefaktdateien (Original/Archiv/Thumbnail) eines
     gelöschten Dokuments von der Platte/dem PVC (P2).
 
@@ -417,21 +417,47 @@ def cleanup_artifact_files(self, paths: list[str]) -> dict:
     transienten I/O-/NFS-Fehler wird die GESAMTE Liste (nur die noch vorhandenen
     Dateien) mit begrenztem Backoff erneut versucht.
 
+    Durable Outbox (P2): Der Aufrufer legt VOR dem Dispatch einen persistenten
+    ``ArtifactCleanupJob`` an und übergibt dessen ``job_id``. Dieser Task LÖSCHT
+    die Outbox-Zeile ERST nach VOLLSTÄNDIGER Bereinigung. Scheitern alle Retries,
+    bleibt der Job bestehen und der periodische Sweeper
+    (``process_artifact_cleanup_jobs``) arbeitet ihn weiter ab – so gehen auch bei
+    endgültig fehlgeschlagenen Dateisystem-Retries keine Aufträge verloren.
+
     Die Sicherheitsprüfungen (Referenz- + DATA_DIR-Schutz) liegen gemeinsam in
-    :func:`safe_remove_artifacts`, damit der Inline-Fallback dieselben nutzt.
+    :func:`safe_remove_artifacts`.
     """
     removed, failed = safe_remove_artifacts(paths)
-    if failed:
-        if self.request.retries < self.max_retries:
-            raise self.retry(
-                args=[failed],
-                countdown=min(600, 60 * (2 ** self.request.retries)),
-                exc=OSError(f"Artefakt-Cleanup unvollständig: {failed}"),
-            )
-        # Retries erschöpft (P2): NICHT als Erfolg durchfallen – sonst bliebe der
-        # Speicherverlust im Monitoring unsichtbar. Als Task-FEHLER enden.
-        raise OSError(f"Artefakt-Cleanup endgültig fehlgeschlagen: {failed}")
-    return {"removed": removed, "failed": []}
+    if not failed:
+        if job_id is not None:
+            from .models import ArtifactCleanupJob
+
+            ArtifactCleanupJob.objects.filter(pk=job_id).delete()  # erst jetzt löschen
+        return {"removed": removed, "failed": []}
+
+    # Teilweise/ganz fehlgeschlagen: die Outbox-Zeile BLEIBT (nur noch offene Pfade).
+    if job_id is not None:
+        from django.utils import timezone
+
+        from .models import ArtifactCleanupJob
+
+        ArtifactCleanupJob.objects.filter(pk=job_id).update(
+            paths=failed,
+            attempts=models.F("attempts") + 1,
+            last_error=f"{len(failed)} Pfad(e) nicht entfernbar",
+            updated_at=timezone.now(),
+        )
+    if self.request.retries < self.max_retries:
+        raise self.retry(
+            args=[failed],
+            kwargs={"job_id": job_id},
+            countdown=min(600, 60 * (2 ** self.request.retries)),
+            exc=OSError(f"Artefakt-Cleanup unvollständig: {failed}"),
+        )
+    # Retries erschöpft (P2): NICHT als Erfolg durchfallen. Der Outbox-Job bleibt
+    # bestehen -> der Sweeper übernimmt; der Task endet trotzdem als FEHLER
+    # (Monitoring-Alarm).
+    raise OSError(f"Artefakt-Cleanup endgültig fehlgeschlagen: {failed}")
 
 
 @shared_task

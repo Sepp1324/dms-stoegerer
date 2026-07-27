@@ -1,5 +1,6 @@
 """P1/P2: cleanup_artifact_files entfernt Pfade sicher (Referenz-/Root-Prüfung)
 und endet nach erschöpften Retries als FEHLER (statt still als Erfolg)."""
+import os
 import tempfile
 from pathlib import Path
 from unittest import mock
@@ -8,7 +9,7 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase
 
 from . import storage, tasks
-from .models import Document, DocumentVersion
+from .models import ArtifactCleanupJob, Document, DocumentVersion
 
 User = get_user_model()
 
@@ -88,3 +89,45 @@ class CleanupArtifactSafetyTests(TestCase):
                 retries=tasks.cleanup_artifact_files.max_retries,
             )
         self.assertTrue(result.failed())
+
+    def test_symlink_mit_anderem_namen_schuetzt_datei(self):
+        # P1: Eine Version referenziert die gemeinsame Datei über einen ANDERS
+        # BENANNTEN Symlink. Der frühere Basename-Vorfilter übersah das und hätte
+        # das Ziel gelöscht -> jetzt kanonisch (realpath) erkannt.
+        target = self.root / "original.pdf"
+        target.write_bytes(b"x")
+        link = self.root / "verweis.pdf"
+        os.symlink(target, link)  # anderer Name, gleiches Ziel
+
+        doc = Document.objects.create(title="Sym", owner=self.user)
+        DocumentVersion.objects.create(
+            document=doc, version_no=1, file_path=str(link), sha256="a" * 64
+        )
+        with self._patch_data_dir():
+            res = tasks.cleanup_artifact_files([str(target)])  # Kandidat = Ziel
+        self.assertTrue(target.exists())  # über den Symlink noch referenziert
+        self.assertEqual(res["removed"], 0)
+
+    def test_outbox_wird_bei_erfolg_geloescht(self):
+        f = self.root / "orig.pdf"
+        f.write_bytes(b"x")
+        job = ArtifactCleanupJob.objects.create(paths=[str(f)])
+        with self._patch_data_dir():
+            tasks.cleanup_artifact_files([str(f)], job_id=job.id)
+        self.assertFalse(f.exists())
+        self.assertFalse(ArtifactCleanupJob.objects.filter(pk=job.id).exists())
+
+    def test_outbox_bleibt_bei_endgueltigem_fehler(self):
+        # Endgültig fehlgeschlagene FS-Retries: der Outbox-Job bleibt bestehen
+        # (Sweeper übernimmt), statt still verloren zu gehen.
+        d = self.root / "dir"
+        d.mkdir()
+        job = ArtifactCleanupJob.objects.create(paths=[str(d)])
+        with self._patch_data_dir():
+            result = tasks.cleanup_artifact_files.apply(
+                args=[[str(d)]],
+                kwargs={"job_id": job.id},
+                retries=tasks.cleanup_artifact_files.max_retries,
+            )
+        self.assertTrue(result.failed())
+        self.assertTrue(ArtifactCleanupJob.objects.filter(pk=job.id).exists())
