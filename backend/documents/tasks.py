@@ -1241,11 +1241,15 @@ def check_due_reminders() -> dict:
         )
         for pk in email_candidates:
             try:
+                # 1) CLAIM (at-most-once, P2): ``email_sent_at`` unter Zeilensperre
+                #    setzen und COMMITTEN, BEVOR extern gesendet wird. Bislang lief
+                #    der SMTP-Versand VOR dem Commit – stirbt der Worker nach
+                #    erfolgreichem Versand, blieb email_sent_at=NULL und die nächste
+                #    Runde sendete dieselbe Mail erneut. Mit dem vorgezogenen,
+                #    committeten Claim ist ein Doppelversand ausgeschlossen.
                 with transaction.atomic():
-                    # KEIN select_related hier: select_for_update + Outer Join auf
-                    # die NULLBARE FK created_by scheitert auf Postgres („FOR UPDATE
-                    # cannot be applied to the nullable side of an outer join"). Die
-                    # wenigen Felder (created_by.email, document_id) laden wir direkt.
+                    # KEIN select_related: select_for_update + Outer Join auf die
+                    # NULLBARE FK created_by scheitert auf Postgres.
                     reminder = (
                         DocumentReminder.objects.select_for_update(skip_locked=True)
                         .filter(pk=pk, email_sent_at__isnull=True)
@@ -1256,29 +1260,51 @@ def check_due_reminders() -> dict:
                     recipient = getattr(reminder.created_by, "email", "") or ""
                     if not recipient:
                         continue  # kein Empfänger -> nichts zu senden (kein Retry nötig)
+                    subject = f"Wiedervorlage fällig: Dokument #{reminder.document_id}"
+                    message = (
+                        f"Die Wiedervorlage für Dokument #{reminder.document_id} ist "
+                        f"seit {reminder.remind_on.isoformat()} fällig.\n\n"
+                        f"{reminder.note}".strip()
+                    )
+                    DocumentReminder.objects.filter(pk=pk).update(
+                        email_sent_at=now, updated_at=now
+                    )
+
+                # 2) NACH dem Commit senden (externer Effekt außerhalb der Sperre).
+                try:
                     sent = send_mail(
-                        subject=f"Wiedervorlage fällig: Dokument #{reminder.document_id}",
-                        message=(
-                            f"Die Wiedervorlage für Dokument #{reminder.document_id} ist "
-                            f"seit {reminder.remind_on.isoformat()} fällig.\n\n"
-                            f"{reminder.note}".strip()
-                        ),
+                        subject=subject,
+                        message=message,
                         from_email=getattr(settings, "DEFAULT_FROM_EMAIL", None),
                         recipient_list=[recipient],
-                        fail_silently=False,  # Fehler wirft -> email_sent_at bleibt NULL (Retry)
+                        fail_silently=False,
                     )
-                    if sent:
-                        reminder.email_sent_at = now
-                        reminder.save(update_fields=["email_sent_at", "updated_at"])
-                        emailed += 1
-                    # sent == 0: nicht als versendet markieren -> nächster Lauf versucht erneut.
+                except SoftTimeLimitExceeded:
+                    # Claim zurücknehmen, damit der nächste Lauf erneut versucht.
+                    DocumentReminder.objects.filter(
+                        pk=pk, email_sent_at=now
+                    ).update(email_sent_at=None)
+                    raise
+                except Exception:
+                    sent = 0
+                    logger.exception(
+                        "check_due_reminders: E-Mail-Versand fehlgeschlagen für "
+                        "Reminder %s", pk
+                    )
+
+                if sent:
+                    emailed += 1
+                else:
+                    # Kein bestätigter Versand -> Claim zurücknehmen (nur den eigenen),
+                    # damit der nächste Lauf erneut sendet (at-least-once im Fehlerfall).
+                    DocumentReminder.objects.filter(
+                        pk=pk, email_sent_at=now
+                    ).update(email_sent_at=None)
             except SoftTimeLimitExceeded:
                 raise  # Soft-Time-Limit nicht verschlucken (s. scan_consume_folder).
             except Exception:
-                # Versand best-effort: Fehler loggen, email_sent_at bleibt NULL
-                # (Retry beim nächsten Lauf). Der Beat läuft weiter.
                 logger.exception(
-                    "check_due_reminders: E-Mail-Versand fehlgeschlagen für Reminder %s", pk
+                    "check_due_reminders: Reminder %s konnte nicht verarbeitet werden", pk
                 )
 
     return {"notified": notified, "emailed": emailed}
