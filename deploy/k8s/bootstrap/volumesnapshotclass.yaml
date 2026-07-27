@@ -1,0 +1,20 @@
+# VolumeSnapshotClass für konsistente Datensicherungen (P1).
+#
+# CLUSTER-SCOPED -> gehört ins einmalige Admin-Bootstrap (nicht in die
+# namespace-beschränkte Deploy-Rolle). Voraussetzung: Longhorn ist installiert
+# und der CSI-Snapshot-Controller läuft (bei k3s+Longhorn i. d. R. vorhanden;
+# sonst den external-snapshotter installieren).
+#
+# ``type: snap`` = In-Cluster-Snapshot (kein Longhorn-Backup-Target nötig). Der
+# Snapshot ist near-instant und liefert den KONSISTENTEN Zeitpunkt, aus dem das
+# Snapshot-Backup (deploy/k8s/base/backup-snapshot-cronjob.yaml) ein temporäres
+# Restore-PVC ableitet und daraus tart – so verändert sich /data während des
+# tar nicht mehr.
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: dms-longhorn-snapshot
+driver: driver.longhorn.io
+deletionPolicy: Delete
+parameters:
+  type: snap

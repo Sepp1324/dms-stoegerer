@@ -18,3 +18,7 @@ kind: Kustomization
 resources:
   - namespace.yaml
   - serviceaccount.yaml
+  # Snapshot-Backup (P1, konsistenter Zeitpunkt) – cluster-scoped bzw.
+  # rechtevergebend, daher Admin-Bootstrap (nicht CD):
+  - volumesnapshotclass.yaml     # cluster-scoped VolumeSnapshotClass (Longhorn)
+  - backup-snapshot-rbac.yaml    # SA dms-backup + Role/RoleBinding (Snapshot/PVC/Job)
