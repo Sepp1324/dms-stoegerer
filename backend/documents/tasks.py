@@ -548,9 +548,7 @@ def process_document_version(version_id: int) -> dict:
     # KI-Vorschläge NUR bei erfolgreichem Lauf (done). Bei FAILED/superseded keine
     # verfrühten Vorschläge / unnötigen API-Kosten.
     if result.get("status") == "done":
-        from ai.tasks import suggest_document_metadata
-
-        suggest_document_metadata.delay(version.document_id)
+        _dispatch_metadata_suggestion(version.document_id)
         # Trägt das Dokument den psychosr-Trigger-Tag, wird auch die NEUE Version
         # synchronisiert (nicht nur beim erstmaligen Taggen) – nach Commit, damit
         # der Task die persistierte Version/Tags sicher sieht.
@@ -560,6 +558,27 @@ def process_document_version(version_id: int) -> dict:
     # von pipeline.process_version() über _sync_semantic_index() synchron
     # aufgebaut – kein separater Task nötig (ein einziger Indexierungs-Pfad).
     return result
+
+
+def _dispatch_metadata_suggestion(document_id: int) -> None:
+    """Stößt die (unverbindlichen) KI-Metadatenvorschläge an – best effort (P2).
+
+    Das Dokument ist zu diesem Zeitpunkt bereits READY. Ist der Broker weg, darf
+    dieser Enqueue den Verarbeitungs-Task NICHT nachträglich als fehlgeschlagen
+    markieren: sonst würde ein bereits fertiges Dokument erneut verarbeitet und der
+    Vorschlag ginge trotzdem verloren. Ein Broker-Ausfall wird daher nur geloggt
+    (die Vorschläge sind unverbindlich und jederzeit manuell erneut anstoßbar).
+    """
+    from ai.tasks import suggest_document_metadata
+
+    try:
+        suggest_document_metadata.delay(document_id)
+    except Exception:  # noqa: BLE001 – Broker-Ausfall NACH READY: Task nicht killen
+        logger.warning(
+            "KI-Metadatenvorschlag konnte nicht eingeplant werden (Broker?) für "
+            "Dokument %s – Dokument ist bereits READY, Vorschlag entfällt.",
+            document_id,
+        )
 
 
 def _maybe_dispatch_flashcards(document_id: int) -> None:
@@ -877,9 +896,7 @@ def retry_document_version(version_id: int, actor_id: int | None = None) -> dict
 
     # KI-Vorschläge nur bei erfolgreichem Retry (done); s. process_document_version.
     if result.get("status") == "done":
-        from ai.tasks import suggest_document_metadata
-
-        suggest_document_metadata.delay(version.document_id)
+        _dispatch_metadata_suggestion(version.document_id)
     return result
 
 
