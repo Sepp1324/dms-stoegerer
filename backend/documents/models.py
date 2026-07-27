@@ -658,36 +658,30 @@ class Document(models.Model):
 
 
 def _schedule_artifact_cleanup(paths: list[str]) -> None:
-    """Reiht den Artefakt-Cleanup NACH dem Commit ein (P2).
+    """Legt den Artefakt-Cleanup-Auftrag an und reiht seinen Dispatch nach dem
+    Commit ein (P2).
 
-    Erst nach erfolgreichem Commit werden Dateien entfernt (sonst gingen bei einem
-    Rollback Dateien verloren, deren DB-Verweis noch existiert).
+    Outbox ATOMAR mit der Löschung (P2): Die ``ArtifactCleanupJob``-Zeile wird
+    SYNCHRON (in der laufenden Lösch-Transaktion) angelegt – sie committet damit
+    atomar mit dem DB-Löschen. Stirbt der Prozess direkt nach dem Commit, bevor der
+    ``on_commit``-Callback lief, existiert die Outbox-Zeile trotzdem und der
+    periodische Sweeper (``process_artifact_cleanup_jobs``) räumt. Rollt die
+    Löschung zurück, rollt auch die Zeile zurück (kein Geister-Auftrag).
 
-    Durable Outbox IMMER (P2): Vor dem Dispatch wird ein persistenter
-    ``ArtifactCleanupJob`` angelegt; der Task löscht ihn erst nach VOLLSTÄNDIGER
-    Bereinigung. So verwaisen Artefakte weder bei Broker-Ausfall (Task lässt sich
-    nicht einreihen) NOCH wenn der Task angenommen wird, aber alle Dateisystem-
-    Retries scheitern – in beiden Fällen bleibt der Job liegen und der periodische
-    Sweeper (``process_artifact_cleanup_jobs``) arbeitet ihn weiter ab."""
+    Erst NACH dem Commit wird der Celery-Task dispatcht; der Task löscht die Zeile
+    erst nach VOLLSTÄNDIGER Bereinigung. Broker weg oder alle FS-Retries erschöpft?
+    -> Job bleibt liegen, Sweeper übernimmt."""
     from django.db import transaction
 
+    # 1) Outbox-Zeile SYNCHRON in der aktuellen Transaktion (atomar mit dem Delete).
+    job = ArtifactCleanupJob.objects.create(paths=list(paths))
+
+    # 2) Dispatch erst NACH dem Commit (sonst liefe der Task ggf. vor dem Commit).
     def _dispatch():
         from .tasks import cleanup_artifact_files
 
-        # 1) Outbox-Zeile ZUERST anlegen (Quelle der Wahrheit). Scheitert schon das,
-        #    kann nur noch geloggt werden.
         try:
-            job = ArtifactCleanupJob.objects.create(paths=list(paths))
-        except Exception:  # noqa: BLE001
-            logger.exception(
-                "Artefakt-Cleanup-Outbox nicht schreibbar, Artefakte verwaisen: %s",
-                paths,
-            )
-            return
-
-        # 2) Task einreihen. Broker weg? -> Job bleibt bestehen, Sweeper übernimmt.
-        try:
-            cleanup_artifact_files.delay(paths, job_id=job.id)
+            cleanup_artifact_files.delay(list(paths), job_id=job.id)
         except Exception:  # noqa: BLE001 – Broker-Ausfall: Outbox bleibt, Sweeper räumt
             logger.warning(
                 "Artefakt-Cleanup konnte nicht eingereiht werden (Broker?); "
