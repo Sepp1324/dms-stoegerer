@@ -295,8 +295,8 @@ def _approval_items(
             action="submit",
             object_id=Cast(OuterRef("pk"), output_field=CharField()),
         )
-        .order_by("-created_at")
-        .values("created_at")[:1]
+        .order_by("-timestamp")
+        .values("timestamp")[:1]
     )
     qs = (
         documents.filter(status=Document.ApprovalStatus.ZUR_FREIGABE)
