@@ -63,26 +63,40 @@ export default function KnowledgeGraphPage({
 
   const selected = entities.find((entity) => entity.id === selectedId) ?? null;
 
-  function load() {
-    setLoading(true);
-    setError(null);
-    Promise.all([getKnowledgeSummary(), getKnowledgeEntities(query)])
-      .then(([nextSummary, nextEntities]) => {
-        setSummary(nextSummary);
-        setEntities(nextEntities);
-        setSelectedId((current) => current ?? nextEntities[0]?.id ?? null);
-      })
-      .catch((err) => {
-        setError(
-          err instanceof Error
-            ? err.message
-            : "Gedächtnis konnte nicht geladen werden.",
-        );
-      })
-      .finally(() => setLoading(false));
-  }
+  const [reloadKey, setReloadKey] = useState(0);
 
-  useEffect(load, [query]);
+  // Auto-Load bei Suche/Filter: debounced (kein Request je Tastendruck) + Stale-
+  // Guard (P2). ``cancelled`` verhindert, dass die verspätete Antwort einer bereits
+  // verworfenen Anfrage die aktuelle Liste überschreibt; das clearTimeout debounced.
+  useEffect(() => {
+    let cancelled = false;
+    const handle = setTimeout(() => {
+      setLoading(true);
+      setError(null);
+      Promise.all([getKnowledgeSummary(), getKnowledgeEntities(query)])
+        .then(([nextSummary, nextEntities]) => {
+          if (cancelled) return;
+          setSummary(nextSummary);
+          setEntities(nextEntities);
+          setSelectedId((current) => current ?? nextEntities[0]?.id ?? null);
+        })
+        .catch((err) => {
+          if (cancelled) return;
+          setError(
+            err instanceof Error
+              ? err.message
+              : "Gedächtnis konnte nicht geladen werden.",
+          );
+        })
+        .finally(() => {
+          if (!cancelled) setLoading(false);
+        });
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(handle);
+    };
+  }, [query, reloadKey]);
 
   useEffect(() => {
     if (!selectedId) {
@@ -90,16 +104,27 @@ export default function KnowledgeGraphPage({
       setSelectedRelations([]);
       return;
     }
+    // Stale-Guard (P2): Beim schnellen Wechsel zwischen Entitäten darf die
+    // verspätete Antwort einer FRÜHEREN Auswahl die Details der aktuellen nicht
+    // überschreiben.
+    let cancelled = false;
     setDetailLoading(true);
     Promise.all([getEntityDocuments(selectedId), getEntityRelations(selectedId)])
       .then(([docs, relations]) => {
+        if (cancelled) return;
         setSelectedDocs(docs);
         setSelectedRelations(relations);
       })
       .catch((err) => {
+        if (cancelled) return;
         setError(err instanceof Error ? err.message : "Details konnten nicht geladen werden.");
       })
-      .finally(() => setDetailLoading(false));
+      .finally(() => {
+        if (!cancelled) setDetailLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [selectedId]);
 
   async function handleScan() {
@@ -111,7 +136,7 @@ export default function KnowledgeGraphPage({
       setMessage(
         `${result.scanned} Dokumente gescannt · ${result.entities} Entitäten · ${result.links} Links · ${result.relations} Beziehungen.`,
       );
-      load();
+      setReloadKey((k) => k + 1);  // Reload über den (guarded) Auto-Load-Effekt
     } catch (err) {
       setError(err instanceof Error ? err.message : "Scan fehlgeschlagen.");
     } finally {
