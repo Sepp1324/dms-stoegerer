@@ -3114,8 +3114,26 @@ class DocumentViewSet(viewsets.ModelViewSet):
         ins Leere (404) – es gab weder Route noch Handler.
 
         Body: ``{"owner": <user_id>}``. Zuweisung + Audit laufen atomar.
+
+        NUR Triage (P1): Die Zuweisung ist auf **eigentümerlose** Dokumente
+        beschränkt. Ein bereits zugewiesenes Dokument darf NICHT umgehängt werden –
+        sonst blieben owner-gebundene Beziehungen (Akten, Dossiers) beim alten
+        Eigentümer bestehen, deren Querysets eingebettete Dokumente nicht erneut
+        nach Owner filtern, und der Alt-Eigentümer sähe weiterhin Metadaten/
+        Dossier-Ausschnitte. Ein Wechsel bestehender Eigentümer bräuchte eine
+        atomare Bereinigung ALLER Beziehungen und ist hier bewusst gesperrt (409).
         """
         document = self.get_object()
+        if document.owner_id is not None:
+            return Response(
+                {
+                    "detail": (
+                        "Nur eigentümerlose (Triage-)Dokumente sind zuweisbar. Ein "
+                        "bereits zugewiesenes Dokument kann nicht umgehängt werden."
+                    )
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
         raw = request.data.get("owner")
         if raw in (None, ""):
             return Response(

@@ -35,6 +35,21 @@ class SetOwnerActionTests(APITestCase):
             ).exists()
         )
 
+    def test_bereits_zugewiesenes_dokument_409(self):
+        # P1: Ein Dokument mit Eigentümer darf NICHT umgehängt werden (sonst blieben
+        # Akten-/Dossier-Verknüpfungen beim Alt-Eigentümer und leakten Metadaten).
+        owned = Document.objects.create(title="Hat Owner", owner=self.user)
+        other = User.objects.create_user("so-other", password="pw", role="user")
+        self.client.force_authenticate(self.admin)
+        resp = self.client.post(
+            f"/api/documents/{owned.id}/set-owner/",
+            {"owner": other.id},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 409)
+        owned.refresh_from_db()
+        self.assertEqual(owned.owner_id, self.user.id)  # unverändert
+
     def test_normalnutzer_darf_nicht(self):
         self.client.force_authenticate(self.user)
         resp = self.client.post(
