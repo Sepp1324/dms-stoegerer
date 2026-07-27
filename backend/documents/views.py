@@ -3005,6 +3005,51 @@ class DocumentViewSet(viewsets.ModelViewSet):
         )
         return Response(self.get_serializer(document).data)
 
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path="set-owner",
+        permission_classes=[IsDmsAdmin],
+    )
+    def set_owner(self, request, pk=None):
+        """Weist einem (Triage-)Dokument einen Eigentümer zu (STOAA-295/296).
+
+        Admin-only (``IsDmsAdmin``): ``owner=None`` ist der bewusste, nur für
+        Admins sichtbare Triage-Zustand; von hier aus wird das Dokument einem
+        Nutzer zugewiesen und fällt aus der ``?owner=none``-Liste heraus. Ohne
+        diese Action lief der Frontend-Button (POST ``/documents/{id}/set-owner/``)
+        ins Leere (404) – es gab weder Route noch Handler.
+
+        Body: ``{"owner": <user_id>}``. Zuweisung + Audit laufen atomar.
+        """
+        document = self.get_object()
+        raw = request.data.get("owner")
+        if raw in (None, ""):
+            return Response(
+                {"detail": "Feld 'owner' (Nutzer-ID) ist erforderlich."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        User = get_user_model()
+        try:
+            new_owner = User.objects.get(pk=int(raw))
+        except (User.DoesNotExist, TypeError, ValueError):
+            return Response(
+                {"detail": "Unbekannter Nutzer."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        old_owner_id = document.owner_id
+        with transaction.atomic():
+            document.owner = new_owner
+            document.save(update_fields=["owner"])
+            AuditLogEntry.objects.create(
+                actor=request.user,
+                action="set_owner",
+                object_type="Document",
+                object_id=str(document.id),
+                detail={"from": old_owner_id, "to": new_owner.id},
+            )
+        return Response(self.get_serializer(document).data)
+
     @action(detail=False, methods=["get"], url_path="duplicate-report")
     def duplicate_report(self, request):
         """Korpus-Report: Paare inhaltlicher Beinah-Duplikate im Bestand des Nutzers."""
