@@ -51,6 +51,7 @@ class DocumentShareLinkSerializer(serializers.ModelSerializer):
         fields = (
             "id",
             "document",
+            "version",
             "created_at",
             "expires_at",
             "revoked_at",
