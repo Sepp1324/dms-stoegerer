@@ -1301,8 +1301,13 @@ def check_due_reminders() -> dict:
     )
     notified = 0
     for pk in due_ids:
+        # Race-Schutz (P2): SÄMTLICHE Zustandsbedingungen der Kandidatensuche
+        # (``done=False`` UND ``remind_on<=today``) gehören in das atomare UPDATE –
+        # nicht nur ``pk``/Marker. Wird die Erinnerung zwischen Auswahl und Claim neu
+        # terminiert (Zukunft) oder erledigt, trifft das UPDATE die Zeile nicht mehr
+        # (rowcount 0) und markiert sie NICHT fälschlich als benachrichtigt.
         claimed = DocumentReminder.objects.filter(
-            pk=pk, notified_at__isnull=True
+            pk=pk, done=False, remind_on__lte=today, notified_at__isnull=True
         ).update(notified_at=now)
         if claimed:
             notified += 1
@@ -1336,7 +1341,10 @@ def check_due_reminders() -> dict:
                 #    Lease frei/abgelaufen. Rowcount 1 == diese Runde besitzt die Mail.
                 claimed = (
                     DocumentReminder.objects.filter(
-                        pk=pk, email_sent_at__isnull=True
+                        pk=pk,
+                        done=False,
+                        remind_on__lte=today,
+                        email_sent_at__isnull=True,
                     )
                     .filter(claimable)
                     .update(email_claimed_at=now, updated_at=now)
@@ -1352,11 +1360,16 @@ def check_due_reminders() -> dict:
                 # Erinnerungsnotiz schicken. Fallback auf created_by nur, wenn das
                 # Dokument (Triage) keinen Owner hat.
                 owner = reminder.document.owner if reminder.document_id else None
-                recipient = (
-                    getattr(owner, "email", "")
-                    or getattr(reminder.created_by, "email", "")
-                    or ""
-                )
+                if owner is not None:
+                    # Owner existiert → NUR seine Adresse. KEIN Fallback auf
+                    # ``created_by`` (P1): hätte der aktuelle Eigentümer keine
+                    # E-Mail, ginge die Erinnerung sonst nach einer Übertragung an
+                    # den FRÜHEREN Besitzer (Dokumentnummer + Notiz).
+                    recipient = getattr(owner, "email", "") or ""
+                else:
+                    # Nur wenn GAR kein Owner existiert (z. B. Triage-Dokument),
+                    # ersatzweise an den Ersteller.
+                    recipient = getattr(reminder.created_by, "email", "") or ""
                 if not recipient:
                     # Kein Empfänger -> Lease freigeben (kein Dauerclaim), nichts senden.
                     DocumentReminder.objects.filter(pk=pk).update(email_claimed_at=None)
