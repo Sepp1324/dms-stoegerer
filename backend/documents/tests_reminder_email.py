@@ -121,6 +121,47 @@ class ReminderEmailTests(TestCase):
             check_due_reminders()
         sm.assert_called_once()  # zweiter Lauf sendet nicht erneut (email_sent_at gesetzt)
 
+    def test_reschedule_zwischen_claim_und_versand_markiert_nicht_versendet(self):
+        # P2: Wird die Erinnerung NACH dem CAS-Claim, WÄHREND des SMTP-Versands neu
+        # in die Zukunft terminiert (die Reschedule-Logik setzt die Marker zurück),
+        # darf der Worker email_sent_at NICHT setzen – sonst fiele der neue Termin aus.
+        # send_mail ist genau der Seam zwischen Claim und Versandbestätigung.
+        future = timezone.localdate() + timedelta(days=7)
+
+        def fake_send(**kwargs):
+            DocumentReminder.objects.filter(pk=self.reminder.pk).update(
+                remind_on=future,
+                email_claimed_at=None,
+                email_sent_at=None,
+                notified_at=None,
+            )
+            return 1
+
+        with mock.patch("django.core.mail.send_mail", side_effect=fake_send):
+            res = check_due_reminders()
+
+        self.reminder.refresh_from_db()
+        self.assertEqual(self.reminder.remind_on, future)
+        self.assertIsNone(self.reminder.email_sent_at)  # zukünftiger Termin NICHT versendet-markiert
+        self.assertEqual(res["emailed"], 0)
+
+    def test_versandbestaetigung_ist_an_den_claim_token_gebunden(self):
+        # P2: Auch wenn remind_on<=today und done=False erhalten bleiben, darf die
+        # Bestätigung NICHT feuern, wenn der Claim (email_claimed_at) zwischenzeitlich
+        # zurückgesetzt wurde – der Versand ist strikt an unseren Claim gebunden.
+        def fake_send(**kwargs):
+            DocumentReminder.objects.filter(pk=self.reminder.pk).update(
+                email_claimed_at=None
+            )
+            return 1
+
+        with mock.patch("django.core.mail.send_mail", side_effect=fake_send):
+            res = check_due_reminders()
+
+        self.reminder.refresh_from_db()
+        self.assertIsNone(self.reminder.email_sent_at)
+        self.assertEqual(res["emailed"], 0)
+
     def test_owner_ohne_email_faellt_nicht_auf_created_by_zurueck(self):
         # P1: Hat der AKTUELLE Owner keine E-Mail, darf NICHT auf created_by
         # (früherer Besitzer) zurückgefallen werden – sonst erhielte der alte
