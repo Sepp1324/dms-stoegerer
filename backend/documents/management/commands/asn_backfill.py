@@ -31,6 +31,14 @@ class Command(BaseCommand):
         self.stdout.write(f"Scanne {total} Versionen …")
 
         for version in qs.iterator():
+            # WORM (P1): Versiegelte Versionen strikt überspringen. Ein Reconcile
+            # könnte sie sonst umhängen (``version_no``/``prev_hash`` ändern) und die
+            # Siegel-/Hash-Kette brechen. Die Erkennung selbst wäre zwar lesend, aber
+            # ein Backfill über den (längst versiegelten) Bestand darf sie GAR NICHT
+            # erst als Merge-Kandidat behandeln.
+            if version.is_immutable:
+                uebersprungen += 1
+                continue
             try:
                 asn, matched_by = asn_service.detect_asn(version)
             except Exception as exc:
