@@ -13,6 +13,20 @@ metadata:
   name: dms-backup
   namespace: dms
 ---
+# Eigene Identität NUR für den tar/scp-Helfer-Job (P1). Der Helfer braucht KEINE
+# Kubernetes-API (er liest das Restore-Volume und überträgt zur NAS), daher:
+#   * KEINE Role/RoleBinding -> null API-Rechte
+#   * automountServiceAccountToken: false -> gar kein Token im Pod
+# Der Admission-Guard (backup-snapshot-admission-policy.yaml) erzwingt, dass die
+# von der Backup-Identität erstellten Helfer-Jobs GENAU diese SA (und kein Token)
+# verwenden. So kann ein kompromittierter Helfer nicht auf die API zurückgreifen.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dms-backup-helper
+  namespace: dms
+automountServiceAccountToken: false
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:

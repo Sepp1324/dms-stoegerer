@@ -150,6 +150,9 @@ spec:
 
                   # 3) Helfer-Job: tart aus dem KONSISTENTEN Restore-Volume + shipt.
                   #    (Skript = backup-cronjob.yaml-Logik, /data = Restore-PVC RO.)
+                  #    Muss der Admission-Guard (backup-snapshot-admission-policy.yaml)
+                  #    erfüllen: eigene token-lose SA, nur erlaubte Secrets, Restore-PVC,
+                  #    gepinntes dms-backend-Image, kein Privesc.
                   kubectl -n dms apply -f - <<EOF
                   apiVersion: batch/v1
                   kind: Job
@@ -159,10 +162,16 @@ spec:
                     activeDeadlineSeconds: 3000
                     template:
                       spec:
+                        serviceAccountName: dms-backup-helper   # eigene SA OHNE API-Rechte
+                        automountServiceAccountToken: false      # kein Token im Helfer-Pod
                         restartPolicy: Never
                         containers:
                           - name: tar
                             image: registry.stoegerer-home.at/dms-backend:REPLACE
+                            securityContext:
+                              privileged: false
+                              allowPrivilegeEscalation: false
+                              capabilities: { drop: ["ALL"] }
                             envFrom:
                               - configMapRef: { name: dms-config }
                               - secretRef: { name: dms-secrets }

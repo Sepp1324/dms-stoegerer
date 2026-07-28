@@ -3,17 +3,25 @@
 # Die Backup-Rolle (backup-snapshot-rbac.yaml) braucht ``jobs: create`` für den
 # Snapshot→Restore→tar-Helfer. ``jobs: create`` allein wäre aber KEINE echte
 # Least-Privilege: die Identität könnte damit einen Job mit FREMDER
-# serviceAccountName, beliebigen Secret-Mounts, hostPath oder privilegierten
-# Containern anlegen und so aus dem Namespace ausbrechen.
+# serviceAccountName, BELIEBIGEN Secret-Mounts, fremden PVCs, hostPath oder
+# privilegierten Containern anlegen und so aus dem Namespace ausbrechen bzw.
+# fremde Secrets exfiltrieren – obwohl RBAC ihr kein direktes ``get secrets``
+# erlaubt (ein Job mit ``envFrom: secretRef`` liest das Secret dennoch).
 #
 # Diese ValidatingAdmissionPolicy schränkt daher – NUR für Requests der
 # Backup-Identität ``system:serviceaccount:dms:dms-backup`` – die zulässige
-# Job-Form fest ein: eigener ServiceAccount, kein hostPath, kein privileged, kein
-# hostNetwork/hostPID/hostIPC, nur Images aus der eigenen Registry. Da die
-# ``matchConditions`` ausschließlich auf diese eine Identität greifen, kann die
-# Policy KEINE anderen Workloads (Backend/Celery/Postgres) beeinflussen – ein
-# etwaiger CEL-Fehler bliebe auf die (ohnehin suspendierte) Backup-Job-Erstellung
-# beschränkt.
+# Job-Form eng ein:
+#   * serviceAccountName == ``dms-backup-helper`` (eigene SA OHNE API-Rechte)
+#   * automountServiceAccountToken == false (der Helfer bekommt KEIN Token)
+#   * Secrets NUR aus einer exakten Allowlist (envFrom/env/volumes/projected)
+#   * PVC-Mounts NUR das Restore-PVC (``dms-data-restore-*``)
+#   * Image NUR das dms-backend-Repo der eigenen Registry, niemals ``:latest``
+#   * kein hostPath, kein hostNetwork/PID/IPC, kein privileged,
+#     allowPrivilegeEscalation == false, keine zusätzlichen Capabilities
+# Da die ``matchConditions`` ausschließlich auf diese eine Identität greifen,
+# kann die Policy KEINE anderen Workloads (Backend/Celery/Postgres) beeinflussen –
+# ein etwaiger CEL-Fehler bliebe auf die (ohnehin suspendierte) Backup-Job-
+# Erstellung beschränkt.
 #
 # CLUSTER-SCOPED -> Admin-Bootstrap. Setzt k8s ≥ 1.30 (ValidatingAdmissionPolicy
 # GA; bei k3s vorhanden) voraus.
@@ -40,12 +48,60 @@ spec:
       expression: >-
         object.spec.template.spec.containers +
         object.spec.template.spec.?initContainers.orValue([])
+    # Exakte Allowlist der Secrets, die der Backup-Helfer referenzieren darf
+    # (DB-Passwort für pg_dump + SSH/scp-Ziel). NICHTS sonst.
+    - name: allowedSecrets
+      expression: "['dms-secrets', 'dms-backup-secrets']"
+    - name: allvolumes
+      expression: "object.spec.template.spec.?volumes.orValue([])"
   validations:
+    # --- Identität des Helfers: eigene, rechtelose, token-lose SA -------------
     - expression: >-
         has(variables.podspec.serviceAccountName) &&
-        variables.podspec.serviceAccountName == 'dms-backup'
-      message: "Backup-Jobs müssen serviceAccountName=dms-backup verwenden."
-    - expression: "variables.podspec.?volumes.orValue([]).all(v, !has(v.hostPath))"
+        variables.podspec.serviceAccountName == 'dms-backup-helper'
+      message: "Backup-Helfer-Jobs müssen serviceAccountName=dms-backup-helper verwenden."
+    - expression: >-
+        has(variables.podspec.automountServiceAccountToken) &&
+        variables.podspec.automountServiceAccountToken == false
+      message: "Backup-Helfer-Jobs dürfen kein ServiceAccount-Token einhängen (automountServiceAccountToken=false)."
+    # --- Secret-Referenzen nur aus der Allowlist -----------------------------
+    - expression: >-
+        variables.allctrs.all(c,
+          c.?envFrom.orValue([]).all(e,
+            !has(e.secretRef) || e.secretRef.name in variables.allowedSecrets
+          )
+        )
+      message: "envFrom.secretRef ist nur für dms-secrets/dms-backup-secrets erlaubt."
+    - expression: >-
+        variables.allctrs.all(c,
+          c.?env.orValue([]).all(e,
+            !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef) ||
+            e.valueFrom.secretKeyRef.name in variables.allowedSecrets
+          )
+        )
+      message: "env.valueFrom.secretKeyRef ist nur für dms-secrets/dms-backup-secrets erlaubt."
+    - expression: >-
+        variables.allvolumes.all(v,
+          !has(v.secret) || v.secret.secretName in variables.allowedSecrets
+        )
+      message: "secret-Volumes sind nur für dms-secrets/dms-backup-secrets erlaubt."
+    - expression: >-
+        variables.allvolumes.all(v,
+          !has(v.projected) ||
+          v.projected.?sources.orValue([]).all(s,
+            !has(s.secret) || s.secret.name in variables.allowedSecrets
+          )
+        )
+      message: "projizierte secret-Volumes sind nur für dms-secrets/dms-backup-secrets erlaubt."
+    # --- PVC-Mounts nur das Restore-PVC --------------------------------------
+    - expression: >-
+        variables.allvolumes.all(v,
+          !has(v.persistentVolumeClaim) ||
+          v.persistentVolumeClaim.claimName.matches('^dms-data-restore-[0-9a-zA-Z-]+$')
+        )
+      message: "PVC-Mounts sind nur für das Restore-PVC (dms-data-restore-*) erlaubt."
+    # --- Host-Namespaces / hostPath / privileged -----------------------------
+    - expression: "variables.allvolumes.all(v, !has(v.hostPath))"
       message: "hostPath-Volumes sind in Backup-Jobs verboten."
     - expression: >-
         !variables.podspec.?hostNetwork.orValue(false) &&
@@ -56,8 +112,18 @@ spec:
         variables.allctrs.all(c, !c.?securityContext.?privileged.orValue(false))
       message: "Privilegierte Container sind in Backup-Jobs verboten."
     - expression: >-
-        variables.allctrs.all(c, c.image.startsWith('registry.stoegerer-home.at/'))
-      message: "In Backup-Jobs sind nur Images aus der eigenen Registry erlaubt."
+        variables.allctrs.all(c, c.?securityContext.?allowPrivilegeEscalation.orValue(true) == false)
+      message: "Backup-Container müssen allowPrivilegeEscalation=false setzen."
+    - expression: >-
+        variables.allctrs.all(c, c.?securityContext.?capabilities.?add.orValue([]).size() == 0)
+      message: "Backup-Container dürfen keine zusätzlichen Capabilities anfordern."
+    # --- Image nur das dms-backend-Repo, niemals :latest ---------------------
+    - expression: >-
+        variables.allctrs.all(c,
+          c.image.startsWith('registry.stoegerer-home.at/dms-backend@sha256:') ||
+          (c.image.startsWith('registry.stoegerer-home.at/dms-backend:') && !c.image.endsWith(':latest'))
+        )
+      message: "In Backup-Jobs ist nur ein gepinntes dms-backend-Image der eigenen Registry erlaubt (kein :latest)."
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
