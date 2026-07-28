@@ -213,13 +213,23 @@ def render_qr(document) -> bytes:
 # ---------------------------------------------------------------------------
 # Lookup / Re-Scan-Reconcile (Import-Historie)
 # ---------------------------------------------------------------------------
-def find_document_by_asn(asn: int | None):
-    """Findet das Dokument zu einer ASN (systemweit, ohne Owner-Scope) oder ``None``."""
+_OWNER_UNSET = object()
+
+
+def find_document_by_asn(asn: int | None, *, owner=_OWNER_UNSET):
+    """Findet das Dokument zu einer ASN – optional owner-gescoped – oder ``None``.
+
+    Ohne ``owner`` systemweit (Rückwärtskompatibilität für die API-Suche). Der
+    Re-Scan-Reconcile übergibt dagegen den Owner der Quellversion, damit ein
+    automatischer Merge NIE über die Owner-Grenze greift (P1)."""
     from documents.models import Document
 
     if asn is None:
         return None
-    return Document.objects.filter(asn=asn).first()
+    qs = Document.objects.filter(asn=asn)
+    if owner is not _OWNER_UNSET:
+        qs = qs.filter(owner=owner)
+    return qs.first()
 
 
 def record_scan(document, version, *, matched_by: str = "OCR", confidence: float = 1.0):
@@ -350,6 +360,13 @@ def _attach_version_to(document, version, *, actor=None) -> int:
     """
     from documents.models import AuditLogEntry, Document, DocumentVersion
 
+    if version.is_immutable:
+        # WORM (P1): Eine versiegelte Version darf NICHT umgehängt werden – das
+        # ``QuerySet.update`` unten würde ``document``/``version_no``/``prev_hash``
+        # ändern und die Siegel-/Hash-Kette ungültig machen. Autoritative Schranke
+        # für ALLE Aufrufer (Reconcile prüft zusätzlich vorab).
+        raise ValueError("Versiegelte (WORM-)Version kann nicht umgehängt werden.")
+
     with transaction.atomic():
         last = (
             DocumentVersion.objects.select_for_update()
@@ -413,7 +430,12 @@ def match_and_reconcile(version, *, actor=None) -> dict:
     if asn is None:
         return {"matched": False, "asn": None}
 
-    existing = find_document_by_asn(asn)
+    current = version.document
+    # Owner-Grenze (P1): NUR im Bestand DESSELBEN Eigentümers suchen. Sonst könnte
+    # eine per OCR-Text erkannte fremde ASN dazu führen, dass die frische Version in
+    # ein FREMDES Dokument gehängt wird (Cross-Owner-Injection). Der Reconcile ist
+    # damit strikt owner-lokal; die systemweite API-Suche bleibt unberührt.
+    existing = find_document_by_asn(asn, owner=current.owner)
     if existing is None:
         # ASN unbekannt. Übernehmen (das provisorisch vergebene Auto-ASN durch die
         # erkannte Nummer ersetzen) NUR bei einem echten Barcode/QR – der ist
@@ -425,7 +447,6 @@ def match_and_reconcile(version, *, actor=None) -> dict:
         if matched_by != "BARCODE":
             return {"matched": False, "asn": asn, "reason": "text_only"}
 
-        current = version.document
         claimed = _claim_detected_asn(
             current,
             version,
@@ -443,11 +464,38 @@ def match_and_reconcile(version, *, actor=None) -> dict:
             }
         return {"matched": False, "asn": asn, "reason": "conflict"}
 
-    current = version.document
     if existing.pk == current.pk:
         # Re-Upload auf dasselbe Dokument: nur die Erkennung dokumentieren.
         record_scan(existing, version, matched_by=matched_by)
         return {"matched": True, "asn": asn, "moved": False, "document_id": existing.pk}
+
+    # Anderes (eigenes) Dokument. Ein automatisches Umhängen ist ein destruktiver
+    # Eingriff (Version wandert dauerhaft, Quelldokument wird ggf. gelöscht) und
+    # darf daher NUR einem echten Barcode/QR vertrauen (P1). Eine per OCR-Text
+    # erkannte ASN dokumentieren wir nur, ohne zu verschieben – Fließtext soll keine
+    # fremde Version kapern können.
+    if matched_by != "BARCODE":
+        record_scan(current, version, matched_by=matched_by)
+        return {
+            "matched": True,
+            "asn": asn,
+            "moved": False,
+            "reason": "text_only_no_merge",
+            "document_id": existing.pk,
+        }
+
+    # WORM (P1): Eine bereits versiegelte Version wird NIE umgehängt – das würde
+    # ``version_no``/``prev_hash`` ändern und die Siegel-/Hash-Kette brechen
+    # (relevant v. a. für den Backfill über bestehende, längst versiegelte Versionen).
+    if version.is_immutable:
+        record_scan(current, version, matched_by=matched_by)
+        return {
+            "matched": True,
+            "asn": asn,
+            "moved": False,
+            "reason": "sealed",
+            "document_id": existing.pk,
+        }
 
     # Re-Scan eines anderen Dokuments → Version übernehmen, Duplikat vermeiden.
     # ATOMAR (P1): Zeiger lösen, Umhängen, Scan protokollieren und das leere
@@ -472,7 +520,10 @@ def match_and_reconcile(version, *, actor=None) -> dict:
         record_scan(existing, version, matched_by=matched_by)
 
         if not current.versions.exists():
-            # Das leere, versehentlich neu angelegte Dokument entfernen (keine Duplikate).
-            Document.objects.filter(pk=current.pk).delete()
+            # Das leere, versehentlich neu angelegte Dokument entfernen (keine
+            # Duplikate). Über das MODELL ``delete()`` – NICHT ``QuerySet.delete()`` –,
+            # damit die Legal-Hold-/Retention-/WORM-Schranken greifen (P1); ein unter
+            # Hold/Retention stehendes Quelldokument darf nicht still verschwinden.
+            current.delete()
 
     return {"matched": True, "asn": asn, "moved": True, "document_id": existing.pk}

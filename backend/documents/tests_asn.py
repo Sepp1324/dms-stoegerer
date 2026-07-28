@@ -174,19 +174,27 @@ class ASNQRTests(TestCase):
 # OCR-/Barcode-Reconcile
 # ---------------------------------------------------------------------------
 class ASNReconcileTests(TestCase):
+    def _barcode(self, asn):
+        """Kontextmanager: erzwingt eine Barcode-Erkennung mit ``asn``."""
+        from unittest import mock
+
+        return mock.patch(
+            "documents.services.asn_barcode.scan_pdf_for_asn", return_value=asn
+        )
+
     def test_rescan_moves_version_to_existing_document(self):
-        """Bekannte ASN im OCR-Text → Version wandert an das bestehende Dokument."""
-        existing = Document.objects.create(title="Vertrag 2024")
+        """Bekannte ASN per **Barcode** → Version wandert an das bestehende Dokument."""
+        owner = User.objects.create_user(username="mover", password="pw", role="user")
+        existing = Document.objects.create(title="Vertrag 2024", owner=owner)
         _assign(existing, 55)
         _make_version(existing, version_no=1, sha256="a" * 64)
 
-        rescan = Document.objects.create(title="Scan")
-        v_new = _make_version(
-            rescan, version_no=1, ocr_text=f"Kopf {asn_service.format_asn(55)} Fuss"
-        )
+        rescan = Document.objects.create(title="Scan", owner=owner)
+        v_new = _make_version(rescan, version_no=1)
         rescan_pk = rescan.pk
 
-        result = asn_service.match_and_reconcile(v_new)
+        with self._barcode(55):
+            result = asn_service.match_and_reconcile(v_new)
 
         self.assertTrue(result["matched"])
         self.assertTrue(result["moved"])
@@ -198,8 +206,91 @@ class ASNReconcileTests(TestCase):
         self.assertEqual(existing.versions.count(), 2)
         self.assertFalse(Document.objects.filter(pk=rescan_pk).exists())
         self.assertTrue(
-            ASNScan.objects.filter(document=existing, matched_by="OCR").exists()
+            ASNScan.objects.filter(document=existing, matched_by="BARCODE").exists()
         )
+
+    def test_ocr_text_match_does_not_merge_across_documents(self):
+        """P1: Eine per OCR-**Text** erkannte ASN eines ANDEREN (eigenen) Dokuments
+        darf die Version NICHT umhängen – nur ein echter Barcode ist vertrauenswürdig.
+        Ohne diese Schranke genügte Fließtext, um eine fremde Version zu kapern."""
+        owner = User.objects.create_user(username="textonly", password="pw", role="user")
+        existing = Document.objects.create(title="Vertrag", owner=owner)
+        _assign(existing, 55)
+        _make_version(existing, version_no=1, sha256="a" * 64)
+
+        rescan = Document.objects.create(title="Scan", owner=owner)
+        v_new = _make_version(
+            rescan, version_no=1, ocr_text=f"Kopf {asn_service.format_asn(55)} Fuss"
+        )
+
+        result = asn_service.match_and_reconcile(v_new)
+
+        self.assertTrue(result["matched"])
+        self.assertFalse(result["moved"])
+        self.assertEqual(result.get("reason"), "text_only_no_merge")
+        # Version bleibt beim Quelldokument, das Zieldokument behält eine Version.
+        v_new.refresh_from_db()
+        self.assertEqual(v_new.document_id, rescan.pk)
+        self.assertEqual(existing.versions.count(), 1)
+        self.assertTrue(Document.objects.filter(pk=rescan.pk).exists())
+
+    def test_rescan_never_crosses_owner_boundary(self):
+        """P1: Selbst ein Barcode-Treffer darf NICHT auf ein Dokument eines ANDEREN
+        Eigentümers greifen. Die frische Version bleibt beim eigenen (Quell-)Dokument."""
+        owner = User.objects.create_user(username="me", password="pw", role="user")
+        stranger = User.objects.create_user(username="stranger", password="pw", role="user")
+        foreign = Document.objects.create(title="Fremdvertrag", owner=stranger)
+        _assign(foreign, 55)
+        _make_version(foreign, version_no=1, sha256="a" * 64)
+
+        rescan = Document.objects.create(title="Mein Scan", owner=owner)
+        v_new = _make_version(rescan, version_no=1)
+
+        with self._barcode(55):
+            result = asn_service.match_and_reconcile(v_new)
+
+        # Keine fremde ASN gefunden (owner-gescoped) → Barcode beansprucht sie frei
+        # fürs EIGENE Dokument, hängt aber nichts an das fremde Dokument um.
+        v_new.refresh_from_db()
+        self.assertEqual(v_new.document_id, rescan.pk)
+        self.assertEqual(foreign.versions.count(), 1)
+        self.assertNotEqual(result.get("document_id"), foreign.pk)
+
+    def test_sealed_version_is_never_moved(self):
+        """P1/WORM: Eine bereits versiegelte Version wird NICHT umgehängt – das würde
+        version_no/prev_hash ändern und die Siegelkette brechen."""
+        owner = User.objects.create_user(username="worm", password="pw", role="user")
+        existing = Document.objects.create(title="Ziel", owner=owner)
+        _assign(existing, 55)
+        _make_version(existing, version_no=1, sha256="a" * 64)
+
+        rescan = Document.objects.create(title="Scan", owner=owner)
+        v_new = _make_version(rescan, version_no=1)
+        DocumentVersion.objects.filter(pk=v_new.pk).update(is_immutable=True)
+        v_new.refresh_from_db()
+
+        with self._barcode(55):
+            result = asn_service.match_and_reconcile(v_new)
+
+        self.assertFalse(result["moved"])
+        self.assertEqual(result.get("reason"), "sealed")
+        v_new.refresh_from_db()
+        self.assertEqual(v_new.document_id, rescan.pk)
+        self.assertEqual(v_new.version_no, 1)
+
+    def test_attach_version_refuses_sealed_version(self):
+        """Autoritative Schranke: _attach_version_to lehnt versiegelte Versionen ab."""
+        owner = User.objects.create_user(username="attach", password="pw", role="user")
+        target = Document.objects.create(title="Ziel", owner=owner)
+        _make_version(target, version_no=1, sha256="a" * 64)
+
+        src = Document.objects.create(title="Quelle", owner=owner)
+        sealed = _make_version(src, version_no=1)
+        DocumentVersion.objects.filter(pk=sealed.pk).update(is_immutable=True)
+        sealed.refresh_from_db()
+
+        with self.assertRaises(ValueError):
+            asn_service._attach_version_to(target, sealed)
 
     def test_reconcile_ist_atomar_bei_fehler(self):
         """P1: Scheitert das Umhängen mitten im Reconcile, darf das Quelldokument
@@ -207,17 +298,16 @@ class ASNReconcileTests(TestCase):
         """
         from unittest import mock
 
-        existing = Document.objects.create(title="Ziel")
+        owner = User.objects.create_user(username="atomic", password="pw", role="user")
+        existing = Document.objects.create(title="Ziel", owner=owner)
         _assign(existing, 77)
         _make_version(existing, version_no=1, sha256="a" * 64)
 
-        rescan = Document.objects.create(title="Scan")
-        v_new = _make_version(
-            rescan, version_no=1, ocr_text=f"Kopf {asn_service.format_asn(77)} Fuss"
-        )
+        rescan = Document.objects.create(title="Scan", owner=owner)
+        v_new = _make_version(rescan, version_no=1)
         rescan_pk = rescan.pk
 
-        with mock.patch.object(
+        with self._barcode(77), mock.patch.object(
             asn_service, "_attach_version_to", side_effect=RuntimeError("boom")
         ):
             with self.assertRaises(RuntimeError):
@@ -407,6 +497,44 @@ class RepairAsnCommandTests(TestCase):
 
         poisoned.refresh_from_db()
         self.assertEqual(poisoned.asn, 99999)
+
+
+class AsnBackfillCommandTests(TestCase):
+    def test_backfill_skips_sealed_versions(self):
+        """P1: Der Backfill fasst versiegelte Versionen GAR NICHT an – sie werden
+        nie als Reconcile-Kandidat behandelt (Schutz der Siegel-/Hash-Kette)."""
+        from unittest import mock
+        from django.core.management import call_command
+
+        owner = User.objects.create_user(username="bf", password="pw", role="user")
+        doc = Document.objects.create(title="Alt", owner=owner)
+        sealed = _make_version(doc, version_no=1, ocr_text=asn_service.format_asn(55))
+        DocumentVersion.objects.filter(pk=sealed.pk).update(is_immutable=True)
+
+        with mock.patch.object(
+            asn_service, "match_and_reconcile", return_value={"matched": False}
+        ) as reconcile:
+            call_command("asn_backfill")
+
+        called_pks = {c.args[0].pk for c in reconcile.call_args_list}
+        self.assertNotIn(sealed.pk, called_pks)
+
+    def test_backfill_processes_unsealed_versions(self):
+        """Nicht-versiegelte Versionen werden weiterhin verarbeitet."""
+        from unittest import mock
+        from django.core.management import call_command
+
+        owner = User.objects.create_user(username="bf2", password="pw", role="user")
+        doc = Document.objects.create(title="Neu", owner=owner)
+        fresh = _make_version(doc, version_no=1, ocr_text=asn_service.format_asn(55))
+
+        with mock.patch.object(
+            asn_service, "match_and_reconcile", return_value={"matched": False}
+        ) as reconcile:
+            call_command("asn_backfill")
+
+        called_pks = {c.args[0].pk for c in reconcile.call_args_list}
+        self.assertIn(fresh.pk, called_pks)
 
 
 class ClearAutoAsnCommandTests(TestCase):
