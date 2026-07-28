@@ -474,8 +474,33 @@ class RepairAsnCommandTests(TestCase):
     def test_repair_renumbers_poisoned_and_resets_counter(self):
         from django.core.management import call_command
 
+        from .models import AuditLogEntry
+
         clean = Document.objects.create(title="Sauber")
         _assign(clean, 5)
+        poisoned = Document.objects.create(title="Vergiftet")
+        _assign(poisoned, 99999)
+        ASNCounter.objects.update_or_create(pk=1, defaults={"last_value": 99999})
+
+        call_command("repair_asn", threshold=1000, yes=True)
+
+        poisoned.refresh_from_db()
+        self.assertLess(poisoned.asn, 1000)
+        self.assertGreater(poisoned.asn, clean.asn)
+        self.assertEqual(ASNCounter.objects.get(pk=1).last_value, poisoned.asn)
+        # Audit-Trail (P2): der Vorgang ist protokolliert.
+        entry = AuditLogEntry.objects.filter(action="asn_repair").first()
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry.detail["count"], 1)
+        self.assertEqual(entry.detail["remaps"][0]["from"], 99999)
+        self.assertEqual(entry.detail["remaps"][0]["to"], poisoned.asn)
+
+    def test_repair_ohne_yes_aendert_nichts(self):
+        # P2: Ohne --yes (und ohne --dry-run) wird nichts geändert.
+        from django.core.management import call_command
+
+        from .models import AuditLogEntry
+
         poisoned = Document.objects.create(title="Vergiftet")
         _assign(poisoned, 99999)
         ASNCounter.objects.update_or_create(pk=1, defaults={"last_value": 99999})
@@ -483,9 +508,9 @@ class RepairAsnCommandTests(TestCase):
         call_command("repair_asn", threshold=1000)
 
         poisoned.refresh_from_db()
-        self.assertLess(poisoned.asn, 1000)
-        self.assertGreater(poisoned.asn, clean.asn)
-        self.assertEqual(ASNCounter.objects.get(pk=1).last_value, poisoned.asn)
+        self.assertEqual(poisoned.asn, 99999)
+        self.assertEqual(ASNCounter.objects.get(pk=1).last_value, 99999)
+        self.assertFalse(AuditLogEntry.objects.filter(action="asn_repair").exists())
 
     def test_repair_dry_run_changes_nothing(self):
         from django.core.management import call_command
@@ -550,3 +575,19 @@ class ClearAutoAsnCommandTests(TestCase):
         doc.refresh_from_db()
         self.assertIsNone(doc.asn)
         self.assertEqual(ASNCounter.objects.get(pk=1).last_value, 0)
+
+    def test_clear_schreibt_audit(self):
+        """P2: Das Leeren aller ASNs ist auditiert."""
+        from django.core.management import call_command
+
+        from .models import AuditLogEntry
+
+        doc = Document.objects.create(title="Alt")
+        _assign(doc, 12)
+
+        call_command("clear_auto_asn", yes=True)
+
+        entry = AuditLogEntry.objects.filter(action="asn_clear_all").first()
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry.detail["count"], 1)
+        self.assertEqual(entry.detail["cleared"][0]["from"], 12)
