@@ -11,8 +11,9 @@ ZERSTÖREND – erfordert ``--yes``:
     python manage.py clear_auto_asn --yes
 """
 from django.core.management.base import BaseCommand
+from django.db import transaction
 
-from documents.models import ASNCounter, Document
+from documents.models import ASNCounter, AuditLogEntry, Document
 
 
 class Command(BaseCommand):
@@ -45,8 +46,31 @@ class Command(BaseCommand):
             )
             return
 
-        Document.objects.exclude(asn__isnull=True).update(asn=None)
-        ASNCounter.objects.update_or_create(pk=1, defaults={"last_value": 0})
+        # ATOMAR + auditiert (P2): ASNs leeren, Zähler unter Sperre auf 0 setzen und
+        # den Vorgang protokollieren – in EINER Transaktion. Der Zählerlock
+        # serialisiert gegen parallele Vergaben; ein Abbruch rollt alles zurück.
+        with transaction.atomic():
+            counter = ASNCounter.objects.select_for_update().filter(pk=1).first()
+            cleared = list(
+                Document.objects.exclude(asn__isnull=True).values_list("pk", "asn")
+            )
+            Document.objects.exclude(asn__isnull=True).update(asn=None)
+            if counter is None:
+                ASNCounter.objects.create(pk=1, last_value=0)
+            else:
+                counter.last_value = 0
+                counter.save(update_fields=["last_value"])
+            AuditLogEntry.objects.create(
+                action="asn_clear_all",
+                object_type="Document",
+                object_id="",
+                detail={
+                    "count": len(cleared),
+                    "cleared": [
+                        {"document_id": pk, "from": asn} for pk, asn in cleared
+                    ],
+                },
+            )
         self.stdout.write(
             self.style.SUCCESS(f"{count} ASN(s) geleert, ASNCounter auf 0 gesetzt.")
         )
