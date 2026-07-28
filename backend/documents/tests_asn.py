@@ -292,6 +292,34 @@ class ASNReconcileTests(TestCase):
         with self.assertRaises(ValueError):
             asn_service._attach_version_to(target, sealed)
 
+    def test_attach_refuses_version_sealed_after_stale_load(self):
+        """P1/WORM-TOCTOU: Auch wenn die IN-MEMORY-Instanz noch is_immutable=False
+        zeigt (weil parallel VERSIEGELT wurde, nachdem sie geladen wurde), darf
+        _attach_version_to die Version NICHT umhängen. Der Zeilen-Lock + CAS gegen
+        is_immutable/seal_finalized_at fängt den veralteten Zustand ab."""
+        from django.utils import timezone
+
+        owner = User.objects.create_user(username="toctou", password="pw", role="user")
+        target = Document.objects.create(title="Ziel", owner=owner)
+        _make_version(target, version_no=1, sha256="a" * 64)
+
+        src = Document.objects.create(title="Quelle", owner=owner)
+        stale = _make_version(src, version_no=1)
+        # Version wird NACH dem Laden von ``stale`` versiegelt – die In-Memory-
+        # Instanz bleibt bewusst veraltet (is_immutable=False, kein refresh).
+        DocumentVersion.objects.filter(pk=stale.pk).update(
+            is_immutable=True, seal_finalized_at=timezone.now()
+        )
+        self.assertFalse(stale.is_immutable)  # Speicher noch veraltet
+
+        with self.assertRaises(ValueError):
+            asn_service._attach_version_to(target, stale)
+
+        # Version blieb beim Quelldokument, version_no unverändert.
+        stale.refresh_from_db()
+        self.assertEqual(stale.document_id, src.pk)
+        self.assertEqual(stale.version_no, 1)
+
     def test_reconcile_ist_atomar_bei_fehler(self):
         """P1: Scheitert das Umhängen mitten im Reconcile, darf das Quelldokument
         NICHT ohne current_version zurückbleiben – die ganze Übernahme rollt zurück.
