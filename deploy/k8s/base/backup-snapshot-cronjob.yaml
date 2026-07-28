@@ -1,0 +1,240 @@
+# Konsistenter Snapshot-Backup-Job (P1) – SUSPENDIERT ausgeliefert.
+#
+# Warum: Das aktive live-tar-Backup (backup-cronjob.yaml) macht pg_dump und tart
+# DANACH das WÄHRENDDESSEN veränderbare /data. Löscht ein paralleler Vorgang
+# zwischen beiden Schritten eine Datei, referenziert der Dump eine nicht
+# gesicherte Datei (Inkonsistenz). Dieser Job löst das über einen koordinierten
+# Longhorn/CSI-Snapshot: er tart aus einem UNVERÄNDERLICHEN Restore-Volume, das
+# den Zustand eines einzigen Zeitpunkts festhält.
+#
+# ``suspend: true`` (bewusst): Der Snapshot-Pfad ist clusterabhängig (Longhorn-
+# VolumeSnapshotClass, CSI) und wurde NICHT auf diesem Cluster verifiziert. Er
+# wird ausgeliefert, aber NICHT automatisch aktiv – erst nach einem erfolgreichen
+# Test-Lauf am Cluster (siehe docs/backup-snapshot.md) auf ``suspend: false``
+# stellen UND danach die live-tar-CronJob ``backup`` suspendieren. So bleibt das
+# funktionierende Backup unangetastet, bis der Snapshot-Pfad validiert ist.
+#
+# Voraussetzungen (Bootstrap, deploy/k8s/bootstrap): SA dms-backup + dms-backup-
+# helper, RBAC, VolumeSnapshotClass ``dms-longhorn-snapshot`` und der Admission-
+# Guard. Der Helfer-Job erfüllt den Guard exakt (token-lose SA, nur erlaubte
+# Secrets, Restore-PVC, gepinntes dms-backend-Image, kein Privesc).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dms-backup-snapshot-script
+  namespace: dms
+data:
+  # Backup-Skript des Helfer-Jobs. Bewusst als ConfigMap (nicht inline im
+  # Orchestrator-Heredoc): so werden die Helfer-Laufzeit-Variablen
+  # (${POSTGRES_PASSWORD} …) NICHT versehentlich vom Orchestrator-Shell expandiert.
+  # /data ist hier das RO-Restore-Volume (konsistenter Snapshot-Zeitpunkt).
+  backup.sh: |
+    set -e
+
+    TIMESTAMP="${SNAP_TIMESTAMP:-$(date +%Y%m%d-%H%M%S)}"
+    MONITOR_OK=0
+    BACKUP_DIR="/backup"
+    DB_BACKUP="${BACKUP_DIR}/db-${TIMESTAMP}.sql.gz"
+    DATA_BACKUP="${BACKUP_DIR}/data-${TIMESTAMP}.tar.gz"
+
+    record_backup_status() {
+      size_arg=""
+      [ -n "$3" ] && size_arg="--size-bytes $3"
+      python manage.py record_backup_status \
+        --kind backup \
+        --status "$1" \
+        --artifact-timestamp "${TIMESTAMP}" \
+        --message "$2" $size_arg || true
+    }
+
+    on_exit() {
+      code=$?
+      if [ "$code" -ne 0 ] && [ "$MONITOR_OK" -ne 1 ]; then
+        record_backup_status failed "Snapshot-Backup fehlgeschlagen (Exit ${code})"
+      fi
+    }
+    trap on_exit EXIT
+
+    mkdir -p "${BACKUP_DIR}"
+    echo "=== DMS Snapshot-Backup Start: ${TIMESTAMP} ==="
+    record_backup_status running "Snapshot-Backup-Helfer läuft"
+
+    # --- SSH-Key + Wrapper ---
+    SSH_KEY_FILE="/tmp/backup_ssh_key"
+    printf '%s\n' "${BACKUP_SSH_KEY}" > "${SSH_KEY_FILE}"
+    chmod 600 "${SSH_KEY_FILE}"
+    SSH_WRAPPER="/tmp/backup_ssh"
+    {
+      printf '#!/bin/sh\n'
+      printf 'exec ssh -p "%s" -i "%s" -o IdentitiesOnly=yes -o BatchMode=yes -o PreferredAuthentications=publickey -o StrictHostKeyChecking=no "$@"\n' "${BACKUP_SSH_PORT:-22}" "${SSH_KEY_FILE}"
+    } > "${SSH_WRAPPER}"
+    chmod 700 "${SSH_WRAPPER}"
+
+    echo "--- SSH-Vorabprüfung: ${BACKUP_SSH_USER}@${BACKUP_SSH_HOST} (Port ${BACKUP_SSH_PORT:-22})"
+    if ! "${SSH_WRAPPER}" "${BACKUP_SSH_USER}@${BACKUP_SSH_HOST}" "echo SSH OK"; then
+      record_backup_status failed "SSH-Auth zur NAS abgelehnt – Public-Key/authorized_keys prüfen (Port ${BACKUP_SSH_PORT:-22})."
+      MONITOR_OK=1
+      echo "FEHLER: SSH-Auth zur NAS fehlgeschlagen – pg_dump/tar übersprungen." >&2
+      exit 1
+    fi
+
+    echo "--- pg_dump: ${POSTGRES_DB}"
+    DB_DUMP_TMP="${BACKUP_DIR}/db-${TIMESTAMP}.sql"
+    PGPASSWORD="${POSTGRES_PASSWORD}" pg_dump \
+      -h "${POSTGRES_HOST}" -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" \
+      > "${DB_DUMP_TMP}"
+    gzip "${DB_DUMP_TMP}"
+
+    echo "--- tar: /data (konsistenter Snapshot) → ${DATA_BACKUP}"
+    tar -czf "${DATA_BACKUP}" -C /data originals archive thumbnails consume
+
+    echo "--- Übertragung → ${BACKUP_SSH_USER}@${BACKUP_SSH_HOST}:${BACKUP_TARGET_PATH}"
+    scp -O -S "${SSH_WRAPPER}" \
+      "${DB_BACKUP}" "${DATA_BACKUP}" \
+      "${BACKUP_SSH_USER}@${BACKUP_SSH_HOST}:${BACKUP_TARGET_PATH}/"
+
+    echo "--- Rotation: behalte letzte ${BACKUP_RETENTION} Backups"
+    "${SSH_WRAPPER}" "${BACKUP_SSH_USER}@${BACKUP_SSH_HOST}" \
+      "cd ${BACKUP_TARGET_PATH} && ls -t db-*.sql.gz | tail -n +$((BACKUP_RETENTION + 1)) | xargs -r rm -v && ls -t data-*.tar.gz | tail -n +$((BACKUP_RETENTION + 1)) | xargs -r rm -v"
+
+    rm -f "${SSH_KEY_FILE}" "${SSH_WRAPPER}"
+    TOTAL_BYTES=$(( $(wc -c < "${DB_BACKUP}") + $(wc -c < "${DATA_BACKUP}") ))
+    record_backup_status success "Snapshot-Backup erfolgreich abgeschlossen" "${TOTAL_BYTES}"
+    MONITOR_OK=1
+    echo "=== Snapshot-Backup abgeschlossen: ${TIMESTAMP} ==="
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: backup-snapshot
+  namespace: dms
+spec:
+  # SUSPENDIERT: erst nach erfolgreichem Cluster-Testlauf aktivieren (s. o.).
+  suspend: true
+  schedule: "30 2 * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 5400
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app: backup-snapshot
+        spec:
+          serviceAccountName: dms-backup
+          restartPolicy: OnFailure
+          containers:
+            # Orchestrator: kubectl-fähiges Image. EINZIGES externes Image hier –
+            # bei Bedarf in die eigene Registry spiegeln und den Verweis anpassen.
+            # (Vom Admission-Guard NICHT betroffen: der greift nur auf Jobs, die von
+            # dms-backup erstellt werden – also den HELFER, nicht den Orchestrator.)
+            - name: orchestrator
+              image: docker.io/bitnami/kubectl:1.30
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -e
+                  TS=$(date +%Y%m%d-%H%M%S)
+                  SNAP="dms-data-snap-${TS}"
+                  PVC="dms-data-restore-${TS}"
+                  JOB="backup-snap-tar-${TS}"
+
+                  cleanup() {
+                    kubectl -n dms delete job "$JOB" --ignore-not-found
+                    kubectl -n dms delete pvc "$PVC" --ignore-not-found
+                    kubectl -n dms delete volumesnapshot "$SNAP" --ignore-not-found
+                  }
+                  trap cleanup EXIT
+
+                  # Aktuell deploytes Backend-Image auflösen (echter Registry-Tag).
+                  HELPER_IMAGE=$(kubectl -n dms get deploy backend \
+                    -o jsonpath='{.spec.template.spec.containers[0].image}')
+                  echo "Helfer-Image: ${HELPER_IMAGE}"
+
+                  # 1) Snapshot des Daten-PVC + warten.
+                  kubectl -n dms apply -f - <<EOF
+                  apiVersion: snapshot.storage.k8s.io/v1
+                  kind: VolumeSnapshot
+                  metadata: { name: ${SNAP} }
+                  spec:
+                    volumeSnapshotClassName: dms-longhorn-snapshot
+                    source: { persistentVolumeClaimName: dms-data }
+                  EOF
+                  kubectl -n dms wait --for=jsonpath='{.status.readyToUse}'=true \
+                    volumesnapshot/${SNAP} --timeout=600s
+
+                  # 2) Restore-PVC aus dem Snapshot.
+                  kubectl -n dms apply -f - <<EOF
+                  apiVersion: v1
+                  kind: PersistentVolumeClaim
+                  metadata: { name: ${PVC} }
+                  spec:
+                    storageClassName: longhorn
+                    dataSource:
+                      name: ${SNAP}
+                      kind: VolumeSnapshot
+                      apiGroup: snapshot.storage.k8s.io
+                    accessModes: ["ReadWriteOnce"]
+                    resources: { requests: { storage: 20Gi } }
+                  EOF
+
+                  # 3) Helfer-Job: tart aus dem KONSISTENTEN Restore-Volume + shipt.
+                  #    Erfüllt den Admission-Guard (token-lose SA, nur erlaubte
+                  #    Secrets, Restore-PVC, gepinntes dms-backend-Image, kein Privesc).
+                  #    Das Backup-Skript kommt aus der ConfigMap (kein Heredoc-Escaping
+                  #    der Helfer-Laufzeit-Variablen).
+                  kubectl -n dms apply -f - <<EOF
+                  apiVersion: batch/v1
+                  kind: Job
+                  metadata: { name: ${JOB} }
+                  spec:
+                    backoffLimit: 1
+                    activeDeadlineSeconds: 3600
+                    template:
+                      spec:
+                        serviceAccountName: dms-backup-helper
+                        automountServiceAccountToken: false
+                        restartPolicy: Never
+                        containers:
+                          - name: tar
+                            image: ${HELPER_IMAGE}
+                            securityContext:
+                              privileged: false
+                              allowPrivilegeEscalation: false
+                              capabilities: { drop: ["ALL"] }
+                            command: ["/bin/sh", "/scripts/backup.sh"]
+                            env:
+                              - name: SNAP_TIMESTAMP
+                                value: "${TS}"
+                              - name: DJANGO_SECRET_KEY
+                                valueFrom: { secretKeyRef: { name: dms-db-backup-secrets, key: DJANGO_SECRET_KEY } }
+                              - name: POSTGRES_PASSWORD
+                                valueFrom: { secretKeyRef: { name: dms-db-backup-secrets, key: POSTGRES_PASSWORD } }
+                              - name: REDIS_PASSWORD
+                                valueFrom: { secretKeyRef: { name: dms-db-backup-secrets, key: REDIS_PASSWORD } }
+                            envFrom:
+                              - configMapRef: { name: dms-config }
+                              - secretRef: { name: dms-backup-secrets }
+                            volumeMounts:
+                              - { name: restore, mountPath: /data, readOnly: true }
+                              - { name: script, mountPath: /scripts, readOnly: true }
+                              - { name: backup-tmp, mountPath: /backup }
+                            resources:
+                              requests: { ephemeral-storage: "2Gi" }
+                              limits: { ephemeral-storage: "20Gi" }
+                        volumes:
+                          - name: restore
+                            persistentVolumeClaim: { claimName: ${PVC} }
+                          - name: script
+                            configMap: { name: dms-backup-snapshot-script }
+                          - name: backup-tmp
+                            emptyDir: { sizeLimit: 20Gi }
+                  EOF
+
+                  # 4) Auf den Helfer warten + Ergebnis übernehmen.
+                  kubectl -n dms wait --for=condition=complete --timeout=3600s job/${JOB} \
+                    || { kubectl -n dms logs job/${JOB} || true; exit 1; }

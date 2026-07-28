@@ -45,4 +45,7 @@ resources:
   - frontend.yaml
   - ingress.yaml
   - backup-cronjob.yaml
+  # Konsistenter Snapshot-Backup – SUSPENDIERT ausgeliefert (erst nach Cluster-
+  # Validierung aktivieren; siehe Datei-Header + docs/backup-snapshot.md).
+  - backup-snapshot-cronjob.yaml
   - networkpolicy.yaml

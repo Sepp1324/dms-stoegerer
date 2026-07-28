@@ -48,6 +48,12 @@ rules:
   - apiGroups: [""]
     resources: ["pods", "pods/log"]
     verbs: ["get", "list", "watch"]
+  # Nur LESEN, um das aktuell deployte Backend-Image aufzulösen und dem Helfer-Job
+  # mitzugeben (so bleibt der Helfer ohne kustomize/CD-Kniff immer auf dem echten,
+  # in der Registry vorhandenen Tag). Kein create/patch – reine Leseberechtigung.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

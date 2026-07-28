@@ -48,10 +48,12 @@ spec:
       expression: >-
         object.spec.template.spec.containers +
         object.spec.template.spec.?initContainers.orValue([])
-    # Exakte Allowlist der Secrets, die der Backup-Helfer referenzieren darf
-    # (DB-Passwort für pg_dump + SSH/scp-Ziel). NICHTS sonst.
+    # Exakte Allowlist der Secrets, die der Backup-Helfer referenzieren darf: das
+    # DEDIZIERTE DB-Backup-Secret (nur DJANGO_SECRET_KEY/POSTGRES_PASSWORD/
+    # REDIS_PASSWORD) + das SSH/scp-Ziel. NICHT das gesamte ``dms-secrets`` (P1) –
+    # sonst könnte der Helfer alle Anwendungsschlüssel (AI/IMAP/…) exfiltrieren.
     - name: allowedSecrets
-      expression: "['dms-secrets', 'dms-backup-secrets']"
+      expression: "['dms-db-backup-secrets', 'dms-backup-secrets']"
     - name: allvolumes
       expression: "object.spec.template.spec.?volumes.orValue([])"
   validations:
@@ -133,6 +135,87 @@ spec:
   policyName: dms-backup-job-guard
   validationActions: ["Deny"]
   # Nur im dms-Namespace auswerten (dort läuft das Backup).
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: dms
+---
+# Snapshot-Quelle einschränken (P1): Die Backup-Identität darf per RBAC
+# VolumeSnapshots anlegen. Ohne diese Policy könnte sie einen Snapshot eines
+# BELIEBIGEN PVC (z. B. postgres-data oder ein fremdes Volume) erstellen, daraus
+# ein Restore-PVC bauen und es im Helfer mounten -> Datenabfluss. Diese Policy
+# erlaubt der Backup-Identität ausschließlich Snapshots des Daten-PVC ``dms-data``.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: dms-backup-snapshot-guard
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["snapshot.storage.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["volumesnapshots"]
+  matchConditions:
+    - name: only-dms-backup-sa
+      expression: "request.userInfo.username == 'system:serviceaccount:dms:dms-backup'"
+  validations:
+    - expression: >-
+        has(object.spec.source) &&
+        has(object.spec.source.persistentVolumeClaimName) &&
+        object.spec.source.persistentVolumeClaimName == 'dms-data'
+      message: "Die Backup-Identität darf nur das Daten-PVC dms-data snapshotten."
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: dms-backup-snapshot-guard
+spec:
+  policyName: dms-backup-snapshot-guard
+  validationActions: ["Deny"]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: dms
+---
+# Restore-PVC einschränken (P1): Die Backup-Identität darf PVCs anlegen. Ohne
+# diese Policy könnte sie ein PVC mit beliebiger dataSource (z. B. einem fremden
+# Snapshot) unter einem erlaubten ``dms-data-restore-*``-Namen erzeugen und
+# mounten. Diese Policy erzwingt: Name ``dms-data-restore-*`` UND dataSource ist
+# ein VolumeSnapshot der eigenen Snapshot-Serie ``dms-data-snap-*``.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: dms-backup-restore-pvc-guard
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["persistentvolumeclaims"]
+  matchConditions:
+    - name: only-dms-backup-sa
+      expression: "request.userInfo.username == 'system:serviceaccount:dms:dms-backup'"
+  validations:
+    - expression: "object.metadata.name.matches('^dms-data-restore-[0-9a-zA-Z-]+$')"
+      message: "Backup-PVCs müssen dms-data-restore-* heißen."
+    - expression: >-
+        has(object.spec.dataSource) &&
+        object.spec.dataSource.kind == 'VolumeSnapshot' &&
+        object.spec.dataSource.?apiGroup.orValue('') == 'snapshot.storage.k8s.io' &&
+        object.spec.dataSource.name.matches('^dms-data-snap-[0-9a-zA-Z-]+$')
+      message: "Backup-PVCs müssen aus einem eigenen VolumeSnapshot (dms-data-snap-*) restauriert werden."
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: dms-backup-restore-pvc-guard
+spec:
+  policyName: dms-backup-restore-pvc-guard
+  validationActions: ["Deny"]
   matchResources:
     namespaceSelector:
       matchLabels:
