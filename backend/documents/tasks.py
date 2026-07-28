@@ -1354,6 +1354,17 @@ def check_due_reminders() -> dict:
                 reminder = DocumentReminder.objects.select_related(
                     "document__owner", "created_by"
                 ).get(pk=pk)
+                # Post-Claim-Re-Check (P2): Zwischen erfolgreichem CAS-Claim und dem
+                # Neuladen kann die Erinnerung verschoben (remind_on in die Zukunft)
+                # oder erledigt (done=True) worden sein. Ohne diese Prüfung würde der
+                # Worker trotzdem senden UND anschließend email_sent_at setzen, wodurch
+                # der neue, zukünftige Termin ausfiele. In dem Fall den (noch von uns
+                # gehaltenen) Claim freigeben und NICHT senden.
+                if reminder.done or reminder.remind_on > today:
+                    DocumentReminder.objects.filter(
+                        pk=pk, email_claimed_at=now
+                    ).update(email_claimed_at=None)
+                    continue
                 # Empfänger = AKTUELLER Dokument-Eigentümer (P1): Die API-Sichtbarkeit
                 # richtet sich nach ``document.owner``. ``created_by`` würde nach einer
                 # Dokumentübertragung dem FRÜHEREN Besitzer weiter Dokumentnummer +
@@ -1402,12 +1413,26 @@ def check_due_reminders() -> dict:
                     )
 
                 if sent:
-                    DocumentReminder.objects.filter(pk=pk).update(
-                        email_sent_at=now, updated_at=now
-                    )
-                    emailed += 1
+                    # Versandbestätigung an den CLAIM binden (P2): email_sent_at nur
+                    # setzen, wenn die Erinnerung noch fällig+offen ist UND unser
+                    # Claim (email_claimed_at == now) unverändert steht. Wurde die
+                    # Erinnerung während des SMTP-Versands verschoben/erledigt (was
+                    # email_claimed_at zurücksetzt bzw. done/remind_on ändert), trifft
+                    # das CAS 0 Zeilen -> der neue, zukünftige Termin wird NICHT
+                    # fälschlich als versendet markiert (die Mail selbst ist dann ein
+                    # unvermeidbares, SMTP-inhärentes Duplikat – at-least-once).
+                    confirmed = DocumentReminder.objects.filter(
+                        pk=pk,
+                        done=False,
+                        remind_on__lte=today,
+                        email_claimed_at=now,
+                    ).update(email_sent_at=now, updated_at=now)
+                    if confirmed:
+                        emailed += 1
                 else:
-                    DocumentReminder.objects.filter(pk=pk).update(email_claimed_at=None)
+                    DocumentReminder.objects.filter(
+                        pk=pk, email_claimed_at=now
+                    ).update(email_claimed_at=None)
             except SoftTimeLimitExceeded:
                 raise  # Soft-Time-Limit nicht verschlucken (s. scan_consume_folder).
             except Exception:
