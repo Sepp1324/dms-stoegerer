@@ -41,6 +41,15 @@ _VECTOR_FIELDS = frozenset(
         "mail_sender",
         "note",
         "current_version",
+        # FK-Felder werden von Django über den ``update_fields``-Namen des
+        # ATTRIBUTS gemeldet – ein ``save(update_fields=…)``, das eine FK per
+        # ``<name>_id`` setzt (so tun es die Workflow-Zuweisungen, workflows.py),
+        # nennt daher ``correspondent_id`` statt ``correspondent``. Ohne die
+        # ``_id``-Varianten liefe der Vektor-Refresh bei genau diesen Workflow-Saves
+        # nicht an und hinterließe einen veralteten Suchvektor (P2).
+        "correspondent_id",
+        "document_type_id",
+        "current_version_id",
     }
 )
 
