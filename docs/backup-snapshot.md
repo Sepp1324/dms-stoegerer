@@ -72,17 +72,33 @@ Der Orchestrator-Pod (SA `dms-backup`, kubectl):
 5. Auf den Helfer warten; dessen Exit-Code propagieren.
 6. **Immer** aufräumen: Helfer-Job, Temp-PVC, Snapshot löschen.
 
-## CronJob-Vorlage (erst nach Test aktivieren)
+## CronJob (ausgeliefert als `suspend: true` – erst nach Test aktivieren)
 
-Diese Vorlage bewusst als Doku (nicht als auto-applied Manifest), bis sie
-**einmal am Cluster getestet** wurde – ein ungetestetes P0-Backup darf das
-funktionierende `backup-cronjob.yaml` nicht ablösen. `ORCHESTRATOR_IMAGE` und die
-`storageClassName`/`accessModes` an die reale Umgebung anpassen, dann als
-`deploy/k8s/base/backup-snapshot-cronjob.yaml` ablegen (mit `suspend: true`),
-in `base/kustomization.yaml` aufnehmen, ausrollen und mit
-`kubectl -n dms create job --from=cronjob/backup-snapshot backup-snap-test`
-einen manuellen Lauf testen. Erst wenn Dump+TAR konsistent auf der NAS liegen,
-`suspend` entfernen und das alte `backup-cronjob.yaml` außer Dienst nehmen.
+Der Job ist als **`deploy/k8s/base/backup-snapshot-cronjob.yaml`** ausgeliefert
+(ConfigMap `dms-backup-snapshot-script` + CronJob `backup-snapshot`, bereits in
+`base/kustomization.yaml` referenziert) und rollt mit `suspend: true` mit – er
+läuft also NICHT, bis er bewusst aktiviert wird. Ein ungetestetes P0-Backup darf
+das funktionierende `backup-cronjob.yaml` nicht ablösen.
+
+Der Orchestrator (Image `bitnami/kubectl`, bei Bedarf in die eigene Registry
+spiegeln) löst das aktuell deployte Backend-Image selbst auf (`kubectl get deploy
+backend`) und übergibt es dem Helfer – kein manuelles Tag-Nachziehen nötig. Der
+Helfer nutzt das dedizierte `dms-db-backup-secrets` (nur DJANGO_SECRET_KEY/
+POSTGRES_PASSWORD/REDIS_PASSWORD, **kein** volles `dms-secrets`) und erfüllt den
+Admission-Guard exakt.
+
+**Aktivierung (nach Cluster-Validierung):**
+
+1. Voraussetzungen bootstrappen: `kubectl apply -k deploy/k8s/bootstrap`
+   (VolumeSnapshotClass, SAs, RBAC, Admission-Guard) und `dms-db-backup-secrets`
+   anlegen (Werte = `dms-secrets`).
+2. Testlauf: `kubectl -n dms create job --from=cronjob/backup-snapshot backup-snap-test`
+   – prüfen, dass Dump + TAR **konsistent** auf der NAS liegen und der
+   Backup-Monitor `success` meldet.
+3. Erst dann `suspend: false` setzen UND das alte `backup-cronjob.yaml`
+   suspendieren (nicht beide aktiv laufen lassen).
+
+Die folgende Vorlage entspricht dem ausgelieferten Manifest (gekürzt):
 
 ```yaml
 apiVersion: batch/v1
@@ -172,10 +188,20 @@ spec:
                               privileged: false
                               allowPrivilegeEscalation: false
                               capabilities: { drop: ["ALL"] }
+                            # Least-Privilege (P1): KEIN envFrom von dms-secrets –
+                            # nur die tatsächlich benötigten Keys aus dem dedizierten
+                            # DB-Backup-Secret + das scp-Ziel. POSTGRES_HOST/USER/DB/
+                            # PORT + REDIS_URL kommen aus dms-config (kein Secret).
                             envFrom:
                               - configMapRef: { name: dms-config }
-                              - secretRef: { name: dms-secrets }
                               - secretRef: { name: dms-backup-secrets }
+                            env:
+                              - name: DJANGO_SECRET_KEY
+                                valueFrom: { secretKeyRef: { name: dms-db-backup-secrets, key: DJANGO_SECRET_KEY } }
+                              - name: POSTGRES_PASSWORD
+                                valueFrom: { secretKeyRef: { name: dms-db-backup-secrets, key: POSTGRES_PASSWORD } }
+                              - name: REDIS_PASSWORD
+                                valueFrom: { secretKeyRef: { name: dms-db-backup-secrets, key: REDIS_PASSWORD } }
                             command: ["/bin/sh","-c"]
                             args: ["<backup-Skript: pg_dump->temp->gzip, tar /data, scp, rotate, record_backup_status>"]
                             volumeMounts:

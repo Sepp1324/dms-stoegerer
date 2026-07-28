@@ -157,10 +157,31 @@ spec:
               envFrom:
                 - configMapRef:
                     name: dms-config
-                - secretRef:
-                    name: dms-secrets
+                # SSH/scp-Ziel: dediziertes Backup-Secret, alle Keys werden gebraucht.
                 - secretRef:
                     name: dms-backup-secrets
+              # Least-Privilege (P1): NUR die tatsächlich benötigten Secret-Keys
+              # einzeln injizieren – NICHT mehr das gesamte ``dms-secrets``
+              # (Django/PG/Redis/AI/IMAP) per envFrom, das den Backup-Pod alle
+              # Anwendungsschlüssel lesen (und exfiltrieren) ließe. POSTGRES_HOST/
+              # USER/DB/PORT und REDIS_URL kommen weiterhin aus dms-config (kein
+              # Secret).
+              env:
+                - name: DJANGO_SECRET_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: dms-db-backup-secrets
+                      key: DJANGO_SECRET_KEY
+                - name: POSTGRES_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: dms-db-backup-secrets
+                      key: POSTGRES_PASSWORD
+                - name: REDIS_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: dms-db-backup-secrets
+                      key: REDIS_PASSWORD
               # Ephemeral-Storage begrenzen (P2): DB-Dump + vollständiges Daten-TAR
               # liegen gleichzeitig im emptyDir. Ohne Limit könnte ein großer Lauf
               # den k3s-Node vollschreiben (STOAA-Vorfall). Mit einem Limit wird
