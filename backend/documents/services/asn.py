@@ -361,13 +361,27 @@ def _attach_version_to(document, version, *, actor=None) -> int:
     from documents.models import AuditLogEntry, Document, DocumentVersion
 
     if version.is_immutable:
-        # WORM (P1): Eine versiegelte Version darf NICHT umgehängt werden – das
-        # ``QuerySet.update`` unten würde ``document``/``version_no``/``prev_hash``
-        # ändern und die Siegel-/Hash-Kette ungültig machen. Autoritative Schranke
-        # für ALLE Aufrufer (Reconcile prüft zusätzlich vorab).
+        # Schneller Fast-Fail aus dem Speicher (billig). Die AUTORITATIVE Schranke
+        # ist der Zeilen-Lock + CAS in der Transaktion unten – die In-Memory-Instanz
+        # allein taugt nicht, weil sie zwischen Prüfung und Update veralten kann.
         raise ValueError("Versiegelte (WORM-)Version kann nicht umgehängt werden.")
 
     with transaction.atomic():
+        # WORM-TOCTOU (P1): Die Version ZUERST unter Zeilensperre neu laden. So kann
+        # ein paralleles ``_seal_version`` (das dieselbe Version per
+        # ``select_for_update`` sperrt und ``is_immutable``/``seal_finalized_at``
+        # setzt) NICHT zwischen unsere Prüfung und den Update grätschen: entweder es
+        # war vor uns fertig (dann sehen wir das Siegel und brechen ab) oder es
+        # wartet, bis wir committen. Lock-Reihenfolge bleibt Document→Version – der
+        # Aufrufer (match_and_reconcile) hält die Dokument-Sperren bereits.
+        locked = (
+            DocumentVersion.objects.select_for_update().filter(pk=version.pk).first()
+        )
+        if locked is None or locked.is_immutable or locked.seal_finalized_at is not None:
+            raise ValueError(
+                "Versiegelte (WORM-)Version kann nicht umgehängt werden."
+            )
+
         last = (
             DocumentVersion.objects.select_for_update()
             .filter(document=document)
@@ -377,11 +391,20 @@ def _attach_version_to(document, version, *, actor=None) -> int:
         next_no = (last.version_no if last else 0) + 1
         prev_hash = last.sha256 if last else ""
 
-        DocumentVersion.objects.filter(pk=version.pk).update(
+        # Update zusätzlich als CAS gegen den Siegelzustand (Defense-in-Depth): trifft
+        # 0 Zeilen, falls die Version trotz Lock als versiegelt gilt -> Abbruch statt
+        # stiller Siegelverletzung.
+        moved = DocumentVersion.objects.filter(
+            pk=version.pk, is_immutable=False, seal_finalized_at__isnull=True
+        ).update(
             document=document,
             version_no=next_no,
             prev_hash=prev_hash,
         )
+        if not moved:
+            raise ValueError(
+                "Version wurde zwischenzeitlich versiegelt (WORM) – Umhängen abgebrochen."
+            )
         version.document = document
         version.document_id = document.pk
         version.version_no = next_no
