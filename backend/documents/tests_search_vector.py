@@ -12,7 +12,7 @@ from django.core.management import call_command
 from django.test import TestCase
 from rest_framework.test import APITestCase
 
-from .models import Document, DocumentVersion, Tag
+from .models import Correspondent, Document, DocumentType, DocumentVersion, Tag
 from .services.search_vector import update_document_search_vector
 
 
@@ -54,6 +54,26 @@ class SearchVectorTests(TestCase):
         tag = Tag.objects.create(name="Versicherung")
         doc.tags.add(tag)  # m2m_changed post_add -> Vektor-Refresh
         self.assertTrue(_matches(doc.pk, "Versicherung"))
+
+    def test_fk_id_update_fields_refresh_vector(self):
+        """P2: Ein ``save(update_fields=["correspondent_id"/"document_type_id"])`` –
+        genau die Form der Workflow-Zuweisungen – muss den Vektor neu schreiben.
+        Zuvor reagierte das Signal nur auf ``correspondent``/``document_type`` und
+        ließ den Suchvektor nach solchen Workflow-Saves veraltet zurück."""
+        doc = Document.objects.create(title="Vorgang", owner=self.user)
+        corr = Correspondent.objects.create(name="Musterversicherung")
+        dtype = DocumentType.objects.create(name="Polizze")
+
+        # Vektor kennt Korrespondent/Typ noch nicht.
+        self.assertFalse(_matches(doc.pk, "Musterversicherung"))
+
+        # Setzen wie im Workflow: FK per ``<name>_id`` + gezieltes update_fields.
+        doc.correspondent_id = corr.pk
+        doc.document_type_id = dtype.pk
+        doc.save(update_fields=["correspondent_id", "document_type_id"])
+
+        self.assertTrue(_matches(doc.pk, "Musterversicherung"))  # Korrespondent (A)
+        self.assertTrue(_matches(doc.pk, "Polizze"))  # Dokumenttyp (B)
 
     def test_backfill_command_fills_null_vectors(self):
         doc = Document.objects.create(title="Backfilltest", owner=self.user)
