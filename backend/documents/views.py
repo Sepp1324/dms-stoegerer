@@ -344,6 +344,33 @@ def _household_visibility_q(user):
     return q
 
 
+def _folder_visibility_q(user):
+    """Q für die ORDNER-Sichtbarkeit eines Nicht-Admins (P2, Privacy).
+
+    Der Ordnerbaum war bislang global lesbar – ``full_path``, ``owner`` und
+    ``owner_username`` FREMDER (privater) Ordner waren damit für alle Nutzer
+    sichtbar. Sichtbar sind jetzt nur:
+      * **eigene** Ordner (``owner == user``) – auch leere,
+      * **haushaltsgeteilte** (Sub-)Bäume: ein Ordner, dessen Elternkette einen
+        ``shared_with_household``-Ordner eines HAUSHALTSMITGLIEDS enthält, und
+      * Ordner, in denen **eigene Dokumente** liegen (sonst verlöre der Nutzer die
+        Navigation zu seinen eigenen Dokumenten in alt-/fremd-owned Ordnern).
+    Admins sehen alles (der Aufrufer prüft ``is_dms_admin`` separat)."""
+    member_ids = _household_member_ids(user)
+    shared_visible = {
+        fid
+        for fid, sharer_ids in _folder_share_map().items()
+        if sharer_ids & member_ids
+    }
+    own_doc_folder_ids = set(
+        DocumentFolder.objects.filter(documents__owner=user).values_list(
+            "id", flat=True
+        )
+    )
+    visible_ids = shared_visible | own_doc_folder_ids
+    return Q(owner=user) | Q(pk__in=visible_ids)
+
+
 def _visible_documents_for(user):
     """Lese-Sichtbarkeit: eigene Dokumente + für den Haushalt freigegebene."""
     qs = Document.objects.select_related(
@@ -5128,12 +5155,16 @@ class DocumentFolderViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        count_filter = None
-        if not getattr(user, "is_dms_admin", False):
-            count_filter = Q(documents__owner=user)
+        base = DocumentFolder.objects.select_related("parent", "owner")
+        if getattr(user, "is_dms_admin", False):
+            return base.annotate(document_count=Count("documents")).order_by(
+                "parent__name", "name"
+            )
+        # Nicht-Admin: nur sichtbare Ordner (eigene + haushaltsgeteilte + solche mit
+        # eigenen Dokumenten). Der Zähler bleibt owner-gefiltert (nur eigene Docs).
         return (
-            DocumentFolder.objects.select_related("parent", "owner")
-            .annotate(document_count=Count("documents", filter=count_filter))
+            base.filter(_folder_visibility_q(user))
+            .annotate(document_count=Count("documents", filter=Q(documents__owner=user)))
             .order_by("parent__name", "name")
         )
 
