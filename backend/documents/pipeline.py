@@ -78,10 +78,18 @@ def create_document_from_file(
     mime: str = "",
     size: int | None = None,
     ingest_source: str = "upload",
+    sha256: str = "",
 ) -> tuple[Document, DocumentVersion]:
     """Legt Dokument + erste Version an und protokolliert die Aufnahme.
 
     Führt (noch) keine OCR aus – das übernimmt die Pipeline anschließend.
+
+    ``sha256`` (optional): Der bereits berechnete Inhalts-Hash wird ATOMAR beim
+    Anlegen der Version gesetzt (P1). Sonst bliebe ``sha256`` bis zum späteren,
+    asynchronen ``process_version`` leer – und eine zweite, INHALTSGLEICHE Datei
+    im selben Ingest-Lauf fände die erste Version nicht (``find_duplicate_version``
+    matcht auf ``sha256``) und würde ein Doppel-Dokument anlegen. ``process_version``
+    berechnet den Hash später erneut aus der Datei (identischer Wert).
     """
     path = Path(file_path)
     size = size if size is not None else path.stat().st_size
@@ -97,6 +105,7 @@ def create_document_from_file(
                 file_path=str(path),
                 mime_type=mime,
                 size=size,
+                sha256=sha256,
                 created_by=owner,
                 ingest_source=ingest_source,
             )

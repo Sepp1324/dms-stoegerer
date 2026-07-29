@@ -12,7 +12,9 @@ from celery import shared_task
 from celery.exceptions import SoftTimeLimitExceeded
 from django.conf import settings
 from django.contrib.auth import get_user_model
-from django.db import models, transaction
+from contextlib import contextmanager
+
+from django.db import connection, models, transaction
 from django.db.models import Q
 from django.utils import timezone
 
@@ -905,6 +907,34 @@ def retry_document_version(version_id: int, actor_id: int | None = None) -> dict
     return result
 
 
+# Fester Schlüssel für den Postgres-Advisory-Lock des Consume-Scans.
+_CONSUME_SCAN_LOCK_KEY = 0x434F4E53  # "CONS"
+
+
+@contextmanager
+def _consume_scan_lock():
+    """Best-effort Advisory-Lock: höchstens EIN Consume-Scan gleichzeitig (P1).
+
+    Die frühe ``sha256``-Dedup schützt zuverlässig INNERHALB eines Scans. Zwei
+    PARALLELE Scans (überlappender Beat, manueller Trigger) könnten dieselbe Datei
+    aber gleichzeitig lesen, bevor der jeweils andere seine Version geschrieben
+    hat -> Doppel-Import. Ein Postgres-Session-Advisory-Lock serialisiert die
+    Scans; ein zweiter Lauf, der ihn nicht bekommt, überspringt sich sauber. Auf
+    Nicht-Postgres (kein solcher Lock) läuft der Scan wie bisher weiter."""
+    if connection.vendor != "postgresql":
+        yield True
+        return
+    with connection.cursor() as cur:
+        cur.execute("SELECT pg_try_advisory_lock(%s)", [_CONSUME_SCAN_LOCK_KEY])
+        acquired = bool(cur.fetchone()[0])
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            with connection.cursor() as cur:
+                cur.execute("SELECT pg_advisory_unlock(%s)", [_CONSUME_SCAN_LOCK_KEY])
+
+
 @shared_task
 def scan_consume_folder() -> dict:
     """Nimmt alle reifen Dateien aus dem Consume-Ordner auf und stößt die Pipeline an.
@@ -943,29 +973,39 @@ def scan_consume_folder() -> dict:
     min_age = float(getattr(settings, "CONSUME_MIN_AGE", 15))
     now = time.time()
 
-    if getattr(settings, "CONSUME_PER_USER", False):
-        # Pro-User-Modus: nur die Basis wird vorab angelegt (die eigentlichen
-        # Scan-Ordner sind pro-User-Unterordner, deren Namen hier unbekannt
-        # sind). ``_processed/``/``_failed/`` entstehen dort je User-Ordner.
-        return _scan_per_user(consume, min_age, now)
+    with _consume_scan_lock() as acquired:
+        if not acquired:
+            # Ein anderer Scan läuft bereits – dieser Lauf überspringt sich, statt
+            # dieselben Dateien parallel (und potenziell doppelt) zu importieren.
+            logger.info("scan_consume_folder: paralleler Scan aktiv – übersprungen")
+            return {"found": 0, "skipped_locked": True}
 
-    # Flat-Modus: ``_processed/``/``_failed/`` direkt unter ``consume`` vorab
-    # idempotent anlegen (AK STOAA-321). ``_ingest_consume_dir`` legt sie sonst
-    # ohnehin lazy an – hier nur explizit, damit die Ordnerstruktur nach dem
-    # ersten Scan vollständig steht.
-    (consume / "_processed").mkdir(parents=True, exist_ok=True)
-    (consume / "_failed").mkdir(parents=True, exist_ok=True)
+        if getattr(settings, "CONSUME_PER_USER", False):
+            # Pro-User-Modus: nur die Basis wird vorab angelegt (die eigentlichen
+            # Scan-Ordner sind pro-User-Unterordner, deren Namen hier unbekannt
+            # sind). ``_processed/``/``_failed/`` entstehen dort je User-Ordner.
+            return _scan_per_user(consume, min_age, now)
 
-    # Flat-Modus (Default): Dateien liegen direkt im Consume-Ordner. Ohne
-    # pro-User-Ordner greift optional ``CONSUME_DEFAULT_OWNER`` (STOAA-295),
-    # damit eingespeiste Dokumente nicht eigentümerlos (und für Nicht-Admins
-    # unsichtbar) bleiben. Ist er leer/unbekannt, bleibt owner=None ein
-    # bewusster, admin-sichtbarer Triage-Zustand.
-    default_owner = resolve_default_owner(getattr(settings, "CONSUME_DEFAULT_OWNER", ""))
-    result = _ingest_consume_dir(
-        consume, default_owner, min_age, now, fallback_used=default_owner is not None
-    )
-    return {"found": len(result["ingested"]), **result}
+        # Flat-Modus: ``_processed/``/``_failed/`` direkt unter ``consume`` vorab
+        # idempotent anlegen (AK STOAA-321). ``_ingest_consume_dir`` legt sie sonst
+        # ohnehin lazy an – hier nur explizit, damit die Ordnerstruktur nach dem
+        # ersten Scan vollständig steht.
+        (consume / "_processed").mkdir(parents=True, exist_ok=True)
+        (consume / "_failed").mkdir(parents=True, exist_ok=True)
+
+        # Flat-Modus (Default): Dateien liegen direkt im Consume-Ordner. Ohne
+        # pro-User-Ordner greift optional ``CONSUME_DEFAULT_OWNER`` (STOAA-295),
+        # damit eingespeiste Dokumente nicht eigentümerlos (und für Nicht-Admins
+        # unsichtbar) bleiben. Ist er leer/unbekannt, bleibt owner=None ein
+        # bewusster, admin-sichtbarer Triage-Zustand.
+        default_owner = resolve_default_owner(
+            getattr(settings, "CONSUME_DEFAULT_OWNER", "")
+        )
+        result = _ingest_consume_dir(
+            consume, default_owner, min_age, now,
+            fallback_used=default_owner is not None,
+        )
+        return {"found": len(result["ingested"]), **result}
 
 
 def _scan_per_user(consume: Path, min_age: float, now: float) -> dict:
@@ -1186,6 +1226,10 @@ def _ingest_consume_dir(
             document, version = pipeline.create_document_from_file(
                 str(saved_path), title=title, size=len(data), owner=owner,
                 mime=detected_mime, ingest_source="consume",
+                # Hash ATOMAR beim Anlegen setzen (P1): sonst fände eine zweite
+                # inhaltsgleiche Datei im selben Scan die erste Version (deren
+                # sha256 erst asynchron gefüllt würde) nicht -> Doppel-Dokument.
+                sha256=sha256_hex,
             )
             # Owner-Herkunft explizit machen (STOAA-295): Flat-Fallback ->
             # ``owner_fallback``, ohne Owner -> ``triage_ingest``. Per-User-Pfad
