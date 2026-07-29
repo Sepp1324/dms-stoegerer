@@ -104,6 +104,25 @@ class UploadEndpointXssTests(TestCase):
         )
         self.assertEqual(resp.status_code, 400)
 
+    def test_upload_setzt_sha256_atomar(self):
+        """P2: Der Upload setzt sha256 ATOMAR beim Anlegen (wie Consume/Mail),
+        nicht erst im asynchronen process_version – sonst könnte ein gleichzeitiger
+        identischer Upload das Duplikat nicht erkennen."""
+        from unittest import mock
+
+        from .models import Document
+
+        url = reverse("document-upload")
+        with mock.patch("documents.views._enqueue_processing"):
+            resp = self.client.post(
+                url,
+                {"file": SimpleUploadedFile("ok.pdf", PDF_BYTES, content_type="application/pdf")},
+                format="multipart",
+            )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        doc = Document.objects.get(id=resp.data["id"])
+        self.assertTrue(doc.current_version.sha256)  # sofort gesetzt, nicht erst async
+
 
 class MailIngestMimeTests(TestCase):
     """Mail-Anhänge werden mit dem ERKANNTEN MIME gespeichert, nie mit dem vom
