@@ -4,6 +4,7 @@ from django.test.utils import CaptureQueriesContext
 from rest_framework.test import APITestCase
 
 from .models import (
+    AuditLogEntry,
     Dossier,
     Document,
     DocumentFolder,
@@ -69,6 +70,64 @@ class DossierApiTests(APITestCase):
         self.assertIn(self.own_doc.id, source_doc_ids)
         self.assertNotIn(self.foreign_doc.id, source_doc_ids)
         self.assertTrue(resp.data["summary"])
+
+    def test_status_ist_read_only_kein_final_per_patch(self):
+        """P2: status ist read-only – ein PATCH kann NICHT ohne Finalisierungs-Audit
+        auf FINAL setzen. Andere Felder (Titel) bleiben editierbar (Draft)."""
+        self.client.force_authenticate(self.user)
+        d = Dossier.objects.create(
+            owner=self.user, title="T", query="q", status=Dossier.Status.DRAFT
+        )
+        resp = self.client.patch(
+            f"/api/dossiers/{d.id}/",
+            {"status": "final", "title": "Umbenannt"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        d.refresh_from_db()
+        self.assertEqual(d.status, Dossier.Status.DRAFT)  # status ignoriert
+        self.assertEqual(d.title, "Umbenannt")  # Titel schon editierbar
+
+    def test_finalize_action_setzt_final_und_auditiert(self):
+        self.client.force_authenticate(self.user)
+        d = Dossier.objects.create(
+            owner=self.user, title="T", query="q", status=Dossier.Status.GENERATED
+        )
+        resp = self.client.post(f"/api/dossiers/{d.id}/finalize/")
+        self.assertEqual(resp.status_code, 200)
+        d.refresh_from_db()
+        self.assertEqual(d.status, Dossier.Status.FINAL)
+        self.assertTrue(
+            AuditLogEntry.objects.filter(
+                action="dossier_finalize", object_id=str(d.id)
+            ).exists()
+        )
+
+    def test_finales_dossier_ist_unveraenderlich(self):
+        """P2: Ein finalisiertes Dossier lässt sich weder inhaltlich ändern …"""
+        self.client.force_authenticate(self.user)
+        d = Dossier.objects.create(
+            owner=self.user, title="T", query="q", status=Dossier.Status.FINAL
+        )
+        resp = self.client.patch(
+            f"/api/dossiers/{d.id}/", {"title": "Neu"}, format="json"
+        )
+        self.assertEqual(resp.status_code, 403)
+        d.refresh_from_db()
+        self.assertEqual(d.title, "T")
+
+    def test_finales_dossier_nicht_auf_draft_zurueck(self):
+        """… noch über einen PATCH auf status wieder auf DRAFT zurückstellen."""
+        self.client.force_authenticate(self.user)
+        d = Dossier.objects.create(
+            owner=self.user, title="T", query="q", status=Dossier.Status.FINAL
+        )
+        resp = self.client.patch(
+            f"/api/dossiers/{d.id}/", {"status": "draft"}, format="json"
+        )
+        self.assertEqual(resp.status_code, 403)
+        d.refresh_from_db()
+        self.assertEqual(d.status, Dossier.Status.FINAL)
 
     def test_export_markdown_contains_sources(self):
         self.client.force_authenticate(self.user)

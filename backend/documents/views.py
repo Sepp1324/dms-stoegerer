@@ -4539,6 +4539,20 @@ class DossierViewSet(viewsets.ModelViewSet):
             detail={"title": dossier.title, "query": dossier.query[:500]},
         )
 
+    def perform_update(self, serializer):
+        # Finale Dossiers sind unveränderlich (P2): Ein einmal finalisiertes Dossier
+        # (Beweis-/Rechercheakte) darf weder inhaltlich geändert noch – auch nicht
+        # über einen Umweg – reaktiviert werden. ``status`` ist ohnehin read-only
+        # (Wechsel nur über ``finalize``); dieser Guard sperrt zusätzlich jede
+        # Änderung an Titel/Query o. Ä. am bereits finalisierten Dossier.
+        if serializer.instance.status == Dossier.Status.FINAL:
+            from rest_framework.exceptions import PermissionDenied
+
+            raise PermissionDenied(
+                "Ein finalisiertes Dossier ist unveränderlich."
+            )
+        serializer.save()
+
     def _visible_documents(self):
         qs = (
             Document.objects.select_related(
