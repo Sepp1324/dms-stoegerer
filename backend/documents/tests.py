@@ -1576,6 +1576,27 @@ class ConsumeFolderScanTests(TestCase):
             Document.objects.get().current_version.mime_type, "application/pdf"
         )
 
+    def test_zwei_identische_dateien_im_selben_scan_erzeugen_ein_dokument(self):
+        """P1: Zwei INHALTSGLEICHE Dateien im selben Scan dürfen nur EIN Dokument
+        anlegen. Die erste Version bekommt ihren sha256 ATOMAR beim Anlegen – so
+        findet die zweite Datei sie über ``find_duplicate_version`` und wird
+        dedupliziert (vorher blieb der Hash bis zum async OCR leer -> Doppel-Dok)."""
+        with self.settings(CONSUME_MIN_AGE=15):
+            self._write("scan-a.pdf", age_seconds=3600)
+            self._write("scan-b.pdf", age_seconds=3600)  # identischer Inhalt
+            result, delay = self._run_scan()
+
+        # Genau ein Dokument; die zweite Datei wurde dedupliziert.
+        self.assertEqual(Document.objects.count(), 1)
+        self.assertEqual(result["found"], 1)
+        self.assertEqual(result["deduped"], 1)
+        # Der Hash steht sofort an der ersten Version (nicht erst nach OCR).
+        self.assertTrue(Document.objects.get().current_version.sha256)
+        # Beide Originale sind aus dem Eingang nach _processed/ verschoben.
+        self.assertTrue((self.consume / "_processed" / "scan-a.pdf").exists())
+        self.assertTrue((self.consume / "_processed" / "scan-b.pdf").exists())
+        delay.assert_called_once()  # nur der echte Import stößt die Pipeline an
+
     def test_ungueltiger_dateityp_landet_in_failed(self):
         """P2: Consume nutzt dieselbe Magic-Byte-Allowlist wie Upload/Mail –
         eine als PDF getarnte HTML-Datei wird abgewiesen und nach _failed/
