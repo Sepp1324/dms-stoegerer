@@ -5160,13 +5160,19 @@ class DocumentFolderViewSet(viewsets.ModelViewSet):
             return base.annotate(document_count=Count("documents")).order_by(
                 "parent__name", "name"
             )
-        # Nicht-Admin: nur sichtbare Ordner (eigene + haushaltsgeteilte + solche mit
-        # eigenen Dokumenten). Der Zähler bleibt owner-gefiltert (nur eigene Docs).
-        return (
-            base.filter(_folder_visibility_q(user))
-            .annotate(document_count=Count("documents", filter=Q(documents__owner=user)))
-            .order_by("parent__name", "name")
-        )
+        annotated = base.annotate(
+            document_count=Count("documents", filter=Q(documents__owner=user))
+        ).order_by("parent__name", "name")
+        # LESE-Zugriff (Liste/Detail) auf die SICHTBAREN Ordner beschränken – sonst
+        # leckt der Endpoint full_path/owner/owner_username fremder privater Ordner
+        # (P2). Für MUTATIONEN (update/destroy) bewusst NICHT scopen: dort greift
+        # ``_assert_folder_mutable`` und liefert die klare 403-„verboten"-Semantik
+        # (statt 404); ein Erfolg ist ohnehin nur am eigenen Ordner möglich, also
+        # kein Existenz-Leak. ``create`` nutzt kein get_object (Parent-Feld-Scope
+        # im Serializer).
+        if self.action in ("list", "retrieve"):
+            return annotated.filter(_folder_visibility_q(user))
+        return annotated
 
     def perform_create(self, serializer):
         # Owner-Konsistenz (P1): Ein Root-Ordner gehört dem Ersteller; ein Kind ERBT
