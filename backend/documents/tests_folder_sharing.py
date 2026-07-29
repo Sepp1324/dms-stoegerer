@@ -91,6 +91,70 @@ class FolderSharingTests(APITestCase):
         self.assertIn(self.in_private.id, self._list_ids())
 
 
+class FolderListVisibilityTests(APITestCase):
+    """P2: Der Ordner-Endpoint darf keine FREMDEN privaten Ordner (full_path/owner/
+    owner_username) preisgeben. Sichtbar: eigene + haushaltsgeteilte (Sub-)Bäume."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.alice = User.objects.create_user("fv_alice", password="pw", role="user")
+        cls.bob = User.objects.create_user("fv_bob", password="pw", role="user")
+        cls.carol = User.objects.create_user("fv_carol", password="pw", role="user")
+        cls.admin = User.objects.create_user("fv_admin", password="pw", role="admin")
+        hh = Household.objects.create(name="Fam", created_by=cls.alice)
+        hh.members.add(cls.alice, cls.bob)  # carol NICHT im Haushalt
+
+        cls.shared = DocumentFolder.objects.create(
+            name="Familie", shared_with_household=True, owner=cls.alice
+        )
+        cls.sub = DocumentFolder.objects.create(
+            name="Unter", parent=cls.shared, owner=cls.alice
+        )  # erbt Freigabe
+        cls.private = DocumentFolder.objects.create(name="Privat", owner=cls.alice)
+        cls.bob_own = DocumentFolder.objects.create(name="BobPrivat", owner=cls.bob)
+
+    def _folder_ids(self):
+        data = self.client.get("/api/folders/").data
+        rows = data["results"] if isinstance(data, dict) and "results" in data else data
+        return [f["id"] for f in rows]
+
+    def test_owner_sieht_eigene_nicht_fremde(self):
+        self.client.force_authenticate(self.alice)
+        ids = self._folder_ids()
+        self.assertIn(self.shared.id, ids)
+        self.assertIn(self.sub.id, ids)
+        self.assertIn(self.private.id, ids)
+        self.assertNotIn(self.bob_own.id, ids)  # Bobs privater Ordner NICHT
+
+    def test_member_sieht_geteilte_baeume_nicht_private(self):
+        self.client.force_authenticate(self.bob)
+        ids = self._folder_ids()
+        self.assertIn(self.shared.id, ids)       # geteilt
+        self.assertIn(self.sub.id, ids)          # geteilter Unterbaum
+        self.assertIn(self.bob_own.id, ids)      # eigener
+        self.assertNotIn(self.private.id, ids)   # Alices PRIVATER Ordner NICHT
+
+    def test_nichtmitglied_sieht_keine_fremden(self):
+        self.client.force_authenticate(self.carol)
+        ids = self._folder_ids()
+        for f in (self.shared, self.sub, self.private, self.bob_own):
+            self.assertNotIn(f.id, ids)
+
+    def test_admin_sieht_alle(self):
+        self.client.force_authenticate(self.admin)
+        ids = self._folder_ids()
+        for f in (self.shared, self.sub, self.private, self.bob_own):
+            self.assertIn(f.id, ids)
+
+    def test_fremder_privater_ordner_nicht_als_parent_waehlbar(self):
+        # Nicht-Admin darf einen fremden privaten Ordner nicht als parent setzen.
+        self.client.force_authenticate(self.bob)
+        resp = self.client.post(
+            "/api/folders/", {"name": "Neu", "parent": self.private.id}, format="json"
+        )
+        self.assertIn(resp.status_code, (400, 403))
+
+
 class FolderShareOwnershipTests(APITestCase):
     """P1: Ordnerfreigabe ist owner-verankert – ein Mitglied kann weder fremde
     Ordner freigeben noch über einen eigenen Ordner fremde Dokumente exponieren."""

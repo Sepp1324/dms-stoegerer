@@ -149,6 +149,28 @@ class DocumentFolderSerializer(serializers.ModelSerializer):
             "shared_with_household": {"required": False},
         }
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Auswählbare Parent-Ordner auf die SICHTBAREN beschränken (P2): sonst listet
+        # das related-Feld alle (auch fremde, private) Ordner-PKs. Für Nicht-Admins
+        # deckungsgleich mit der Listen-Sichtbarkeit; ``validate()`` engt CREATE
+        # zusätzlich auf EIGENE Parents ein. Lazy-Import bricht den Zyklus
+        # views→serializers.
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        parent_field = self.fields.get("parent")
+        if (
+            parent_field is not None
+            and user is not None
+            and getattr(user, "is_authenticated", False)
+            and not getattr(user, "is_dms_admin", False)
+        ):
+            from .views import _folder_visibility_q
+
+            parent_field.queryset = DocumentFolder.objects.filter(
+                _folder_visibility_q(user)
+            )
+
     def validate(self, attrs):
         parent = attrs.get("parent", getattr(self.instance, "parent", None))
         name = attrs.get("name", getattr(self.instance, "name", None))
