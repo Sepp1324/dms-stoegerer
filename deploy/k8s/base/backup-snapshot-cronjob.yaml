@@ -229,8 +229,6 @@ spec:
                                 valueFrom: { secretKeyRef: { name: dms-db-backup-secrets, key: DJANGO_SECRET_KEY } }
                               - name: POSTGRES_PASSWORD
                                 valueFrom: { secretKeyRef: { name: dms-db-backup-secrets, key: POSTGRES_PASSWORD } }
-                              - name: REDIS_PASSWORD
-                                valueFrom: { secretKeyRef: { name: dms-db-backup-secrets, key: REDIS_PASSWORD } }
                             envFrom:
                               - configMapRef: { name: dms-config }
                               - secretRef: { name: dms-backup-secrets }
