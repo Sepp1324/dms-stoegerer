@@ -128,12 +128,19 @@ spec:
           serviceAccountName: dms-backup
           restartPolicy: OnFailure
           containers:
-            # Orchestrator: kubectl-fähiges Image. EINZIGES externes Image hier –
-            # bei Bedarf in die eigene Registry spiegeln und den Verweis anpassen.
+            # Orchestrator: kubectl-fähiges Image. Das offizielle
+            # ``registry.k8s.io/kubectl`` EXISTIERT (anders als das frühere
+            # ``bitnami/kubectl:1.30``, das keinen Manifest-Eintrag hat) und ist auf
+            # den Cluster (k3s 1.33) versioniert – innerhalb der ±1-Minor-Skew-Policy.
+            # HÄRTUNG für den Betrieb: in die eigene Registry spiegeln und per Digest
+            # pinnen, z. B.:
+            #   skopeo copy docker://registry.k8s.io/kubectl:v1.33.4 \
+            #     docker://registry.stoegerer-home.at/kubectl:v1.33.4
+            #   image: registry.stoegerer-home.at/kubectl@sha256:<digest>
             # (Vom Admission-Guard NICHT betroffen: der greift nur auf Jobs, die von
             # dms-backup erstellt werden – also den HELFER, nicht den Orchestrator.)
             - name: orchestrator
-              image: docker.io/bitnami/kubectl:1.30
+              image: registry.k8s.io/kubectl:v1.33.4
               command: ["/bin/sh", "-c"]
               args:
                 - |
@@ -154,6 +161,14 @@ spec:
                   HELPER_IMAGE=$(kubectl -n dms get deploy backend \
                     -o jsonpath='{.spec.template.spec.containers[0].image}')
                   echo "Helfer-Image: ${HELPER_IMAGE}"
+
+                  # Restore-PVC-Größe DYNAMISCH aus dem Quell-PVC übernehmen (P2):
+                  # ein hart kodiertes 20Gi kann einen inzwischen gewachsenen
+                  # dms-data-Snapshot nicht mehr aufnehmen (Restore schlägt fehl).
+                  SRC_SIZE=$(kubectl -n dms get pvc dms-data \
+                    -o jsonpath='{.spec.resources.requests.storage}')
+                  [ -n "${SRC_SIZE}" ] || SRC_SIZE=20Gi
+                  echo "Restore-PVC-Größe: ${SRC_SIZE}"
 
                   # 1) Snapshot des Daten-PVC + warten.
                   kubectl -n dms apply -f - <<EOF
@@ -179,7 +194,7 @@ spec:
                       kind: VolumeSnapshot
                       apiGroup: snapshot.storage.k8s.io
                     accessModes: ["ReadWriteOnce"]
-                    resources: { requests: { storage: 20Gi } }
+                    resources: { requests: { storage: ${SRC_SIZE} } }
                   EOF
 
                   # 3) Helfer-Job: tart aus dem KONSISTENTEN Restore-Volume + shipt.
