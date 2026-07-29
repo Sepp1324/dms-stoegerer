@@ -4571,14 +4571,44 @@ class DossierViewSet(viewsets.ModelViewSet):
         # (Beweis-/Rechercheakte) darf weder inhaltlich geändert noch – auch nicht
         # über einen Umweg – reaktiviert werden. ``status`` ist ohnehin read-only
         # (Wechsel nur über ``finalize``); dieser Guard sperrt zusätzlich jede
-        # Änderung an Titel/Query o. Ä. am bereits finalisierten Dossier.
-        if serializer.instance.status == Dossier.Status.FINAL:
-            from rest_framework.exceptions import PermissionDenied
+        # Änderung am bereits finalisierten Dossier.
+        #
+        # Zeilensperre (P2): Der Status wird UNTER ``select_for_update`` geprüft.
+        # Sonst könnte ein PATCH die Statusprüfung zwischen Lesen und Schreiben mit
+        # einer parallelen ``finalize``-Action überholen (TOCTOU) und ein gerade
+        # finalisiertes Dossier doch noch ändern. Der Lock serialisiert PATCH und
+        # finalize: wer zuerst committet, gewinnt; der andere sieht FINAL.
+        from rest_framework.exceptions import PermissionDenied
 
-            raise PermissionDenied(
-                "Ein finalisiertes Dossier ist unveränderlich."
+        with transaction.atomic():
+            locked = Dossier.objects.select_for_update().get(
+                pk=serializer.instance.pk
             )
-        serializer.save()
+            if locked.status == Dossier.Status.FINAL:
+                raise PermissionDenied("Ein finalisiertes Dossier ist unveränderlich.")
+            serializer.save()
+
+    def perform_destroy(self, instance):
+        # Finale Dossiers sind auch gegen LÖSCHEN geschützt (P2): eine finalisierte
+        # Beweisakte darf nicht einfach verschwinden. Löschen eines FINAL-Dossiers ist
+        # nur Admins erlaubt und wird auditiert; jede Löschung wird protokolliert.
+        from rest_framework.exceptions import PermissionDenied
+
+        with transaction.atomic():
+            locked = Dossier.objects.select_for_update().get(pk=instance.pk)
+            is_final = locked.status == Dossier.Status.FINAL
+            if is_final and not getattr(self.request.user, "is_dms_admin", False):
+                raise PermissionDenied(
+                    "Ein finalisiertes Dossier kann nur ein Admin löschen."
+                )
+            AuditLogEntry.objects.create(
+                actor=self.request.user,
+                action="dossier_delete",
+                object_type="Dossier",
+                object_id=str(locked.id),
+                detail={"title": locked.title, "status": locked.status, "final": is_final},
+            )
+            locked.delete()
 
     def _visible_documents(self):
         qs = (
@@ -4649,16 +4679,23 @@ class DossierViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN,
             )
         dossier = self.get_object()
-        dossier.status = Dossier.Status.FINAL
-        dossier.save(update_fields=["status", "updated_at"])
-        AuditLogEntry.objects.create(
-            actor=request.user,
-            action="dossier_finalize",
-            object_type="Dossier",
-            object_id=str(dossier.id),
-            detail={},
-        )
-        return Response(self.get_serializer(dossier).data)
+        # Zeilensperre (P2): Finalisierung läuft unter select_for_update, damit ein
+        # paralleles PATCH sie nicht überholt (perform_update sperrt dieselbe Zeile).
+        # Idempotent: ein bereits finales Dossier wird nicht doppelt auditiert.
+        with transaction.atomic():
+            locked = Dossier.objects.select_for_update().get(pk=dossier.pk)
+            if locked.status == Dossier.Status.FINAL:
+                return Response(self.get_serializer(locked).data)
+            locked.status = Dossier.Status.FINAL
+            locked.save(update_fields=["status", "updated_at"])
+            AuditLogEntry.objects.create(
+                actor=request.user,
+                action="dossier_finalize",
+                object_type="Dossier",
+                object_id=str(locked.id),
+                detail={},
+            )
+        return Response(self.get_serializer(locked).data)
 
     @action(detail=True, methods=["get"], url_path="export-markdown")
     def export_markdown(self, request, pk=None):
