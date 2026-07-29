@@ -200,6 +200,29 @@ PROCESSING_STUCK_AFTER_MINUTES = float(os.getenv("PROCESSING_STUCK_AFTER_MINUTES
 # sein; 0 schaltet das Caching ab.
 QUALITY_STATUS_CACHE_TTL = int(os.getenv("QUALITY_STATUS_CACHE_TTL", "60"))
 
+def _with_redis_auth(url: str) -> str:
+    """Webt ``REDIS_PASSWORD`` in eine passwortlose redis-URL ein (Redis-Auth).
+
+    So bleibt das Passwort an EINER Stelle (Secret ``REDIS_PASSWORD``); die
+    passwortlose URL (ConfigMap) muss nicht dupliziert werden. Ist die URL bereits
+    mit Zugangsdaten versehen (``@``) oder kein Passwort gesetzt, bleibt sie
+    unverändert. Früh definiert, weil Cache UND Broker/Result-Backend sie nutzen.
+    """
+    password = os.getenv("REDIS_PASSWORD", "")
+    if not password or "://" not in url:
+        return url
+    scheme, rest = url.split("://", 1)
+    if "@" in rest:  # bereits Zugangsdaten enthalten
+        return url
+    # Passwort MUSS URL-kodiert werden: Sonderzeichen (z. B. aus base64: ``+/=``
+    # oder ein ``:``) würden sonst die URL zerlegen und Celery/kombu mit
+    # "Port could not be cast to integer" abstürzen lassen. ``safe=""`` kodiert
+    # auch ``/`` und ``:``.
+    from urllib.parse import quote
+
+    return f"{scheme}://:{quote(password, safe='')}@{rest}"
+
+
 # --- Cache ---
 # DRF-Throttling (siehe unten) speichert seine Zähler im Django-Cache. Ohne
 # Konfiguration ist das der prozesslokale LocMemCache – funktioniert überall
@@ -208,6 +231,11 @@ QUALITY_STATUS_CACHE_TTL = int(os.getenv("QUALITY_STATUS_CACHE_TTL", "60"))
 # alle Worker/Pods hinweg GEMEINSAM gelten. Django 4+ bringt das Redis-Backend
 # ohne Zusatzpaket mit (nutzt das bereits vorhandene ``redis``).
 CACHE_URL = os.getenv("CACHE_URL", "")
+# Redis verlangt in Prod ein Passwort (REDIS_PASSWORD). Der Cache MUSS es – exakt
+# wie der Broker – in die passwortlose CACHE_URL (ConfigMap) einweben, sonst
+# scheitern ALLE Cache-Nutzer (Throttling, Qualitäts-Status …) mit NOAUTH →
+# HTTP 500 (P1). Ohne Passwort/ohne CACHE_URL bleibt der Wert unverändert.
+CACHE_URL = _with_redis_auth(CACHE_URL)
 if CACHE_URL:
     CACHES = {
         "default": {
@@ -293,32 +321,7 @@ if not DEBUG:
 
 # --- Celery ---
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-
-
-def _with_redis_auth(url: str) -> str:
-    """Webt ``REDIS_PASSWORD`` in eine passwortlose redis-URL ein (P2, Redis-Auth).
-
-    So bleibt das Passwort an EINER Stelle (Secret ``REDIS_PASSWORD``); die
-    passwortlose ``REDIS_URL`` (ConfigMap) muss nicht dupliziert werden. Ist die
-    URL bereits mit Zugangsdaten versehen (``@``) oder kein Passwort gesetzt,
-    bleibt sie unverändert.
-    """
-    password = os.getenv("REDIS_PASSWORD", "")
-    if not password or "://" not in url:
-        return url
-    scheme, rest = url.split("://", 1)
-    if "@" in rest:  # bereits Zugangsdaten enthalten
-        return url
-    # Passwort MUSS URL-kodiert werden: Sonderzeichen (z. B. aus base64: ``+/=``
-    # oder ein ``:``) würden sonst die URL zerlegen und Celery/kombu mit
-    # "Port could not be cast to integer" abstürzen lassen. ``safe=""`` kodiert
-    # auch ``/`` und ``:``.
-    from urllib.parse import quote
-
-    return f"{scheme}://:{quote(password, safe='')}@{rest}"
-
-
-REDIS_URL = _with_redis_auth(REDIS_URL)
+REDIS_URL = _with_redis_auth(REDIS_URL)  # Helfer oben definiert (Cache + Broker)
 CELERY_BROKER_URL = REDIS_URL
 CELERY_RESULT_BACKEND = REDIS_URL
 CELERY_TASK_TRACK_STARTED = True

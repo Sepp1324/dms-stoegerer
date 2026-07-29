@@ -55,6 +55,58 @@ class AlwaysOnSecurityTests(SimpleTestCase):
         self.assertTrue(settings.SECURE_CONTENT_TYPE_NOSNIFF)
 
 
+class CacheRedisAuthTests(SimpleTestCase):
+    """P1: Der Cache MUSS – wie der Broker – REDIS_PASSWORD in CACHE_URL einweben.
+
+    Sonst fallen alle Cache-Nutzer (Throttling, Qualitäts-Status) in Prod mit
+    NOAUTH → HTTP 500 aus. Wir importieren die Settings in einem Subprozess mit
+    gesetzten Env-Vars und lesen die effektive CACHES-LOCATION aus.
+    """
+
+    def _cache_location(self, env_overrides: dict) -> subprocess.CompletedProcess:
+        env = dict(os.environ)
+        env["DJANGO_SETTINGS_MODULE"] = "config.settings"
+        env.update(env_overrides)
+        return subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import django; django.setup();"
+                "from django.conf import settings;"
+                "print(settings.CACHES['default'].get('LOCATION',''))",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            cwd=str(BACKEND_DIR),
+        )
+
+    def test_cache_url_gets_password_woven_in(self):
+        proc = self._cache_location(
+            {
+                "DJANGO_DEBUG": "false",
+                "DJANGO_SECRET_KEY": "a-real-strong-secret-value",
+                "CACHE_URL": "redis://redis:6379/1",
+                "REDIS_PASSWORD": "s3cr3t",
+            }
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("redis://:s3cr3t@redis:6379/1", proc.stdout)
+
+    def test_cache_url_without_password_unchanged(self):
+        proc = self._cache_location(
+            {
+                "DJANGO_DEBUG": "false",
+                "DJANGO_SECRET_KEY": "a-real-strong-secret-value",
+                "CACHE_URL": "redis://redis:6379/1",
+                "REDIS_PASSWORD": "",
+            }
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("redis://redis:6379/1", proc.stdout)
+        self.assertNotIn("@", proc.stdout)
+
+
 class SecretKeyFailClosedTests(SimpleTestCase):
     def _setup_in_subprocess(self, env_overrides: dict) -> subprocess.CompletedProcess:
         env = dict(os.environ)
