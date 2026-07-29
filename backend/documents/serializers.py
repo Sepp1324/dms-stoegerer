@@ -840,6 +840,11 @@ class DossierSerializer(serializers.ModelSerializer):
         )
         read_only_fields = (
             "owner",
+            # ``status`` NICHT frei beschreibbar (P2): sonst könnte ein PATCH ein
+            # Dossier ohne Finalisierungs-Audit auf FINAL setzen ODER ein finales
+            # wieder auf DRAFT zurückstellen. Der Wechsel läuft ausschließlich über
+            # die ``finalize``-Action (auditiert); FINAL ist danach terminal.
+            "status",
             "summary",
             "timeline",
             "sources",
