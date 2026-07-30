@@ -1,0 +1,9 @@
+# Dokumentierte Waiver für den verbindlichen Backend-pip-audit-Gate
+# (siehe .github/workflows/dependency-audit.yml).
+#
+# Format: eine Advisory-ID (GHSA-… / PYSEC-… / CVE-…) pro Zeile, gefolgt von einer
+# kurzen Begründung. NUR bewusst akzeptierte Restrisiken ohne verfügbaren Fix
+# gehören hierher – alles Behebbare wird stattdessen in requirements.txt gebumpt.
+#
+# Die Liste wird nach dem ersten CI-Lauf aus dem pip-audit-Report befüllt
+# (Advisory-IDs stehen dort im Klartext-Log unter „pip-audit (Klartext fürs Log)").

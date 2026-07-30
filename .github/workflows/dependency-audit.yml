@@ -51,14 +51,37 @@ jobs:
           python-version: "3.12"
       - name: pip-audit installieren
         run: pip install pip-audit
-      - name: Audit-Bericht (nicht blockierend – Bestand erst sichten)
-        # Bewusst report-only: der Backend-Bestand ist hier nicht vorab verifiziert.
-        # Findings landen im Job-Summary; auf blockierend umstellen, sobald die
-        # gemeldeten Pakete gesichtet/aktualisiert sind (ggf. gezielt --ignore-vuln).
+      - name: Audit-Bericht (alle Findings, nicht blockierend)
+        # Vollständiger Bericht (inkl. dokumentierter Waiver) fürs Job-Summary und
+        # als Klartext im Log – Letzteres, damit neue Advisory-IDs sichtbar sind.
         run: |
           {
-            echo "### Backend – pip-audit (requirements.txt)"
+            echo "### Backend – pip-audit (requirements.txt, vollständig)"
             echo '```'
             pip-audit -r backend/requirements.txt --progress-spinner off || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+          echo "::group::pip-audit (Klartext fürs Log)"
+          pip-audit -r backend/requirements.txt --progress-spinner off || true
+          echo "::endgroup::"
+      - name: Gate – nicht gewaiverte Advisories blockieren
+        # Verbindlich (kein `|| true`): der Job wird rot, sobald eine Verwundbarkeit
+        # auftaucht, die NICHT in backend/.pip-audit-ignore dokumentiert gewaivert
+        # ist. Jeder Waiver trägt dort eine Begründung (z. B. Pillow an der
+        # fastembed-Decke, ohne verfügbaren Fix). So ist der Audit binding, ohne an
+        # den bewusst akzeptierten Restrisiken dauerhaft rot zu stehen.
+        working-directory: backend
+        run: |
+          IGNORE_ARGS=""
+          if [ -f .pip-audit-ignore ]; then
+            while IFS= read -r line; do
+              case "$line" in
+                ''|\#*) continue ;;  # Leerzeilen/Kommentare überspringen
+              esac
+              id="${line%%[[:space:]]*}"   # erstes Token = Advisory-ID
+              IGNORE_ARGS="$IGNORE_ARGS --ignore-vuln $id"
+            done < .pip-audit-ignore
+          fi
+          echo "Waiver: ${IGNORE_ARGS:-<keine>}"
+          # shellcheck disable=SC2086
+          pip-audit -r requirements.txt --progress-spinner off $IGNORE_ARGS
