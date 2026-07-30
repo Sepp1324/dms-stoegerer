@@ -986,6 +986,11 @@ export interface OCRRetryResult {
   queued: number;
   limit: number;
   version_ids: number[];
+  // Versionen, die NICHT eingeplant werden konnten (Broker weg). Bei Teilerfolg
+  // liefert das Backend 202 mit gefüllter Liste – die UI muss das sichtbar machen,
+  // sonst bleiben nicht erneut verarbeitete Dokumente unbemerkt. Bei komplettem
+  // Fehlschlag (queued=0) antwortet das Backend 503 (der Wrapper wirft dann).
+  failed_ids?: number[];
 }
 
 export interface SemanticIndexHealth {
