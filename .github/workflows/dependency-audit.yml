@@ -1,0 +1,64 @@
+name: dependency-audit
+
+# Automatisierter Abhängigkeits-Scan (P2): Frontend (npm) + Backend (pip).
+# Läuft bei jedem PR und wöchentlich. Bewusst so gestuft, dass die CI nicht sofort
+# an vorbestehenden high/moderate-Findings rot wird: ALLE Findings werden im
+# Job-Summary berichtet, blockierend ist nur CRITICAL in den PRODUKTIONS-Deps.
+# Die Schwelle kann später verschärft werden, sobald die gemeldeten Pakete
+# (u. a. react-router, dompurify) aktualisiert sind.
+on:
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1" # montags 06:00 UTC
+  workflow_dispatch:
+
+jobs:
+  frontend-npm-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install (ohne Scripts)
+        working-directory: frontend
+        run: npm ci --ignore-scripts
+      - name: Audit-Bericht (alle Ebenen, nicht blockierend)
+        working-directory: frontend
+        run: |
+          {
+            echo "### Frontend – npm audit (Produktion)"
+            echo '```'
+            npm audit --omit=dev || true
+            echo '```'
+            echo "### Frontend – npm audit (inkl. dev/Tooling)"
+            echo '```'
+            npm audit || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Gate – CRITICAL in Produktions-Deps blockiert
+        working-directory: frontend
+        run: npm audit --omit=dev --audit-level=critical
+
+  backend-pip-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: pip-audit installieren
+        run: pip install pip-audit
+      - name: Audit-Bericht (nicht blockierend – Bestand erst sichten)
+        # Bewusst report-only: der Backend-Bestand ist hier nicht vorab verifiziert.
+        # Findings landen im Job-Summary; auf blockierend umstellen, sobald die
+        # gemeldeten Pakete gesichtet/aktualisiert sind (ggf. gezielt --ignore-vuln).
+        run: |
+          {
+            echo "### Backend – pip-audit (requirements.txt)"
+            echo '```'
+            pip-audit -r backend/requirements.txt --progress-spinner off || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
