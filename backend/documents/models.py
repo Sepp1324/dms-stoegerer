@@ -1461,6 +1461,23 @@ class EntityRelation(models.Model):
     def __str__(self) -> str:
         return f"{self.from_entity} → {self.to_entity} ({self.get_relation_type_display()})"
 
+    def clean(self):
+        """Invariante (P2): Beide Entitäten einer Beziehung gehören DEMSELBEN Owner.
+
+        Der Scan erzeugt Relationen nur zwischen Entitäten desselben Dokuments (und
+        damit desselben Owners). Diese Validierung verankert die Grenze auch für
+        etwaige manuelle/administrative Pfade (``full_clean``), damit keine Kante
+        über Owner-Grenzen entsteht, die fremde Entity-Daten exponieren würde.
+        """
+        from django.core.exceptions import ValidationError
+
+        from_owner = getattr(self.from_entity, "owner_id", None)
+        to_owner = getattr(self.to_entity, "owner_id", None)
+        if from_owner is not None and to_owner is not None and from_owner != to_owner:
+            raise ValidationError(
+                "Eine Entitätsbeziehung darf nur Entitäten desselben Eigentümers verbinden."
+            )
+
 
 class DocumentReviewTask(models.Model):
     """Konkreter Klärungsauftrag für ein Dokument.

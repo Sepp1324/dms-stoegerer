@@ -110,6 +110,42 @@ class EntityGraphTests(APITestCase):
         resp = self.client.get(f"/api/knowledge-entities/{foreign_entity.id}/")
         self.assertEqual(resp.status_code, 404)
 
+    def test_relations_leaken_keine_fremden_entities(self):
+        """P2: /relations darf keine Relation liefern, deren ANDERER Endpunkt einem
+        fremden Owner gehört – der Serializer würde sonst dessen Entity-Namen
+        exponieren. Beide Endpunkte müssen dem Nutzer gehören."""
+        own = KnowledgeEntity.objects.create(
+            owner=self.owner, kind=KnowledgeEntity.Kind.PERSON,
+            name="Cornelia", canonical_name="cornelia",
+        )
+        foreign = KnowledgeEntity.objects.create(
+            owner=self.other, kind=KnowledgeEntity.Kind.PERSON,
+            name="Geheim Fremd", canonical_name="geheim fremd",
+        )
+        # Cross-Owner-Relation (direkt angelegt – der Scan täte das nie).
+        EntityRelation.objects.create(
+            from_entity=own, to_entity=foreign,
+            relation_type=EntityRelation.RelationType.MENTIONED_WITH,
+        )
+        # Eigene, saubere Relation zwischen zwei EIGENEN Entitäten.
+        own2 = KnowledgeEntity.objects.create(
+            owner=self.owner, kind=KnowledgeEntity.Kind.COMPANY,
+            name="Meine Firma", canonical_name="meine firma",
+        )
+        own_rel = EntityRelation.objects.create(
+            from_entity=own, to_entity=own2,
+            relation_type=EntityRelation.RelationType.MENTIONED_WITH,
+        )
+
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get(f"/api/knowledge-entities/{own.id}/relations/")
+        self.assertEqual(resp.status_code, 200)
+        ids = {r["id"] for r in resp.data}
+        self.assertIn(own_rel.id, ids)  # eigene Relation sichtbar
+        self.assertEqual(len(ids), 1)   # KEINE Cross-Owner-Relation
+        # Kein Fremd-Entity-Name im Payload.
+        self.assertNotIn("Geheim Fremd", resp.content.decode("utf-8"))
+
     def test_scan_endpoint_processes_only_visible_documents(self):
         own_doc = self._doc(
             "Scan eigen",
