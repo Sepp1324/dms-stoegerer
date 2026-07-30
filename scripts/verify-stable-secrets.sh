@@ -31,3 +31,51 @@ EOF
 fi
 
 echo "Stable-secret guard OK: kein secretGenerator unter deploy/k8s."
+
+# --- Key-Drift-Guard für dms-db-backup-secrets (P2) ------------------------
+# Statisch (kein Cluster): Jeder Key, den ein Manifest per secretKeyRef aus
+# dms-db-backup-secrets zieht, MUSS in secret.example.yaml dokumentiert sein –
+# sonst driftet der CronJob gegen ein Secret, das den Key gar nicht anbietet
+# (Rollout grün, Backup scheitert). Zusätzlich müssen die Pflicht-Keys existieren.
+python3 - <<'PY'
+import re
+import sys
+from pathlib import Path
+
+EXPECTED = {"DJANGO_SECRET_KEY", "POSTGRES_PASSWORD"}
+example = Path("deploy/k8s/secret.example.yaml").read_text(encoding="utf-8")
+
+# Keys, die secret.example.yaml im dms-db-backup-secrets-Block definiert.
+block = example.split("name: dms-db-backup-secrets", 1)
+defined = set()
+if len(block) == 2:
+    rest = block[1].split("\n---", 1)[0]
+    for line in rest.splitlines():
+        m = re.match(r"\s{2}([A-Z0-9_]+):", line)
+        if m:
+            defined.add(m.group(1))
+
+missing_example = EXPECTED - defined
+if missing_example:
+    print(f"FEHLER: secret.example.yaml fehlt dms-db-backup-secrets-Key(s): {sorted(missing_example)}", file=sys.stderr)
+    sys.exit(1)
+
+# Alle in Manifesten referenzierten Keys von dms-db-backup-secrets einsammeln
+# (Flow ``{ name: dms-db-backup-secrets, key: X }`` UND mehrzeilige Form).
+referenced = set()
+for path in Path("deploy/k8s").rglob("*.yaml"):
+    text = path.read_text(encoding="utf-8")
+    # Flow-Form
+    for m in re.finditer(r"name:\s*dms-db-backup-secrets\s*,\s*key:\s*([A-Z0-9_]+)", text):
+        referenced.add(m.group(1))
+    # Mehrzeilige Form: name: dms-db-backup-secrets \n ... key: X
+    for m in re.finditer(r"name:\s*dms-db-backup-secrets\b[^\n]*\n(?:\s.*\n)*?\s*key:\s*([A-Z0-9_]+)", text):
+        referenced.add(m.group(1))
+
+undocumented = referenced - defined
+if undocumented:
+    print(f"FEHLER: Manifeste referenzieren dms-db-backup-secrets-Key(s), die secret.example.yaml NICHT anbietet: {sorted(undocumented)}", file=sys.stderr)
+    sys.exit(1)
+
+print(f"Backup-Secret-Key-Guard OK: referenziert={sorted(referenced) or '—'}, dokumentiert={sorted(defined)}.")
+PY
