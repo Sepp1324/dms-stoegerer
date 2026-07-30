@@ -29,7 +29,7 @@ from django.http import (
 from django.utils import timezone
 from django.utils.text import slugify
 from kombu.exceptions import OperationalError as BrokerOperationalError
-from rest_framework import status, viewsets
+from rest_framework import serializers, status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.exceptions import APIException
 from rest_framework.exceptions import ValidationError as DRFValidationError
@@ -270,6 +270,24 @@ _EXTRACTION_CUSTOM_FIELD_TARGETS = {
         CustomField.DataType.TEXT,
     ),
 }
+
+
+_BOOL_FIELD = serializers.BooleanField()
+
+
+def parse_bool_param(value, *, default=False) -> bool:
+    """Robuste Bool-Auswertung für Action-Payloads (P2).
+
+    ``bool(request.data.get(...))`` ist unsicher: Python wertet JEDEN nicht-leeren
+    String – auch ``"false"`` – als ``True``. Bei einem Freigabelink könnte so aus
+    ``always_latest="false"`` versehentlich ``True`` (Zugriff auf künftige
+    Versionen) werden. Wir nutzen das DRF-``BooleanField`` (akzeptiert
+    true/false/1/0/yes/no …) und lehnen ungültige Werte mit HTTP 400 ab, statt sie
+    still als wahr zu interpretieren. Fehlt der Schlüssel (``None``), gilt der
+    Default."""
+    if value is None:
+        return default
+    return _BOOL_FIELD.to_internal_value(value)
 
 
 def _household_member_ids(user) -> set:
@@ -2070,7 +2088,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN,
             )
         document = self.get_object()
-        enabled = bool(request.data.get("enabled", True))
+        enabled = parse_bool_param(request.data.get("enabled"), default=True)
         reason = str(request.data.get("reason", "")).strip()
         if enabled and not reason:
             return Response(
@@ -3140,7 +3158,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN,
             )
         document = self.get_object()
-        shared = bool(request.data.get("shared", True))
+        shared = parse_bool_param(request.data.get("shared"), default=True)
         if shared and not request.user.households.exists():
             return Response(
                 {"detail": "Bitte zuerst einen Haushalt anlegen oder beitreten."},
@@ -3531,7 +3549,9 @@ class DocumentViewSet(viewsets.ModelViewSet):
         learned_created = False
         learn_payload = request.data.get("learn")
         learn_payload = learn_payload if isinstance(learn_payload, dict) else {}
-        create_rule = bool(request.data.get("create_rule") or learn_payload)
+        create_rule = parse_bool_param(
+            request.data.get("create_rule"), default=False
+        ) or bool(learn_payload)
         match_text = (
             request.data.get("match_text")
             or learn_payload.get("text_contains")
@@ -5856,7 +5876,9 @@ class DocumentShareLinkViewSet(viewsets.ModelViewSet):
         # Versionsbindung (P1): Standardmäßig wird die AKTUELLE Version gepinnt,
         # damit der Link keine späteren (evtl. vertraulichen) Versionen offenlegt.
         # ``always_latest=true`` wählt bewusst „immer aktuelle Version" (version=NULL).
-        always_latest = bool(request.data.get("always_latest", False))
+        always_latest = parse_bool_param(
+            request.data.get("always_latest"), default=False
+        )
         pinned_version = None if always_latest else document.current_version
 
         # ≥32 Zeichen Entropie; nur der Hash landet in der DB.

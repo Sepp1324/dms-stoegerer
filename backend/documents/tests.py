@@ -2149,6 +2149,40 @@ class DocumentShareLinkTests(APITestCase):
         self.assertEqual(resp.status_code, 404)
         self.assertEqual(DocumentShareLink.objects.count(), 0)
 
+    def test_always_latest_false_string_pinnt_version(self):
+        """P2: ``always_latest="false"`` (String) darf NICHT als True gewertet
+        werden – sonst gäbe der Link (ungewollt) auch KÜNFTIGE Versionen frei.
+        Erwartung: die aktuelle Version wird gepinnt (version_id gesetzt)."""
+        version = DocumentVersion.objects.create(
+            document=self.doc, version_no=1, file_path="/tmp/sl.pdf", sha256="d" * 64
+        )
+        self.doc.current_version = version
+        self.doc.save(update_fields=["current_version"])
+        self.client.force_authenticate(self.owner)
+        resp = self.client.post(
+            self.BASE,
+            {
+                "document": self.doc.id,
+                "expires_at": self._future(),
+                "always_latest": "false",
+            },
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
+        link = DocumentShareLink.objects.get(id=resp.data["id"])
+        self.assertEqual(link.version_id, version.id)  # gepinnt, NICHT always-latest
+
+    def test_always_latest_ungueltiger_wert_ist_400(self):
+        self.client.force_authenticate(self.owner)
+        resp = self.client.post(
+            self.BASE,
+            {
+                "document": self.doc.id,
+                "expires_at": self._future(),
+                "always_latest": "vielleicht",
+            },
+        )
+        self.assertEqual(resp.status_code, 400)
+
     # --- List -------------------------------------------------------------
     def test_list_je_dokument_ohne_hash_und_owner_gescoped(self):
         link = DocumentShareLink.objects.create(
