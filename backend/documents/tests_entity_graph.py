@@ -146,6 +146,39 @@ class EntityGraphTests(APITestCase):
         # Kein Fremd-Entity-Name im Payload.
         self.assertNotIn("Geheim Fremd", resp.content.decode("utf-8"))
 
+    def test_entity_relations_liste_leaked_keine_fremden(self):
+        """P1: Auch das separate /api/entity-relations/ (EntityRelationViewSet) muss
+        beide Endpunkte owner-scopen – nicht nur die relations-Action (#464)."""
+        own = KnowledgeEntity.objects.create(
+            owner=self.owner, kind=KnowledgeEntity.Kind.PERSON,
+            name="Cornelia", canonical_name="cornelia",
+        )
+        foreign = KnowledgeEntity.objects.create(
+            owner=self.other, kind=KnowledgeEntity.Kind.PERSON,
+            name="Geheim Fremd", canonical_name="geheim fremd",
+        )
+        cross = EntityRelation.objects.create(
+            from_entity=own, to_entity=foreign,
+            relation_type=EntityRelation.RelationType.MENTIONED_WITH,
+        )
+        own2 = KnowledgeEntity.objects.create(
+            owner=self.owner, kind=KnowledgeEntity.Kind.COMPANY,
+            name="Meine Firma", canonical_name="meine firma",
+        )
+        own_rel = EntityRelation.objects.create(
+            from_entity=own, to_entity=own2,
+            relation_type=EntityRelation.RelationType.MENTIONED_WITH,
+        )
+
+        self.client.force_authenticate(self.owner)
+        resp = self.client.get("/api/entity-relations/")
+        self.assertEqual(resp.status_code, 200)
+        rows = resp.data["results"] if isinstance(resp.data, dict) and "results" in resp.data else resp.data
+        ids = {r["id"] for r in rows}
+        self.assertIn(own_rel.id, ids)
+        self.assertNotIn(cross.id, ids)  # KEINE Cross-Owner-Relation
+        self.assertNotIn("Geheim Fremd", resp.content.decode("utf-8"))
+
     def test_scan_endpoint_processes_only_visible_documents(self):
         own_doc = self._doc(
             "Scan eigen",
