@@ -291,6 +291,8 @@ REST_FRAMEWORK = {
         # legitime Logins sind selten, Angreifer probieren viele durch.
         "login": os.getenv("THROTTLE_LOGIN_RATE", "10/minute"),
         "token_refresh": os.getenv("THROTTLE_TOKEN_REFRESH_RATE", "30/minute"),
+        # Regel-Simulation: synchroner Vollscan über alle sichtbaren Dokumente.
+        "rule_simulate": os.getenv("THROTTLE_RULE_SIMULATE_RATE", "20/minute"),
     },
 }
 

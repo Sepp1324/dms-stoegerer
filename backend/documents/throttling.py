@@ -113,3 +113,12 @@ class IntegrityCheckRateThrottle(_PerUserScopeThrottle):
     P2)."""
 
     scope = "integrity_check"
+
+
+class RuleSimulateRateThrottle(_PerUserScopeThrottle):
+    """Limit für die Regel-Simulation (Scope ``rule_simulate``, P2).
+
+    Jede Simulation zählt + durchläuft den GESAMTEN sichtbaren Dokumentbestand
+    synchron. Ohne Drossel könnten wiederholte Aufrufe die Webworker binden."""
+
+    scope = "rule_simulate"

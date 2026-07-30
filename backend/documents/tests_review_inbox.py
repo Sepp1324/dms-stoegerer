@@ -541,6 +541,51 @@ class DocumentReviewInboxTests(APITestCase):
         self.assertIsNone(self.needs_review.correspondent)
         self.assertIsNone(self.needs_review.document_type)
 
+    def test_rule_simulation_tags_kein_n_plus_1(self):
+        """P2: Die Simulation liest die Tags jedes Treffers aus dem Prefetch-Cache;
+        die Query-Zahl bleibt KONSTANT, egal wie viele Dokumente matchen (früher je
+        Treffer eine tags.values_list()-Query)."""
+        from django.core.cache import cache
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        cache.clear()  # Throttle-Historie frisch
+        payload = {
+            "match": {"text_contains": ["Wuestenrot"]},
+            "then": {"tags": ["Neu"]},
+        }
+
+        def _match_doc(i):
+            d = self._document(
+                f"Wuestenrot {i}",
+                owner=self.owner,
+                review_status=Document.ReviewStatus.NEEDS_REVIEW,
+            )
+            d.current_version.ocr_text = "Wuestenrot Gruppe"
+            d.current_version.save(update_fields=["ocr_text"])
+            d.tags.add(Tag.objects.create(name=f"T{i}"))
+
+        self.client.force_authenticate(self.owner)
+        for i in range(2):
+            _match_doc(i)
+        with CaptureQueriesContext(connection) as ctx1:
+            r1 = self.client.post(
+                "/api/classification-rules/simulate/", payload, format="json"
+            )
+        baseline = len(ctx1)
+
+        for i in range(2, 6):
+            _match_doc(i)
+        with CaptureQueriesContext(connection) as ctx2:
+            r2 = self.client.post(
+                "/api/classification-rules/simulate/", payload, format="json"
+            )
+
+        self.assertEqual(r1.status_code, 200, r1.data)
+        self.assertEqual(r2.status_code, 200, r2.data)
+        self.assertGreaterEqual(r2.data["matched"], 6)
+        self.assertEqual(len(ctx2), baseline)  # kein N+1: konstant trotz mehr Treffer
+
     def test_existing_rule_simulation_zeigt_metadatenkonflikte(self):
         """Bestehende Regeln lassen sich simulieren und zeigen Konflikte."""
         evn = Correspondent.objects.create(name="EVN")
