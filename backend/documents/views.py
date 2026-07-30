@@ -1,5 +1,6 @@
 import hashlib
 import io
+import logging
 import os
 import re
 import secrets
@@ -271,6 +272,25 @@ _EXTRACTION_CUSTOM_FIELD_TARGETS = {
         CustomField.DataType.TEXT,
     ),
 }
+
+
+logger = logging.getLogger(__name__)
+
+
+def _try_enqueue(dispatch) -> bool:
+    """Ruft einen ``.delay()``-Dispatch auf; ``True`` bei Erfolg, ``False`` bei
+    Broker-Fehler (kein Wurf) (P1).
+
+    So kann ein Bulk-Enqueue nach dem ERSTEN Broker-Fehler abbrechen (statt N
+    Broker-Timeouts nacheinander) und der Request sauber mit **503 + Ergebnisliste**
+    antworten, statt mitten im Loop mit 500 zu sterben und einen Teil der Tasks
+    doch eingeplant zu hinterlassen."""
+    try:
+        dispatch()
+        return True
+    except Exception:  # noqa: BLE001 – Broker nicht erreichbar: kontrolliert melden
+        logger.warning("Task-Dispatch fehlgeschlagen (Broker nicht erreichbar?).")
+        return False
 
 
 _BOOL_FIELD = serializers.BooleanField()
@@ -911,16 +931,36 @@ class OCRRetryFailedView(APIView):
             .filter(processing_state=PS.FAILED)
             .order_by("processing_failed_at", "id")[:limit]
         )
+        queued_ids: list[int] = []
+        failed_ids: list[int] = []
+        broker_down = False
         for version in versions:
-            retry_document_version.delay(version.id, actor_id=request.user.id)
+            if broker_down:
+                failed_ids.append(version.id)
+                continue  # Broker weg -> Rest gar nicht erst versuchen (kein N×Timeout)
+            if _try_enqueue(
+                lambda v=version: retry_document_version.delay(
+                    v.id, actor_id=request.user.id
+                )
+            ):
+                queued_ids.append(version.id)
+            else:
+                broker_down = True
+                failed_ids.append(version.id)
 
         return Response(
             {
-                "queued": len(versions),
+                "queued": len(queued_ids),
                 "limit": limit,
-                "version_ids": [v.id for v in versions],
+                "version_ids": queued_ids,
+                "failed_ids": failed_ids,
             },
-            status=status.HTTP_202_ACCEPTED,
+            # 503, wenn NICHTS eingeplant werden konnte (Broker down); 202 sonst.
+            status=(
+                status.HTTP_503_SERVICE_UNAVAILABLE
+                if failed_ids and not queued_ids
+                else status.HTTP_202_ACCEPTED
+            ),
         )
 
 
@@ -3556,7 +3596,13 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        retry_document_version.delay(version.id, actor_id=request.user.id)
+        if not _try_enqueue(
+            lambda: retry_document_version.delay(version.id, actor_id=request.user.id)
+        ):
+            return Response(
+                {"detail": "Verarbeitung konnte nicht eingeplant werden (Broker nicht erreichbar). Bitte später erneut."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         return Response(
             DocumentVersionSerializer(version).data,
             status=status.HTTP_202_ACCEPTED,
@@ -4228,8 +4274,19 @@ class DocumentViewSet(viewsets.ModelViewSet):
 
         # Große Batches asynchron verarbeiten (Timeout-/Lastschutz).
         if len(owned_ids) > self.BULK_CLASSIFY_SYNC_LIMIT:
-            task = bulk_classify_documents.delay(owned_ids, actor_id=request.user.id)
-            return Response({"task_id": task.id, "status": "processing"})
+            holder = {}
+
+            def _dispatch():
+                holder["task"] = bulk_classify_documents.delay(
+                    owned_ids, actor_id=request.user.id
+                )
+
+            if not _try_enqueue(_dispatch):
+                return Response(
+                    {"detail": "Klassifizierung konnte nicht eingeplant werden (Broker nicht erreichbar). Bitte später erneut."},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
+            return Response({"task_id": holder["task"].id, "status": "processing"})
 
         # Kleine Batches synchron; frische Instanzen mit Prefetch für apply_rules.
         documents = list(self.get_queryset().filter(id__in=owned_ids))
