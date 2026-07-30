@@ -15,8 +15,20 @@ import {
   type BackupStatus,
   type OCRHealthIssue,
   type OCRHealthStatus,
+  type OCRRetryResult,
   type SemanticIndexHealth,
 } from "../api";
+
+// Bulk-Retry-Rückmeldung (P2): Bei Teilerfolg liefert das Backend 202 mit
+// gefüllter ``failed_ids`` (Broker weg). Ohne das im Text sichtbar zu machen,
+// bleiben nicht erneut eingeplante Dokumente unbemerkt. Als reine Funktion
+// ausgelagert, damit sie ohne Komponenten-Render testbar ist.
+export function formatRetryNote(result: OCRRetryResult): string {
+  const base = `${result.queued} Verarbeitung${result.queued === 1 ? "" : "en"} neu angestoßen.`;
+  const failed = result.failed_ids?.length ?? 0;
+  if (failed === 0) return base;
+  return `${base} ${failed} konnte${failed === 1 ? "" : "n"} nicht eingeplant werden (Broker nicht erreichbar) – bitte erneut versuchen.`;
+}
 
 function formatDate(value: string | null): string {
   if (!value) return "Nie";
@@ -302,7 +314,7 @@ export default function SystemStatusPage() {
     setRetryNote(null);
     try {
       const result = await retryFailedOCRProcessing(25);
-      setRetryNote(`${result.queued} Verarbeitung${result.queued === 1 ? "" : "en"} neu angestoßen.`);
+      setRetryNote(formatRetryNote(result));
       await Promise.all([
         getBackupStatus().then(setStatus),
         getArchiveHealth().then(setArchive),
