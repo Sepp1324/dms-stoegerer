@@ -42,6 +42,23 @@ class ThrottleLocalFallbackTests(TestCase):
         # Erste 2 erlaubt, danach gesperrt (statt alle 4 offen).
         self.assertEqual(results, [True, True, False, False])
 
+    def test_gedrosselter_fallback_liefert_wait_ohne_500(self):
+        # P1-Regression: Nach allow_request()->False ruft DRF wait() für den
+        # Retry-After-Header auf und greift auf self.history/self.now zu. Ohne die
+        # gesetzten DRF-Attribute crashte das mit AttributeError -> HTTP 500.
+        t = self._throttle(num_requests=1, duration=60)
+        req = self._request()
+        with patch.object(
+            SimpleRateThrottle, "allow_request", side_effect=ConnectionError("redis down")
+        ):
+            self.assertTrue(t.allow_request(req, view=None))  # 1. erlaubt
+            self.assertFalse(t.allow_request(req, view=None))  # 2. gedrosselt
+            # DRF-Pfad: darf NICHT mit AttributeError brechen.
+            wait = t.wait()
+        self.assertIsInstance(wait, float)
+        self.assertGreaterEqual(wait, 0.0)
+        self.assertLessEqual(wait, 60.0)
+
     def test_fallback_ist_pro_key_unabhaengig(self):
         t = self._throttle(num_requests=1)
         a, b = self._request("198.51.100.1"), self._request("198.51.100.2")
