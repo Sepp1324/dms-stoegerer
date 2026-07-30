@@ -10,10 +10,27 @@ das Limit über alle Pods GEMEINSAM gilt – siehe ``settings.CACHE_URL``).
 from __future__ import annotations
 
 import logging
+import threading
+import time
 
 from rest_framework.throttling import SimpleRateThrottle
 
 logger = logging.getLogger(__name__)
+
+# Prozess-lokaler Fallback-Zähler (P2): Fällt der geteilte Redis-Cache aus, war das
+# Throttle bisher vollständig offen (fail-open) – Login/Refresh/Upload/KI-Limits
+# griffen dann GAR NICHT mehr. Der Kommentar verwies auf ein vorgeschaltetes
+# Traefik-Rate-Limit, das im Deployment aber nicht existiert. Statt komplett offen
+# zu sein, zählt dieser In-Memory-Fallback pro Prozess weiter. Er gilt NICHT über
+# alle Pods gemeinsam (darum nur Fallback, nicht der Normalpfad), begrenzt aber
+# einen Brute-Force gegen einen einzelnen Pod deutlich. Die Historie ist je Key
+# eine absteigend nach Zeit sortierte Liste von Zeitstempeln (analog DRF).
+_FALLBACK_LOCK = threading.Lock()
+_FALLBACK_HISTORY: dict[str, list[float]] = {}
+# Notbremse gegen unbegrenztes Wachstum bei einem langen Ausfall mit sehr vielen
+# unterschiedlichen IPs: übersteigt der Store diese Größe, wird er verworfen
+# (die Zähler starten neu – akzeptable Degradation während eines Cache-Ausfalls).
+_FALLBACK_MAX_KEYS = 50_000
 
 
 class _PerUserScopeThrottle(SimpleRateThrottle):
@@ -28,20 +45,49 @@ class _PerUserScopeThrottle(SimpleRateThrottle):
         return self.cache_format % {"scope": self.scope, "ident": ident}
 
     def allow_request(self, request, view):
-        """Fail-open bei Cache-Ausfall (P1): Der Zähler liegt in Redis. Ist Redis
-        nicht erreichbar, warf ``super().allow_request`` einen ungefangenen
-        ``ConnectionError`` -> HTTP 500. Insbesondere legte das den (jetzt
-        gedrosselten) LOGIN komplett lahm. Ein Cache-Ausfall darf den Request NICHT
-        mit 500 killen; das Throttle lässt ihn dann durch (die eigentliche Auth-/
-        Berechtigungsprüfung bleibt unberührt). Das äußere Traefik-Rate-Limit dient
-        als Fallback-Schranke."""
+        """Bei Cache-Ausfall (P2) auf einen prozess-lokalen Zähler zurückfallen statt
+        vollständig offen zu sein. Der Zähler liegt normal in Redis; ist Redis nicht
+        erreichbar, warf ``super().allow_request`` einen ungefangenen
+        ``ConnectionError`` -> HTTP 500 (das legte u. a. den gedrosselten LOGIN lahm).
+        Ein Cache-Ausfall darf den Request NICHT mit 500 killen – aber auch nicht
+        jedes Limit komplett aushebeln. Deshalb greift der In-Memory-Fallback
+        (per-Pod)."""
         try:
             return super().allow_request(request, view)
-        except Exception:  # noqa: BLE001 – Redis/Cache weg: fail-open statt 500
+        except Exception:  # noqa: BLE001 – Redis/Cache weg: lokaler Fallback statt 500
             logger.warning(
-                "Throttle-Cache (%s) nicht erreichbar – Request wird durchgelassen "
-                "(fail-open).", getattr(self, "scope", "?"),
+                "Throttle-Cache (%s) nicht erreichbar – prozess-lokaler "
+                "Fallback-Zähler greift.", getattr(self, "scope", "?"),
             )
+            return self._local_fallback_allow(request, view)
+
+    def _local_fallback_allow(self, request, view) -> bool:
+        """Sliding-Window im Prozessspeicher, mit derselben Rate wie im Normalpfad."""
+        rate = getattr(self, "rate", None)
+        num_requests = getattr(self, "num_requests", None)
+        duration = getattr(self, "duration", None)
+        if not rate or not num_requests or not duration:
+            return True  # keine Rate konfiguriert -> nicht drosseln
+        try:
+            key = self.get_cache_key(request, view)
+        except Exception:  # noqa: BLE001 – Key nicht bestimmbar -> durchlassen
+            return True
+        if key is None:
+            return True
+        now = time.time()
+        cutoff = now - duration
+        with _FALLBACK_LOCK:
+            if len(_FALLBACK_HISTORY) > _FALLBACK_MAX_KEYS:
+                _FALLBACK_HISTORY.clear()
+            history = _FALLBACK_HISTORY.get(key, [])
+            # Einträge außerhalb des Fensters am Listenende verwerfen.
+            while history and history[-1] <= cutoff:
+                history.pop()
+            if len(history) >= num_requests:
+                _FALLBACK_HISTORY[key] = history
+                return False
+            history.insert(0, now)
+            _FALLBACK_HISTORY[key] = history
             return True
 
 
