@@ -334,6 +334,26 @@ CELERY_RESULT_BACKEND = REDIS_URL
 CELERY_TASK_TRACK_STARTED = True
 CELERY_TIMEZONE = TIME_ZONE
 
+# Broker fail-fast im Request-Pfad (P2): Signale/Views rufen synchron ``.delay()``.
+# Ist Redis nicht erreichbar, blockierte das per Default ~20 s (mehrere Reconnect-
+# Versuche) und ließ z. B. eine simple Tag-/Metadatenänderung hängen. Kurzer
+# Connect/Socket-Timeout + eng begrenzte Publish-Retries lassen ``.delay()``
+# stattdessen in wenigen Sekunden scheitern; die Aufrufer fangen die Exception ab
+# (best-effort) bzw. der Ingest markiert die Version retry-fähig. Der WORKER-Start
+# darf weiter auf den Broker warten (retry_on_startup).
+CELERY_BROKER_TRANSPORT_OPTIONS = {
+    "socket_connect_timeout": int(os.getenv("CELERY_BROKER_CONNECT_TIMEOUT", "3")),
+    "socket_timeout": int(os.getenv("CELERY_BROKER_SOCKET_TIMEOUT", "3")),
+}
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+CELERY_TASK_PUBLISH_RETRY = True
+CELERY_TASK_PUBLISH_RETRY_POLICY = {
+    "max_retries": int(os.getenv("CELERY_TASK_PUBLISH_MAX_RETRIES", "1")),
+    "interval_start": 0,
+    "interval_step": 0.2,
+    "interval_max": 0.5,
+}
+
 # acks_late/reject_on_worker_lost BEWUSST NICHT global (zurückgenommen):
 # * process_document_version ist (noch) NICHT wiederaufnahmefähig – es startet
 #   immer bei Schritt 0. Ein nach Worker-Crash wiederzugestellter Task auf
