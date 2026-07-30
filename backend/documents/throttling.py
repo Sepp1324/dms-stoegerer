@@ -83,12 +83,21 @@ class _PerUserScopeThrottle(SimpleRateThrottle):
             # Einträge außerhalb des Fensters am Listenende verwerfen.
             while history and history[-1] <= cutoff:
                 history.pop()
-            if len(history) >= num_requests:
-                _FALLBACK_HISTORY[key] = history
-                return False
-            history.insert(0, now)
+            allowed = len(history) < num_requests
+            if allowed:
+                history.insert(0, now)
             _FALLBACK_HISTORY[key] = history
-            return True
+        # DRF ruft bei einem gedrosselten Request (allow_request -> False)
+        # anschließend ``wait()`` für den Retry-After-Header auf und greift dabei
+        # auf ``self.history`` und ``self.now`` zu. Im Fehlerpfad hatte
+        # ``super().allow_request`` diese Attribute NICHT gesetzt (der Cache-Zugriff
+        # warf davor) -> AttributeError -> HTTP 500 statt 429. Deshalb hier die von
+        # ``wait()`` erwarteten DRF-Attribute setzen (Historie ist wie bei DRF
+        # absteigend nach Zeit; num_requests/duration stehen aus __init__ bereit).
+        self.key = key
+        self.now = now
+        self.history = history
+        return allowed
 
 
 class UploadRateThrottle(_PerUserScopeThrottle):
