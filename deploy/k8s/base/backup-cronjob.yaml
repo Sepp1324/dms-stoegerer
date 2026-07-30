@@ -41,6 +41,16 @@ spec:
         spec:
           hostNetwork: true
           dnsPolicy: ClusterFirstWithHostNet
+          # Härtung (P2), NICHT-brechend: seccomp-Standardfilter für alle Container.
+          # Der Pod bleibt BEWUSST root – er tart /data (Dateien gehören der App-UID
+          # 1000; root liest sie via CAP_DAC_OVERRIDE). Ein Wechsel auf non-root
+          # (runAsUser 1000 + fsGroup 1000) UND capabilities.drop:[ALL] ist möglich,
+          # muss aber am Cluster verifiziert werden (dass UID 1000 wirklich ALLE
+          # /data-Dateien lesen kann) – sonst bricht das Backup. Daher hier nur die
+          # garantiert unschädliche Härtung.
+          securityContext:
+            seccompProfile:
+              type: RuntimeDefault
           affinity:
             podAffinity:
               requiredDuringSchedulingIgnoredDuringExecution:
@@ -53,6 +63,11 @@ spec:
             - name: backup
               image: registry.stoegerer-home.at/dms-backend:46b8f61
               imagePullPolicy: IfNotPresent
+              # Kein Privilege-Escalation (P2): setuid/setgid-Aufstieg ist für pg_dump/
+              # tar/ssh nicht nötig. (capabilities.drop:[ALL] bewusst NICHT gesetzt –
+              # als root braucht tar CAP_DAC_OVERRIDE zum Lesen der /data-Dateien.)
+              securityContext:
+                allowPrivilegeEscalation: false
               command: ["/bin/sh"]
               args:
                 - -c
