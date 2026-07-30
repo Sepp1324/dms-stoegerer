@@ -262,6 +262,14 @@ REST_FRAMEWORK = {
     ),
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 25,
+    # Vertrauenswürdige Proxy-Anzahl für die Client-IP-Ermittlung (P2). Ohne diese
+    # Angabe nimmt DRFs get_ident() einen CLIENT-gesetzten X-Forwarded-For-Wert und
+    # das IP-basierte Login-/Refresh-Throttle wäre trivial umgehbar (jeder gefälschte
+    # XFF ergäbe einen anderen Zähler-Key). Mit NUM_PROXIES=<Anzahl vertrauenswürdiger
+    # Proxies> nutzt DRF den vom äußersten vertrauenswürdigen Proxy (Traefik)
+    # angehängten echten Client-Wert. WICHTIG (Betrieb): Traefik MUSS eingehende
+    # X-Forwarded-For-Header von unvertrauten Quellen verwerfen/überschreiben.
+    "NUM_PROXIES": int(os.getenv("DRF_NUM_PROXIES", "1")),
     # DoS-Schutz (P1): KEIN globaler Default-Throttle – die Drossel wird gezielt
     # per ``throttle_classes`` an die Upload-Pfade gehängt (documents/throttling.py),
     # damit Suche/Listen/Polling unangetastet bleiben. Die Raten sind per Env

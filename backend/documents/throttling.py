@@ -9,7 +9,11 @@ das Limit über alle Pods GEMEINSAM gilt – siehe ``settings.CACHE_URL``).
 """
 from __future__ import annotations
 
+import logging
+
 from rest_framework.throttling import SimpleRateThrottle
+
+logger = logging.getLogger(__name__)
 
 
 class _PerUserScopeThrottle(SimpleRateThrottle):
@@ -22,6 +26,23 @@ class _PerUserScopeThrottle(SimpleRateThrottle):
         else:
             ident = self.get_ident(request)  # Fallback: Client-IP
         return self.cache_format % {"scope": self.scope, "ident": ident}
+
+    def allow_request(self, request, view):
+        """Fail-open bei Cache-Ausfall (P1): Der Zähler liegt in Redis. Ist Redis
+        nicht erreichbar, warf ``super().allow_request`` einen ungefangenen
+        ``ConnectionError`` -> HTTP 500. Insbesondere legte das den (jetzt
+        gedrosselten) LOGIN komplett lahm. Ein Cache-Ausfall darf den Request NICHT
+        mit 500 killen; das Throttle lässt ihn dann durch (die eigentliche Auth-/
+        Berechtigungsprüfung bleibt unberührt). Das äußere Traefik-Rate-Limit dient
+        als Fallback-Schranke."""
+        try:
+            return super().allow_request(request, view)
+        except Exception:  # noqa: BLE001 – Redis/Cache weg: fail-open statt 500
+            logger.warning(
+                "Throttle-Cache (%s) nicht erreichbar – Request wird durchgelassen "
+                "(fail-open).", getattr(self, "scope", "?"),
+            )
+            return True
 
 
 class UploadRateThrottle(_PerUserScopeThrottle):
