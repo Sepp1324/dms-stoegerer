@@ -802,12 +802,20 @@ def run_postprocessing(version: DocumentVersion, result: dict, *, actor=None) ->
     Einzelschritte sind reconciliierende ``sync``-Funktionen (wiederholbar);
     identisch für den Erst- und den Retry-Lauf."""
     actor = actor or version.created_by
-    _sync_contract_center(version, result, actor=actor)
-    _sync_entity_graph(version, result, actor=actor)
-    # Pflicht-Findbarkeitsindizes: bei vollständigem Erfolg wird indexed_at gesetzt;
-    # bei Fehler bleibt es NULL -> reap_unindexed_versions holt die Indizierung nach.
+    # Erfolg JE STUFE einsammeln (P1): postprocessed_at darf NUR gesetzt werden, wenn
+    # ALLE Pflichtstufen erfolgreich waren. Die Stufen fangen Fehler intern ab; würde
+    # der Marker trotzdem gesetzt, überspränge der Reconciler das unvollständige
+    # Dokument dauerhaft. Jede Stufe läuft unabhängig (kein Short-Circuit der
+    # Seiteneffekte – die Funktion ist stets die linke Seite von ``and``).
+    ok = True
+    ok = _sync_contract_center(version, result, actor=actor) and ok
+    ok = _sync_entity_graph(version, result, actor=actor) and ok
+    # Findbarkeitsindex hat einen EIGENEN Marker (indexed_at) + Reconciler
+    # (reap_unindexed_versions, inkl. Sonderfall deaktivierte Embeddings). Er wird
+    # daher NICHT über postprocessed_at gegated – sonst bliebe der Marker bei
+    # deaktivierten Embeddings dauerhaft NULL.
     result["indexed"] = ensure_findability_index(version, actor=actor)
-    _sync_auto_file(version, result, actor=actor)
+    ok = _sync_auto_file(version, result, actor=actor) and ok
     try:
         from documents.services import review_tasks
 
@@ -818,7 +826,11 @@ def run_postprocessing(version: DocumentVersion, result: dict, *, actor=None) ->
         raise  # Soft-Time-Limit nie als Best-Effort-Teilfehler verschlucken
     except Exception:  # noqa: BLE001 - Review-Tasks dürfen Verarbeitung nicht kippen
         logger.exception("Review-Task-Sync für Version %s fehlgeschlagen", version.id)
-    _mark_postprocessed(version)
+        ok = False
+    # NUR bei vollständigem Erfolg abschließen; sonst bleibt postprocessed_at NULL und
+    # reap_unpostprocessed_versions versucht die (idempotenten) Stufen erneut.
+    if ok:
+        _mark_postprocessed(version)
     return result
 
 
@@ -916,38 +928,46 @@ def ensure_findability_index(version: DocumentVersion, *, actor=None) -> bool:
     return False
 
 
-def _sync_contract_center(version: DocumentVersion, result: dict, *, actor=None) -> None:
-    """Best-effort-Vertragserkennung nach erfolgreicher Verarbeitung."""
+def _sync_contract_center(version: DocumentVersion, result: dict, *, actor=None) -> bool:
+    """Vertragserkennung nach erfolgreicher Verarbeitung. Gibt ``True`` zurück, wenn
+    der Schritt sauber durchlief (oder nichts zu tun war), ``False`` bei einem intern
+    abgefangenen Fehler – damit ``run_postprocessing`` den Abschlussmarker nur bei
+    vollständigem Erfolg setzt."""
     if result.get("status") != "done":
-        return
+        return True
     try:
         from documents.services import contracts
 
         result["contract"] = contracts.sync_contract_record(
             version.document, actor=actor
         )
+        return True
     except SoftTimeLimitExceeded:
         raise  # Soft-Time-Limit nie als Best-Effort-Teilfehler verschlucken
     except Exception:  # noqa: BLE001 - Vertrags-Cockpit darf Pipeline nie kippen
         logger.exception("Contract-Center-Sync für Version %s fehlgeschlagen", version.id)
         result["contract"] = {"status": "failed"}
+        return False
 
 
-def _sync_entity_graph(version: DocumentVersion, result: dict, *, actor=None) -> None:
-    """Best-effort-Sync des privaten DMS-Gedächtnisses nach READY."""
+def _sync_entity_graph(version: DocumentVersion, result: dict, *, actor=None) -> bool:
+    """Sync des privaten DMS-Gedächtnisses nach READY. Gibt ``True``/``False`` wie
+    ``_sync_contract_center`` zurück (Erfolg je Stufe)."""
     if result.get("status") != "done":
-        return
+        return True
     try:
         from documents.services import entity_graph
 
         result["entity_graph"] = entity_graph.sync_document_entities(
             version.document, actor=actor
         )
+        return True
     except SoftTimeLimitExceeded:
         raise  # Soft-Time-Limit nie als Best-Effort-Teilfehler verschlucken
     except Exception:  # noqa: BLE001 - Graph darf Pipeline nie kippen
         logger.exception("Entity-Graph-Sync für Version %s fehlgeschlagen", version.id)
         result["entity_graph"] = {"status": "failed"}
+        return False
 
 
 def _sync_semantic_index(version: DocumentVersion, result: dict, *, actor=None) -> bool:
@@ -985,25 +1005,26 @@ def _sync_semantic_index(version: DocumentVersion, result: dict, *, actor=None) 
         return False
 
 
-def _sync_auto_file(version: DocumentVersion, result: dict, *, actor=None) -> None:
+def _sync_auto_file(version: DocumentVersion, result: dict, *, actor=None) -> bool:
     """Autopilot-Ablage: sortiert das Dokument nach dem Embedding-Sync automatisch
     ein – nur bei ``settings.AUTO_FILE_ENABLED`` und nur hoch-sichere Vorschläge
     (Confidence >= ``AUTO_FILE_MIN_CONFIDENCE``). Füllt ausschließlich leere Felder.
-    Best-effort: darf die Pipeline nie kippen.
+    Gibt ``True`` zurück, wenn der Schritt durchlief (oder bewusst nichts tat),
+    ``False`` bei einem intern abgefangenen Fehler (Erfolg je Stufe).
     """
     if result.get("status") != "done":
-        return
+        return True
     from django.conf import settings
 
     if not settings.AUTO_FILE_ENABLED:
-        return
+        return True
     try:
         from documents.models import AuditLogEntry, Document
         from documents.services import auto_file
 
         document = version.document
         if document.owner_id is None:
-            return  # eigentümerlose Triage-Dokumente nicht automatisch ablegen
+            return True  # eigentümerlose Triage-Dokumente nicht automatisch ablegen
         outcome = auto_file.autofile_document(
             document,
             Document.objects.filter(owner_id=document.owner_id),
@@ -1021,11 +1042,13 @@ def _sync_auto_file(version: DocumentVersion, result: dict, *, actor=None) -> No
                     "min_confidence": settings.AUTO_FILE_MIN_CONFIDENCE,
                 },
             )
+        return True
     except SoftTimeLimitExceeded:
         raise  # Soft-Time-Limit nie als Best-Effort-Teilfehler verschlucken
     except Exception:  # noqa: BLE001 - Autopilot darf Pipeline nie kippen
         logger.exception("Auto-Ablage für Version %s fehlgeschlagen", version.id)
         result["auto_file"] = {"status": "failed"}
+        return False
 
 
 def _add_months(d, months: int):

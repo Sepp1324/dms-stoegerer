@@ -51,16 +51,36 @@ class RunPostprocessingTests(TestCase):
     def test_erfolg_setzt_postprocessed_at_worm_safe(self):
         v = _ready_version()
         self.assertIsNone(v.postprocessed_at)
-        with mock.patch.object(pipeline, "_sync_contract_center"), mock.patch.object(
-            pipeline, "_sync_entity_graph"
+        with mock.patch.object(
+            pipeline, "_sync_contract_center", return_value=True
+        ), mock.patch.object(
+            pipeline, "_sync_entity_graph", return_value=True
         ), mock.patch.object(
             pipeline, "ensure_findability_index", return_value=True
-        ), mock.patch.object(pipeline, "_sync_auto_file"), mock.patch(
-            REVIEW, return_value=[]
-        ):
+        ), mock.patch.object(
+            pipeline, "_sync_auto_file", return_value=True
+        ), mock.patch(REVIEW, return_value=[]):
             pipeline.run_postprocessing(v, {"status": "done"})
         v.refresh_from_db()
         self.assertIsNotNone(v.postprocessed_at)
+
+    def test_interner_stufenfehler_laesst_marker_null(self):
+        # P1: Eine Stufe fängt ihren Fehler INTERN ab (gibt False zurück, wirft NICHT).
+        # postprocessed_at darf dann NICHT gesetzt werden – sonst überspränge der
+        # Reconciler das unvollständige Dokument dauerhaft.
+        v = _ready_version()
+        with mock.patch.object(
+            pipeline, "_sync_contract_center", return_value=False  # intern fehlgeschlagen
+        ), mock.patch.object(
+            pipeline, "_sync_entity_graph", return_value=True
+        ), mock.patch.object(
+            pipeline, "ensure_findability_index", return_value=True
+        ), mock.patch.object(
+            pipeline, "_sync_auto_file", return_value=True
+        ), mock.patch(REVIEW, return_value=[]):
+            pipeline.run_postprocessing(v, {"status": "done"})
+        v.refresh_from_db()
+        self.assertIsNone(v.postprocessed_at)  # -> Reconciler versucht erneut
 
     def test_abbruch_mitten_drin_laesst_marker_null(self):
         # Simuliert einen Worker-Crash NACH READY, während der Nachbearbeitung:
