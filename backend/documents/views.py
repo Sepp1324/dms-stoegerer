@@ -6269,12 +6269,27 @@ class MailAccountViewSet(viewsets.ModelViewSet):
                     {"detail": "host und username sind erforderlich."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+            # Port + use_ssl robust auswerten (P3): ``int("false")`` würde 500 werfen,
+            # ``bool("false")`` wäre fälschlich True. Ungültige Werte -> klares 400.
+            try:
+                port = int(data.get("port") or 993)
+            except (TypeError, ValueError):
+                return Response(
+                    {"detail": "Ungültiger Port (Ganzzahl erwartet)."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if not (1 <= port <= 65535):
+                return Response(
+                    {"detail": "Port außerhalb des gültigen Bereichs (1–65535)."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            use_ssl = parse_bool_param(data.get("use_ssl"), default=True)
             # Transientes (nicht gespeichertes) Konto nur für den Verbindungstest.
             account = MailAccount(
                 name="__test__",
                 host=host,
-                port=int(data.get("port") or 993),
-                use_ssl=bool(data.get("use_ssl", True)),
+                port=port,
+                use_ssl=use_ssl,
                 username=username,
                 folder=data.get("folder") or "INBOX",
                 password=data.get("password") or "",
