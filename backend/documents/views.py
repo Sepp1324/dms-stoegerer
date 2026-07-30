@@ -5072,9 +5072,11 @@ class KnowledgeEntityViewSet(viewsets.ModelViewSet):
             "from_entity", "to_entity", "document"
         ).filter(Q(from_entity=entity) | Q(to_entity=entity))
         if not getattr(request.user, "is_dms_admin", False):
-            qs = qs.filter(
-                Q(from_entity__owner=request.user) | Q(to_entity__owner=request.user)
-            )
+            # Owner-Grenze (P2): BEIDE Endpunkte müssen dem Nutzer gehören. Ein ODER
+            # (nur eine Seite) würde eine Relation freigeben, deren ANDERER Endpunkt
+            # einem fremden Owner gehört – der Serializer liefert aber BEIDE Namen aus
+            # und leakte damit fremde Entity-Daten.
+            qs = qs.filter(from_entity__owner=request.user, to_entity__owner=request.user)
         return Response(EntityRelationSerializer(qs.distinct(), many=True).data)
 
     @action(detail=False, methods=["get"])
