@@ -39,9 +39,9 @@ export default function App() {
   const [loggedIn, setLoggedIn] = useState(isLoggedIn());
 
   return (
-    <BrowserRouter
-      future={{ v7_startTransition: true, v7_relativeSplatPath: true }}
-    >
+    <BrowserRouter>
+      {/* Die v6-``future``-Flags (v7_startTransition/v7_relativeSplatPath) sind in
+          react-router v7 der Standard und wurden aus der Prop entfernt. */}
       <Routes>
         <Route
           path="/share/:token"

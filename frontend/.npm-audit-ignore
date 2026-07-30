@@ -1,0 +1,6 @@
+# Dokumentierte Waiver für den verbindlichen Frontend-npm-audit-Gate
+# (siehe .github/workflows/dependency-audit.yml). Eine GHSA-ID pro Zeile, gefolgt
+# von einer Begründung. NUR nicht-anwendbare oder fixlose Restrisiken – alles
+# Behebbare wird stattdessen per Bump in package.json geschlossen.
+
+GHSA-qwww-vcr4-c8h2   # react-router „RSC Mode CSRF" – betrifft ausschließlich den React-Server-Components-Modus. Diese App ist eine reine Client-SPA (BrowserRouter, kein SSR/RSC), daher nicht anwendbar. Zudem existiert KEIN Release-Fix: die Advisory nennt 8.3.0, aber react-router-dom 8.x ist auf npm nicht veröffentlicht (npm schlägt nur einen Downgrade auf 7.11.0 vor, der den bereits behobenen Open-Redirect wieder öffnen würde). Entfernen, sobald ein fixed 7.x/8.x erscheint.
