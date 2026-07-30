@@ -21,6 +21,7 @@ from django.utils import timezone
 from . import pipeline, storage
 from .models import DocumentVersion
 from .owner import log_ingest_owner_audit, resolve_default_owner
+from .services.quiesce import is_quiesced
 
 logger = logging.getLogger(__name__)
 
@@ -1012,6 +1013,14 @@ def scan_consume_folder() -> dict:
     und protokolliert – niemals owner-los aufgenommen. Default (Flag off) ist
     das unveränderte Flat-Verhalten.
     """
+    # Backup-Schreibsperre (P1): Während einer laufenden Sicherung KEINE neue
+    # Aufnahme starten – die reifen Dateien bleiben liegen, der nächste Scan holt
+    # sie nach Aufhebung der Sperre (der Storage-Backstop griffe sonst mitten im
+    # Ingest und würde die Datei nach _failed/ verschieben).
+    if is_quiesced():
+        logger.info("scan_consume_folder: Backup-Schreibsperre aktiv – Scan übersprungen.")
+        return {"found": 0, "skipped": "backup_quiesce"}
+
     consume = storage.CONSUME_DIR
     # Fehlt der Consume-Ordner, tat der Task früher still nichts ({'found': 0})
     # und Ingest lief betrieblich unbemerkt ins Leere (STOAA-321). Stattdessen
@@ -1327,6 +1336,12 @@ def _ingest_consume_dir(
 def fetch_all_mail_accounts() -> dict:
     """Beat-Task: stößt für jedes aktive IMAP-Konto einen Abruf an (fan-out)."""
     from .models import MailAccount
+
+    # Backup-Schreibsperre (P1): Kein Mail-Import während einer Sicherung – sonst
+    # landet ein zwischen Snapshot und pg_dump importiertes Dokument nur im Dump.
+    if is_quiesced():
+        logger.info("fetch_all_mail_accounts: Backup-Schreibsperre aktiv – Abruf übersprungen.")
+        return {"dispatched": 0, "skipped": "backup_quiesce"}
 
     ids = list(MailAccount.objects.filter(enabled=True).values_list("id", flat=True))
     for account_id in ids:
