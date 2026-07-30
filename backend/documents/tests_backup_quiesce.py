@@ -97,12 +97,16 @@ class QuiesceBeatTaskSkipTests(TestCase):
 
 
 class QuiesceCommandTests(TestCase):
+    # WICHTIG: Das Command importiert set_quiesce in SEINEN Namespace
+    # (from ... import set_quiesce). Daher dort patchen, nicht im quiesce-Modul.
+    CMD = "documents.management.commands.backup_quiesce.set_quiesce"
+
     def test_command_on_setzt_flag(self):
-        with mock.patch.object(quiesce, "set_quiesce") as set_mock:
+        with mock.patch(self.CMD) as set_mock:
             call_command("backup_quiesce", "--on", "--ttl", "120")
         set_mock.assert_called_once_with(True, ttl=120)
 
     def test_command_off_loest_flag(self):
-        with mock.patch.object(quiesce, "set_quiesce") as set_mock:
+        with mock.patch(self.CMD) as set_mock:
             call_command("backup_quiesce", "--off")
         set_mock.assert_called_once_with(False)
