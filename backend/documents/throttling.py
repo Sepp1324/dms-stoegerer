@@ -64,6 +64,25 @@ class RevisionExportRateThrottle(_PerUserScopeThrottle):
     scope = "revision_export"
 
 
+class LoginRateThrottle(_PerUserScopeThrottle):
+    """Limit für den JWT-Login (Scope ``login``, P1).
+
+    Der Login ist unauthentifiziert -> die Basisklasse keyt auf die Client-IP.
+    Bremst Brute-Force gegen die öffentliche Instanz. Ergänzend empfohlen: ein
+    Traefik-Rate-Limit vor der App und optional django-axes (Account-Lockout)."""
+
+    scope = "login"
+
+
+class TokenRefreshRateThrottle(_PerUserScopeThrottle):
+    """Limit für den JWT-Refresh (Scope ``token_refresh``, P1).
+
+    Verhindert das Durchprobieren gestohlener/geratener Refresh-Tokens. Keyt für
+    den (unauthentifizierten) Endpunkt auf die Client-IP."""
+
+    scope = "token_refresh"
+
+
 class IntegrityCheckRateThrottle(_PerUserScopeThrottle):
     """Limit für Integritäts-/Evidence-Endpunkte (Scope ``integrity_check``).
 
