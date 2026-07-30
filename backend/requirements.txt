@@ -1,9 +1,12 @@
 # Django 5.2 ist LTS (Sicherheits-Support bis 2028); die 5.1-Serie ist per
 # Kalender EOL – deshalb Wechsel auf 5.2. DRF 3.16 + simplejwt 5.5 tragen die
 # offizielle Django-5.2-Unterstützung; cors-headers 4.7 ebenso.
-Django==5.2.6
+Django==5.2.16
 djangorestframework==3.16.1
-djangorestframework-simplejwt==5.5.0
+djangorestframework-simplejwt==5.5.1
+# PyJWT explizit gepinnt (transitiv über simplejwt): 2.10.1 behebt die 2.9.0-CVE
+# (partielle Vergleiche/Signaturprüfung). simplejwt 5.5.x akzeptiert PyJWT<3.
+PyJWT==2.10.1
 django-cors-headers==4.7.0
 whitenoise==6.8.2
 psycopg[binary]==3.2.3
@@ -14,7 +17,7 @@ gunicorn==23.0.0
 # Symmetrische Verschlüsselung für DB-Geheimnisse (MailAccount.password, STOAA-212).
 # Innerhalb 44.x gehalten (Sicherheits-Patch); ein Major-Sprung zöge neue
 # Rust/ABI-Anforderungen nach sich – bewusst separat.
-cryptography==44.0.1
+cryptography==44.0.2
 # OCR-Pipeline
 ocrmypdf==16.10.0
 img2pdf==0.6.0
