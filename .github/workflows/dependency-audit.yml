@@ -38,9 +38,43 @@ jobs:
             npm audit || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-      - name: Gate – CRITICAL in Produktions-Deps blockiert
+      - name: Gate – moderate+ Advisories blockieren (außer dokumentierte Waiver)
+        # Verbindlich: der Job wird rot, sobald eine Produktions-Abhängigkeit eine
+        # Verwundbarkeit ab Schweregrad moderate hat, die NICHT in
+        # frontend/.npm-audit-ignore dokumentiert gewaivert ist. Jeder Waiver trägt
+        # dort eine Begründung (nicht anwendbar oder ohne Release-Fix). ``npm audit``
+        # kennt keine native Ignore-Liste, daher die Auswertung über --json.
         working-directory: frontend
-        run: npm audit --omit=dev --audit-level=critical
+        run: |
+          npm audit --omit=dev --json > audit.json || true
+          python3 - <<'PY'
+          import json, os, re, sys
+          THRESHOLD = {"moderate", "high", "critical"}
+          ignore = set()
+          if os.path.exists(".npm-audit-ignore"):
+              for line in open(".npm-audit-ignore"):
+                  line = line.strip()
+                  if line and not line.startswith("#"):
+                      ignore.add(line.split()[0])
+          data = json.load(open("audit.json"))
+          seen, unwaived = set(), []
+          for _name, vuln in data.get("vulnerabilities", {}).items():
+              for via in vuln.get("via", []):
+                  if not isinstance(via, dict):
+                      continue
+                  sev = via.get("severity")
+                  m = re.search(r"GHSA-[0-9a-z-]+", via.get("url", ""))
+                  ghsa = m.group(0) if m else via.get("url", "?")
+                  if sev in THRESHOLD and ghsa not in ignore and ghsa not in seen:
+                      seen.add(ghsa)
+                      unwaived.append((sev, ghsa, via.get("title", "")))
+          if unwaived:
+              print("Nicht gewaiverte Advisories (moderate+):")
+              for sev, ghsa, title in unwaived:
+                  print(f"  [{sev}] {ghsa} – {title}")
+              sys.exit(1)
+          print("Keine nicht-gewaiverten moderate+ Advisories.")
+          PY
 
   backend-pip-audit:
     runs-on: ubuntu-latest
