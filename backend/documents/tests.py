@@ -2615,6 +2615,41 @@ class MailAccountApiTests(APITestCase):
         self.assertEqual(resp.status_code, 200, resp.content)
         self.assertTrue(resp.data["ok"])
 
+    def test_test_connection_ungueltiger_port_ist_400(self):
+        # P3: ``int("abc")`` warf früher 500; jetzt klares 400.
+        self.client.force_authenticate(self.admin)
+        resp = self.client.post(
+            "/api/mail-accounts/test-connection/",
+            {"host": "imap.example.org", "username": "u", "port": "abc"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_test_connection_use_ssl_false_string_deaktiviert_ssl(self):
+        # P3: use_ssl="false" (String) muss FALSE bedeuten, nicht True.
+        from unittest import mock
+
+        self.client.force_authenticate(self.admin)
+        captured = {}
+
+        def fake_connect(account):
+            captured["use_ssl"] = account.use_ssl
+            return mock.Mock()
+
+        with mock.patch("documents.mail.connect", side_effect=fake_connect):
+            resp = self.client.post(
+                "/api/mail-accounts/test-connection/",
+                {
+                    "host": "imap.example.org",
+                    "username": "u",
+                    "password": "p",
+                    "use_ssl": "false",
+                },
+                format="json",
+            )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertFalse(captured["use_ssl"])  # "false" -> False, nicht True
+
     def test_test_connection_failure(self):
         from unittest import mock
 
