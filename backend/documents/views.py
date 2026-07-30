@@ -1279,8 +1279,15 @@ class DocumentUploadView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # Hash ATOMAR beim Anlegen setzen (P2, wie Consume/Mail): sonst hätte die
+        # frische Version bis zum asynchronen ``process_version`` kein ``sha256`` –
+        # ein gleichzeitiger identischer Upload fände sie nicht und legte ein Doppel-
+        # Dokument an. Der Wert ist identisch mit dem, den die Pipeline später erneut
+        # aus der Datei berechnet.
+        sha256 = pipeline.sha256_of(file_path)
         document, version = pipeline.create_document_from_file(
-            file_path, title=title, owner=request.user, mime=mime, size=size
+            file_path, title=title, owner=request.user, mime=mime, size=size,
+            sha256=sha256,
         )
         # OCR/Hash-Kette asynchron im Celery-Worker.
         _enqueue_processing(version.id)
@@ -1483,6 +1490,8 @@ class MobileCaptureUploadView(APIView):
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
+        # Hash ATOMAR beim Anlegen setzen (P2, wie Consume/Mail/Upload).
+        sha256 = pipeline.sha256_of(file_path)
         document, version = pipeline.create_document_from_file(
             file_path,
             title=title,
@@ -1490,6 +1499,7 @@ class MobileCaptureUploadView(APIView):
             mime="application/pdf",
             size=size,
             ingest_source="mobile",
+            sha256=sha256,
         )
         # OCR/Hash-Kette asynchron im Celery-Worker.
         _enqueue_processing(version.id)

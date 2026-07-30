@@ -307,6 +307,12 @@ def ingest_message(account, raw_bytes: bytes) -> int | None:
             mime=safe_mime,
             size=len(payload),
             ingest_source="mail",
+            # Hash ATOMAR beim Anlegen setzen (P2): nicht mehr per Nach-Speicherung
+            # (winziges Fenster, in dem die Version ohne sha256 sichtbar war). Der
+            # Wert ist identisch mit dem, den die Pipeline später erneut berechnet;
+            # so dedupliziert auch ein weiterer identischer Anhang im selben Lauf
+            # zuverlässig.
+            sha256=sha,
         )
         log_ingest_owner_audit(
             document,
@@ -315,11 +321,6 @@ def ingest_message(account, raw_bytes: bytes) -> int | None:
             source="mail",
             reason="account_owner_leer",
         )
-        # Hash sofort setzen, damit weitere identische Anhänge im selben Lauf
-        # zuverlässig dedupliziert werden (die OCR-Pipeline berechnet ihn später
-        # aus der Datei erneut – identischer Wert).
-        version.sha256 = sha
-        version.save(update_fields=["sha256"])
         # Betreff + Absender der Quell-Mail am Dokument hinterlegen, damit die
         # (asynchrone) Rule-Engine per subject_contains/from_contains darauf
         # matchen kann. Vor dem Enqueue setzen, sonst läuft die Klassifizierung
