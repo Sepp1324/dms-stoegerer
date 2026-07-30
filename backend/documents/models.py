@@ -658,37 +658,23 @@ class Document(models.Model):
 
 
 def _schedule_artifact_cleanup(paths: list[str]) -> None:
-    """Legt den Artefakt-Cleanup-Auftrag an und reiht seinen Dispatch nach dem
-    Commit ein (P2).
+    """Legt den Artefakt-Cleanup-Auftrag als Outbox-Zeile an (P1/P2).
 
-    Outbox ATOMAR mit der Löschung (P2): Die ``ArtifactCleanupJob``-Zeile wird
-    SYNCHRON (in der laufenden Lösch-Transaktion) angelegt – sie committet damit
-    atomar mit dem DB-Löschen. Stirbt der Prozess direkt nach dem Commit, bevor der
-    ``on_commit``-Callback lief, existiert die Outbox-Zeile trotzdem und der
-    periodische Sweeper (``process_artifact_cleanup_jobs``) räumt. Rollt die
-    Löschung zurück, rollt auch die Zeile zurück (kein Geister-Auftrag).
+    Outbox ATOMAR mit der Löschung: Die ``ArtifactCleanupJob``-Zeile wird SYNCHRON
+    (in der laufenden Lösch-Transaktion) angelegt – sie committet damit atomar mit
+    dem DB-Löschen. Rollt die Löschung zurück, rollt auch die Zeile zurück (kein
+    Geister-Auftrag).
 
-    Erst NACH dem Commit wird der Celery-Task dispatcht; der Task löscht die Zeile
-    erst nach VOLLSTÄNDIGER Bereinigung. Broker weg oder alle FS-Retries erschöpft?
-    -> Job bleibt liegen, Sweeper übernimmt."""
-    from django.db import transaction
-
-    # 1) Outbox-Zeile SYNCHRON in der aktuellen Transaktion (atomar mit dem Delete).
-    job = ArtifactCleanupJob.objects.create(paths=list(paths))
-
-    # 2) Dispatch erst NACH dem Commit (sonst liefe der Task ggf. vor dem Commit).
-    def _dispatch():
-        from .tasks import cleanup_artifact_files
-
-        try:
-            cleanup_artifact_files.delay(list(paths), job_id=job.id)
-        except Exception:  # noqa: BLE001 – Broker-Ausfall: Outbox bleibt, Sweeper räumt
-            logger.warning(
-                "Artefakt-Cleanup konnte nicht eingereiht werden (Broker?); "
-                "Outbox-Job %s bleibt für den Sweeper.", job.id
-            )
-
-    transaction.on_commit(_dispatch)
+    KEIN Broker-Zugriff im HTTP-Request (P1): Früher wurde der Celery-Task im
+    ``on_commit``-Callback synchron dispatcht. Ist Redis nicht erreichbar,
+    BLOCKIERT ``.delay()`` den Request bis zum Verbindungs-Timeout (~20 s) – das ließ
+    die Löschung hängen und die Backend-CI (isolierter Concurrency-Test, ohne Broker)
+    reproduzierbar rot laufen. Die Zustellung übernimmt jetzt ausschließlich der
+    periodische Beat-Sweeper (``process_artifact_cleanup_jobs``), der die offenen
+    Outbox-Zeilen abarbeitet – ganz ohne Broker-Zugriff im Request. Die Bereinigung
+    verzögert sich damit höchstens um das Sweeper-Intervall (Default 10 min);
+    verwaiste Artefaktdateien sind unkritisch."""
+    ArtifactCleanupJob.objects.create(paths=list(paths))
 
 
 class DocumentVersion(models.Model):

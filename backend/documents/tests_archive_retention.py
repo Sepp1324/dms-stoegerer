@@ -215,21 +215,22 @@ class ArchiveApiTests(ArchiveDocMixin, APITestCase):
         doc.save(update_fields=["current_version"])
         self.client.force_authenticate(self.user)
 
-        # Cleanup-Task synchron ausfuehren (statt an Celery zu delegieren).
+        from .models import ArtifactCleanupJob
+
+        # Löschen schreibt NUR die Outbox-Zeile (kein Broker-Dispatch im Request);
+        # die Zustellung übernimmt der Sweeper.
+        resp = self.client.delete(f"/api/documents/{doc.id}/")
+        self.assertEqual(resp.status_code, 204)
+        job = ArtifactCleanupJob.objects.first()
+        self.assertIsNotNone(job)
+        self.assertCountEqual(job.paths, [str(orig), str(arch), str(thumb)])
+
+        # Sweeper-Zustellung nachstellen: Cleanup synchron auf die Outbox-Pfade.
         # DATA_DIR auf den Tmpdir patchen, damit die Testdateien den Root-Check
         # bestehen (der Cleanup entfernt nur Pfade UNTER DATA_DIR).
-        with mock.patch.object(
-            storage, "DATA_DIR", Path(self.tmpdir.name)
-        ), mock.patch.object(
-            tasks.cleanup_artifact_files,
-            "delay",
-            side_effect=lambda paths, job_id=None: tasks.cleanup_artifact_files(
-                paths, job_id=job_id
-            ),
-        ), self.captureOnCommitCallbacks(execute=True):
-            resp = self.client.delete(f"/api/documents/{doc.id}/")
+        with mock.patch.object(storage, "DATA_DIR", Path(self.tmpdir.name)):
+            tasks.cleanup_artifact_files(job.paths, job_id=job.id)
 
-        self.assertEqual(resp.status_code, 204)
         self.assertFalse(orig.exists())
         self.assertFalse(arch.exists())
         self.assertFalse(thumb.exists())
