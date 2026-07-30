@@ -1614,6 +1614,26 @@ class AuditLogEntry(models.Model):
     def __str__(self) -> str:
         return f"[{self.timestamp:%Y-%m-%d %H:%M}] {self.action} {self.object_type}#{self.object_id}"
 
+    def save(self, *args, **kwargs):
+        """Append-only (P1): ein bestehender Audit-Eintrag darf nicht geändert
+        werden. Nur der erste Insert (``_state.adding``) ist erlaubt; jedes
+        spätere ``save()`` (Update) wird abgelehnt. Programmatisch werden Einträge
+        ausschließlich per ``objects.create()`` angelegt."""
+        if not self._state.adding:
+            raise ValidationError(
+                "Audit-Einträge sind unveränderlich (append-only)."
+            )
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        """Append-only (P1): Audit-Einträge dürfen nicht gelöscht werden.
+
+        Deckt das Modell-``delete()`` (Instanz + Admin-Collector prüft zusätzlich
+        ``has_delete_permission``). Für harte Revisionssicherheit gegen
+        ``QuerySet.delete()``/rohes SQL braucht es zusätzlich DB-seitige Rechte/
+        Trigger (dokumentiert)."""
+        raise ValidationError("Audit-Einträge dürfen nicht gelöscht werden (append-only).")
+
 
 # ---------------------------------------------------------------------------
 # E-Mail-Ingestion (Stufe 3) – IMAP-Postfach + Idempotenz-Log
