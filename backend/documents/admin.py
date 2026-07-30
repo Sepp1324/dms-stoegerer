@@ -420,6 +420,18 @@ class AuditLogEntryAdmin(admin.ModelAdmin):
     list_filter = ("action", "object_type")
     readonly_fields = ("timestamp", "actor", "action", "object_type", "object_id", "detail")
 
+    # Append-only (P1): Der Django-Admin bietet sonst „delete selected“ (über den
+    # Collector, der das Modell-delete() umgeht) und ein Change-Formular. Beides
+    # sperren; Ansehen (has_view_permission) bleibt erlaubt.
+    def has_add_permission(self, request):
+        return False  # Audit-Einträge entstehen ausschließlich programmatisch
+
+    def has_change_permission(self, request, obj=None):
+        return False  # unveränderlich – nur ansehen
+
+    def has_delete_permission(self, request, obj=None):
+        return False  # kein Löschen (auch nicht „delete selected“)
+
 
 @admin.register(SavedView)
 class SavedViewAdmin(admin.ModelAdmin):
