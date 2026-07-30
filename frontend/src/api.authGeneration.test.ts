@@ -75,4 +75,36 @@ describe("Refresh respektiert die Auth-Generation", () => {
     // Der veraltete Refresh darf seinen Access-Token nicht angewendet haben.
     expect(setSpy).not.toHaveBeenCalledWith(ACCESS_KEY, "stale-access");
   });
+
+  it("ein veralteter Request loggt eine neue Sitzung NICHT aus", async () => {
+    localStorage.setItem(ACCESS_KEY, "old-access");
+    localStorage.setItem(REFRESH_KEY, "old-refresh");
+
+    vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+      const url = String(input);
+      if (url.includes("/auth/token/refresh/")) {
+        // Während des Refresh des ALTEN Requests: Abmeldung + neue Anmeldung.
+        // (logout() erhöht die Generation; die neuen Tokens stehen danach.)
+        logout();
+        localStorage.setItem(ACCESS_KEY, "new-access");
+        localStorage.setItem(REFRESH_KEY, "new-refresh");
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ access: "stale-access" }),
+        } as unknown as Response);
+      }
+      // Der alte Request bleibt 401 (Retry ebenfalls).
+      return Promise.resolve({
+        ok: false,
+        status: 401,
+        json: async () => ({}),
+      } as unknown as Response);
+    });
+
+    await expect(getInboxSummary()).rejects.toThrow();
+    // Der alte Request darf die frisch angemeldete Sitzung nicht ausgeloggt haben.
+    expect(getAccessToken()).toBe("new-access");
+    expect(localStorage.getItem(REFRESH_KEY)).toBe("new-refresh");
+  });
 });

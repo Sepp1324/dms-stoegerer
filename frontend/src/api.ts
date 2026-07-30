@@ -27,6 +27,9 @@ let authGeneration = 0;
 
 export function logout() {
   authGeneration++;
+  // Laufenden Refresh der alten Sitzung fallenlassen, damit ein danach
+  // gestarteter Request nicht die veraltete In-Flight-Promise weiterverwendet.
+  refreshInFlight = null;
   localStorage.removeItem(ACCESS_KEY);
   localStorage.removeItem(REFRESH_KEY);
 }
@@ -41,8 +44,10 @@ export async function login(username: string, password: string): Promise<void> {
     throw new AuthError("Anmeldung fehlgeschlagen – Benutzername oder Passwort falsch.");
   }
   const data = await res.json();
-  // Neue Sitzung: laufende Refreshes der alten Sitzung entwerten.
+  // Neue Sitzung: laufende Refreshes der alten Sitzung entwerten und die
+  // In-Flight-Promise fallenlassen, damit sie nicht weiterverwendet wird.
   authGeneration++;
+  refreshInFlight = null;
   setTokens(data.access, data.refresh);
 }
 
@@ -58,7 +63,7 @@ async function tryRefresh(): Promise<boolean> {
   // Generation + verwendeten Refresh-Token beim Start des Flights festhalten.
   const generation = authGeneration;
   const usedRefresh = localStorage.getItem(REFRESH_KEY);
-  refreshInFlight = (async (): Promise<boolean> => {
+  const mine = (async (): Promise<boolean> => {
     if (!usedRefresh) return false;
     const res = await fetch(`${API_BASE}/auth/token/refresh/`, {
       method: "POST",
@@ -75,10 +80,14 @@ async function tryRefresh(): Promise<boolean> {
     setTokens(data.access);
     return true;
   })();
+  refreshInFlight = mine;
   try {
-    return await refreshInFlight;
+    return await mine;
   } finally {
-    refreshInFlight = null;
+    // Nur zurücksetzen, wenn noch UNSERE Promise steht – ein zwischenzeitliches
+    // logout()/login() (das refreshInFlight auf null/neu gesetzt hat) darf nicht
+    // überschrieben werden.
+    if (refreshInFlight === mine) refreshInFlight = null;
   }
 }
 
@@ -92,12 +101,20 @@ async function apiFetch(path: string, options: RequestInit = {}): Promise<Respon
     },
   });
 
+  // Generation zu Beginn festhalten: Startet während dieses (evtl. veralteten)
+  // Requests ein logout()+login(), darf sein finaler 401 NICHT die Tokens der
+  // neuen Sitzung löschen.
+  const generationAtStart = authGeneration;
   let res = await fetch(`${API_BASE}${path}`, withAuth());
   if (res.status === 401 && (await tryRefresh())) {
     res = await fetch(`${API_BASE}${path}`, withAuth());
   }
   if (res.status === 401) {
-    logout();
+    // Nur ausloggen, wenn zwischenzeitlich KEIN logout/login lief. Sonst würde
+    // dieser veraltete Request die frisch angemeldete Sitzung wieder auswerfen.
+    if (authGeneration === generationAtStart) {
+      logout();
+    }
     throw new AuthError("Sitzung abgelaufen – bitte erneut anmelden.");
   }
   return res;
