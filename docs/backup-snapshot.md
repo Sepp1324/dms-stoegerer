@@ -83,8 +83,9 @@ das funktionierende `backup-cronjob.yaml` nicht ablösen.
 Der Orchestrator (Image `bitnami/kubectl`, bei Bedarf in die eigene Registry
 spiegeln) löst das aktuell deployte Backend-Image selbst auf (`kubectl get deploy
 backend`) und übergibt es dem Helfer – kein manuelles Tag-Nachziehen nötig. Der
-Helfer nutzt das dedizierte `dms-db-backup-secrets` (nur DJANGO_SECRET_KEY/
-POSTGRES_PASSWORD/REDIS_PASSWORD, **kein** volles `dms-secrets`) und erfüllt den
+Helfer nutzt das dedizierte `dms-db-backup-secrets` (nur DJANGO_SECRET_KEY –
+separater Zufallswert – und POSTGRES_PASSWORD, **kein** volles `dms-secrets`,
+kein REDIS_PASSWORD) und erfüllt den
 Admission-Guard exakt.
 
 **Aktivierung (nach Cluster-Validierung):**
@@ -200,8 +201,6 @@ spec:
                                 valueFrom: { secretKeyRef: { name: dms-db-backup-secrets, key: DJANGO_SECRET_KEY } }
                               - name: POSTGRES_PASSWORD
                                 valueFrom: { secretKeyRef: { name: dms-db-backup-secrets, key: POSTGRES_PASSWORD } }
-                              - name: REDIS_PASSWORD
-                                valueFrom: { secretKeyRef: { name: dms-db-backup-secrets, key: REDIS_PASSWORD } }
                             command: ["/bin/sh","-c"]
                             args: ["<backup-Skript: pg_dump->temp->gzip, tar /data, scp, rotate, record_backup_status>"]
                             volumeMounts:

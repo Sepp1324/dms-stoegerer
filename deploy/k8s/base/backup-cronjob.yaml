@@ -157,18 +157,31 @@ spec:
               envFrom:
                 - configMapRef:
                     name: dms-config
-                # Das aktive Backup ist ein vertrauenswürdiger, admin-deployter Pod
-                # (NICHT der admission-guarded Snapshot-Helfer). Es nutzt das im
-                # Cluster bereits vorhandene ``dms-secrets`` – so bricht der nächtliche
-                # Lauf NICHT (das in #449 eingeführte, aber noch nicht angelegte
-                # ``dms-db-backup-secrets`` führte sonst zu CreateContainerConfigError).
-                # Die Least-Privilege-Trennung über ``dms-db-backup-secrets`` bleibt
-                # dem (suspendierten) Snapshot-Helfer vorbehalten, der sie bei
-                # Aktivierung mitbringt.
-                - secretRef:
-                    name: dms-secrets
+                # SSH/scp-Ziel: dediziertes Backup-Secret (nur SSH-Keys/Host/Pfad).
                 - secretRef:
                     name: dms-backup-secrets
+              # Least-Privilege (P2): NUR die tatsächlich benötigten Keys einzeln
+              # injizieren – NICHT das gesamte ``dms-secrets`` (Django/PG/Redis/AI/
+              # IMAP), das den Backup-Pod (mit NAS-Zugriff + hostNetwork) alle
+              # Anwendungsschlüssel lesen ließe. POSTGRES_HOST/USER/DB/PORT +
+              # REDIS_URL kommen aus dms-config (kein Secret); REDIS_PASSWORD wird
+              # NICHT gebraucht (kein Broker-Zugriff im Backup).
+              #
+              # ⚠️ ``dms-db-backup-secrets`` MUSS vor dem Rollout angelegt sein
+              #    (secret.example.yaml) – sonst CreateContainerConfigError. Der
+              #    DJANGO_SECRET_KEY darin ist bewusst ein SEPARATER Zufallswert,
+              #    nicht der produktive (Backup-Pod signiert/entschlüsselt nichts).
+              env:
+                - name: DJANGO_SECRET_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: dms-db-backup-secrets
+                      key: DJANGO_SECRET_KEY
+                - name: POSTGRES_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: dms-db-backup-secrets
+                      key: POSTGRES_PASSWORD
               # Ephemeral-Storage begrenzen (P2): DB-Dump + vollständiges Daten-TAR
               # liegen gleichzeitig im emptyDir. Ohne Limit könnte ein großer Lauf
               # den k3s-Node vollschreiben (STOAA-Vorfall). Mit einem Limit wird

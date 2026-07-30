@@ -49,9 +49,9 @@ spec:
         object.spec.template.spec.containers +
         object.spec.template.spec.?initContainers.orValue([])
     # Exakte Allowlist der Secrets, die der Backup-Helfer referenzieren darf: das
-    # DEDIZIERTE DB-Backup-Secret (nur DJANGO_SECRET_KEY/POSTGRES_PASSWORD/
-    # REDIS_PASSWORD) + das SSH/scp-Ziel. NICHT das gesamte ``dms-secrets`` (P1) –
-    # sonst könnte der Helfer alle Anwendungsschlüssel (AI/IMAP/…) exfiltrieren.
+    # DEDIZIERTE DB-Backup-Secret (nur DJANGO_SECRET_KEY – separater Zufallswert –
+    # und POSTGRES_PASSWORD) + das SSH/scp-Ziel. NICHT das gesamte ``dms-secrets``
+    # (P1) – sonst könnte der Helfer alle Anwendungsschlüssel (AI/IMAP/…) exfiltrieren.
     - name: allowedSecrets
       expression: "['dms-db-backup-secrets', 'dms-backup-secrets']"
     - name: allvolumes
