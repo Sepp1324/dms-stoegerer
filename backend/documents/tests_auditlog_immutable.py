@@ -60,6 +60,32 @@ class AuditLogDbTriggerTests(TestCase):
         self.assertIsNone(entry.actor_id)
         self.assertEqual(entry.action, "create")  # inhaltlich unverändert
 
+    def test_actor_umattribution_wird_vom_trigger_blockiert(self):
+        # P1: Der Trigger darf eine nachträgliche Umattribution auf einen ANDEREN
+        # Nutzer NICHT zulassen – sonst ließe sich ein Audit-Ereignis fälschen.
+        actor = User.objects.create_user("audit_a", password="pw", role="user")
+        other = User.objects.create_user("audit_b", password="pw", role="user")
+        entry = AuditLogEntry.objects.create(
+            actor=actor, action="create", object_type="Document"
+        )
+        with self.assertRaises(DatabaseError):
+            with transaction.atomic():
+                AuditLogEntry.objects.filter(pk=entry.pk).update(actor=other)
+        entry.refresh_from_db()
+        self.assertEqual(entry.actor_id, actor.id)  # unverändert
+
+    def test_actor_setzen_von_null_wird_blockiert(self):
+        # NULL -> Wert ist ebenfalls keine erlaubte Anonymisierung.
+        actor = User.objects.create_user("audit_c", password="pw", role="user")
+        entry = AuditLogEntry.objects.create(
+            actor=None, action="create", object_type="Document"
+        )
+        with self.assertRaises(DatabaseError):
+            with transaction.atomic():
+                AuditLogEntry.objects.filter(pk=entry.pk).update(actor=actor)
+        entry.refresh_from_db()
+        self.assertIsNone(entry.actor_id)  # unverändert
+
 
 class AuditLogAdminPermissionTests(TestCase):
     def setUp(self):
