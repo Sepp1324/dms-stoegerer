@@ -3693,6 +3693,19 @@ class ProcessingStatusAPITests(APITestCase):
         self.assertEqual(resp.data["id"], version.id)
         self.assertEqual(resp.data["processing_state"], "failed")
 
+    def test_retry_broker_down_liefert_503_kein_500(self):
+        """P1: Ist der Broker nicht erreichbar, wirft .delay() – der Request darf
+        NICHT mit 500 sterben, sondern sauber mit 503 antworten."""
+        from unittest import mock
+
+        self.client.force_authenticate(self.owner)
+        with mock.patch(
+            "documents.views.retry_document_version.delay",
+            side_effect=Exception("broker weg"),
+        ):
+            resp = self.client.post(self._retry_url(self.docs["failed"]))
+        self.assertEqual(resp.status_code, 503)
+
     def test_retry_nicht_failed_liefert_400(self):
         from unittest import mock
 
@@ -3739,6 +3752,42 @@ class ProcessingStatusAPITests(APITestCase):
             resp = self.client.post(self._retry_url(self.docs["failed"]))
         self.assertEqual(resp.status_code, 404)
         delayed.assert_not_called()
+
+
+class OCRBulkRetryBrokerTests(APITestCase):
+    """P1: Der Bulk-OCR-Retry darf bei Broker-Ausfall nicht N Timeouts nacheinander
+    erzeugen und mit 500 sterben, sondern nach dem ersten Fehler abbrechen und
+    sauber 503 + Ergebnisliste liefern."""
+
+    URL = "/api/system/ocr-health/retry-failed/"
+
+    def setUp(self):
+        self.admin = get_user_model().objects.create_user(
+            "ocr_admin", password="pw", role="admin"
+        )
+        for i in range(2):
+            doc = Document.objects.create(title=f"F{i}", owner=self.admin)
+            v = DocumentVersion.objects.create(
+                document=doc, version_no=1, file_path=f"/tmp/f{i}.pdf",
+                sha256=f"{i:064d}",
+                processing_state=DocumentVersion.ProcessingState.FAILED,
+            )
+            doc.current_version = v
+            doc.save(update_fields=["current_version"])
+        self.client.force_authenticate(self.admin)
+
+    def test_broker_down_liefert_503_und_stoppt_nach_erstem(self):
+        from unittest import mock
+
+        with mock.patch(
+            "documents.views.retry_document_version.delay",
+            side_effect=Exception("broker weg"),
+        ) as delayed:
+            resp = self.client.post(self.URL)
+        self.assertEqual(resp.status_code, 503)
+        delayed.assert_called_once()  # nach dem 1. Fehler bricht der Loop ab
+        self.assertEqual(resp.data["queued"], 0)
+        self.assertTrue(resp.data["failed_ids"])
 
 
 class DocumentSearchTests(APITestCase):
