@@ -17,7 +17,16 @@ function setTokens(access: string, refresh?: string) {
   localStorage.setItem(ACCESS_KEY, access);
   if (refresh) localStorage.setItem(REFRESH_KEY, refresh);
 }
+// Auth-Generation (P2): Jeder logout()/login() erhöht diesen Zähler. Ein bereits
+// LAUFENDER Refresh merkt sich die Generation bei Start und schreibt seinen neuen
+// Access-Token nur zurück, wenn zwischenzeitlich kein logout/login lief. Sonst
+// könnte ein nach dem Logout eintreffender Refresh wieder einen gültigen Token in
+// den Storage legen (Zombie-Session) bzw. die Tokens einer unmittelbar folgenden
+// Anmeldung überschreiben.
+let authGeneration = 0;
+
 export function logout() {
+  authGeneration++;
   localStorage.removeItem(ACCESS_KEY);
   localStorage.removeItem(REFRESH_KEY);
 }
@@ -32,6 +41,8 @@ export async function login(username: string, password: string): Promise<void> {
     throw new AuthError("Anmeldung fehlgeschlagen – Benutzername oder Passwort falsch.");
   }
   const data = await res.json();
+  // Neue Sitzung: laufende Refreshes der alten Sitzung entwerten.
+  authGeneration++;
   setTokens(data.access, data.refresh);
 }
 
@@ -44,16 +55,23 @@ let refreshInFlight: Promise<boolean> | null = null;
 
 async function tryRefresh(): Promise<boolean> {
   if (refreshInFlight) return refreshInFlight;
+  // Generation + verwendeten Refresh-Token beim Start des Flights festhalten.
+  const generation = authGeneration;
+  const usedRefresh = localStorage.getItem(REFRESH_KEY);
   refreshInFlight = (async (): Promise<boolean> => {
-    const refresh = localStorage.getItem(REFRESH_KEY);
-    if (!refresh) return false;
+    if (!usedRefresh) return false;
     const res = await fetch(`${API_BASE}/auth/token/refresh/`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ refresh }),
+      body: JSON.stringify({ refresh: usedRefresh }),
     });
     if (!res.ok) return false;
     const data = await res.json();
+    // Ergebnis verwerfen, wenn zwischenzeitlich logout()/login() lief ODER der
+    // verwendete Refresh-Token nicht mehr der aktuelle ist – sonst würde ein
+    // veralteter Refresh eine bereits beendete/ersetzte Sitzung wiederbeleben.
+    if (authGeneration !== generation) return false;
+    if (localStorage.getItem(REFRESH_KEY) !== usedRefresh) return false;
     setTokens(data.access);
     return true;
   })();
