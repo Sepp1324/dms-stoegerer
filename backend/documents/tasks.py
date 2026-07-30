@@ -789,6 +789,58 @@ def reap_unindexed_versions() -> dict:
 
 
 @shared_task
+def reap_unpostprocessed_versions() -> dict:
+    """Reconciler (Beat): holt die Pflicht-Nachbearbeitung NACH READY nach (P1).
+
+    Vertragsabgleich, Entity Graph, Findbarkeitsindex, Auto-Ablage und Review-Tasks
+    laufen NACH dem READY-Übergang. Stirbt der Worker dazwischen, gilt das Dokument
+    dauerhaft als fertig, obwohl diese Schritte fehlen (der Index-Reaper repariert
+    NUR die Suche). ``pipeline.run_postprocessing`` setzt ``postprocessed_at`` erst
+    NACH dem gesamten Block; Kandidaten sind READY-Versionen mit
+    ``postprocessed_at IS NULL``, die seit dem Erreichen von READY mind.
+    ``INDEX_RECONCILE_AFTER_MINUTES`` alt sind (Erst-Lauf bekommt Zeit). Gebatcht,
+    idempotent (die sync-Schritte sind reconciliierend). NUR die aktuelle Version je
+    Dokument (die Nachbearbeitung arbeitet dokumentweit)."""
+    PS = DocumentVersion.ProcessingState
+    minutes = float(getattr(settings, "INDEX_RECONCILE_AFTER_MINUTES", 15))
+    limit = int(getattr(settings, "INDEX_RECONCILE_BATCH", 50))
+    threshold = timezone.now() - timedelta(minutes=minutes)
+
+    versions = list(
+        DocumentVersion.objects.select_related("document")
+        .filter(
+            processing_state=PS.READY,
+            postprocessed_at__isnull=True,
+            document__current_version_id=models.F("id"),
+            processing_state_changed_at__lt=threshold,
+        )
+        .order_by("processing_state_changed_at")[:limit]
+    )
+    repaired = 0
+    for version in versions:
+        try:
+            # Synthetisches „done"-Ergebnis: die sync-Schritte lesen den Zustand aus
+            # Version/Dokument, nicht aus dem OCR-Ergebnis (sie prüfen nur
+            # result.status == "done").
+            pipeline.run_postprocessing(
+                version, {"status": "done"}, actor=version.created_by
+            )
+            repaired += 1
+        except SoftTimeLimitExceeded:
+            raise  # Soft-Time-Limit nicht verschlucken.
+        except Exception:  # noqa: BLE001 – pro Version isoliert, Beat läuft weiter
+            logger.exception(
+                "reap_unpostprocessed_versions: Nachbearbeitung fehlgeschlagen für %s",
+                version.id,
+            )
+    if repaired:
+        logger.info(
+            "reap_unpostprocessed_versions: %d Versionen nachbearbeitet.", repaired
+        )
+    return {"candidates": len(versions), "repaired": repaired}
+
+
+@shared_task
 def reap_stuck_flashcard_syncs() -> dict:
     """Watchdog für hängengebliebene psychosr-Kartensyncs (Beat).
 

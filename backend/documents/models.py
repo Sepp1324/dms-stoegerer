@@ -838,6 +838,15 @@ class DocumentVersion(models.Model):
     # ``QuerySet.update`` gesetzt (Betriebs-Metadatum – umgeht bewusst den
     # WORM-``save()``-Guard, wie ``processing_state``), NICHT über ``save()``.
     indexed_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    # Zeitpunkt, zu dem ALLE Pflicht-Nachbearbeitungen NACH READY abgeschlossen
+    # wurden (Vertragsabgleich, Entity Graph, Findbarkeitsindex, Auto-Ablage,
+    # Review-Tasks). Diese laufen NACH dem READY-Übergang; stirbt der Worker
+    # dazwischen, galt das Dokument sonst dauerhaft als fertig, obwohl Schritte
+    # fehlten. Ist ``postprocessed_at`` NULL an einer READY-Version, holt der
+    # Reconciler (``tasks.reap_unpostprocessed_versions``) die Nachbearbeitung
+    # idempotent nach. Wird per ``QuerySet.update`` gesetzt (Betriebs-Metadatum,
+    # umgeht den WORM-``save()``-Guard wie ``indexed_at``/``processing_state``).
+    postprocessed_at = models.DateTimeField(null=True, blank=True, db_index=True)
 
     retention_until = models.DateField(
         null=True,

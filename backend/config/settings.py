@@ -398,6 +398,14 @@ CELERY_BEAT_SCHEDULE = {
         "task": "documents.tasks.reap_unindexed_versions",
         "schedule": float(os.getenv("INDEX_RECONCILE_INTERVAL", "600")),
     },
+    # Pflicht-Nachbearbeitung nach READY nachholen (P1): Vertragsabgleich, Entity
+    # Graph, Auto-Ablage, Review-Tasks laufen NACH dem READY-Übergang; stirbt der
+    # Worker dazwischen, fehlten sie dauerhaft. Kandidaten: READY + postprocessed_at
+    # IS NULL. Reconciler ist idempotent (sync-Schritte sind wiederholbar).
+    "reap-unpostprocessed-versions": {
+        "task": "documents.tasks.reap_unpostprocessed_versions",
+        "schedule": float(os.getenv("INDEX_RECONCILE_INTERVAL", "600")),
+    },
     # Werkbank-Thumbnail-Cache begrenzen (P2): TTL + Größenobergrenze, sonst
     # wüchse der persistente Cache unbegrenzt auf dem PVC.
     "prune-workbench-thumbnail-cache": {

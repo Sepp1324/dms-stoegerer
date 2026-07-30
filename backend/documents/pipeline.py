@@ -776,12 +776,38 @@ def process_version(version: DocumentVersion) -> dict:
         # Review-Aufgaben und unnötige API-Kosten für ein Dokument, das (noch)
         # nicht fertig verarbeitet ist.
         return result
-    _sync_contract_center(version, result, actor=version.created_by)
-    _sync_entity_graph(version, result, actor=version.created_by)
+    return run_postprocessing(version, result, actor=version.created_by)
+
+
+def _mark_postprocessed(version: DocumentVersion) -> None:
+    """Setzt ``postprocessed_at`` per ``update`` (die Version ist nach READY
+    WORM-immutable; ``postprocessed_at`` ist Betriebs-Metadatum wie ``indexed_at``)."""
+    from django.utils import timezone
+
+    now = timezone.now()
+    DocumentVersion.objects.filter(pk=version.pk).update(postprocessed_at=now)
+    version.postprocessed_at = now
+
+
+def run_postprocessing(version: DocumentVersion, result: dict, *, actor=None) -> dict:
+    """Führt ALLE Pflicht-Nachbearbeitungen NACH READY aus und markiert sie als
+    abgeschlossen (``postprocessed_at``).
+
+    Vertragsabgleich, Entity Graph, Findbarkeitsindex, Auto-Ablage und Review-Tasks
+    laufen NACH dem READY-Übergang. Stirbt der Worker dazwischen, galt das Dokument
+    bisher dauerhaft als fertig, obwohl diese Schritte fehlten (der Index-Reaper
+    reparierte NUR die Suche). ``postprocessed_at`` wird ERST NACH dem gesamten
+    Block gesetzt; bricht der Worker vorher ab, bleibt es NULL und
+    ``reap_unpostprocessed_versions`` holt die Nachbearbeitung idempotent nach. Die
+    Einzelschritte sind reconciliierende ``sync``-Funktionen (wiederholbar);
+    identisch für den Erst- und den Retry-Lauf."""
+    actor = actor or version.created_by
+    _sync_contract_center(version, result, actor=actor)
+    _sync_entity_graph(version, result, actor=actor)
     # Pflicht-Findbarkeitsindizes: bei vollständigem Erfolg wird indexed_at gesetzt;
     # bei Fehler bleibt es NULL -> reap_unindexed_versions holt die Indizierung nach.
-    result["indexed"] = ensure_findability_index(version, actor=version.created_by)
-    _sync_auto_file(version, result, actor=version.created_by)
+    result["indexed"] = ensure_findability_index(version, actor=actor)
+    _sync_auto_file(version, result, actor=actor)
     try:
         from documents.services import review_tasks
 
@@ -792,6 +818,7 @@ def process_version(version: DocumentVersion) -> dict:
         raise  # Soft-Time-Limit nie als Best-Effort-Teilfehler verschlucken
     except Exception:  # noqa: BLE001 - Review-Tasks dürfen Verarbeitung nicht kippen
         logger.exception("Review-Task-Sync für Version %s fehlgeschlagen", version.id)
+    _mark_postprocessed(version)
     return result
 
 
@@ -839,21 +866,7 @@ def retry_version(version: DocumentVersion, actor=None) -> dict:
     if result.get("status") != "done":
         # Wie process_version: bei FAILED/superseded keine Folgeaktionen.
         return result
-    _sync_contract_center(version, result, actor=actor or version.created_by)
-    _sync_entity_graph(version, result, actor=actor or version.created_by)
-    result["indexed"] = ensure_findability_index(version, actor=actor or version.created_by)
-    _sync_auto_file(version, result, actor=actor or version.created_by)
-    try:
-        from documents.services import review_tasks
-
-        result["review_tasks"] = review_tasks.sync_document_review_tasks(
-            version.document
-        )
-    except SoftTimeLimitExceeded:
-        raise  # Soft-Time-Limit nie als Best-Effort-Teilfehler verschlucken
-    except Exception:  # noqa: BLE001 - Review-Tasks dürfen Retry nicht kippen
-        logger.exception("Review-Task-Sync für Retry-Version %s fehlgeschlagen", version.id)
-    return result
+    return run_postprocessing(version, result, actor=actor or version.created_by)
 
 
 def _sync_search_vector(version: DocumentVersion) -> bool:
