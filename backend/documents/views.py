@@ -2081,7 +2081,12 @@ class DocumentViewSet(viewsets.ModelViewSet):
         document = self.get_object()
         return Response(pipeline.verify_document_integrity(document))
 
-    @action(detail=True, methods=["post"], url_path="archive-check")
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path="archive-check",
+        throttle_classes=[IntegrityCheckRateThrottle],  # hasht alle Dateien (P2)
+    )
     def archive_check(self, request, pk=None):
         """Persistente Archivprüfung: Hash-Kette + Metadaten-Siegel + WORM."""
         if not getattr(request.user, "can_write", False):
@@ -2182,7 +2187,12 @@ class DocumentViewSet(viewsets.ModelViewSet):
         )
         return Response(payload)
 
-    @action(detail=True, methods=["post"], url_path="reindex-semantic")
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path="reindex-semantic",
+        throttle_classes=[AiRateThrottle],  # synchroner Embedding-Neuaufbau (P2)
+    )
     def reindex_semantic(self, request, pk=None):
         """Erzeugt den semantischen Index für dieses Dokument neu."""
         if not getattr(request.user, "can_write", False):
@@ -3331,7 +3341,12 @@ class DocumentViewSet(viewsets.ModelViewSet):
             }
         )
 
-    @action(detail=True, methods=["post"], url_path="suggest")
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path="suggest",
+        throttle_classes=[AiRateThrottle],  # synchroner Provider-Aufruf (P2)
+    )
     def suggest(self, request, pk=None):
         """Regeneriert die KI-Metadatenvorschläge synchron (sofortiges UI-Feedback).
 
