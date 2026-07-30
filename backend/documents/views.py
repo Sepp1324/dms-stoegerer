@@ -100,6 +100,7 @@ from .throttling import (
     IntegrityCheckRateThrottle,
     PdfThumbnailRateThrottle,
     RevisionExportRateThrottle,
+    RuleSimulateRateThrottle,
     UploadRateThrottle,
 )
 from .services import version_compare
@@ -5677,12 +5678,22 @@ class ClassificationRuleViewSet(_OwnerScopedAutomationMixin, viewsets.ModelViewS
             )
         )
 
-    @action(detail=False, methods=["post"], url_path="simulate")
+    @action(
+        detail=False,
+        methods=["post"],
+        url_path="simulate",
+        throttle_classes=[RuleSimulateRateThrottle],  # synchroner Vollscan (P2)
+    )
     def simulate_unsaved(self, request):
         """Simuliert einen Regelentwurf aus dem Formular ohne DB-Schreibvorgang."""
         return self._simulate_payload(request)
 
-    @action(detail=True, methods=["post"], url_path="simulate")
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path="simulate",
+        throttle_classes=[RuleSimulateRateThrottle],  # synchroner Vollscan (P2)
+    )
     def simulate(self, request, pk=None):
         """Simuliert eine bestehende Regel gegen sichtbare Dokumente."""
         return self._simulate_payload(request, rule=self.get_object())

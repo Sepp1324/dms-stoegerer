@@ -74,7 +74,11 @@ def _impact_for_document(document: Document, then: dict) -> dict:
 
     target_tags = then.get("tags") or []
     if target_tags:
-        current_tags = set(document.tags.values_list("name", flat=True))
+        # Aus dem Prefetch-Cache lesen (P2): ``tags.values_list(...)`` würde den
+        # ``prefetch_related("tags")``-Cache UMGEHEN und je Dokument eine Query
+        # feuern (N+1). ``tags.all()`` nutzt den Cache; die Namen ziehen wir in
+        # Python heraus.
+        current_tags = {t.name for t in document.tags.all()}
         missing_tags = [tag for tag in target_tags if tag not in current_tags]
         existing_tags = [tag for tag in target_tags if tag in current_tags]
         if missing_tags:
