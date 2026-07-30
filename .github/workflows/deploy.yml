@@ -117,6 +117,12 @@ jobs:
             fi
           done
 
+      - name: Backup-Secret-Preflight (dms-db-backup-secrets)
+        # VOR dem apply prüfen, dass der Backup-CronJob nicht mit
+        # CreateContainerConfigError starten wird (Secret + Keys + PG-Passwort).
+        # Best-effort: fehlende Leserechte -> Warnung, kein Abbruch.
+        run: scripts/preflight-backup-secret.sh
+
       - name: Manifeste rendern, Tags ersetzen, anwenden
         run: |
           set -euo pipefail
