@@ -5211,9 +5211,11 @@ class EntityRelationViewSet(viewsets.ReadOnlyModelViewSet):
         ).order_by("relation_type", "from_entity__name")
         user = self.request.user
         if not getattr(user, "is_dms_admin", False):
-            qs = qs.filter(
-                Q(from_entity__owner=user) | Q(to_entity__owner=user)
-            )
+            # Owner-Grenze (P1): BEIDE Endpunkte müssen dem Nutzer gehören. Ein ODER
+            # gäbe eine mandantenübergreifende Relation frei, deren ANDERE Entität
+            # der Serializer (from_name/to_name) dann ausliefert -> Leak. Identisch
+            # zur relations-Action der KnowledgeEntity (siehe #464).
+            qs = qs.filter(from_entity__owner=user, to_entity__owner=user)
         entity_id = self.request.query_params.get("entity")
         if entity_id:
             qs = qs.filter(Q(from_entity_id=entity_id) | Q(to_entity_id=entity_id))
