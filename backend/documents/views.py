@@ -97,6 +97,7 @@ from .filetypes import SNIFF_BYTES, UnsupportedFileType, detect, is_safe_inline
 from .throttling import (
     AiRateThrottle,
     CaptureRateThrottle,
+    IntegrityCheckRateThrottle,
     PdfThumbnailRateThrottle,
     RevisionExportRateThrottle,
     UploadRateThrottle,
@@ -2010,7 +2011,12 @@ class DocumentViewSet(viewsets.ModelViewSet):
         )
         return response
 
-    @action(detail=False, methods=["get"], url_path="evidence-status")
+    @action(
+        detail=False,
+        methods=["get"],
+        url_path="evidence-status",
+        throttle_classes=[IntegrityCheckRateThrottle],  # liest+hasht viele Dateien (P2)
+    )
     def evidence_status(self, request):
         """Mandantengefiltertes Audit-/Beweis-Center für sichtbare Dokumente."""
         return Response(evidence_service.evidence_status(self.get_queryset()))
@@ -2044,7 +2050,12 @@ class DocumentViewSet(viewsets.ModelViewSet):
         """Qualitätsprofil eines einzelnen sichtbaren Dokuments."""
         return Response(quality_service.document_quality(self.get_object()))
 
-    @action(detail=True, methods=["get"], url_path="evidence")
+    @action(
+        detail=True,
+        methods=["get"],
+        url_path="evidence",
+        throttle_classes=[IntegrityCheckRateThrottle],  # frische Datei-Hashes (P2)
+    )
     def evidence(self, request, pk=None):
         """Frisch verifizierter Beweisbericht für ein einzelnes Dokument."""
         document = self.get_object()
@@ -2057,7 +2068,11 @@ class DocumentViewSet(viewsets.ModelViewSet):
         )
         return Response(evidence_service.document_report(document))
 
-    @action(detail=True, methods=["get"])
+    @action(
+        detail=True,
+        methods=["get"],
+        throttle_classes=[IntegrityCheckRateThrottle],  # rechnet alle Datei-Hashes frisch (P2)
+    )
     def integrity(self, request, pk=None):
         """Prüft die Hash-Kette des Dokuments (Datei-Hash + prev_hash-Verkettung).
 
