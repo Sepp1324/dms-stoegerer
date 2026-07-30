@@ -223,12 +223,13 @@ UNDO_HANDLERS = {
 def undo(user, audit_id) -> dict:
     """Macht eine zuvor ausgeführte Agent-Aktion rückgängig (owner-gescoped).
 
-    Atomar (P1): Umkehr, das Markieren des Ursprungs-Audits als ``undone`` und der
-    ``agent_undo``-Audit laufen in EINER Transaktion unter ``select_for_update()``
-    auf dem Ursprungs-Audit – ein Prozess-/DB-Fehler hinterlässt sonst eine Umkehr
-    ohne Kennzeichnung (oder umgekehrt), und paralleles Undo würde doppelt umkehren.
-    Wird nichts umgekehrt (aktueller Wert ≠ angewandter Wert oder Objekt bereits
-    weg), bleibt der Eintrag ``undone=False`` und es entsteht KEIN ``agent_undo``.
+    Atomar (P1): Umkehr und der ``agent_undo``-Audit laufen in EINER Transaktion
+    unter ``select_for_update()`` auf dem Ursprungs-Audit – paralleles Undo würde
+    sonst doppelt umkehren. Der Audit-Trail ist append-only: der Ursprungs-Eintrag
+    wird NICHT mutiert; die Rücknahme wird ausschließlich durch den kompensierenden
+    ``agent_undo``-Eintrag belegt (der zugleich die „bereits rückgängig"-Prüfung
+    trägt). Wird nichts umgekehrt (aktueller Wert ≠ angewandter Wert oder Objekt
+    bereits weg), entsteht KEIN ``agent_undo``.
     """
     with transaction.atomic():
         entry = (
@@ -242,7 +243,13 @@ def undo(user, audit_id) -> dict:
         if action not in UNDO_HANDLERS:
             return {"status": "unsupported", "message": "Nicht rückgängig machbar."}
         detail = dict(entry.detail or {})
-        if detail.get("undone"):
+        # Bereits rückgängig? Append-only (P1): den Ursprungs-Eintrag NICHT mutieren,
+        # sondern am kompensierenden ``agent_undo``-Eintrag erkennen, der auf ihn
+        # zeigt. Die Zeilensperre auf ``entry`` serialisiert parallele Undos, sodass
+        # nicht zwei gleichzeitig einen agent_undo für denselben Eintrag anlegen.
+        if AuditLogEntry.objects.filter(
+            action="agent_undo", detail__undid_audit=entry.id
+        ).exists():
             return {"status": "already_undone", "message": "Bereits rückgängig gemacht."}
         document = Document.objects.filter(id=entry.object_id, owner=user).first()
         if document is None:
@@ -254,9 +261,8 @@ def undo(user, audit_id) -> dict:
             # undone markieren, kein agent_undo-Audit.
             return {"status": "skipped", "message": message}
 
-        detail["undone"] = True
-        entry.detail = detail
-        entry.save(update_fields=["detail"])
+        # Append-only: KEIN Update des Ursprungs-Eintrags mehr – der agent_undo-Eintrag
+        # IST der Beleg der Rücknahme (und die „already_undone"-Prüfung oben).
         AuditLogEntry.objects.create(
             actor=user,
             action="agent_undo",
