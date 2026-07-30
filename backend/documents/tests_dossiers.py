@@ -116,6 +116,33 @@ class DossierApiTests(APITestCase):
         d.refresh_from_db()
         self.assertEqual(d.title, "T")
 
+    def test_patch_ueberschreibt_parallele_generierung_nicht(self):
+        """P1: Ein PATCH darf eine parallel abgeschlossene generate-Aktion NICHT
+        überschreiben. Der Serializer trägt eine VOR der Sperre geladene Instanz;
+        perform_update muss auf das unter der Sperre frisch gelesene Objekt umhängen,
+        sonst schreibt instance.save() die veralteten Felder (summary/…) zurück."""
+        from unittest import mock
+
+        from .views import DossierViewSet
+
+        d = Dossier.objects.create(
+            owner=self.user, title="T", query="q",
+            status=Dossier.Status.DRAFT, summary="ALT",
+        )
+        stale = Dossier.objects.get(pk=d.pk)  # summary=ALT im Speicher
+        # Parallele generate schreibt NEU in die DB, NACHDEM stale geladen wurde.
+        Dossier.objects.filter(pk=d.pk).update(summary="NEU-parallel")
+
+        self.client.force_authenticate(self.user)
+        with mock.patch.object(DossierViewSet, "get_object", return_value=stale):
+            resp = self.client.patch(
+                f"/api/dossiers/{d.id}/", {"title": "Neuer Titel"}, format="json"
+            )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        d.refresh_from_db()
+        self.assertEqual(d.title, "Neuer Titel")            # PATCH angewandt
+        self.assertEqual(d.summary, "NEU-parallel")         # generate NICHT überschrieben
+
     def test_finales_dossier_loeschen_durch_nicht_admin_abgelehnt(self):
         """P2: Ein finalisiertes Dossier darf ein Nicht-Admin NICHT löschen."""
         self.client.force_authenticate(self.user)

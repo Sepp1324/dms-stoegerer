@@ -4631,6 +4631,14 @@ class DossierViewSet(viewsets.ModelViewSet):
             )
             if locked.status == Dossier.Status.FINAL:
                 raise PermissionDenied("Ein finalisiertes Dossier ist unveränderlich.")
+            # Lost-Update-Schutz (P1): Der Serializer trägt seine VOR der Sperre
+            # geladene Instanz. Ein ``serializer.save()`` darauf würde ein volles
+            # ``instance.save()`` mit den ALTEN Feldern (summary/sources/…) schreiben
+            # und eine parallel abgeschlossene ``generate``-Aktion überschreiben.
+            # Deshalb den Serializer auf das UNTER der Sperre frisch gelesene Objekt
+            # umhängen – ``validated_data`` (Titel/Query) wird dann auf den aktuellen
+            # Stand angewendet.
+            serializer.instance = locked
             serializer.save()
 
     def perform_destroy(self, instance):
