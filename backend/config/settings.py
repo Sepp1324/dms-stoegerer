@@ -276,6 +276,9 @@ REST_FRAMEWORK = {
         # Revisionspaket-Export: baut synchron ein ZIP über ALLE Versionen/Archive.
         # Bewusst niedrig – ein einzelner Nutzer soll nicht beide Webworker binden.
         "revision_export": os.getenv("THROTTLE_REVISION_EXPORT_RATE", "6/minute"),
+        # Integritäts-/Evidence-Prüfung: liest + hasht synchron alle Dateien.
+        # Bewusst niedrig – wenige große Requests sollen die Webworker nicht binden.
+        "integrity_check": os.getenv("THROTTLE_INTEGRITY_CHECK_RATE", "12/minute"),
     },
 }
 

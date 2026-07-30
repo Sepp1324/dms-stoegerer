@@ -62,3 +62,14 @@ class RevisionExportRateThrottle(_PerUserScopeThrottle):
     die Frequenz pro Nutzer (P2)."""
 
     scope = "revision_export"
+
+
+class IntegrityCheckRateThrottle(_PerUserScopeThrottle):
+    """Limit für Integritäts-/Evidence-Endpunkte (Scope ``integrity_check``).
+
+    ``integrity``, ``evidence`` und ``evidence_status`` lesen und HASHEN synchron
+    sämtliche betroffenen Dateien. Ohne Drossel könnten wenige große Requests bei
+    nur zwei Gunicorn-Workern das Backend blockieren (analog Revisionspaket-Export,
+    P2)."""
+
+    scope = "integrity_check"
