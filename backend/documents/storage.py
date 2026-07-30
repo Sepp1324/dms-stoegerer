@@ -18,6 +18,7 @@ from django.utils import timezone
 from django.utils.text import slugify
 
 from .filetypes import SNIFF_BYTES, UnsupportedFileType, detect
+from .services.quiesce import raise_if_quiesced
 
 
 def _max_upload_bytes() -> int:
@@ -62,6 +63,11 @@ def save_upload(uploaded_file) -> tuple[str, int, str]:
     aus, bevor irgendetwas geschrieben wird. MIME und Endung stammen aus dem
     erkannten Typ, nicht aus Nutzereingaben. Zusätzlich greift ein Größenlimit.
     """
+    # Backup-Schreibsperre (P1): Während einer laufenden Sicherung darf kein neues
+    # Original geschrieben werden – sonst driften /data-Snapshot und DB-Dump
+    # auseinander. Zentraler Backstop für ALLE Ingest-Wege (HTTP-Upload,
+    # Mobile-Capture, Version, Consume, Mail), die hier zusammenlaufen.
+    raise_if_quiesced()
     max_bytes = _max_upload_bytes()
     size = getattr(uploaded_file, "size", None)
     if size is not None and size > max_bytes:
@@ -112,6 +118,7 @@ def save_bytes(data: bytes, ext: str = "") -> tuple[Path, str]:
     ein ``%PDF-…<script>``-Polyglot als ``text/html`` abgelegt und in der
     (un-sandboxed) Vorschau im DMS-Origin ausgeführt werden (Stored XSS).
     """
+    raise_if_quiesced()  # Backup-Schreibsperre (P1), s. save_upload
     if len(data) > _max_upload_bytes():
         raise UnsupportedFileType(
             f"Datei zu groß ({len(data)} Bytes > Limit {_max_upload_bytes()} Bytes)."

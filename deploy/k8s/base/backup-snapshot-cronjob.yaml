@@ -14,6 +14,15 @@
 # stellen UND danach die live-tar-CronJob ``backup`` suspendieren. So bleibt das
 # funktionierende Backup unangetastet, bis der Snapshot-Pfad validiert ist.
 #
+# DB-/Datei-Konsistenz (P1): Der /data-Snapshot (Schritt 1) und der pg_dump des
+# Helfers (Schritt 3) liegen zeitlich auseinander – ein dazwischen hochgeladenes
+# Dokument stünde nur im Dump. Deshalb setzt der Orchestrator VOR dem Snapshot eine
+# kurze Backup-Schreibsperre (``manage.py backup_quiesce --on``, per kubectl exec
+# ins Backend) und der Helfer hebt sie direkt nach dem pg_dump wieder auf. Während
+# der Sperre antworten Upload/Mobile-Capture/Version mit 503 und die Consume-/Mail-
+# Beat-Tasks pausieren (Enforcement im Backend, s. documents/services/quiesce.py).
+# Voraussetzung fürs Aktivieren: Bootstrap-RBAC um ``pods/exec`` (dms-backup) ergänzen.
+#
 # Voraussetzungen (Bootstrap, deploy/k8s/bootstrap): SA dms-backup + dms-backup-
 # helper, RBAC, VolumeSnapshotClass ``dms-longhorn-snapshot`` und der Admission-
 # Guard. Der Helfer-Job erfüllt den Guard exakt (token-lose SA, nur erlaubte
@@ -85,6 +94,14 @@ data:
       > "${DB_DUMP_TMP}"
     gzip "${DB_DUMP_TMP}"
 
+    # Backup-Schreibsperre AUFHEBEN (P1): /data-Snapshot (vom Orchestrator VOR dem
+    # VolumeSnapshot gesetzt) UND dieser pg_dump spiegeln jetzt denselben Zustand –
+    # der konsistente Zeitpunkt ist eingefangen. tar/Upload lesen nur noch den
+    # unveränderlichen Snapshot, daher darf ab hier wieder geschrieben werden. Der
+    # TTL-Backstop (Orchestrator: --ttl) hebt die Sperre notfalls ohnehin auf.
+    echo "--- pg_dump fertig – Backup-Schreibsperre aufheben"
+    python manage.py backup_quiesce --off || true
+
     echo "--- tar: /data (konsistenter Snapshot) → ${DATA_BACKUP}"
     tar -czf "${DATA_BACKUP}" -C /data originals archive thumbnails consume
 
@@ -151,6 +168,11 @@ spec:
                   JOB="backup-snap-tar-${TS}"
 
                   cleanup() {
+                    # Backup-Schreibsperre IMMER best-effort aufheben – falls der
+                    # Helfer sie nicht schon nach dem pg_dump gelöst hat (z. B.
+                    # Abbruch vor dem Helfer). Der TTL-Backstop greift zusätzlich.
+                    kubectl -n dms exec deploy/backend -- \
+                      python manage.py backup_quiesce --off || true
                     kubectl -n dms delete job "$JOB" --ignore-not-found
                     kubectl -n dms delete pvc "$PVC" --ignore-not-found
                     kubectl -n dms delete volumesnapshot "$SNAP" --ignore-not-found
@@ -169,6 +191,19 @@ spec:
                     -o jsonpath='{.spec.resources.requests.storage}')
                   [ -n "${SRC_SIZE}" ] || SRC_SIZE=20Gi
                   echo "Restore-PVC-Größe: ${SRC_SIZE}"
+
+                  # 0) Backup-Schreibsperre AKTIVIEREN, BEVOR der /data-Snapshot
+                  #    entsteht. Sonst könnte ein zwischen /data-Snapshot (Schritt 1)
+                  #    und dem pg_dump des Helfers (Schritt 3) hochgeladenes Dokument
+                  #    NUR im DB-Dump landen (baumelt im Restore ohne Datei). Der
+                  #    Helfer hebt die Sperre direkt nach dem pg_dump wieder auf; die
+                  #    ``--ttl`` ist die Notbremse gegen einen hängenden Lauf.
+                  #    Voraussetzung (Bootstrap-RBAC): dms-backup braucht ``pods/exec``
+                  #    im Namespace dms. Upload/Mobile-Capture/Version antworten
+                  #    während der Sperre mit 503, Consume-/Mail-Beat pausiert.
+                  echo "0) Backup-Schreibsperre aktivieren"
+                  kubectl -n dms exec deploy/backend -- \
+                    python manage.py backup_quiesce --on --ttl 1200
 
                   # 1) Snapshot des Daten-PVC + warten.
                   kubectl -n dms apply -f - <<EOF
