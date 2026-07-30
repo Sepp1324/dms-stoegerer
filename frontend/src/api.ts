@@ -35,18 +35,33 @@ export async function login(username: string, password: string): Promise<void> {
   setTokens(data.access, data.refresh);
 }
 
+// Single-Flight (P2): Bei mehreren gleichzeitig mit 401 beantworteten Requests
+// darf nur EIN Refresh laufen. Sonst starten alle parallel einen eigenen Refresh –
+// die zusätzlichen können das (neue) Refresh-Rate-Limit treffen und den Nutzer
+// fälschlich ausloggen, obwohl ein paralleler Refresh erfolgreich war. Alle
+// Aufrufer teilen sich dieselbe Promise; nach Abschluss wird sie zurückgesetzt.
+let refreshInFlight: Promise<boolean> | null = null;
+
 async function tryRefresh(): Promise<boolean> {
-  const refresh = localStorage.getItem(REFRESH_KEY);
-  if (!refresh) return false;
-  const res = await fetch(`${API_BASE}/auth/token/refresh/`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ refresh }),
-  });
-  if (!res.ok) return false;
-  const data = await res.json();
-  setTokens(data.access);
-  return true;
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = (async (): Promise<boolean> => {
+    const refresh = localStorage.getItem(REFRESH_KEY);
+    if (!refresh) return false;
+    const res = await fetch(`${API_BASE}/auth/token/refresh/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh }),
+    });
+    if (!res.ok) return false;
+    const data = await res.json();
+    setTokens(data.access);
+    return true;
+  })();
+  try {
+    return await refreshInFlight;
+  } finally {
+    refreshInFlight = null;
+  }
 }
 
 // fetch-Wrapper: hängt den Access-Token an und erneuert ihn bei 401 einmalig.
