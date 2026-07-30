@@ -116,6 +116,44 @@ class DossierApiTests(APITestCase):
         d.refresh_from_db()
         self.assertEqual(d.title, "T")
 
+    def test_finales_dossier_loeschen_durch_nicht_admin_abgelehnt(self):
+        """P2: Ein finalisiertes Dossier darf ein Nicht-Admin NICHT löschen."""
+        self.client.force_authenticate(self.user)
+        d = Dossier.objects.create(
+            owner=self.user, title="T", query="q", status=Dossier.Status.FINAL
+        )
+        resp = self.client.delete(f"/api/dossiers/{d.id}/")
+        self.assertEqual(resp.status_code, 403)
+        self.assertTrue(Dossier.objects.filter(pk=d.id).exists())
+
+    def test_finales_dossier_loeschen_durch_admin_auditiert(self):
+        admin = User.objects.create_user(username="dossier-admin", password="pw", role="admin")
+        d = Dossier.objects.create(
+            owner=self.user, title="T", query="q", status=Dossier.Status.FINAL
+        )
+        self.client.force_authenticate(admin)
+        resp = self.client.delete(f"/api/dossiers/{d.id}/")
+        self.assertEqual(resp.status_code, 204)
+        self.assertFalse(Dossier.objects.filter(pk=d.id).exists())
+        self.assertTrue(
+            AuditLogEntry.objects.filter(
+                action="dossier_delete", object_id=str(d.id)
+            ).exists()
+        )
+
+    def test_nicht_finales_dossier_loeschen_erlaubt_und_auditiert(self):
+        self.client.force_authenticate(self.user)
+        d = Dossier.objects.create(
+            owner=self.user, title="T", query="q", status=Dossier.Status.DRAFT
+        )
+        resp = self.client.delete(f"/api/dossiers/{d.id}/")
+        self.assertEqual(resp.status_code, 204)
+        self.assertTrue(
+            AuditLogEntry.objects.filter(
+                action="dossier_delete", object_id=str(d.id)
+            ).exists()
+        )
+
     def test_finales_dossier_nicht_auf_draft_zurueck(self):
         """… noch über einen PATCH auf status wieder auf DRAFT zurückstellen."""
         self.client.force_authenticate(self.user)
