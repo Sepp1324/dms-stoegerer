@@ -24,6 +24,22 @@ class CleanupArtifactSafetyTests(TestCase):
     def _patch_data_dir(self):
         return mock.patch.object(storage, "DATA_DIR", self.root)
 
+    def test_delete_erzeugt_outbox_ohne_broker_dispatch(self):
+        """P1: Das Löschen legt NUR die Outbox-Zeile an und dispatcht KEINEN
+        Celery-Task im Request. Sonst blockiert ein nicht erreichbarer Redis den
+        Lösch-Request ~20 s (und ließ die CI rot laufen); der Sweeper stellt zu."""
+        doc = Document.objects.create(title="D", owner=self.user)
+        DocumentVersion.objects.create(
+            document=doc,
+            version_no=1,
+            file_path=str(self.root / "orphan.pdf"),
+            sha256="b" * 64,
+        )
+        with mock.patch.object(tasks.cleanup_artifact_files, "delay") as delay:
+            doc.delete()
+        delay.assert_not_called()  # KEIN Broker-Zugriff im Request
+        self.assertTrue(ArtifactCleanupJob.objects.exists())  # Outbox für den Sweeper
+
     def test_entfernt_unreferenzierte_datei_unter_data_dir(self):
         f = self.root / "orig.pdf"
         f.write_bytes(b"x")
