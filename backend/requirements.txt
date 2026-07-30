@@ -4,20 +4,25 @@
 Django==5.2.16
 djangorestframework==3.16.1
 djangorestframework-simplejwt==5.5.1
-# PyJWT explizit gepinnt (transitiv über simplejwt): 2.10.1 behebt die 2.9.0-CVE
-# (partielle Vergleiche/Signaturprüfung). simplejwt 5.5.x akzeptiert PyJWT<3.
-PyJWT==2.10.1
+# PyJWT explizit gepinnt (transitiv über simplejwt): 2.13.0 behebt mehrere 2026er
+# Advisories (PYSEC-2026-120/175/176/177/178/179). PYSEC-2025-183 hat (Stand jetzt)
+# keinen Fix und ist in backend/.pip-audit-ignore dokumentiert gewaivert.
+# simplejwt 5.5.x akzeptiert PyJWT<3.
+PyJWT==2.13.0
 django-cors-headers==4.7.0
 whitenoise==6.8.2
 psycopg[binary]==3.2.3
 celery==5.4.0
 redis==5.2.1
-python-dotenv==1.1.1
+python-dotenv==1.2.2
 gunicorn==23.0.0
 # Symmetrische Verschlüsselung für DB-Geheimnisse (MailAccount.password, STOAA-212).
-# Innerhalb 44.x gehalten (Sicherheits-Patch); ein Major-Sprung zöge neue
-# Rust/ABI-Anforderungen nach sich – bewusst separat.
-cryptography==44.0.2
+# Bump auf 48.0.1 behebt GHSA-537c-gmf6-5ccf sowie PYSEC-2026-2141/2026-35. Die
+# frühere 44.x-Deckelung („Rust/ABI") betraf Source-Builds – das Backend baut auf
+# python:3.12-slim (glibc), wo cryptography vorgebaute manylinux-Wheels liefert;
+# der Bump ist damit ohne Rust-Toolchain installierbar (von CI verifiziert). Nur
+# die stabile Fernet-API wird genutzt.
+cryptography==48.0.1
 # OCR-Pipeline
 ocrmypdf==16.10.0
 img2pdf==0.6.0

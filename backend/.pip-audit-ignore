@@ -5,5 +5,40 @@
 # kurzen Begründung. NUR bewusst akzeptierte Restrisiken ohne verfügbaren Fix
 # gehören hierher – alles Behebbare wird stattdessen in requirements.txt gebumpt.
 #
-# Die Liste wird nach dem ersten CI-Lauf aus dem pip-audit-Report befüllt
-# (Advisory-IDs stehen dort im Klartext-Log unter „pip-audit (Klartext fürs Log)").
+# Behoben per Bump (NICHT hier): PyJWT 2.13.0, python-dotenv 1.2.2,
+# cryptography 48.0.1.
+
+# --- Pillow 10.4.0: alle Fixes verlangen Pillow 12.x, das ÜBER der
+# fastembed-0.3.6-Decke liegt (pillow<11). Ein Bump erzwänge einen fastembed-
+# Upgrade, der auf diesem Selfhost-Cluster den Pod-Memory sprengt (OOMKill,
+# dokumentiert in requirements.txt). Restrisiko akzeptiert; der Upload-Vektor ist
+# durch die Magic-Byte-Allowlist (P0-2) stark entschärft. Beim Anheben der
+# fastembed-Decke ersatzlos entfernen.
+PYSEC-2026-165    # Pillow – Fix erst 12.2.0 (> fastembed-Decke)
+PYSEC-2026-2249   # Pillow – Fix erst 12.1.1
+PYSEC-2026-2250   # Pillow – Fix erst 12.2.0
+PYSEC-2026-2252   # Pillow – Fix erst 12.2.0
+PYSEC-2026-2253   # Pillow – Fix erst 12.3.0
+PYSEC-2026-2254   # Pillow – Fix erst 12.3.0
+PYSEC-2026-2255   # Pillow – Fix erst 12.3.0
+PYSEC-2026-2256   # Pillow – Fix erst 12.3.0
+PYSEC-2026-2257   # Pillow – Fix erst 12.3.0
+PYSEC-2026-2874   # Pillow – Fix erst 12.2.0
+PYSEC-2026-3451   # Pillow – Fix erst 12.3.0
+PYSEC-2026-3453   # Pillow – Fix erst 12.3.0
+PYSEC-2026-3454   # Pillow – Fix erst 12.3.0
+PYSEC-2026-3493   # Pillow – Fix erst 12.3.0
+PYSEC-2026-3494   # Pillow – Fix erst 12.3.0
+PYSEC-2026-3495   # Pillow – Fix erst 12.3.0
+PYSEC-2026-3496   # Pillow – Fix erst 12.3.0
+
+# --- pillow-heif / pi-heif: HEIC/HEIF-Support (Mobile-Erfassung). Der Fix (1.3.0)
+# hängt an Pillow 11+/12, also ebenfalls über der fastembed-Decke. Zusammen mit
+# Pillow anheben.
+PYSEC-2026-2258   # pillow-heif 0.18.0 – Fix erst 1.3.0 (Pillow-11+-gekoppelt)
+PYSEC-2026-2248   # pi-heif 0.22.0 – Fix erst 1.3.0 (Pillow-11+-gekoppelt)
+
+# --- PyJWT: PYSEC-2025-183 hat (Stand jetzt) KEINE Fix-Version. Die übrigen
+# PyJWT-Advisories sind per Bump auf 2.13.0 behoben. Entfernen, sobald ein Fix
+# veröffentlicht ist.
+PYSEC-2025-183    # PyJWT – kein Fix verfügbar
