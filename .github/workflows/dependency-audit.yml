@@ -57,6 +57,17 @@ jobs:
                   if line and not line.startswith("#"):
                       ignore.add(line.split()[0])
           data = json.load(open("audit.json"))
+          # Scanner-/Registry-Fehler NICHT als "keine Advisories" durchwinken (P2):
+          # npm audit --json liefert bei Netzwerk-/Registry-Fehlern gültiges JSON
+          # mit einem `error`-Feld (und ohne `vulnerabilities`). Ohne diese Prüfung
+          # meldete der Parser fälschlich "keine Advisories" -> Gate grün trotz
+          # nicht durchgeführtem Scan. Fehlt die erwartete Struktur oder ist ein
+          # error gesetzt -> Gate rot.
+          if not isinstance(data, dict) or data.get("error") or "vulnerabilities" not in data:
+              print("npm audit lieferte kein gültiges Ergebnis (Scanner-/Registry-Fehler?) "
+                    "– Gate schlägt fehl statt fälschlich grün zu werden.")
+              print(json.dumps(data)[:2000] if isinstance(data, dict) else str(data)[:2000])
+              sys.exit(1)
           seen, unwaived = set(), []
           for _name, vuln in data.get("vulnerabilities", {}).items():
               for via in vuln.get("via", []):
