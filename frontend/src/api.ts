@@ -106,7 +106,18 @@ async function apiFetch(path: string, options: RequestInit = {}): Promise<Respon
   // neuen Sitzung löschen.
   const generationAtStart = authGeneration;
   let res = await fetch(`${API_BASE}${path}`, withAuth());
-  if (res.status === 401 && (await tryRefresh())) {
+  // Refresh+Retry NUR, wenn zwischenzeitlich kein logout()/login() lief (P1):
+  // Sonst würde tryRefresh() den NEUEN Refresh-Token nehmen und den alten Request
+  // mit der NEUEN Identität wiederholen – ein altes POST/PATCH/DELETE liefe dann
+  // unter dem frisch angemeldeten Benutzer. Die Generation wird vor dem Refresh
+  // UND nach dem (await-enden) Refresh geprüft (ein login() kann während des
+  // laufenden Refresh passieren).
+  if (
+    res.status === 401 &&
+    authGeneration === generationAtStart &&
+    (await tryRefresh()) &&
+    authGeneration === generationAtStart
+  ) {
     res = await fetch(`${API_BASE}${path}`, withAuth());
   }
   if (res.status === 401) {
