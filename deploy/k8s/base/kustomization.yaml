@@ -48,6 +48,7 @@ resources:
   # Konsistenter Snapshot-Backup – SUSPENDIERT ausgeliefert (erst nach Cluster-
   # Validierung aktivieren; siehe Datei-Header + docs/backup-snapshot.md).
   - backup-snapshot-cronjob.yaml
-  # networkpolicy.yaml BEWUSST NICHT eingebunden (2026-07-31): kube-router (k3s)
-  # blockte damit dynamische CronJob-Pods -> Backups kaputt. Begründung + mögliche
-  # Wieder-Aktivierung stehen im Datei-Header von networkpolicy.yaml.
+  # networkpolicy.yaml korrigiert wieder eingebunden (2026-07-31): Ursache war NICHT
+  # die Pod-Lebensdauer, sondern hostNetwork am Backup (Node-Traffic matcht kein
+  # podSelector) – jetzt via ipBlock der Node-Gateways gelöst (siehe Datei-Header).
+  - networkpolicy.yaml

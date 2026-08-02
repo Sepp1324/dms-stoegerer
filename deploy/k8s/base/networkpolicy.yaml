@@ -1,27 +1,67 @@
-# ENTFERNT (2026-07-31): Die beiden NetworkPolicies (postgres-allow-namespace,
-# redis-allow-namespace) sind DEAKTIVIERT und bewusst NICHT mehr in der
-# kustomization eingebunden.
+# NetworkPolicy (P2): Die Daten-Stores (Postgres, Redis) nehmen Ingress NUR von
+# Pods DESSELBEN Namespaces (dms) an – plus den Node-Flannel-Gateways (siehe
+# ipBlock unten). Das kapselt DB + Broker gegen Zugriffe aus anderen
+# Namespaces/Pods – die häufigste Lateral-Movement-Route.
 #
-# Warum:
-# Der in k3s eingebaute NetworkPolicy-Controller (kube-router) erzwingt diese
-# Policies nur zuverlässig für Pods, die BEIM ANLEGEN der Policy bereits liefen
-# (z. B. das langlebige backend-Deployment). DYNAMISCH erzeugte, kurzlebige Pods
-# – insbesondere der Backup-CronJob – werden dagegen geblockt (TCP-Reset →
-# "connection refused" bzw. psycopg "server closed the connection unexpectedly").
-# Das legte den nächtlichen Backup-Job lahm: Weder `record_backup_status` (DB)
-# noch `pg_dump` kamen an Postgres. Verifiziert 2026-07-31: OHNE Policy verbindet
-# ein frischer Pod, MIT Policy (egal ob `podSelector: {}` ODER
-# `namespaceSelector`) bekommt er "connection refused" – während das alte
-# backend-Pod weiter durchkommt.
+# WARUM die ipBlock-Ausnahmen (2026-07-31): Der aktive Backup-CronJob läuft mit
+# `hostNetwork: true` (backup-cronjob.yaml) – bewusst, damit SSH/rsync zur NAS von
+# der Node-IP kommt (sonst sieht die NAS-Firewall die Pod-CIDR). hostNetwork-Pods
+# erscheinen für die NetworkPolicy aber als NODE-Traffic (die Flannel-VTEP-Adresse
+# `10.42.<node>.0`), NICHT als normaler Pod – `podSelector: {}` matcht sie deshalb
+# NIE und der Backup-Pod wurde abgewiesen ("connection refused" /
+# psycopg "server closed the connection unexpectedly"), während normale Pods
+# (backend) durchkamen. Verifiziert am Cluster: ein hostNetwork-Pod verbindet mit
+# `inet_client_addr() = 10.42.2.0`. Die drei /32-ipBlocks geben genau die
+# Node-Gateways frei (k3s-01/02/03 = 10.42.0/1/2.0), sodass der hostNetwork-Backup
+# durchkommt, OHNE die Namespace-Isolation aufzuweichen: fremde Pods in fremden
+# Namespaces haben normale Pod-IPs (10.42.x.<n>, n>=2), kein `.0`, und bleiben
+# draußen.
 #
-# Da `dms` praktisch der einzige App-Namespace in diesem Heim-Cluster ist (kein
-# fremder Mandant, aus dem lateral zugegriffen würde), ist der Sicherheitsgewinn
-# der Namespace-Isolation gering – der Schaden (kaputte Backups + jeder künftige
-# CronJob/dynamische Pod betroffen) überwiegt klar. Die Redis-AUTH (Passwort
-# REDIS_PASSWORD) und die übrigen Härtungen bleiben unberührt; nur die
-# NetworkPolicy-Kapselung der Datastores entfällt.
+# HINWEIS: Kommt ein weiterer Node dazu, muss dessen Gateway (10.42.<neu>.0/32)
+# hier ergänzt werden – sonst schlägt ein dort gescheduleter Backup-Pod fehl.
 #
-# Wieder-Aktivierung nur sinnvoll, wenn der NetworkPolicy-Controller dynamische
-# Pods korrekt behandelt (anderer CNI/Controller, z. B. Calico/Cilium) – dann
-# `namespaceSelector: { kubernetes.io/metadata.name: dms }` verwenden und in die
-# kustomization zurücknehmen.
+# Bewusst KEIN namespace-weites default-deny und KEINE Egress-Regeln:
+# * Der Web-Tier (frontend/backend) bleibt für den Traefik-Ingress erreichbar
+#   (keine Policy selektiert ihn → er bleibt offen).
+# * Egress bleibt offen (DNS + externe APIs: Anthropic, IMAP, psychosr).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-allow-namespace
+  namespace: dms
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        # Alle Pods im selben Namespace (dms).
+        - podSelector: {}
+        # Node-Flannel-Gateways (hostNetwork-Backup erscheint als Node-Traffic).
+        - ipBlock: { cidr: 10.42.0.0/32 }
+        - ipBlock: { cidr: 10.42.1.0/32 }
+        - ipBlock: { cidr: 10.42.2.0/32 }
+      ports:
+        - protocol: TCP
+          port: 5432
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-allow-namespace
+  namespace: dms
+spec:
+  podSelector:
+    matchLabels:
+      app: redis
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector: {}
+        - ipBlock: { cidr: 10.42.0.0/32 }
+        - ipBlock: { cidr: 10.42.1.0/32 }
+        - ipBlock: { cidr: 10.42.2.0/32 }
+      ports:
+        - protocol: TCP
+          port: 6379
