@@ -20,6 +20,18 @@
 # HINWEIS: Kommt ein weiterer Node dazu, muss dessen Gateway (10.42.<neu>.0/32)
 # hier ergänzt werden – sonst schlägt ein dort gescheduleter Backup-Pod fehl.
 #
+# RESTRISIKO (bewusst akzeptiert): Der ipBlock vertraut damit dem GESAMTEN
+# Host-Network-Traffic dieser Nodes – nicht nur dem Backup-Pod. Jeder andere
+# hostNetwork-Pod ODER Node-Prozess auf k3s-01/02/03 kann Postgres/Redis TCP
+# erreichen (Passwort bleibt die zweite Schranke). Zudem ist der ipBlock an die
+# Pod-CIDR gebunden und bricht bei Node-Neuaufbau/geänderter CIDR. Die saubere
+# Härtung wäre ein ZWEISTUFIGES Backup: pg_dump/tar in einem NORMALEN Pod
+# (Pod-Netz → matcht podSelector, KEIN ipBlock nötig) und der Offsite-Transfer in
+# einem separaten hostNetwork-Pod OHNE DB-Zugriff. Dann bräuchte diese Policy gar
+# keine ipBlock-Ausnahme mehr. Bewusst separat gehalten (größerer Umbau am
+# Backup-Flow); solange nur der eine, bekannte Backup-Job hostNetwork nutzt, ist
+# das Restrisiko im Ein-App-Heim-Cluster vertretbar.
+#
 # Bewusst KEIN namespace-weites default-deny und KEINE Egress-Regeln:
 # * Der Web-Tier (frontend/backend) bleibt für den Traefik-Ingress erreichbar
 #   (keine Policy selektiert ihn → er bleibt offen).
