@@ -209,6 +209,26 @@ describe("Auth-State: atomar, tab-übergreifend, serverseitig invalidiert", () =
     await expect(getInboxSummary()).rejects.toBeInstanceOf(AuthSessionChangedError);
   });
 
+  it("verwirft eine JSON-Antwort, wenn die Sitzung während res.json() wechselt (P1)", async () => {
+    seed("s1", "a", "r");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      json: async () => {
+        // Sitzungswechsel WÄHREND des JSON-Body-Reads (Header waren schon da).
+        localStorage.setItem(
+          AUTH_KEY,
+          JSON.stringify({ session: "s2", access: "b", refresh: "br" }),
+        );
+        return { total_needs_review: 3 };
+      },
+    } as unknown as Response);
+
+    const err = await getInboxSummary().catch((e) => e);
+    expect(err).toBeInstanceOf(AuthSessionChangedError);
+  });
+
   it("ein verspäteter 401 nach Sitzungswechsel wirft AuthSessionChangedError (kein Logout)", async () => {
     seed("s1", "a", "r");
     vi.spyOn(globalThis, "fetch").mockImplementation(() => {
