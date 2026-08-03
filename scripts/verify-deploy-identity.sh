@@ -27,11 +27,18 @@ esac
 
 # 3) ECHTE Identität serverseitig prüfen. kubectl auth whoami braucht k8s >= 1.26
 #    (k3s erfüllt das). Leere Ausgabe -> fail-closed (nicht heimlich weiterlaufen).
-who="$(kubectl auth whoami -o jsonpath='{.status.userInfo.username}' 2>/dev/null || true)"
+#    Den stderr NICHT verschlucken: die eigentliche Ursache (z. B.
+#    "connection refused" bei nicht erreichbarer API) muss im Log sichtbar sein.
+err_file="$(mktemp)"
+who="$(kubectl auth whoami -o jsonpath='{.status.userInfo.username}' 2>"${err_file}" || true)"
 if [ -z "${who}" ]; then
-  echo "::error::Identität nicht feststellbar (kubectl auth whoami). kubectl >= 1.26 nötig; Kubeconfig/Token prüfen."
+  echo "::error::Identität nicht feststellbar (kubectl auth whoami). kubectl >= 1.26 nötig; Kubeconfig/Token/API-Erreichbarkeit prüfen."
+  echo "--- kubectl-Fehlerausgabe (stderr) ---" >&2
+  cat "${err_file}" >&2 || true
+  rm -f "${err_file}"
   exit 1
 fi
+rm -f "${err_file}"
 if [ "${who}" != "${EXPECTED}" ]; then
   echo "::error::Deploy-Identität '${who}' != '${EXPECTED}'. Nur der namespacebeschränkte Deploy-SA ist erlaubt."
   exit 1
