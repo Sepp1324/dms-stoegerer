@@ -210,22 +210,28 @@ jobs:
 
       - name: Rollout-Diagnose (bei Timeout/Fehler)
         if: failure()
+        # Rein informativ: jeder Befehl mit `|| true`, damit die Diagnose NICHT
+        # selbst am ersten Fehler abbricht (z. B. wenn die API nicht erreichbar ist)
+        # und so die eigentliche Ursache verschluckt.
         run: |
+          echo "=== API erreichbar? ==="
+          kubectl version --request-timeout=10s 2>&1 || echo "(kubectl kann die API nicht erreichen)"
+          echo ""
           echo "=== Pod-Übersicht ==="
-          kubectl -n dms get pods -o wide
+          kubectl -n dms get pods -o wide || true
           echo ""
           echo "=== Nicht-ready Pods (describe) ==="
-          kubectl -n dms get pods --field-selector=status.phase!=Running -o name | while read pod; do
+          kubectl -n dms get pods --field-selector=status.phase!=Running -o name 2>/dev/null | while read pod; do
             echo "--- $pod ---"
-            kubectl -n dms describe "$pod"
+            kubectl -n dms describe "$pod" || true
             echo ""
-          done
+          done || true
           echo "=== Letzte Logs (nicht-ready Pods) ==="
-          kubectl -n dms get pods --field-selector=status.phase!=Running -o name | while read pod; do
+          kubectl -n dms get pods --field-selector=status.phase!=Running -o name 2>/dev/null | while read pod; do
             echo "--- $pod ---"
             kubectl -n dms logs "$pod" --tail=50 --all-containers=true || echo "(keine Logs verfügbar)"
             echo ""
-          done
+          done || true
 
       - name: Zusammenfassung
         if: always()
