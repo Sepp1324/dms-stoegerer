@@ -209,6 +209,23 @@ describe("Auth-State: atomar, tab-übergreifend, serverseitig invalidiert", () =
     await expect(getInboxSummary()).rejects.toBeInstanceOf(AuthSessionChangedError);
   });
 
+  it("ein verspäteter 401 nach Sitzungswechsel wirft AuthSessionChangedError (kein Logout)", async () => {
+    seed("s1", "a", "r");
+    vi.spyOn(globalThis, "fetch").mockImplementation(() => {
+      // Sitzung wechselt (Tab B), der alte Request liefert DANACH 401.
+      localStorage.setItem(
+        AUTH_KEY,
+        JSON.stringify({ session: "s2", access: "b", refresh: "br" }),
+      );
+      return Promise.resolve(unauth());
+    });
+
+    const err = await getInboxSummary().catch((e) => e);
+    expect(err).toBeInstanceOf(AuthSessionChangedError);
+    // Sitzung B bleibt intakt – KEIN Logout durch den alten 401.
+    expect(getAccessToken()).toBe("b");
+  });
+
   it("verwirft einen Blob-Download, wenn die Sitzung während des Body-Transfers wechselt (P1)", async () => {
     seed("s1", "a", "r");
     vi.spyOn(globalThis, "fetch").mockResolvedValue({
