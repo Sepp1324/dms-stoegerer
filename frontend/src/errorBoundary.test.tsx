@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 
 import ErrorBoundary from "./components/ErrorBoundary";
 
@@ -14,6 +14,10 @@ function ChunkBoom(): JSX.Element {
 }
 function CodeBoom(): JSX.Element {
   throw new Error("Cannot read properties of undefined (reading 'title')");
+}
+function NetworkBoom(): JSX.Element {
+  // Reiner Netzwerkfehler (kein dynamischer Import) – darf NICHT als Chunk gelten.
+  throw new TypeError("Failed to fetch");
 }
 
 let reloadSpy: ReturnType<typeof vi.fn>;
@@ -70,6 +74,16 @@ describe("ErrorBoundary", () => {
     expect(screen.getByText(/setzt die Seite zurück/i)).toBeInTheDocument();
   });
 
+  it("behandelt einen reinen Netzwerkfehler NICHT als Chunk-Fehler (kein Reload)", () => {
+    render(
+      <ErrorBoundary>
+        <NetworkBoom />
+      </ErrorBoundary>,
+    );
+    expect(reloadSpy).not.toHaveBeenCalled();
+    expect(screen.getByText(/Fehler aufgetreten/i)).toBeInTheDocument();
+  });
+
   it("zeigt bei erneutem Chunk-Fehler im Loop-Fenster den Dialog statt Reload", () => {
     sessionStorage.setItem(RECOVERY_KEY, String(Date.now()));
     render(
@@ -80,5 +94,20 @@ describe("ErrorBoundary", () => {
     expect(reloadSpy).not.toHaveBeenCalled();
     expect(screen.getByText(/Fehler aufgetreten/i)).toBeInTheDocument();
     expect(screen.getAllByRole("button")).toHaveLength(2);
+  });
+
+  it("'Neu laden' setzt den Loop-Zeitstempel, um einen Doppel-Reload zu verhindern", () => {
+    // Dialog erzwingen (Chunk-Fehler im Loop-Fenster).
+    sessionStorage.setItem(RECOVERY_KEY, String(Date.now()));
+    render(
+      <ErrorBoundary>
+        <ChunkBoom />
+      </ErrorBoundary>,
+    );
+    sessionStorage.removeItem(RECOVERY_KEY); // simulieren: Fenster abgelaufen
+    fireEvent.click(screen.getByText("Neu laden"));
+    // Vor dem Reload muss der Zeitstempel GESETZT sein (sonst zweiter Auto-Reload).
+    expect(sessionStorage.getItem(RECOVERY_KEY)).toBeTruthy();
+    expect(reloadSpy).toHaveBeenCalledTimes(1);
   });
 });

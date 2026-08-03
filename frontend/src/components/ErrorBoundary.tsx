@@ -19,7 +19,10 @@ const RECOVERY_WINDOW_MS = 30_000;
 
 function isChunkLoadError(error: unknown): boolean {
   const msg = error instanceof Error ? `${error.name} ${error.message}` : String(error);
-  return /ChunkLoadError|dynamically imported module|Importing a module script failed|Loading chunk|Failed to fetch/i.test(
+  // BEWUSST NICHT das breite "Failed to fetch" (auch normale Netzwerkfehler) –
+  // nur die SPEZIFISCHEN Meldungen fehlgeschlagener dynamischer Imports, sonst
+  // würde ein Netzwerk-Blip einen Auto-Reload (Verlust von Eingaben) auslösen.
+  return /ChunkLoadError|Failed to fetch dynamically imported module|error loading dynamically imported module|dynamically imported module|Importing a module script failed|Loading chunk [^ ]+ failed/i.test(
     msg,
   );
 }
@@ -66,8 +69,12 @@ export default class ErrorBoundary extends Component<{ children: ReactNode }, St
   }
 
   private hardReload = () => {
+    // Zeitstempel SETZEN (nicht entfernen): Schlägt der Chunk dauerhaft fehl, würde
+    // die Boundary den manuellen Reload sonst wieder als "ersten Versuch" werten und
+    // automatisch ein ZWEITES Mal laden. Mit gesetztem Zeitstempel greift der
+    // Loop-Schutz und es bleibt beim Dialog.
     try {
-      sessionStorage.removeItem(RECOVERY_KEY);
+      sessionStorage.setItem(RECOVERY_KEY, String(Date.now()));
     } catch {
       /* egal */
     }
@@ -76,7 +83,7 @@ export default class ErrorBoundary extends Component<{ children: ReactNode }, St
 
   private logoutAndReload = () => {
     try {
-      sessionStorage.removeItem(RECOVERY_KEY);
+      sessionStorage.setItem(RECOVERY_KEY, String(Date.now()));
     } catch {
       /* egal */
     }

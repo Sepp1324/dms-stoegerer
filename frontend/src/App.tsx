@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { BrowserRouter, Route, Routes, useParams } from "react-router-dom";
-import { isLoggedIn, onAuthChange } from "./api";
+import { getSessionId, isLoggedIn, onAuthChange } from "./api";
 import ErrorBoundary from "./components/ErrorBoundary";
 import Login from "./components/Login";
 import DocumentsPage from "./components/DocumentsPage";
@@ -38,12 +38,22 @@ function ShareRoute({
 
 export default function App() {
   const [loggedIn, setLoggedIn] = useState(isLoggedIn());
+  // Sitzungs-ID als State (P1): Ein Benutzerwechsel A -> B (auch aus einem anderen
+  // Tab) lässt loggedIn true, würde DocumentsPage also NICHT neu mounten und könnte
+  // A-Daten unter B zeigen. Wir keyen DocumentsPage mit der Sitzungs-ID -> bei
+  // Wechsel remountet React die Seite frisch.
+  const [sessionId, setSessionId] = useState(getSessionId());
 
-  // Tab-übergreifende UI-Synchronisation (P1): Ein Login/Logout – auch in einem
-  // ANDEREN Tab – zieht den loggedIn-Zustand nach. Sonst bliebe Tab A nach dem
-  // Logout in Tab B mit sichtbaren Dokumenten offen (bzw. ein anderer Tab nach
-  // dem Login auf der Anmeldeseite).
-  useEffect(() => onAuthChange(() => setLoggedIn(isLoggedIn())), []);
+  // Tab-übergreifende UI-Synchronisation (P1): Ein Login/Logout/Benutzerwechsel –
+  // auch in einem ANDEREN Tab – zieht loggedIn UND die Sitzungs-ID nach.
+  useEffect(
+    () =>
+      onAuthChange(() => {
+        setLoggedIn(isLoggedIn());
+        setSessionId(getSessionId());
+      }),
+    [],
+  );
 
   return (
     <ErrorBoundary>
@@ -66,7 +76,10 @@ export default function App() {
           path="/*"
           element={
             loggedIn ? (
-              <DocumentsPage onLogout={() => setLoggedIn(false)} />
+              <DocumentsPage
+                key={sessionId ?? "anon"}
+                onLogout={() => setLoggedIn(false)}
+              />
             ) : (
               <Login onSuccess={() => setLoggedIn(true)} />
             )
