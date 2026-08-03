@@ -279,6 +279,21 @@ async function readBlobChecked(res: Response): Promise<Blob> {
   return blob;
 }
 
+// Wie readBlobChecked, aber für erfolgreiche JSON-Antworten (P1): auch ein
+// res.json()-Body wird erst NACH den Headern gelesen. Wechselt die Sitzung dabei,
+// gehören die Daten noch zur alten Sitzung und dürfen nicht unter der neuen
+// verwendet werden. Rückgabetyp ``any`` wie bei res.json() – Drop-in-Ersatz für
+// die Erfolgs-Leser. (Fehlerpfade lesen den Body bewusst weiter direkt, um die
+// Detailmeldung zu extrahieren – der Request wird dort ohnehin verworfen.)
+async function readJsonChecked(res: Response): Promise<any> {
+  const session = currentSession();
+  const data = await res.json();
+  if (currentSession() !== session) {
+    throw new AuthSessionChangedError("Sitzung gewechselt – Antwort verworfen.");
+  }
+  return data;
+}
+
 // --- Typen ---
 // Fachliche State-Machine der asynchronen Dokumentverarbeitung (STOAA-248).
 // ``ocr_status`` bleibt das technische Detail-Monitoring des OCR-Schritts;
@@ -1591,7 +1606,7 @@ export async function getDocuments(
   // abzubrechen (schnelles Tippen/Filtern) statt sie nur zu ignorieren.
   const res = await apiFetch(`/documents/?${params.toString()}`, { signal });
   if (!res.ok) throw new Error(`Laden fehlgeschlagen: HTTP ${res.status}`);
-  return res.json();
+  return readJsonChecked(res);
 }
 
 export function getSavedViews(): Promise<SavedView[]> {
@@ -1621,7 +1636,7 @@ export async function updateSavedView(
     }
     throw new Error(detail);
   }
-  return res.json();
+  return readJsonChecked(res);
 }
 
 export async function deleteSavedView(id: number): Promise<void> {
@@ -1635,7 +1650,7 @@ export async function getDocument(
 ): Promise<DocumentDetail> {
   const res = await apiFetch(`/documents/${id}/`, { signal });
   if (!res.ok) throw new Error(`Dokument laden fehlgeschlagen: HTTP ${res.status}`);
-  return res.json();
+  return readJsonChecked(res);
 }
 
 // Verarbeitung der aktuellen Version neu anstoßen (STOAA-248). Nur erlaubt, wenn
@@ -1656,13 +1671,13 @@ export async function retryProcessing(id: number): Promise<DocumentVersion> {
     }
     throw new Error(detail);
   }
-  return res.json();
+  return readJsonChecked(res);
 }
 
 export async function getInboxSummary(): Promise<InboxSummary> {
   const res = await apiFetch("/documents/inbox-summary/");
   if (!res.ok) throw new Error(`Inbox-Status laden fehlgeschlagen: HTTP ${res.status}`);
-  return res.json();
+  return readJsonChecked(res);
 }
 
 export async function getAutopilotInbox(limit = 25): Promise<AutopilotInbox> {
@@ -1670,7 +1685,7 @@ export async function getAutopilotInbox(limit = 25): Promise<AutopilotInbox> {
   if (!res.ok) {
     throw new Error(`Autopilot laden fehlgeschlagen: HTTP ${res.status}`);
   }
-  return res.json();
+  return readJsonChecked(res);
 }
 
 // Markiert ein Dokument fachlich als geprüft. Das Backend hält review_status
@@ -1714,7 +1729,7 @@ export async function getExtractionCandidates(
   if (!res.ok) {
     throw new Error(`Vorschläge laden fehlgeschlagen: HTTP ${res.status}`);
   }
-  return res.json();
+  return readJsonChecked(res);
 }
 
 export interface InboxCandidateBundle {
@@ -1734,7 +1749,7 @@ export async function getInboxCandidates(
   if (!res.ok) {
     throw new Error(`Inbox-Vorschläge laden fehlgeschlagen: HTTP ${res.status}`);
   }
-  const raw = (await res.json()) as Record<string, InboxCandidateBundle>;
+  const raw = (await readJsonChecked(res)) as Record<string, InboxCandidateBundle>;
   const out: Record<number, InboxCandidateBundle> = {};
   for (const [key, value] of Object.entries(raw)) {
     out[Number(key)] = value;
@@ -1758,7 +1773,7 @@ export async function generateExtractionCandidates(
     }
     throw new Error(detail);
   }
-  return res.json();
+  return readJsonChecked(res);
 }
 
 export function applyExtractionCandidate(
@@ -1788,7 +1803,7 @@ export async function getCaseFileCandidates(
   if (!res.ok) {
     throw new Error(`Aktenvorschläge laden fehlgeschlagen: HTTP ${res.status}`);
   }
-  return res.json();
+  return readJsonChecked(res);
 }
 
 export async function generateCaseFileCandidates(
@@ -1807,7 +1822,7 @@ export async function generateCaseFileCandidates(
     }
     throw new Error(detail);
   }
-  return res.json();
+  return readJsonChecked(res);
 }
 
 export function applyCaseFileCandidate(
@@ -1837,7 +1852,7 @@ export async function getDocumentAudit(
 ): Promise<Paginated<AuditEntry>> {
   const res = await apiFetch(`/documents/${id}/audit/?page=${page}`);
   if (!res.ok) throw new Error(`Verlauf laden fehlgeschlagen: HTTP ${res.status}`);
-  return res.json();
+  return readJsonChecked(res);
 }
 
 // Lädt das Vorschau-PDF als Blob (mit Auth-Header) – ein <iframe src="…/preview/">
@@ -1874,13 +1889,13 @@ export async function getDocumentIntegrity(
 ): Promise<DocumentIntegrity> {
   const res = await apiFetch(`/documents/${id}/integrity/`, { signal });
   if (!res.ok) throw new Error(`Integritätsprüfung fehlgeschlagen (HTTP ${res.status})`);
-  return res.json();
+  return readJsonChecked(res);
 }
 
 export async function checkDocumentArchive(id: number): Promise<DocumentArchiveReport> {
   const res = await apiFetch(`/documents/${id}/archive-check/`, { method: "POST" });
   if (!res.ok) throw new Error(`Archivprüfung fehlgeschlagen (HTTP ${res.status})`);
-  return res.json();
+  return readJsonChecked(res);
 }
 
 export async function setDocumentLegalHold(
@@ -1903,7 +1918,7 @@ export async function setDocumentLegalHold(
     }
     throw new Error(detail);
   }
-  return res.json();
+  return readJsonChecked(res);
 }
 
 export async function getPdfWorkbenchPages(
@@ -1920,7 +1935,7 @@ export async function getPdfWorkbenchPages(
     }
     throw new Error(detail);
   }
-  return res.json();
+  return readJsonChecked(res);
 }
 
 export async function getPdfWorkbenchPageThumbnail(
@@ -2005,13 +2020,13 @@ export async function getDocumentRevisionPackage(id: number): Promise<Blob> {
 export async function getEvidenceStatus(): Promise<EvidenceStatus> {
   const res = await apiFetch("/documents/evidence-status/");
   if (!res.ok) throw new Error(`Beweis-Center laden fehlgeschlagen: HTTP ${res.status}`);
-  return res.json();
+  return readJsonChecked(res);
 }
 
 export async function getDocumentEvidence(id: number): Promise<EvidenceDocumentReport> {
   const res = await apiFetch(`/documents/${id}/evidence/`);
   if (!res.ok) throw new Error(`Beweisbericht laden fehlgeschlagen: HTTP ${res.status}`);
-  return res.json();
+  return readJsonChecked(res);
 }
 
 export async function getQualityStatus(): Promise<QualityStatus> {
@@ -2019,7 +2034,7 @@ export async function getQualityStatus(): Promise<QualityStatus> {
   if (!res.ok) {
     throw new Error(`Qualitätscenter laden fehlgeschlagen: HTTP ${res.status}`);
   }
-  return res.json();
+  return readJsonChecked(res);
 }
 
 export async function getDocumentQuality(id: number): Promise<DocumentQuality> {
@@ -2027,7 +2042,7 @@ export async function getDocumentQuality(id: number): Promise<DocumentQuality> {
   if (!res.ok) {
     throw new Error(`Qualitätsprofil laden fehlgeschlagen: HTTP ${res.status}`);
   }
-  return res.json();
+  return readJsonChecked(res);
 }
 
 // --- Versionsvergleich (STOAA-288/289/290 Stufe 1 + STOAA-312/313 Stufe 2) ---
@@ -2147,7 +2162,7 @@ export async function compareVersions(
     }
     throw new Error(detail);
   }
-  return res.json();
+  return readJsonChecked(res);
 }
 
 // Hängt eine neue Datei als nächste Version an ein bestehendes Dokument.
@@ -2171,7 +2186,7 @@ export async function addDocumentVersion(
     }
     throw new Error(detail);
   }
-  return res.json();
+  return readJsonChecked(res);
 }
 
 // Miniaturbild der ersten Seite (JPEG) – ebenfalls per fetch+Blob wegen JWT.
@@ -2214,7 +2229,7 @@ export async function updateDocument(
     }
     throw new Error(detail);
   }
-  return res.json();
+  return readJsonChecked(res);
 }
 
 export interface BulkUpdatePatch {
@@ -2592,7 +2607,7 @@ export interface DuplicatesResult {
 export async function getDocumentDuplicates(id: number): Promise<DuplicatesResult> {
   const res = await apiFetch(`/documents/${id}/duplicates/`);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
+  return readJsonChecked(res);
 }
 export interface DuplicatePair {
   a: number;
@@ -2612,7 +2627,7 @@ export interface DuplicateReport {
 export async function getDuplicateReport(): Promise<DuplicateReport> {
   const res = await apiFetch(`/documents/duplicate-report/`);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
+  return readJsonChecked(res);
 }
 /** Soft-Merge: dieses Dokument als Dublette markieren (ersetzt durch ``by``). */
 export function supersedeDocument(id: number, by: number): Promise<DocumentDetail> {
@@ -2655,7 +2670,7 @@ export interface HouseholdJoinRequest {
 export async function getMyHousehold(): Promise<Household | null> {
   const res = await apiFetch("/households/");
   if (!res.ok) throw new Error(`Haushalt laden fehlgeschlagen: HTTP ${res.status}`);
-  return res.json();
+  return readJsonChecked(res);
 }
 export function createHousehold(name: string): Promise<Household> {
   return postJson<Household>("/households/", { name });
@@ -2668,7 +2683,7 @@ export function generateHouseholdJoinCode(id: number): Promise<Household> {
 export async function clearHouseholdJoinCode(id: number): Promise<Household> {
   const res = await apiFetch(`/households/${id}/join-code/`, { method: "DELETE" });
   if (!res.ok) throw new Error(`Code löschen fehlgeschlagen: HTTP ${res.status}`);
-  return res.json();
+  return readJsonChecked(res);
 }
 /** Mit einem Code eine Beitrittsanfrage stellen (erzeugt noch keine Mitgliedschaft). */
 export function requestHouseholdJoin(code: string): Promise<HouseholdJoinRequest> {
@@ -2678,7 +2693,7 @@ export function requestHouseholdJoin(code: string): Promise<HouseholdJoinRequest
 export async function listHouseholdJoinRequests(id: number): Promise<HouseholdJoinRequest[]> {
   const res = await apiFetch(`/households/${id}/requests/`);
   if (!res.ok) throw new Error(`Anfragen laden fehlgeschlagen: HTTP ${res.status}`);
-  return res.json();
+  return readJsonChecked(res);
 }
 /** Eine Beitrittsanfrage bestätigen/ablehnen (nur Owner). */
 export function decideHouseholdJoinRequest(
@@ -2696,13 +2711,13 @@ export async function leaveHousehold(id: number): Promise<void> {
 export async function getSimilarDocuments(id: number): Promise<SimilarDocumentsResult> {
   const res = await apiFetch(`/documents/${id}/similar/`);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
+  return readJsonChecked(res);
 }
 
 export async function getDocumentBriefing(id: number): Promise<DocumentBriefing> {
   const res = await apiFetch(`/documents/${id}/briefing/`);
   if (!res.ok) throw new Error(`Briefing nicht verfügbar (HTTP ${res.status})`);
-  return res.json();
+  return readJsonChecked(res);
 }
 
 export function reindexDocumentEmbeddings(id: number): Promise<SemanticReindexResult> {
@@ -2751,7 +2766,7 @@ export function autoFileBatch(minConfidence?: number): Promise<AutoFileBatchResu
 export async function getFilingSuggestions(id: number): Promise<FilingSuggestions> {
   const res = await apiFetch(`/documents/${id}/filing-suggestions/`);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
+  return readJsonChecked(res);
 }
 export interface ApplyFilingResult {
   applied: string[];
@@ -2786,7 +2801,7 @@ export async function applySuggestions(
     }
     throw new Error(detail);
   }
-  return res.json();
+  return readJsonChecked(res);
 }
 
 // Regeneriert die KI-Vorschläge synchron. Bei fehlendem Provider liefert das
@@ -2811,7 +2826,7 @@ export async function suggestDocument(id: number): Promise<SuggestResult> {
     }
     throw new Error(detail);
   }
-  return res.json();
+  return readJsonChecked(res);
 }
 
 // Verwirft einzelne KI-Vorschlagsfelder, ohne sie anzuwenden.
@@ -2834,7 +2849,7 @@ export async function dismissSuggestions(
     }
     throw new Error(detail);
   }
-  return res.json();
+  return readJsonChecked(res);
 }
 
 // --- Freigabe-Workflow (Stufe 4, Kontrakt aus STOAA-63) ---
@@ -2860,7 +2875,7 @@ async function postDocAction(
     }
     throw new Error(detail);
   }
-  return res.json();
+  return readJsonChecked(res);
 }
 
 // Dokument zur Freigabe einreichen (nur aus entwurf|abgelehnt).
@@ -2882,31 +2897,31 @@ export function rejectDocument(
 export async function getMe(): Promise<Me> {
   const res = await apiFetch("/me/");
   if (!res.ok) throw new Error(`Profil laden fehlgeschlagen: HTTP ${res.status}`);
-  return res.json();
+  return readJsonChecked(res);
 }
 
 export async function getBackupStatus(): Promise<BackupStatus> {
   const res = await apiFetch("/system/backup-status/");
   if (!res.ok) throw new Error(`Backup-Status laden fehlgeschlagen: HTTP ${res.status}`);
-  return res.json();
+  return readJsonChecked(res);
 }
 
 export async function getOCRHealth(): Promise<OCRHealthStatus> {
   const res = await apiFetch("/system/ocr-health/");
   if (!res.ok) throw new Error(`OCR-Status laden fehlgeschlagen: HTTP ${res.status}`);
-  return res.json();
+  return readJsonChecked(res);
 }
 
 export async function getSemanticIndexHealth(): Promise<SemanticIndexHealth> {
   const res = await apiFetch("/system/semantic-index/");
   if (!res.ok) throw new Error(`Semantic-Index laden fehlgeschlagen: HTTP ${res.status}`);
-  return res.json();
+  return readJsonChecked(res);
 }
 
 export async function getArchiveHealth(): Promise<ArchiveHealthStatus> {
   const res = await apiFetch("/system/archive-health/");
   if (!res.ok) throw new Error(`Archivstatus laden fehlgeschlagen: HTTP ${res.status}`);
-  return res.json();
+  return readJsonChecked(res);
 }
 
 export async function runArchiveBulkCheck(limit = 50): Promise<ArchiveBulkCheckResult> {
@@ -2916,7 +2931,7 @@ export async function runArchiveBulkCheck(limit = 50): Promise<ArchiveBulkCheckR
     body: JSON.stringify({ limit }),
   });
   if (!res.ok) throw new Error(`Archivprüfung fehlgeschlagen: HTTP ${res.status}`);
-  return res.json();
+  return readJsonChecked(res);
 }
 
 export async function retryFailedOCRProcessing(limit = 25): Promise<OCRRetryResult> {
@@ -2926,7 +2941,7 @@ export async function retryFailedOCRProcessing(limit = 25): Promise<OCRRetryResu
     body: JSON.stringify({ limit }),
   });
   if (!res.ok) throw new Error(`Retry fehlgeschlagen: HTTP ${res.status}`);
-  return res.json();
+  return readJsonChecked(res);
 }
 
 export async function uploadDocument(file: File, title?: string): Promise<DocumentItem> {
@@ -2945,7 +2960,7 @@ export async function uploadDocument(file: File, title?: string): Promise<Docume
     }
     throw new Error(detail);
   }
-  return res.json();
+  return readJsonChecked(res);
 }
 
 // Mobile-Erfassung (STOAA-514/512b): mehrere Kamerafotos in Reihenfolge zu
@@ -2974,7 +2989,7 @@ export async function uploadMobileCapture(
     }
     throw new Error(detail);
   }
-  return res.json();
+  return readJsonChecked(res);
 }
 
 export async function getCorrespondents(): Promise<NamedRef[]> {
@@ -3010,7 +3025,7 @@ export async function setFolderShared(id: number, shared: boolean): Promise<Fold
     body: JSON.stringify({ shared_with_household: shared }),
   });
   if (!res.ok) throw new Error(`Ordner-Freigabe fehlgeschlagen: HTTP ${res.status}`);
-  return res.json();
+  return readJsonChecked(res);
 }
 export async function getFolders(): Promise<FolderRef[]> {
   return listAll<FolderRef>("/folders/");
@@ -3040,7 +3055,7 @@ export async function getContracts(
 export async function getContractSummary(): Promise<ContractSummary> {
   const res = await apiFetch("/contracts/summary/");
   if (!res.ok) throw new Error(`Vertragsstatus laden fehlgeschlagen: HTTP ${res.status}`);
-  return res.json();
+  return readJsonChecked(res);
 }
 
 export interface CostCurrencyTotal {
@@ -3087,7 +3102,7 @@ export interface CostOverview {
 export async function getCostOverview(): Promise<CostOverview> {
   const res = await apiFetch("/contracts/cost-overview/");
   if (!res.ok) throw new Error(`Ausgabenüberblick laden fehlgeschlagen: HTTP ${res.status}`);
-  return res.json();
+  return readJsonChecked(res);
 }
 
 export function scanContracts(ids?: number[]): Promise<ContractScanResult> {
@@ -3114,19 +3129,19 @@ export async function getKnowledgeEntities(
 export async function getKnowledgeSummary(): Promise<KnowledgeSummary> {
   const res = await apiFetch("/knowledge-entities/summary/");
   if (!res.ok) throw new Error(`Gedächtnis-Status laden fehlgeschlagen: HTTP ${res.status}`);
-  return res.json();
+  return readJsonChecked(res);
 }
 
 export async function getEntityDocuments(id: number): Promise<DocumentItem[]> {
   const res = await apiFetch(`/knowledge-entities/${id}/documents/`);
   if (!res.ok) throw new Error(`Dokumente laden fehlgeschlagen: HTTP ${res.status}`);
-  return res.json();
+  return readJsonChecked(res);
 }
 
 export async function getEntityRelations(id: number): Promise<EntityRelation[]> {
   const res = await apiFetch(`/knowledge-entities/${id}/relations/`);
   if (!res.ok) throw new Error(`Beziehungen laden fehlgeschlagen: HTTP ${res.status}`);
-  return res.json();
+  return readJsonChecked(res);
 }
 
 export function scanKnowledgeEntities(ids?: number[]): Promise<EntityScanResult> {
@@ -3171,7 +3186,7 @@ export async function updateContract(
     body: JSON.stringify(payload),
   });
   if (!res.ok) throw new Error(`Vertrag speichern fehlgeschlagen: HTTP ${res.status}`);
-  return res.json();
+  return readJsonChecked(res);
 }
 
 export function createCaseFile(payload: {
@@ -3200,7 +3215,7 @@ export async function updateDossier(
     body: JSON.stringify(payload),
   });
   if (!res.ok) throw new Error(`Dossier speichern fehlgeschlagen: HTTP ${res.status}`);
-  return res.json();
+  return readJsonChecked(res);
 }
 
 export function generateDossier(id: number): Promise<Dossier> {
@@ -3227,7 +3242,7 @@ export async function updateCaseFile(
     body: JSON.stringify(payload),
   });
   if (!res.ok) throw new Error(`Akte speichern fehlgeschlagen: HTTP ${res.status}`);
-  return res.json();
+  return readJsonChecked(res);
 }
 
 export function addDocumentsToCaseFile(
@@ -3281,7 +3296,7 @@ export async function updateCustomField(
     }
     throw new Error(detail);
   }
-  return res.json();
+  return readJsonChecked(res);
 }
 export async function deleteCustomField(id: number): Promise<void> {
   const res = await apiFetch(`/custom-fields/${id}/`, { method: "DELETE" });
@@ -3344,7 +3359,7 @@ export async function updateWorkflow(
     body: JSON.stringify(payload),
   });
   if (!res.ok) throw new Error(`Speichern fehlgeschlagen: HTTP ${res.status}`);
-  return res.json();
+  return readJsonChecked(res);
 }
 export async function deleteWorkflow(id: number): Promise<void> {
   const res = await apiFetch(`/workflows/${id}/`, { method: "DELETE" });
@@ -3399,7 +3414,7 @@ export async function getTimeline(days?: number): Promise<TimelineResult> {
   const suffix = days === undefined ? "" : `?days=${days}`;
   const res = await apiFetch(`/timeline/${suffix}`);
   if (!res.ok) throw new Error(`Fristen laden fehlgeschlagen: HTTP ${res.status}`);
-  return res.json();
+  return readJsonChecked(res);
 }
 export async function downloadTimelineIcs(days?: number): Promise<Blob> {
   const suffix = days === undefined ? "" : `?days=${days}`;
@@ -3459,7 +3474,7 @@ export async function updateReminder(
     body: JSON.stringify(input),
   });
   if (!res.ok) throw new Error(`Speichern fehlgeschlagen: HTTP ${res.status}`);
-  return res.json();
+  return readJsonChecked(res);
 }
 export async function deleteReminder(id: number): Promise<void> {
   const res = await apiFetch(`/reminders/${id}/`, { method: "DELETE" });
@@ -3473,7 +3488,7 @@ export async function getDueReminders(days?: number): Promise<DueReminders> {
   const suffix = days === undefined ? "" : `?days=${days}`;
   const res = await apiFetch(`/reminders/due/${suffix}`);
   if (!res.ok) throw new Error(`Laden fehlgeschlagen: HTTP ${res.status}`);
-  return res.json();
+  return readJsonChecked(res);
 }
 
 // --- Mailkonten (STOAA-214/215) ---
@@ -3513,7 +3528,7 @@ export async function setDocumentOwner(
     }
     throw new Error(detail);
   }
-  return res.json();
+  return readJsonChecked(res);
 }
 export function createMailAccount(
   payload: MailAccountPayload,
@@ -3541,7 +3556,7 @@ export async function updateMailAccount(
     }
     throw new Error(detail);
   }
-  return res.json();
+  return readJsonChecked(res);
 }
 export async function deleteMailAccount(id: number): Promise<void> {
   const res = await apiFetch(`/mail-accounts/${id}/`, { method: "DELETE" });
@@ -3577,7 +3592,7 @@ export async function testMailAccount(id: number): Promise<MailTestResult> {
     }
     throw new Error(detail);
   }
-  return res.json();
+  return readJsonChecked(res);
 }
 
 export async function getProcessedMails(
@@ -3592,13 +3607,13 @@ export async function getProcessedMails(
   const suffix = params.toString() ? `?${params.toString()}` : "";
   const res = await apiFetch(`/processed-mails/${suffix}`);
   if (!res.ok) throw new Error(`Mails laden fehlgeschlagen: HTTP ${res.status}`);
-  return res.json();
+  return readJsonChecked(res);
 }
 
 export async function getProcessedMailSummary(): Promise<ProcessedMailSummary> {
   const res = await apiFetch("/processed-mails/summary/");
   if (!res.ok) throw new Error(`Mail-Status laden fehlgeschlagen: HTTP ${res.status}`);
-  return res.json();
+  return readJsonChecked(res);
 }
 
 export function markProcessedMailIgnored(
@@ -3638,7 +3653,7 @@ export async function revokeShareLink(id: number): Promise<ShareLink> {
     }
     throw new Error(detail);
   }
-  return res.json();
+  return readJsonChecked(res);
 }
 
 // --- Freigabe-Aufruf (Share-Access, STOAA-193) ---
@@ -3731,7 +3746,7 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
     }
     throw new ApiError(res.status, detail, payload);
   }
-  return res.json();
+  return readJsonChecked(res);
 }
 
 export const createCorrespondent = (name: string) =>
