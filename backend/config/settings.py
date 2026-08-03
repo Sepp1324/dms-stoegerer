@@ -57,6 +57,12 @@ INSTALLED_APPS = [
     "django.contrib.postgres",
     # Drittanbieter
     "rest_framework",
+    # Serverseitige Token-Invalidierung (P2): ermöglicht das Blacklisten von
+    # Refresh-Tokens beim Logout. Ohne diese App bleibt ein kopierter Refresh-Token
+    # nach dem Logout gültig (SimpleJWT ist sonst rein zustandslos). Legt beim
+    # migrate die OutstandingToken/BlacklistedToken-Tabellen an; die Refresh-View
+    # lehnt geblacklistete Tokens dann automatisch ab.
+    "rest_framework_simplejwt.token_blacklist",
     "corsheaders",
     # Eigene Apps
     "accounts",
