@@ -1667,3 +1667,15 @@ def _move_into(src: Path, dest_dir: Path) -> Path:
     dest = _unique(dest_dir / src.name)
     shutil.move(str(src), str(dest))
     return dest
+
+
+@shared_task
+def flush_expired_jwt_tokens() -> dict:
+    """P3: Entfernt abgelaufene JWT-Blacklist-Einträge (rest_framework_simplejwt.
+    token_blacklist legt pro Refresh-Token einen OutstandingToken an; ohne
+    Bereinigung wachsen die Tabellen unbegrenzt). ``flushexpiredtokens`` löscht nur
+    Tokens, deren Ablaufzeit bereits vergangen ist – gültige/aktive bleiben."""
+    from django.core.management import call_command
+
+    call_command("flushexpiredtokens")
+    return {"flushed": True}

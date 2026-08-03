@@ -37,8 +37,14 @@ class LogoutView(APIView):
     throttle_classes = [TokenRefreshRateThrottle]
 
     def post(self, request):
-        refresh = request.data.get("refresh") if hasattr(request, "data") else None
-        if refresh:
+        # Robust gegen jede Payload-Form (P2): Gültiges JSON wie ``[]`` oder
+        # ``null`` liefert eine Liste bzw. None; ein ``.get()`` darauf warf einen
+        # AttributeError -> HTTP 500 auf einem öffentlichen Endpoint. Nur ein
+        # dict-Body mit STRING-``refresh`` wird verarbeitet; alles andere ist ein
+        # No-op mit 205 (idempotent).
+        data = request.data if isinstance(request.data, dict) else {}
+        refresh = data.get("refresh")
+        if isinstance(refresh, str) and refresh:
             try:
                 RefreshToken(refresh).blacklist()
             except TokenError:

@@ -420,6 +420,12 @@ CELERY_BEAT_SCHEDULE = {
         "task": "documents.tasks.check_due_reminders",
         "schedule": float(os.getenv("REMINDER_CHECK_INTERVAL", "86400")),
     },
+    # JWT-Blacklist-Bereinigung (P3): abgelaufene OutstandingToken/BlacklistedToken
+    # entfernen, damit die token_blacklist-Tabellen nicht unbegrenzt wachsen.
+    "flush-expired-jwt-tokens": {
+        "task": "documents.tasks.flush_expired_jwt_tokens",
+        "schedule": float(os.getenv("JWT_FLUSH_INTERVAL", "86400")),
+    },
     # Stuck-Task-Watchdog: hängende Versionen (Worker-Crash, acks_late ist aus)
     # nach PROCESSING_STUCK_AFTER_MINUTES automatisch FAILED (retry-fähig) bzw.
     # hängendes SEALED nach READY abschließen.
