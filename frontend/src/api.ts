@@ -2,45 +2,102 @@
 // Tokens liegen im localStorage; bei 401 wird einmal automatisch refreshed.
 
 const API_BASE = "/api";
-const ACCESS_KEY = "dms_access";
-const REFRESH_KEY = "dms_refresh";
+// Atomarer Auth-State (P2): Sitzungs-ID + Access- + Refresh-Token liegen in EINEM
+// JSON-localStorage-Key statt in drei separaten. Drei einzelne setItem/removeItem
+// sind NICHT atomar – ein anderer Tab konnte zwischen den Schreibvorgängen eine
+// neue Sitzungs-ID mit noch altem Token (oder umgekehrt) sehen und so die
+// Identitäts-Race erneut auslösen. Ein einzelner Key wird in einem Rutsch
+// geschrieben und feuert genau EIN storage-Event mit dem vollständigen Zustand.
+const AUTH_KEY = "dms_auth_state";
 
 export class AuthError extends Error {}
 
+interface AuthState {
+  session: string;
+  access: string;
+  refresh: string;
+}
+
+function readAuth(): AuthState | null {
+  const raw = localStorage.getItem(AUTH_KEY);
+  if (!raw) return null;
+  try {
+    const p = JSON.parse(raw) as Partial<AuthState>;
+    if (
+      p &&
+      typeof p.session === "string" &&
+      typeof p.access === "string" &&
+      typeof p.refresh === "string"
+    ) {
+      return { session: p.session, access: p.access, refresh: p.refresh };
+    }
+  } catch {
+    /* korrupt -> als abgemeldet behandeln */
+  }
+  return null;
+}
+function writeAuth(state: AuthState | null): void {
+  if (state) localStorage.setItem(AUTH_KEY, JSON.stringify(state));
+  else localStorage.removeItem(AUTH_KEY);
+}
+function newSessionId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
+}
+
 export function getAccessToken(): string | null {
-  return localStorage.getItem(ACCESS_KEY);
+  return readAuth()?.access ?? null;
 }
 export function isLoggedIn(): boolean {
   return !!getAccessToken();
 }
-function setTokens(access: string, refresh?: string) {
-  localStorage.setItem(ACCESS_KEY, access);
-  if (refresh) localStorage.setItem(REFRESH_KEY, refresh);
-}
-const SESSION_KEY = "dms_session";
-
-// Sitzungs-Identität – tab-ÜBERGREIFEND (P1): Früher lag die "Auth-Generation" nur
-// im JS-Speicher EINES Tabs. localStorage (Tokens) ist aber zwischen Tabs geteilt:
-// Ein Login als anderer Nutzer in Tab B ändert die Tokens, ohne die Generation in
-// Tab A zu erhöhen -> Tab A könnte alte Requests mit der NEUEN Identität refreshen
-// oder wiederholen. Die Sitzungs-ID liegt deshalb ebenfalls in localStorage; jeder
-// Guard liest den AKTUELLEN Wert, sodass ein Login/Logout in irgendeinem Tab die
-// veralteten Requests ALLER Tabs entwertet.
 function currentSession(): string | null {
-  return localStorage.getItem(SESSION_KEY);
+  return readAuth()?.session ?? null;
 }
-function startNewSession(): void {
-  const id = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
-  localStorage.setItem(SESSION_KEY, id);
+
+// Auth-Änderungen abonnieren (P1, tab-übergreifende UI-Synchronisation): Ein
+// Login/Logout – auch in einem ANDEREN Tab – benachrichtigt hierüber alle
+// Abonnenten, damit die App ihren loggedIn-Zustand nachzieht (sonst bliebe Tab A
+// nach dem Logout in Tab B mit sichtbaren Dokumenten offen bzw. ein anderer Tab
+// nach dem Login auf der Anmeldeseite).
+type AuthListener = () => void;
+const authListeners = new Set<AuthListener>();
+export function onAuthChange(cb: AuthListener): () => void {
+  authListeners.add(cb);
+  return () => {
+    authListeners.delete(cb);
+  };
+}
+function notifyAuthChange(): void {
+  authListeners.forEach((cb) => {
+    try {
+      cb();
+    } catch {
+      /* ein fehlerhafter Listener darf die anderen nicht blockieren */
+    }
+  });
 }
 
 export function logout() {
+  const refresh = readAuth()?.refresh;
   // Laufenden Refresh der alten Sitzung fallenlassen, damit ein danach
   // gestarteter Request nicht die veraltete In-Flight-Promise weiterverwendet.
   refreshInFlight = null;
-  localStorage.removeItem(SESSION_KEY);
-  localStorage.removeItem(ACCESS_KEY);
-  localStorage.removeItem(REFRESH_KEY);
+  writeAuth(null); // atomar (ein removeItem)
+  notifyAuthChange();
+  // Best-effort serverseitige Invalidierung (P1/P2): den Refresh-Token blacklisten,
+  // damit ein kopierter Token nach dem Logout nicht mehr refreshbar ist.
+  // Fire-and-forget – blockiert den UI-Logout nicht; ``keepalive`` überlebt einen
+  // gleichzeitigen Seiten-Unload.
+  if (refresh) {
+    fetch(`${API_BASE}/auth/logout/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh }),
+      keepalive: true,
+    }).catch(() => {
+      /* best-effort: lokaler Logout ist bereits erfolgt */
+    });
+  }
 }
 
 export async function login(username: string, password: string): Promise<void> {
@@ -53,20 +110,22 @@ export async function login(username: string, password: string): Promise<void> {
     throw new AuthError("Anmeldung fehlgeschlagen – Benutzername oder Passwort falsch.");
   }
   const data = await res.json();
-  // Neue Sitzung: frische, tab-übergreifend sichtbare Sitzungs-ID setzen und die
-  // In-Flight-Promise fallenlassen, damit sie nicht weiterverwendet wird.
+  // Neue Sitzung ATOMAR schreiben (frische Sitzungs-ID + beide Tokens in einem
+  // Rutsch) und die In-Flight-Promise fallenlassen.
   refreshInFlight = null;
-  startNewSession();
-  setTokens(data.access, data.refresh);
+  writeAuth({ session: newSessionId(), access: data.access, refresh: data.refresh });
+  notifyAuthChange();
 }
 
-// Sitzungswechsel in einem ANDEREN Tab (Login/Logout dort ändert SESSION_KEY):
-// laufenden Refresh fallenlassen. Die Session-Guards verwerfen sein Ergebnis
-// ohnehin – so startet ein nachfolgender Request aber sauber neu.
+// Sitzungswechsel in einem ANDEREN Tab (Login/Logout dort ändert AUTH_KEY):
+// laufenden Refresh fallenlassen UND die App benachrichtigen, damit ihr
+// loggedIn-Zustand nachzieht. (Das storage-Event feuert nur in den ANDEREN Tabs;
+// im auslösenden Tab benachrichtigt login()/logout() direkt.)
 if (typeof window !== "undefined") {
   window.addEventListener("storage", (e) => {
-    if (e.key === SESSION_KEY || e.key === null) {
+    if (e.key === AUTH_KEY || e.key === null) {
       refreshInFlight = null;
+      notifyAuthChange();
     }
   });
 }
@@ -80,9 +139,10 @@ let refreshInFlight: Promise<boolean> | null = null;
 
 async function tryRefresh(): Promise<boolean> {
   if (refreshInFlight) return refreshInFlight;
-  // Sitzungs-ID + verwendeten Refresh-Token beim Start des Flights festhalten.
-  const session = currentSession();
-  const usedRefresh = localStorage.getItem(REFRESH_KEY);
+  // Sitzung + verwendeten Refresh-Token beim Start des Flights festhalten.
+  const started = readAuth();
+  const session = started?.session ?? null;
+  const usedRefresh = started?.refresh ?? null;
   const mine = (async (): Promise<boolean> => {
     if (!usedRefresh) return false;
     const res = await fetch(`${API_BASE}/auth/token/refresh/`, {
@@ -96,9 +156,10 @@ async function tryRefresh(): Promise<boolean> {
     // logout()/login() lief ODER der verwendete Refresh-Token nicht mehr der
     // aktuelle ist – sonst würde ein veralteter Refresh eine bereits beendete/
     // ersetzte Sitzung wiederbeleben.
-    if (currentSession() !== session) return false;
-    if (localStorage.getItem(REFRESH_KEY) !== usedRefresh) return false;
-    setTokens(data.access);
+    const now = readAuth();
+    if (!now || now.session !== session || now.refresh !== usedRefresh) return false;
+    // Access-Token ATOMAR innerhalb der bestehenden Sitzung aktualisieren.
+    writeAuth({ ...now, access: data.access });
     return true;
   })();
   refreshInFlight = mine;

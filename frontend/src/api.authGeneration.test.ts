@@ -1,21 +1,31 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { getAccessToken, getInboxSummary, login, logout } from "./api";
+import {
+  getAccessToken,
+  getInboxSummary,
+  login,
+  logout,
+  onAuthChange,
+} from "./api";
 
-// P1/P2: Ein bereits laufender Token-Refresh bzw. ein veralteter Request darf einen
-// zwischenzeitlichen logout()/login() – auch in einem ANDEREN Browser-Tab – nicht
-// rückgängig machen und nicht mit fremder Identität weiterlaufen. Die Sitzungs-ID
-// liegt in localStorage (tab-übergreifend geteilt).
+// P1/P2: Refresh/Retry und Logout respektieren die tab-übergreifende Sitzung, der
+// Auth-State liegt ATOMAR in einem JSON-Key, und logout() invalidiert den
+// Refresh-Token best-effort serverseitig.
 
-const ACCESS_KEY = "dms_access";
-const REFRESH_KEY = "dms_refresh";
-const SESSION_KEY = "dms_session";
+const AUTH_KEY = "dms_auth_state";
 
-// Realistischer eingeloggter Zustand: Tokens + Sitzungs-ID (wie nach login()).
-function seedSession(session = "s1", access = "old-access", refresh = "old-refresh") {
-  localStorage.setItem(SESSION_KEY, session);
-  localStorage.setItem(ACCESS_KEY, access);
-  localStorage.setItem(REFRESH_KEY, refresh);
+function seed(session = "s1", access = "old-access", refresh = "old-refresh") {
+  localStorage.setItem(AUTH_KEY, JSON.stringify({ session, access, refresh }));
+}
+function readAuth(): { session: string; access: string; refresh: string } | null {
+  const raw = localStorage.getItem(AUTH_KEY);
+  return raw ? JSON.parse(raw) : null;
+}
+function ok(json: unknown, status = 200): Response {
+  return { ok: status < 400, status, json: async () => json } as unknown as Response;
+}
+function unauth(): Response {
+  return { ok: false, status: 401, json: async () => ({}) } as unknown as Response;
 }
 
 beforeEach(() => {
@@ -26,26 +36,17 @@ afterEach(() => {
   localStorage.clear();
 });
 
-describe("Refresh/Retry respektiert die (tab-übergreifende) Sitzung", () => {
+describe("Auth-State: atomar, tab-übergreifend, serverseitig invalidiert", () => {
   it("logout() während eines laufenden Refresh verhindert den Zombie-Token", async () => {
-    seedSession();
-
+    seed();
     vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
       const url = String(input);
+      if (url.includes("/auth/logout/")) return Promise.resolve(ok({}, 205));
       if (url.includes("/auth/token/refresh/")) {
-        // Mitten im laufenden Refresh loggt sich der Nutzer aus.
         logout();
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          json: async () => ({ access: "zombie-access" }),
-        } as unknown as Response);
+        return Promise.resolve(ok({ access: "zombie-access" }));
       }
-      return Promise.resolve({
-        ok: false,
-        status: 401,
-        json: async () => ({}),
-      } as unknown as Response);
+      return Promise.resolve(unauth());
     });
 
     await expect(getInboxSummary()).rejects.toThrow();
@@ -53,63 +54,47 @@ describe("Refresh/Retry respektiert die (tab-übergreifende) Sitzung", () => {
   });
 
   it("ein Refresh mit veraltetem Refresh-Token schreibt seinen Access-Token nicht", async () => {
-    seedSession();
-
-    const setSpy = vi.spyOn(Storage.prototype, "setItem");
+    seed();
     vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
       const url = String(input);
       if (url.includes("/auth/token/refresh/")) {
-        // Zwischenzeitlich wurde der Refresh-Token rotiert (Sitzung bleibt gleich).
-        localStorage.setItem(REFRESH_KEY, "new-refresh");
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          json: async () => ({ access: "stale-access" }),
-        } as unknown as Response);
+        // Refresh-Token wurde zwischenzeitlich rotiert (Sitzung bleibt).
+        localStorage.setItem(
+          AUTH_KEY,
+          JSON.stringify({ session: "s1", access: "old-access", refresh: "new-refresh" }),
+        );
+        return Promise.resolve(ok({ access: "stale-access" }));
       }
-      return Promise.resolve({
-        ok: false,
-        status: 401,
-        json: async () => ({}),
-      } as unknown as Response);
+      return Promise.resolve(unauth());
     });
 
     await expect(getInboxSummary()).rejects.toThrow();
-    expect(setSpy).not.toHaveBeenCalledWith(ACCESS_KEY, "stale-access");
+    expect(readAuth()?.access).not.toBe("stale-access");
   });
 
   it("ein veralteter Request loggt eine neue Sitzung NICHT aus", async () => {
-    seedSession();
-
+    seed();
     vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
       const url = String(input);
+      if (url.includes("/auth/logout/")) return Promise.resolve(ok({}, 205));
       if (url.includes("/auth/token/refresh/")) {
-        // Abmeldung + neue Anmeldung während des Refresh des ALTEN Requests.
         logout();
-        localStorage.setItem(SESSION_KEY, "s2");
-        localStorage.setItem(ACCESS_KEY, "new-access");
-        localStorage.setItem(REFRESH_KEY, "new-refresh");
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          json: async () => ({ access: "stale-access" }),
-        } as unknown as Response);
+        localStorage.setItem(
+          AUTH_KEY,
+          JSON.stringify({ session: "s2", access: "new-access", refresh: "new-refresh" }),
+        );
+        return Promise.resolve(ok({ access: "stale-access" }));
       }
-      return Promise.resolve({
-        ok: false,
-        status: 401,
-        json: async () => ({}),
-      } as unknown as Response);
+      return Promise.resolve(unauth());
     });
 
     await expect(getInboxSummary()).rejects.toThrow();
     expect(getAccessToken()).toBe("new-access");
-    expect(localStorage.getItem(REFRESH_KEY)).toBe("new-refresh");
+    expect(readAuth()?.refresh).toBe("new-refresh");
   });
 
   it("ein veralteter Request wird nach Neuanmeldung NICHT mit der neuen Identität wiederholt", async () => {
-    seedSession();
-
+    seed();
     let apiCalls = 0;
     let apiRetried = false;
     let refreshAttempted = false;
@@ -117,35 +102,18 @@ describe("Refresh/Retry respektiert die (tab-übergreifende) Sitzung", () => {
     vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
       const url = String(input);
       if (url.includes("/auth/token/") && !url.includes("refresh")) {
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          json: async () => ({ access: "new-access", refresh: "new-refresh" }),
-        } as unknown as Response);
+        return Promise.resolve(ok({ access: "new-access", refresh: "new-refresh" }));
       }
       if (url.includes("/auth/token/refresh/")) {
         refreshAttempted = true;
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          json: async () => ({ access: "stale-access" }),
-        } as unknown as Response);
+        return Promise.resolve(ok({ access: "stale-access" }));
       }
       apiCalls += 1;
       if (apiCalls === 1) {
-        // Während des ersten Versuchs meldet sich ein neuer Nutzer an (echtes
-        // login() setzt eine neue Sitzungs-ID).
-        return login("neu", "pw").then(
-          () =>
-            ({ ok: false, status: 401, json: async () => ({}) }) as unknown as Response,
-        );
+        return login("neu", "pw").then(() => unauth());
       }
       apiRetried = true;
-      return Promise.resolve({
-        ok: false,
-        status: 401,
-        json: async () => ({}),
-      } as unknown as Response);
+      return Promise.resolve(unauth());
     });
 
     await expect(getInboxSummary()).rejects.toThrow();
@@ -153,13 +121,11 @@ describe("Refresh/Retry respektiert die (tab-übergreifende) Sitzung", () => {
     expect(apiRetried).toBe(false);
     expect(apiCalls).toBe(1);
     expect(getAccessToken()).toBe("new-access");
-    expect(localStorage.getItem(REFRESH_KEY)).toBe("new-refresh");
+    expect(readAuth()?.refresh).toBe("new-refresh");
   });
 
   it("ein Login in einem ANDEREN Tab entwertet Requests in diesem Tab (P1)", async () => {
-    // Tab A ist als Nutzer A eingeloggt.
-    seedSession("tabA", "a-access", "a-refresh");
-
+    seed("tabA", "a-access", "a-refresh");
     let apiCalls = 0;
     let apiRetried = false;
     let refreshAttempted = false;
@@ -168,41 +134,71 @@ describe("Refresh/Retry respektiert die (tab-übergreifende) Sitzung", () => {
       const url = String(input);
       if (url.includes("/auth/token/refresh/")) {
         refreshAttempted = true;
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          json: async () => ({ access: "a-refreshed" }),
-        } as unknown as Response);
+        return Promise.resolve(ok({ access: "a-refreshed" }));
       }
       apiCalls += 1;
       if (apiCalls === 1) {
-        // Tab B meldet sich als anderer Nutzer an: localStorage (Sitzung + Tokens)
-        // ist tab-übergreifend geteilt und ändert sich damit auch für Tab A.
-        localStorage.setItem(SESSION_KEY, "tabB");
-        localStorage.setItem(ACCESS_KEY, "b-access");
-        localStorage.setItem(REFRESH_KEY, "b-refresh");
-        return Promise.resolve({
-          ok: false,
-          status: 401,
-          json: async () => ({}),
-        } as unknown as Response);
+        // Tab B meldet sich als anderer Nutzer an (localStorage ist tab-geteilt).
+        localStorage.setItem(
+          AUTH_KEY,
+          JSON.stringify({ session: "tabB", access: "b-access", refresh: "b-refresh" }),
+        );
+        return Promise.resolve(unauth());
       }
       apiRetried = true;
-      return Promise.resolve({
-        ok: false,
-        status: 401,
-        json: async () => ({}),
-      } as unknown as Response);
+      return Promise.resolve(unauth());
     });
 
     await expect(getInboxSummary()).rejects.toThrow();
-    // Weder Refresh noch Retry unter Tab Bs Identität ...
     expect(refreshAttempted).toBe(false);
     expect(apiRetried).toBe(false);
     expect(apiCalls).toBe(1);
-    // ... und Tab Bs Sitzung bleibt unangetastet (Tab A loggt sie nicht aus).
-    expect(localStorage.getItem(ACCESS_KEY)).toBe("b-access");
-    expect(localStorage.getItem(REFRESH_KEY)).toBe("b-refresh");
-    expect(localStorage.getItem(SESSION_KEY)).toBe("tabB");
+    // Tab Bs Sitzung bleibt intakt.
+    expect(readAuth()).toEqual({
+      session: "tabB",
+      access: "b-access",
+      refresh: "b-refresh",
+    });
+  });
+
+  it("logout() ruft /api/auth/logout/ best-effort mit dem Refresh-Token auf (P1)", () => {
+    seed("s1", "a", "the-refresh");
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(ok({}, 205));
+
+    logout();
+
+    const call = fetchSpy.mock.calls.find((c) =>
+      String(c[0]).includes("/auth/logout/"),
+    );
+    expect(call).toBeTruthy();
+    expect(JSON.parse((call![1] as RequestInit).body as string)).toEqual({
+      refresh: "the-refresh",
+    });
+    // Lokal ist der State atomar entfernt.
+    expect(localStorage.getItem(AUTH_KEY)).toBeNull();
+  });
+
+  it("onAuthChange benachrichtigt bei logout()", () => {
+    seed();
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(ok({}, 205));
+    let called = 0;
+    const unsub = onAuthChange(() => {
+      called += 1;
+    });
+    logout();
+    expect(called).toBe(1);
+    unsub();
+  });
+
+  it("der Auth-State liegt in EINEM Key (atomar) statt in drei", () => {
+    seed("s1", "acc", "ref");
+    expect(localStorage.getItem("dms_auth_state")).toBeTruthy();
+    // Keine losen Alt-Keys mehr.
+    expect(localStorage.getItem("dms_access")).toBeNull();
+    expect(localStorage.getItem("dms_refresh")).toBeNull();
+    expect(localStorage.getItem("dms_session")).toBeNull();
+    expect(getAccessToken()).toBe("acc");
   });
 });
