@@ -192,6 +192,20 @@ describe("Auth-State: atomar, tab-übergreifend, serverseitig invalidiert", () =
     unsub();
   });
 
+  it("verwirft eine 200-Antwort, wenn die Sitzung während des Requests wechselt (P1)", async () => {
+    seed("s1", "a", "r");
+    vi.spyOn(globalThis, "fetch").mockImplementation(() => {
+      // Während des Requests wechselt (z. B. aus einem anderen Tab) die Sitzung.
+      localStorage.setItem(
+        AUTH_KEY,
+        JSON.stringify({ session: "s2", access: "b", refresh: "br" }),
+      );
+      return Promise.resolve(ok({ total_needs_review: 5 })); // erfolgreiche 200
+    });
+    // Die 200 gehört zur alten Sitzung -> darf NICHT unter der neuen genutzt werden.
+    await expect(getInboxSummary()).rejects.toThrow();
+  });
+
   it("der Auth-State liegt in EINEM Key (atomar) statt in drei", () => {
     seed("s1", "acc", "ref");
     expect(localStorage.getItem("dms_auth_state")).toBeTruthy();

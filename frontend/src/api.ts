@@ -81,6 +81,12 @@ export function isLoggedIn(): boolean {
 function currentSession(): string | null {
   return readAuth()?.session ?? null;
 }
+// Öffentliche Sitzungs-ID (für die tab-übergreifende UI): die App keyt darauf
+// DocumentsPage, damit ein Benutzerwechsel (A -> B, auch aus einem anderen Tab)
+// die Seite frisch mountet statt A-Daten unter B zu zeigen.
+export function getSessionId(): string | null {
+  return currentSession();
+}
 
 // Auth-Änderungen abonnieren (P1, tab-übergreifende UI-Synchronisation): Ein
 // Login/Logout – auch in einem ANDEREN Tab – benachrichtigt hierüber alle
@@ -237,6 +243,13 @@ async function apiFetch(path: string, options: RequestInit = {}): Promise<Respon
       logout();
     }
     throw new AuthError("Sitzung abgelaufen – bitte erneut anmelden.");
+  }
+  // Sitzungswechsel WÄHREND des Requests (auch bei einer erfolgreichen 200-Antwort,
+  // auch aus einem anderen Tab): Die Antwort gehört noch zur ALTEN Sitzung und darf
+  // NICHT unter der neuen Identität verwendet werden (sonst zeigte Nutzer B evtl.
+  // Daten von Nutzer A). Verwerfen statt zurückgeben.
+  if (currentSession() !== sessionAtStart) {
+    throw new AuthError("Sitzung gewechselt – Anfrage verworfen.");
   }
   return res;
 }
