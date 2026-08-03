@@ -3776,12 +3776,20 @@ async function listAll<T>(path: string): Promise<T[]> {
 // wo client-seitig gefiltert wird (z. B. Erinnerungen je Dokument), damit nicht
 // nur die erste Seite (PAGE_SIZE) berücksichtigt wird.
 async function listAllPages<T>(path: string): Promise<T[]> {
+  // Die gesamte Paginierung an EINE Sitzung binden (P1): Ohne das könnte Seite 1
+  // unter Nutzer A und Seite 2 (nach einem Wechsel) unter Nutzer B geladen und die
+  // Ergebnisse vermischt werden. Vor jeder Seite prüfen + den Body sitzungsgebunden
+  // lesen (readJsonChecked).
+  const opSession = currentSession();
   const out: T[] = [];
   let next: string | null = path;
   while (next) {
+    if (currentSession() !== opSession) {
+      throw new AuthSessionChangedError("Sitzung gewechselt – Liste verworfen.");
+    }
     const res = await apiFetch(next);
     if (!res.ok) throw new Error(`Laden fehlgeschlagen: HTTP ${res.status}`);
-    const data = await res.json();
+    const data = await readJsonChecked(res);
     if (Array.isArray(data)) return data; // unpaginiert
     out.push(...(data.results as T[]));
     // ``next`` ist eine absolute URL – in einen /api-relativen Pfad umwandeln,
