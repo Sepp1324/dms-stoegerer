@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  AuthError,
+  AuthSessionChangedError,
   getAccessToken,
+  getDocumentPreview,
   getInboxSummary,
   login,
   logout,
@@ -203,7 +206,30 @@ describe("Auth-State: atomar, tab-übergreifend, serverseitig invalidiert", () =
       return Promise.resolve(ok({ total_needs_review: 5 })); // erfolgreiche 200
     });
     // Die 200 gehört zur alten Sitzung -> darf NICHT unter der neuen genutzt werden.
-    await expect(getInboxSummary()).rejects.toThrow();
+    await expect(getInboxSummary()).rejects.toBeInstanceOf(AuthSessionChangedError);
+  });
+
+  it("verwirft einen Blob-Download, wenn die Sitzung während des Body-Transfers wechselt (P1)", async () => {
+    seed("s1", "a", "r");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      blob: async () => {
+        // Sitzungswechsel WÄHREND des Body-Transfers (fetch war nach den Headern
+        // schon erfüllt) -> der Blob gehört noch zur alten Sitzung.
+        localStorage.setItem(
+          AUTH_KEY,
+          JSON.stringify({ session: "s2", access: "b", refresh: "br" }),
+        );
+        return new Blob([new Uint8Array([1, 2, 3])], { type: "application/pdf" });
+      },
+    } as unknown as Response);
+
+    const err = await getDocumentPreview(5).catch((e) => e);
+    expect(err).toBeInstanceOf(AuthSessionChangedError);
+    // Bleibt eine AuthError-Unterklasse (semantisch), aber ein eigener Typ.
+    expect(err).toBeInstanceOf(AuthError);
   });
 
   it("der Auth-State liegt in EINEM Key (atomar) statt in drei", () => {

@@ -11,6 +11,12 @@ const API_BASE = "/api";
 const AUTH_KEY = "dms_auth_state";
 
 export class AuthError extends Error {}
+// Ein WÄHREND eines Requests erfolgter Sitzungswechsel (A -> B, auch aus einem
+// anderen Tab). Das ist KEIN Authentifizierungsverlust – die neue Sitzung ist
+// gültig; nur DIESER (veraltete) Request wird beendet, damit seine Antwort nicht
+// unter der neuen Identität landet. Erbt von AuthError (semantisch verwandt), muss
+// von Aufrufern aber VOR AuthError geprüft werden, um kein Ausloggen auszulösen.
+export class AuthSessionChangedError extends AuthError {}
 
 interface AuthState {
   session: string;
@@ -249,9 +255,24 @@ async function apiFetch(path: string, options: RequestInit = {}): Promise<Respon
   // NICHT unter der neuen Identität verwendet werden (sonst zeigte Nutzer B evtl.
   // Daten von Nutzer A). Verwerfen statt zurückgeben.
   if (currentSession() !== sessionAtStart) {
-    throw new AuthError("Sitzung gewechselt – Anfrage verworfen.");
+    throw new AuthSessionChangedError("Sitzung gewechselt – Anfrage verworfen.");
   }
   return res;
+}
+
+// Body-Read mit Sitzungs-Prüfung (P1): ``fetch()`` erfüllt sich bereits nach den
+// HTTP-Headern; der eigentliche Body (großes PDF beim Download/Vorschau) wird erst
+// mit ``res.blob()`` gelesen. Wechselt die Sitzung WÄHREND dieses Transfers, gehört
+// der Blob noch zur alten Sitzung. Deshalb die Sitzung nach vollständigem Body
+// erneut prüfen (JS ist single-threaded: die vor dem await gelesene Sitzung ist
+// exakt die des Requests). Alle Blob-Downloads laufen darüber.
+async function readBlobChecked(res: Response): Promise<Blob> {
+  const session = currentSession();
+  const blob = await res.blob();
+  if (currentSession() !== session) {
+    throw new AuthSessionChangedError("Sitzung gewechselt – Download verworfen.");
+  }
+  return blob;
 }
 
 // --- Typen ---
@@ -1826,7 +1847,7 @@ export async function getDocumentPreview(
   const suffix = versionNo ? `?version=${versionNo}` : "";
   const res = await apiFetch(`/documents/${id}/preview/${suffix}`, { signal });
   if (!res.ok) throw new Error(`Vorschau nicht verfügbar (HTTP ${res.status})`);
-  const blob = await res.blob();
+  const blob = await readBlobChecked(res);
   // Sicherheit (Defense-in-depth zusätzlich zur Backend-415-Prüfung): Nur
   // PDF/Raster-Bilder dürfen als Blob in das (un-sandboxed) Vorschau-iframe.
   // Ein als text/html gespeicherter Polyglot dürfte NIE gerendert werden – die
@@ -1912,7 +1933,7 @@ export async function getPdfWorkbenchPageThumbnail(
   if (!res.ok) {
     throw new Error(`Seitenminiatur nicht verfügbar (HTTP ${res.status})`);
   }
-  return res.blob();
+  return readBlobChecked(res);
 }
 
 export function rewritePdfDocument(
@@ -1958,7 +1979,7 @@ export function splitPdfDocument(
 export async function getDocumentQr(id: number): Promise<Blob> {
   const res = await apiFetch(`/documents/${id}/qr/`);
   if (!res.ok) throw new Error(`QR-Code nicht verfügbar (HTTP ${res.status})`);
-  return res.blob();
+  return readBlobChecked(res);
 }
 
 // Lädt die Originaldatei einer Version als Blob (mit Auth-Header) zum Download.
@@ -1968,13 +1989,13 @@ export async function getDocumentVersionFile(
 ): Promise<Blob> {
   const res = await apiFetch(`/documents/${id}/download/?version=${versionNo}`);
   if (!res.ok) throw new Error(`Download fehlgeschlagen (HTTP ${res.status})`);
-  return res.blob();
+  return readBlobChecked(res);
 }
 
 export async function getDocumentRevisionPackage(id: number): Promise<Blob> {
   const res = await apiFetch(`/documents/${id}/revision-package/`);
   if (!res.ok) throw new Error(`Revisionspaket nicht verfügbar (HTTP ${res.status})`);
-  return res.blob();
+  return readBlobChecked(res);
 }
 
 export async function getEvidenceStatus(): Promise<EvidenceStatus> {
@@ -2153,7 +2174,7 @@ export async function addDocumentVersion(
 export async function getDocumentThumbnail(id: number): Promise<Blob> {
   const res = await apiFetch(`/documents/${id}/thumbnail/`);
   if (!res.ok) throw new Error(`Kein Thumbnail (HTTP ${res.status})`);
-  return res.blob();
+  return readBlobChecked(res);
 }
 
 export interface DocumentPatch {
@@ -3189,7 +3210,7 @@ export function finalizeDossier(id: number): Promise<Dossier> {
 export async function exportDossierMarkdown(id: number): Promise<Blob> {
   const res = await apiFetch(`/dossiers/${id}/export-markdown/`);
   if (!res.ok) throw new Error(`Dossier-Export fehlgeschlagen: HTTP ${res.status}`);
-  return res.blob();
+  return readBlobChecked(res);
 }
 
 export async function updateCaseFile(
@@ -3380,7 +3401,7 @@ export async function downloadTimelineIcs(days?: number): Promise<Blob> {
   const suffix = days === undefined ? "" : `?days=${days}`;
   const res = await apiFetch(`/timeline/ics/${suffix}`);
   if (!res.ok) throw new Error(`Kalenderexport fehlgeschlagen: HTTP ${res.status}`);
-  return res.blob();
+  return readBlobChecked(res);
 }
 
 // --- Wiedervorlage/Erinnerungen (STOAA-372/374) ---
@@ -3632,7 +3653,7 @@ export async function getSharePreview(token: string): Promise<Blob> {
   const res = await apiFetch(`/share/${encodeURIComponent(token)}/preview`);
   if (res.status === 410) throw new ShareGoneError();
   if (!res.ok) throw new Error(`Vorschau nicht verfügbar (HTTP ${res.status})`);
-  return res.blob();
+  return readBlobChecked(res);
 }
 
 // Ergebnis des Share-Downloads: die Original-Bytes plus der vom Backend
@@ -3647,7 +3668,7 @@ export async function getShareDownload(token: string): Promise<ShareDownload> {
   const res = await apiFetch(`/share/${encodeURIComponent(token)}/download`);
   if (res.status === 410) throw new ShareGoneError();
   if (!res.ok) throw new Error(`Download fehlgeschlagen (HTTP ${res.status})`);
-  const blob = await res.blob();
+  const blob = await readBlobChecked(res);
   return {
     blob,
     filename: parseContentDispositionFilename(res.headers.get("Content-Disposition")),
