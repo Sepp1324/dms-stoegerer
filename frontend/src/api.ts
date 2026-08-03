@@ -17,19 +17,28 @@ function setTokens(access: string, refresh?: string) {
   localStorage.setItem(ACCESS_KEY, access);
   if (refresh) localStorage.setItem(REFRESH_KEY, refresh);
 }
-// Auth-Generation (P2): Jeder logout()/login() erhöht diesen Zähler. Ein bereits
-// LAUFENDER Refresh merkt sich die Generation bei Start und schreibt seinen neuen
-// Access-Token nur zurück, wenn zwischenzeitlich kein logout/login lief. Sonst
-// könnte ein nach dem Logout eintreffender Refresh wieder einen gültigen Token in
-// den Storage legen (Zombie-Session) bzw. die Tokens einer unmittelbar folgenden
-// Anmeldung überschreiben.
-let authGeneration = 0;
+const SESSION_KEY = "dms_session";
+
+// Sitzungs-Identität – tab-ÜBERGREIFEND (P1): Früher lag die "Auth-Generation" nur
+// im JS-Speicher EINES Tabs. localStorage (Tokens) ist aber zwischen Tabs geteilt:
+// Ein Login als anderer Nutzer in Tab B ändert die Tokens, ohne die Generation in
+// Tab A zu erhöhen -> Tab A könnte alte Requests mit der NEUEN Identität refreshen
+// oder wiederholen. Die Sitzungs-ID liegt deshalb ebenfalls in localStorage; jeder
+// Guard liest den AKTUELLEN Wert, sodass ein Login/Logout in irgendeinem Tab die
+// veralteten Requests ALLER Tabs entwertet.
+function currentSession(): string | null {
+  return localStorage.getItem(SESSION_KEY);
+}
+function startNewSession(): void {
+  const id = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
+  localStorage.setItem(SESSION_KEY, id);
+}
 
 export function logout() {
-  authGeneration++;
   // Laufenden Refresh der alten Sitzung fallenlassen, damit ein danach
   // gestarteter Request nicht die veraltete In-Flight-Promise weiterverwendet.
   refreshInFlight = null;
+  localStorage.removeItem(SESSION_KEY);
   localStorage.removeItem(ACCESS_KEY);
   localStorage.removeItem(REFRESH_KEY);
 }
@@ -44,11 +53,22 @@ export async function login(username: string, password: string): Promise<void> {
     throw new AuthError("Anmeldung fehlgeschlagen – Benutzername oder Passwort falsch.");
   }
   const data = await res.json();
-  // Neue Sitzung: laufende Refreshes der alten Sitzung entwerten und die
+  // Neue Sitzung: frische, tab-übergreifend sichtbare Sitzungs-ID setzen und die
   // In-Flight-Promise fallenlassen, damit sie nicht weiterverwendet wird.
-  authGeneration++;
   refreshInFlight = null;
+  startNewSession();
   setTokens(data.access, data.refresh);
+}
+
+// Sitzungswechsel in einem ANDEREN Tab (Login/Logout dort ändert SESSION_KEY):
+// laufenden Refresh fallenlassen. Die Session-Guards verwerfen sein Ergebnis
+// ohnehin – so startet ein nachfolgender Request aber sauber neu.
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", (e) => {
+    if (e.key === SESSION_KEY || e.key === null) {
+      refreshInFlight = null;
+    }
+  });
 }
 
 // Single-Flight (P2): Bei mehreren gleichzeitig mit 401 beantworteten Requests
@@ -60,8 +80,8 @@ let refreshInFlight: Promise<boolean> | null = null;
 
 async function tryRefresh(): Promise<boolean> {
   if (refreshInFlight) return refreshInFlight;
-  // Generation + verwendeten Refresh-Token beim Start des Flights festhalten.
-  const generation = authGeneration;
+  // Sitzungs-ID + verwendeten Refresh-Token beim Start des Flights festhalten.
+  const session = currentSession();
   const usedRefresh = localStorage.getItem(REFRESH_KEY);
   const mine = (async (): Promise<boolean> => {
     if (!usedRefresh) return false;
@@ -72,10 +92,11 @@ async function tryRefresh(): Promise<boolean> {
     });
     if (!res.ok) return false;
     const data = await res.json();
-    // Ergebnis verwerfen, wenn zwischenzeitlich logout()/login() lief ODER der
-    // verwendete Refresh-Token nicht mehr der aktuelle ist – sonst würde ein
-    // veralteter Refresh eine bereits beendete/ersetzte Sitzung wiederbeleben.
-    if (authGeneration !== generation) return false;
+    // Ergebnis verwerfen, wenn zwischenzeitlich (in DIESEM oder einem anderen Tab)
+    // logout()/login() lief ODER der verwendete Refresh-Token nicht mehr der
+    // aktuelle ist – sonst würde ein veralteter Refresh eine bereits beendete/
+    // ersetzte Sitzung wiederbeleben.
+    if (currentSession() !== session) return false;
     if (localStorage.getItem(REFRESH_KEY) !== usedRefresh) return false;
     setTokens(data.access);
     return true;
@@ -101,29 +122,29 @@ async function apiFetch(path: string, options: RequestInit = {}): Promise<Respon
     },
   });
 
-  // Generation zu Beginn festhalten: Startet während dieses (evtl. veralteten)
-  // Requests ein logout()+login(), darf sein finaler 401 NICHT die Tokens der
-  // neuen Sitzung löschen.
-  const generationAtStart = authGeneration;
+  // Sitzungs-ID zu Beginn festhalten: Startet während dieses (evtl. veralteten)
+  // Requests – in DIESEM oder einem anderen Tab – ein logout()+login(), darf sein
+  // finaler 401 NICHT die Tokens der neuen Sitzung löschen.
+  const sessionAtStart = currentSession();
   let res = await fetch(`${API_BASE}${path}`, withAuth());
   // Refresh+Retry NUR, wenn zwischenzeitlich kein logout()/login() lief (P1):
   // Sonst würde tryRefresh() den NEUEN Refresh-Token nehmen und den alten Request
   // mit der NEUEN Identität wiederholen – ein altes POST/PATCH/DELETE liefe dann
-  // unter dem frisch angemeldeten Benutzer. Die Generation wird vor dem Refresh
-  // UND nach dem (await-enden) Refresh geprüft (ein login() kann während des
-  // laufenden Refresh passieren).
+  // unter dem frisch angemeldeten Benutzer. Die Sitzung wird vor dem Refresh UND
+  // nach dem (await-enden) Refresh geprüft (ein login() – auch in einem anderen
+  // Tab – kann während des laufenden Refresh passieren).
   if (
     res.status === 401 &&
-    authGeneration === generationAtStart &&
+    currentSession() === sessionAtStart &&
     (await tryRefresh()) &&
-    authGeneration === generationAtStart
+    currentSession() === sessionAtStart
   ) {
     res = await fetch(`${API_BASE}${path}`, withAuth());
   }
   if (res.status === 401) {
     // Nur ausloggen, wenn zwischenzeitlich KEIN logout/login lief. Sonst würde
     // dieser veraltete Request die frisch angemeldete Sitzung wieder auswerfen.
-    if (authGeneration === generationAtStart) {
+    if (currentSession() === sessionAtStart) {
       logout();
     }
     throw new AuthError("Sitzung abgelaufen – bitte erneut anmelden.");
