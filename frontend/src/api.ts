@@ -243,11 +243,15 @@ async function apiFetch(path: string, options: RequestInit = {}): Promise<Respon
     res = await fetch(`${API_BASE}${path}`, withAuth());
   }
   if (res.status === 401) {
-    // Nur ausloggen, wenn zwischenzeitlich KEIN logout/login lief. Sonst würde
-    // dieser veraltete Request die frisch angemeldete Sitzung wieder auswerfen.
-    if (currentSession() === sessionAtStart) {
-      logout();
+    // Sitzung während des Requests gewechselt (A -> B, auch aus einem anderen Tab):
+    // NUR den veralteten Request beenden – NICHT ausloggen und NICHT als
+    // Auth-Verlust melden (Sitzung B ist gültig; sonst würde z. B. ein laufender
+    // Freigabe-Download in SharePage die UI fälschlich abmelden).
+    if (currentSession() !== sessionAtStart) {
+      throw new AuthSessionChangedError("Sitzung gewechselt – Anfrage verworfen.");
     }
+    // Sitzung unverändert -> echter Auth-Verlust: ausloggen und melden.
+    logout();
     throw new AuthError("Sitzung abgelaufen – bitte erneut anmelden.");
   }
   // Sitzungswechsel WÄHREND des Requests (auch bei einer erfolgreichen 200-Antwort,
