@@ -7641,3 +7641,22 @@ button.due-card:hover {
   justify-content: space-between;
   gap: 0.8rem;
 }
+
+/* Wiederherstellungs-Dialog der ErrorBoundary (selbstheilender Chunk-Load-Fehler). */
+.error-recovery {
+  max-width: 32rem;
+  margin: 4rem auto;
+  padding: 2rem;
+  text-align: center;
+}
+.error-recovery h1 {
+  font-size: 1.25rem;
+  margin-bottom: 0.5rem;
+}
+.error-recovery__actions {
+  display: flex;
+  gap: 1rem;
+  justify-content: center;
+  align-items: center;
+  margin-top: 1.5rem;
+}

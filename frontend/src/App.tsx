@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { BrowserRouter, Route, Routes, useParams } from "react-router-dom";
 import { isLoggedIn, onAuthChange } from "./api";
+import ErrorBoundary from "./components/ErrorBoundary";
 import Login from "./components/Login";
 import DocumentsPage from "./components/DocumentsPage";
 import SharePage from "./components/SharePage";
@@ -45,10 +46,11 @@ export default function App() {
   useEffect(() => onAuthChange(() => setLoggedIn(isLoggedIn())), []);
 
   return (
-    <BrowserRouter>
-      {/* Die v6-``future``-Flags (v7_startTransition/v7_relativeSplatPath) sind in
-          react-router v7 der Standard und wurden aus der Prop entfernt. */}
-      <Routes>
+    <ErrorBoundary>
+      <BrowserRouter>
+        {/* Die v6-``future``-Flags (v7_startTransition/v7_relativeSplatPath) sind in
+            react-router v7 der Standard und wurden aus der Prop entfernt. */}
+        <Routes>
         <Route
           path="/share/:token"
           element={
@@ -70,7 +72,8 @@ export default function App() {
             )
           }
         />
-      </Routes>
-    </BrowserRouter>
+        </Routes>
+      </BrowserRouter>
+    </ErrorBoundary>
   );
 }
