@@ -3,22 +3,38 @@ import { render, screen } from "@testing-library/react";
 
 import ErrorBoundary from "./components/ErrorBoundary";
 
-// Selbstheilende Boundary: fängt Render-/Chunk-Load-Fehler ab. Der Auto-Reload
-// beim ERSTEN Fehler wird über den Zeitstempel im sessionStorage getestet – setzen
-// wir ihn auf "gerade eben", greift der Loop-Schutz und der Dialog erscheint.
+// Selbstheilende Boundary: NUR echte Chunk-Load-Fehler laden automatisch neu.
+// Normale Programmierfehler zeigen sofort den Dialog (kein Reload -> keine
+// verlorenen Eingaben). Der Auto-Reload wird über den Zeitstempel loop-geschützt.
 
 const RECOVERY_KEY = "dms_recovery_ts";
 
-function Boom(): JSX.Element {
+function ChunkBoom(): JSX.Element {
   throw new Error("ChunkLoadError: Loading chunk 7 failed");
 }
+function CodeBoom(): JSX.Element {
+  throw new Error("Cannot read properties of undefined (reading 'title')");
+}
+
+let reloadSpy: ReturnType<typeof vi.fn>;
+const realLocation = window.location;
 
 beforeEach(() => {
   sessionStorage.clear();
-  // console.error der abgefangenen Fehler stummschalten (React + Boundary loggen).
   vi.spyOn(console, "error").mockImplementation(() => {});
+  reloadSpy = vi.fn();
+  // jsdom erlaubt kein Überschreiben von location.reload direkt -> location als
+  // Ganzes durch einen minimalen Stub ersetzen.
+  Object.defineProperty(window, "location", {
+    configurable: true,
+    value: { href: "http://localhost/", reload: reloadSpy, assign: vi.fn() },
+  });
 });
 afterEach(() => {
+  Object.defineProperty(window, "location", {
+    configurable: true,
+    value: realLocation,
+  });
   vi.restoreAllMocks();
   sessionStorage.clear();
 });
@@ -33,19 +49,36 @@ describe("ErrorBoundary", () => {
     expect(screen.getByText("alles ok")).toBeInTheDocument();
   });
 
-  it("zeigt den Wiederherstellungs-Dialog, wenn gerade erst neu geladen wurde", () => {
-    // Kürzlicher Recovery-Zeitstempel -> Loop-Schutz -> KEIN erneuter Auto-Reload,
-    // stattdessen der Dialog.
+  it("lädt bei einem frischen Chunk-Load-Fehler automatisch neu", () => {
+    render(
+      <ErrorBoundary>
+        <ChunkBoom />
+      </ErrorBoundary>,
+    );
+    expect(reloadSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("lädt bei einem normalen Programmierfehler NICHT neu, sondern zeigt den Dialog", () => {
+    render(
+      <ErrorBoundary>
+        <CodeBoom />
+      </ErrorBoundary>,
+    );
+    expect(reloadSpy).not.toHaveBeenCalled();
+    expect(screen.getByText(/Fehler aufgetreten/i)).toBeInTheDocument();
+    // Kein Update-spezifischer Text bei einem echten Code-Fehler.
+    expect(screen.getByText(/setzt die Seite zurück/i)).toBeInTheDocument();
+  });
+
+  it("zeigt bei erneutem Chunk-Fehler im Loop-Fenster den Dialog statt Reload", () => {
     sessionStorage.setItem(RECOVERY_KEY, String(Date.now()));
     render(
       <ErrorBoundary>
-        <Boom />
+        <ChunkBoom />
       </ErrorBoundary>,
     );
-    expect(screen.getByText(/konnte nicht geladen werden/i)).toBeInTheDocument();
-    const buttons = screen.getAllByRole("button");
-    expect(buttons).toHaveLength(2);
-    expect(screen.getByText("Neu laden")).toBeInTheDocument();
-    expect(screen.getByText(/Abmelden/i)).toBeInTheDocument();
+    expect(reloadSpy).not.toHaveBeenCalled();
+    expect(screen.getByText(/Fehler aufgetreten/i)).toBeInTheDocument();
+    expect(screen.getAllByRole("button")).toHaveLength(2);
   });
 });

@@ -9,7 +9,7 @@ import "./index.css";
 // holt die neue index.html + Chunks. Loop-Schutz: höchstens ein Auto-Reload pro
 // Zeitfenster (identisch zur ErrorBoundary), damit kein Reload-Kreislauf entsteht.
 const RECOVERY_KEY = "dms_recovery_ts";
-window.addEventListener("vite:preloadError", () => {
+window.addEventListener("vite:preloadError", (event) => {
   let last = 0;
   try {
     last = Number(sessionStorage.getItem(RECOVERY_KEY) || 0);
@@ -18,6 +18,9 @@ window.addEventListener("vite:preloadError", () => {
   }
   const now = Date.now();
   if (now - last > 30_000) {
+    // preventDefault verhindert, dass Vite den Fehler NACH dem Event erneut wirft –
+    // wir übernehmen die Behandlung mit einem frischen Seitenladen.
+    event.preventDefault();
     try {
       sessionStorage.setItem(RECOVERY_KEY, String(now));
     } catch {
@@ -25,7 +28,8 @@ window.addEventListener("vite:preloadError", () => {
     }
     window.location.reload();
   }
-  // Sonst greift beim tatsächlichen Render-Fehler die ErrorBoundary (Dialog).
+  // Innerhalb des Loop-Fensters NICHT preventDefault: Vite wirft weiter, sodass
+  // beim Render-Fehler die ErrorBoundary den Dialog zeigt (kein Endlos-Reload).
 });
 
 ReactDOM.createRoot(document.getElementById("root")!).render(

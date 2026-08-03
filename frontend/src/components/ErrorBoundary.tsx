@@ -26,18 +26,25 @@ function isChunkLoadError(error: unknown): boolean {
 
 interface State {
   failed: boolean;
+  chunk: boolean;
 }
 
 export default class ErrorBoundary extends Component<{ children: ReactNode }, State> {
-  state: State = { failed: false };
+  state: State = { failed: false, chunk: false };
 
-  static getDerivedStateFromError(): State {
-    return { failed: true };
+  static getDerivedStateFromError(error: unknown): State {
+    return { failed: true, chunk: isChunkLoadError(error) };
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
     // Fürs Debugging protokollieren (nicht an den Nutzer weiterreichen).
     console.error("ErrorBoundary hat einen Fehler abgefangen:", error, info);
+
+    // NUR echte Chunk-Load-Fehler heilen sich durch einen Reload. Ein normaler
+    // Programmierfehler (z. B. beim Bearbeiten von Metadaten) darf NICHT automatisch
+    // neu laden – das verwürfe ungespeicherte Eingaben. In dem Fall bleibt es beim
+    // Dialog (state.failed ist bereits gesetzt).
+    if (!isChunkLoadError(error)) return;
 
     // Loop-Schutz: höchstens EIN automatischer Reload innerhalb des Zeitfensters.
     let last = 0;
@@ -53,13 +60,9 @@ export default class ErrorBoundary extends Component<{ children: ReactNode }, St
       } catch {
         /* egal */
       }
-      // Chunk-Fehler heilen zuverlässig durch einen frischen Seitenladen.
       window.location.reload();
-      return;
     }
-    // Kürzlich schon neu geladen und es kracht weiter -> manuellen Dialog zeigen
-    // (kein Endlos-Reload). Der Fehlertyp entscheidet die Empfehlung.
-    void isChunkLoadError(error);
+    // Sonst: kürzlich schon neu geladen und es kracht weiter -> Dialog (kein Loop).
   }
 
   private hardReload = () => {
@@ -85,10 +88,11 @@ export default class ErrorBoundary extends Component<{ children: ReactNode }, St
     if (!this.state.failed) return this.props.children;
     return (
       <div className="error-recovery" role="alert">
-        <h1>Die Seite konnte nicht geladen werden</h1>
+        <h1>Es ist ein Fehler aufgetreten</h1>
         <p>
-          Das passiert meist direkt nach einem Update. Ein Neuladen behebt es in
-          der Regel.
+          {this.state.chunk
+            ? "Das passiert meist direkt nach einem Update. Ein Neuladen behebt es in der Regel."
+            : "Etwas ist schiefgelaufen. Ein Neuladen setzt die Seite zurück."}
         </p>
         <div className="error-recovery__actions">
           <button onClick={this.hardReload}>Neu laden</button>
