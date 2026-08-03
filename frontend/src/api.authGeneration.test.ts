@@ -5,6 +5,7 @@ import {
   AuthSessionChangedError,
   getAccessToken,
   getDocumentPreview,
+  getDossiers,
   getInboxSummary,
   login,
   logout,
@@ -267,6 +268,42 @@ describe("Auth-State: atomar, tab-übergreifend, serverseitig invalidiert", () =
     expect(err).toBeInstanceOf(AuthSessionChangedError);
     // Bleibt eine AuthError-Unterklasse (semantisch), aber ein eigener Typ.
     expect(err).toBeInstanceOf(AuthError);
+  });
+
+  it("verwirft die gesamte Paginierung, wenn die Sitzung zwischen Seiten wechselt (P2)", async () => {
+    seed("s1", "a", "r");
+    let call = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(() => {
+      call += 1;
+      if (call === 1) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: new Headers(),
+          json: async () => ({
+            results: [{ id: 1 }],
+            next: "http://h/api/dossiers/?page=2",
+          }),
+        } as unknown as Response);
+      }
+      // Seite 2: Sitzungswechsel während des Body-Reads -> die gesamte Liste (auch
+      // Seite 1 von Nutzer A) darf NICHT zurückgegeben werden.
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: new Headers(),
+        json: async () => {
+          localStorage.setItem(
+            AUTH_KEY,
+            JSON.stringify({ session: "s2", access: "b", refresh: "br" }),
+          );
+          return { results: [{ id: 2 }], next: null };
+        },
+      } as unknown as Response);
+    });
+
+    const err = await getDossiers().catch((e) => e);
+    expect(err).toBeInstanceOf(AuthSessionChangedError);
   });
 
   it("der Auth-State liegt in EINEM Key (atomar) statt in drei", () => {
