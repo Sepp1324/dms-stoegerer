@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { BrowserRouter, Route, Routes, useParams } from "react-router-dom";
-import { isLoggedIn } from "./api";
+import { isLoggedIn, onAuthChange } from "./api";
 import Login from "./components/Login";
 import DocumentsPage from "./components/DocumentsPage";
 import SharePage from "./components/SharePage";
@@ -37,6 +37,12 @@ function ShareRoute({
 
 export default function App() {
   const [loggedIn, setLoggedIn] = useState(isLoggedIn());
+
+  // Tab-übergreifende UI-Synchronisation (P1): Ein Login/Logout – auch in einem
+  // ANDEREN Tab – zieht den loggedIn-Zustand nach. Sonst bliebe Tab A nach dem
+  // Logout in Tab B mit sichtbaren Dokumenten offen (bzw. ein anderer Tab nach
+  // dem Login auf der Anmeldeseite).
+  useEffect(() => onAuthChange(() => setLoggedIn(isLoggedIn())), []);
 
   return (
     <BrowserRouter>
