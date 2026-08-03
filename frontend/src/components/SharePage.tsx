@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   AuthError,
+  AuthSessionChangedError,
   ShareGoneError,
   getSharePreview,
   getShareDownload,
@@ -44,6 +45,9 @@ export default function SharePage({
       })
       .catch((err) => {
         if (cancelled) return;
+        // Sitzungswechsel (neue gültige Sitzung): nur den alten Request beenden,
+        // NICHT als Auth-Verlust ausloggen.
+        if (err instanceof AuthSessionChangedError) return;
         if (err instanceof ShareGoneError) setState({ kind: "gone" });
         else if (err instanceof AuthError) onAuthLost();
         else
@@ -73,6 +77,8 @@ export default function SharePage({
       a.remove();
       URL.revokeObjectURL(url);
     } catch (err) {
+      // Sitzungswechsel (neue gültige Sitzung): nur den alten Download beenden.
+      if (err instanceof AuthSessionChangedError) return;
       // Der Link kann zwischen Vorschau und Download widerrufen/abgelaufen sein.
       if (err instanceof ShareGoneError) setState({ kind: "gone" });
       else if (err instanceof AuthError) onAuthLost();
