@@ -46,3 +46,31 @@ class LogoutBlacklistTests(APITestCase):
     def test_logout_ohne_token_ist_idempotent(self):
         resp = self.client.post("/api/auth/logout/", {}, format="json")
         self.assertEqual(resp.status_code, 205)
+
+    def test_logout_mit_listen_payload_kein_500(self):
+        # Gültiges JSON `[]` -> request.data ist eine Liste; .get() darauf würde
+        # sonst mit AttributeError 500 werfen.
+        resp = self.client.post("/api/auth/logout/", [], format="json")
+        self.assertEqual(resp.status_code, 205)
+
+    def test_logout_mit_null_payload_kein_500(self):
+        resp = self.client.generic(
+            "POST", "/api/auth/logout/", "null", content_type="application/json"
+        )
+        self.assertEqual(resp.status_code, 205)
+
+    def test_logout_mit_nicht_string_refresh_kein_500(self):
+        resp = self.client.post("/api/auth/logout/", {"refresh": 123}, format="json")
+        self.assertEqual(resp.status_code, 205)
+
+
+class FlushExpiredTokensTaskTests(APITestCase):
+    def test_task_ruft_management_command(self):
+        from unittest import mock
+
+        from documents.tasks import flush_expired_jwt_tokens
+
+        with mock.patch("django.core.management.call_command") as cc:
+            result = flush_expired_jwt_tokens()
+        cc.assert_called_once_with("flushexpiredtokens")
+        self.assertEqual(result, {"flushed": True})
