@@ -44,6 +44,34 @@ function newSessionId(): string {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
 }
 
+// Einmalige Migration des vor-atomaren Auth-States: Produktion hatte drei
+// Einzel-Keys (dms_access/dms_refresh/dms_session). Ohne Migration würden nach dem
+// Deploy ALLE eingeloggten Nutzer ausgeloggt und die Alt-Keys blieben im Browser
+// liegen. Sind vollständige Alt-Werte vorhanden (und noch kein neuer State), werden
+// sie ATOMAR in dms_auth_state überführt; die Alt-Keys werden anschließend immer
+// entfernt (auch Teilbestände).
+const LEGACY_ACCESS = "dms_access";
+const LEGACY_REFRESH = "dms_refresh";
+const LEGACY_SESSION = "dms_session";
+function migrateLegacyAuth(): void {
+  try {
+    if (!localStorage.getItem(AUTH_KEY)) {
+      const access = localStorage.getItem(LEGACY_ACCESS);
+      const refresh = localStorage.getItem(LEGACY_REFRESH);
+      const session = localStorage.getItem(LEGACY_SESSION);
+      if (access && refresh) {
+        writeAuth({ session: session ?? newSessionId(), access, refresh });
+      }
+    }
+    localStorage.removeItem(LEGACY_ACCESS);
+    localStorage.removeItem(LEGACY_REFRESH);
+    localStorage.removeItem(LEGACY_SESSION);
+  } catch {
+    /* localStorage evtl. nicht verfügbar */
+  }
+}
+migrateLegacyAuth();
+
 export function getAccessToken(): string | null {
   return readAuth()?.access ?? null;
 }
