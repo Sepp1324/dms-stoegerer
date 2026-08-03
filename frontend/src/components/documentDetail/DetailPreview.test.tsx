@@ -1,36 +1,59 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { DetailPreview } from "./DetailPreview";
 
-// Vorschau-iframe: Chromes nativer PDF-Viewer rendert NUR in einem komplett
-// un-sandboxed iframe – jede Sandbox-Variante (auch allow-scripts+allow-same-
-// origin+allow-downloads) ließ die PDF-Vorschau leer (im Browser verifiziert).
-// Daher trägt das iframe bewusst KEIN sandbox-Attribut.
-//
-// Sicherheit sitzt eine Ebene davor: Die Magic-Byte-Allowlist beim Ingest lässt
-// nur echte PDFs/Raster-Bilder in den Bestand (HTML/SVG/XML werden abgewiesen),
-// is_safe_inline erzwingt für alles andere Download (SVG explizit ausgeschlossen)
-// und die Auslieferung setzt nosniff + expliziten Content-Type. Dieser Test
-// hält das iframe sandbox-frei, damit nicht versehentlich wieder eine (nicht
-// rendernde) Sandbox "gehärtet" wird und die Vorschau erneut leer bleibt.
-describe("DetailPreview – iframe sandbox", () => {
-  it("rendert das Vorschau-iframe OHNE sandbox (sonst leere PDF-Vorschau)", () => {
-    render(<DetailPreview pdfUrl="blob:test-url" pdfError={null} title="Rechnung" />);
-    const frame = screen.getByTitle("Vorschau: Rechnung");
-    expect(frame.tagName).toBe("IFRAME");
-    expect(frame.getAttribute("src")).toBe("blob:test-url");
-    expect(frame.hasAttribute("sandbox")).toBe(false);
+// Der echte PDF.js-Viewer (Canvas/Worker) gehört in den Browser-Test; hier wird er
+// gestubbt, um die Verzweigung PDF vs. Bild vs. Fehler/Laden zu prüfen.
+vi.mock("./PdfViewer", () => ({
+  PdfViewer: (props: { url: string; initialPage?: number | null }) => (
+    <div data-testid="pdf-viewer" data-url={props.url} data-page={props.initialPage ?? ""} />
+  ),
+}));
+
+describe("DetailPreview – Verzweigung", () => {
+  it("rendert bei application/pdf den PDF.js-Viewer (kein iframe)", () => {
+    render(
+      <DetailPreview
+        pdfUrl="blob:test-url"
+        mime="application/pdf"
+        pdfError={null}
+        title="Rechnung"
+        initialPage={3}
+      />,
+    );
+    const viewer = screen.getByTestId("pdf-viewer");
+    expect(viewer).toHaveAttribute("data-url", "blob:test-url");
+    expect(viewer).toHaveAttribute("data-page", "3");
+    expect(document.querySelector("iframe")).toBeNull();
   });
 
-  it("zeigt bei Fehler eine Warnung und KEIN iframe", () => {
-    render(<DetailPreview pdfUrl={null} pdfError="Datei fehlt" title="X" />);
+  it("rendert Raster-Bilder als <img>", () => {
+    render(
+      <DetailPreview
+        pdfUrl="blob:img-url"
+        mime="image/jpeg"
+        pdfError={null}
+        title="Scan"
+      />,
+    );
+    const img = screen.getByAltText("Vorschau: Scan");
+    expect(img.tagName).toBe("IMG");
+    expect(img).toHaveAttribute("src", "blob:img-url");
+    expect(screen.queryByTestId("pdf-viewer")).toBeNull();
+  });
+
+  it("zeigt bei Fehler eine Warnung und keine Vorschau", () => {
+    render(
+      <DetailPreview pdfUrl={null} mime={null} pdfError="Datei fehlt" title="X" />,
+    );
     expect(screen.getByText(/Vorschau: Datei fehlt/)).toBeInTheDocument();
-    expect(screen.queryByTitle(/Vorschau:/)).toBeNull();
+    expect(screen.queryByTestId("pdf-viewer")).toBeNull();
+    expect(document.querySelector("img")).toBeNull();
   });
 
   it("zeigt einen Ladehinweis ohne URL und ohne Fehler", () => {
-    render(<DetailPreview pdfUrl={null} pdfError={null} title="X" />);
+    render(<DetailPreview pdfUrl={null} mime={null} pdfError={null} title="X" />);
     expect(screen.getByText(/Lade Vorschau/)).toBeInTheDocument();
   });
 });
