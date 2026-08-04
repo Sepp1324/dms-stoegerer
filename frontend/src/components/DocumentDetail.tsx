@@ -648,6 +648,8 @@ export default function DocumentDetail({
               pdfError={pdfError}
               title={doc.title}
               initialPage={initialPage}
+              docId={id}
+              layoutVersion={selectedVersionNo}
             />
 
             {/* Rechte Spalte: kompakte Info-/Aktionsspalte mit ARIA-Tabs. */}

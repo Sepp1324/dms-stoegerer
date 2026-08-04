@@ -1737,6 +1737,75 @@ export async function getExtractionCandidates(
   return readJsonChecked(res);
 }
 
+// --- Dokument-Studio: wortgenaue OCR-Geometrie (Phase 2 Overlay) ---
+// Ein Wortkasten: Text + [x0, y0, x1, y1] in PDF-Punkten (Ursprung oben-links),
+// im Bezugssystem der Seitenmaße (PageLayout.width/height).
+export interface PageLayoutWord {
+  t: string;
+  bbox: [number, number, number, number];
+}
+export interface PageLayoutPage {
+  page_no: number;
+  width: number;
+  height: number;
+  words: PageLayoutWord[];
+}
+export interface PageLayoutPageMeta {
+  page_no: number;
+  width: number;
+  height: number;
+  word_count: number;
+}
+export interface PageLayoutMeta {
+  document: number;
+  version_id: number;
+  version_no: number;
+  page_count: number | null;
+  pages: PageLayoutPageMeta[];
+}
+export interface PageLayoutSingle {
+  document: number;
+  version_id: number;
+  version_no: number;
+  page_count: number | null;
+  page: PageLayoutPage;
+}
+
+function layoutQuery(version?: number | null): string {
+  return version != null ? `?version=${version}` : "";
+}
+
+// Kompakte Übersicht (klein: nur Maße + word_count je Seite, KEINE Wortlisten).
+export async function getPageLayoutMeta(
+  id: number,
+  version?: number | null,
+  signal?: AbortSignal,
+): Promise<PageLayoutMeta> {
+  const res = await apiFetch(`/documents/${id}/page-layout/${layoutQuery(version)}`, {
+    signal,
+  });
+  if (!res.ok) throw new Error(`Layout-Übersicht fehlgeschlagen: HTTP ${res.status}`);
+  return readJsonChecked(res);
+}
+
+// Volle Wortliste GENAU einer Seite (lazy pro sichtbarer Seite). 404, wenn für die
+// Seite kein Layout vorliegt (z. B. Bild-Scan ohne Textebene) – Aufrufer behandelt
+// das als "kein Overlay".
+export async function getPageLayoutPage(
+  id: number,
+  page: number,
+  version?: number | null,
+  signal?: AbortSignal,
+): Promise<PageLayoutSingle> {
+  const sep = layoutQuery(version) ? "&" : "?";
+  const res = await apiFetch(
+    `/documents/${id}/page-layout/${layoutQuery(version)}${sep}page=${page}`,
+    { signal },
+  );
+  if (!res.ok) throw new Error(`Seiten-Layout fehlgeschlagen: HTTP ${res.status}`);
+  return readJsonChecked(res);
+}
+
 export interface InboxCandidateBundle {
   extraction: ExtractionCandidate[];
   cases: CaseFileCandidate[];

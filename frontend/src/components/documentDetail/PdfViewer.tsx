@@ -4,6 +4,10 @@ import { Document, Page, pdfjs } from "react-pdf";
 import "react-pdf/dist/Page/TextLayer.css";
 import "react-pdf/dist/Page/AnnotationLayer.css";
 
+import { getPageLayoutPage, type PageLayoutPage } from "../../api";
+import { OcrOverlay } from "./OcrOverlay";
+import { normalizeText } from "./overlayGeometry";
+
 // PDF.js-Viewer (Phase 0 des Dokument-Studios). Ersetzt den nativen PDF-iframe:
 // gerendert wird auf Canvas – KEIN iframe, KEIN Blob-Frame, KEIN CSP/frame-
 // ancestors-Konflikt (das beseitigt die wiederkehrende Vorschau-Bug-Klasse).
@@ -88,16 +92,91 @@ export function PdfViewer({
   url,
   title,
   initialPage,
+  docId,
+  layoutVersion,
 }: {
   url: string;
   title: string;
   initialPage?: number | null;
+  // Nur gesetzt in der Detailansicht (Owner/Haushalt): aktiviert das OCR-Overlay
+  // via page-layout-Endpoint. Ohne docId (z. B. öffentliche Freigabe) bleibt das
+  // Overlay/die Suche aus. layoutVersion = version_no der gerade gezeigten Version.
+  docId?: number;
+  layoutVersion?: number | null;
 }) {
   const [numPages, setNumPages] = useState<number | null>(null);
   const [page, setPage] = useState(initialPage && initialPage > 0 ? initialPage : 1);
   const [scale, setScale] = useState(1.2);
   const [loadError, setLoadError] = useState<string | null>(null);
   const stageRef = useRef<HTMLDivElement>(null);
+
+  // --- OCR-Overlay / In-Dokument-Suche (Phase 2) ---
+  const [query, setQuery] = useState("");
+  // Gerenderte Seitengröße (CSS-px) aus react-pdf onRenderSuccess – Bezug fürs Overlay.
+  const [rendered, setRendered] = useState<{ w: number; h: number } | null>(null);
+  const [layoutPage, setLayoutPage] = useState<PageLayoutPage | null>(null);
+  const [layoutMsg, setLayoutMsg] = useState("");
+  // Wortlisten je Seite cachen (undefined = noch nicht geladen, null = kein Layout).
+  const layoutCache = useRef<Map<number, PageLayoutPage | null>>(new Map());
+
+  // Cache/Overlay verwerfen, wenn Dokument oder Version wechselt.
+  useEffect(() => {
+    layoutCache.current = new Map();
+    setLayoutPage(null);
+    setLayoutMsg("");
+  }, [url, docId, layoutVersion]);
+
+  // Gerenderte Größe bei Seiten-/Zoomwechsel verwerfen: das Overlay bleibt aus, bis
+  // die neue Seite gerendert und onRenderSuccess die aktuellen Maße geliefert hat
+  // (sonst säßen Treffer kurz an alten Koordinaten).
+  useEffect(() => {
+    setRendered(null);
+  }, [page, scale, url]);
+
+  // Wortliste der aktuellen Seite lazy laden – nur bei aktiver Suche und mit docId.
+  useEffect(() => {
+    if (!docId || !query.trim()) {
+      setLayoutPage(null);
+      setLayoutMsg("");
+      return;
+    }
+    const cached = layoutCache.current.get(page);
+    if (cached !== undefined) {
+      setLayoutPage(cached);
+      setLayoutMsg(cached ? "" : "Keine durchsuchbare Textebene auf dieser Seite.");
+      return;
+    }
+    const ctrl = new AbortController();
+    getPageLayoutPage(docId, page, layoutVersion, ctrl.signal)
+      .then((res) => {
+        layoutCache.current.set(page, res.page);
+        setLayoutPage(res.page);
+        setLayoutMsg("");
+      })
+      .catch(() => {
+        if (ctrl.signal.aborted) return;
+        // 404/Fehler = für diese Seite kein Overlay (weich, nie den Viewer stören).
+        layoutCache.current.set(page, null);
+        setLayoutPage(null);
+        setLayoutMsg("Keine durchsuchbare Textebene auf dieser Seite.");
+      });
+    return () => ctrl.abort();
+  }, [docId, layoutVersion, page, query]);
+
+  const trimmedQuery = query.trim();
+  const overlayActive =
+    !!docId &&
+    trimmedQuery.length > 0 &&
+    !!layoutPage &&
+    layoutPage.page_no === page &&
+    !!rendered;
+
+  // Trefferzahl rein textuell (geometrieunabhängig) für die Toolbar.
+  const matchCount = useMemo(() => {
+    if (!layoutPage || layoutPage.page_no !== page || !trimmedQuery) return 0;
+    const q = normalizeText(trimmedQuery);
+    return layoutPage.words.filter((w) => normalizeText(w.t).includes(q)).length;
+  }, [layoutPage, page, trimmedQuery]);
 
   // NUR bei echtem Dokumentwechsel (neue URL) das geladene PDF verwerfen. Bewusst
   // NICHT an initialPage gekoppelt: sonst würde eine nachträgliche initialPage-
@@ -251,19 +330,52 @@ export function PdfViewer({
               Reset
             </button>
           </div>
+          {docId && (
+            <div className="pdf-toolbar__group pdf-toolbar__search">
+              <input
+                type="search"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Im Dokument suchen …"
+                aria-label="Im Dokument suchen"
+              />
+              {trimmedQuery && (
+                <span className="pdf-toolbar__hits" role="status" aria-live="polite">
+                  {layoutMsg
+                    ? layoutMsg
+                    : `${matchCount} Treffer auf Seite ${page}`}
+                </span>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="pdf-canvas-wrap">
-          <Page
-            key={page}
-            pageNumber={page}
-            scale={scale}
-            renderTextLayer
-            renderAnnotationLayer={false}
-            loading={<p className="muted">Lade Seite …</p>}
-            canvasBackground="#fff"
-            className="pdf-page"
-          />
+          <div className="pdf-page-layer">
+            <Page
+              key={page}
+              pageNumber={page}
+              scale={scale}
+              renderTextLayer
+              renderAnnotationLayer={false}
+              loading={<p className="muted">Lade Seite …</p>}
+              canvasBackground="#fff"
+              className="pdf-page"
+              onRenderSuccess={(p) =>
+                setRendered({ w: p.width, h: p.height })
+              }
+            />
+            {overlayActive && layoutPage && rendered && (
+              <OcrOverlay
+                words={layoutPage.words}
+                layoutWidth={layoutPage.width}
+                layoutHeight={layoutPage.height}
+                renderedWidth={rendered.w}
+                renderedHeight={rendered.h}
+                query={trimmedQuery}
+              />
+            )}
+          </div>
         </div>
       </div>
     </Document>

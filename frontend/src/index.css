@@ -3440,6 +3440,41 @@ textarea:focus-visible {
   align-self: flex-start;
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35);
 }
+/* Träger für Seite + deckungsgleiches OCR-Overlay: relativ, damit das absolut
+   positionierte Overlay die Seite oben-links exakt überlagert. */
+.pdf-page-layer {
+  position: relative;
+  align-self: flex-start;
+  line-height: 0;
+}
+.ocr-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  /* Rein visuell: Klicks/Textauswahl gehen an den PDF-Textlayer darunter. */
+  pointer-events: none;
+  z-index: 2;
+}
+.ocr-word--match {
+  position: absolute;
+  background: rgba(255, 214, 0, 0.4);
+  outline: 1px solid rgba(214, 158, 0, 0.7);
+  border-radius: 2px;
+  mix-blend-mode: multiply;
+}
+.pdf-toolbar__search {
+  flex: 1 1 12rem;
+  min-width: 8rem;
+}
+.pdf-toolbar__search input[type="search"] {
+  width: 100%;
+  min-width: 6rem;
+}
+.pdf-toolbar__hits {
+  font-size: 0.8rem;
+  color: var(--muted, #94a3b8);
+  white-space: nowrap;
+}
 @media (max-width: 720px) {
   .pdf-thumbs {
     display: none;
