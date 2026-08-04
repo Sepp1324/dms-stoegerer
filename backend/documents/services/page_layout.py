@@ -12,6 +12,7 @@ kein WORM-Original; ein erneuter Lauf ersetzt sie idempotent.
 from __future__ import annotations
 
 import os
+import unicodedata
 from pathlib import Path
 
 from celery.exceptions import SoftTimeLimitExceeded
@@ -20,6 +21,56 @@ from celery.exceptions import SoftTimeLimitExceeded
 # insgesamt. Für echte Belege großzügig; verhindert nur DB-/JSON-Explosionen.
 MAX_WORDS_PER_PAGE = 6000
 MAX_WORDS_TOTAL = 60000
+
+# Deckel für die In-Dokument-Suche: begrenzt die Trefferantwort (Payload/Navigation).
+MAX_SEARCH_HITS = 500
+
+
+def normalize_search(s: str) -> str:
+    """Normalisierung für die In-Dokument-Suche.
+
+    Deckungsgleich mit ``normalizeText`` im Frontend: Diakritika entfernen
+    (Müller→muller) und Kleinschreibung. So trifft die serverseitige Suche exakt
+    dasselbe wie die frühere clientseitige – reines Teilstring-Matching, kein Regex.
+    """
+    decomposed = unicodedata.normalize("NFKD", s or "")
+    return "".join(c for c in decomposed if not unicodedata.combining(c)).lower()
+
+
+def search_layout(version, query: str, *, limit: int = MAX_SEARCH_HITS):
+    """Sucht ``query`` seitenübergreifend in den Wortkästen einer Version.
+
+    Liefert ``(matches, truncated)``. Jeder Treffer trägt Seite, Seitenmaße und
+    Wortkasten, damit das Frontend ohne Zweitabfrage dorthin springen und den
+    Treffer deckungsgleich markieren kann. Matching ist diakritika-/case-tolerant.
+    Bei Erreichen von ``limit`` wird ``truncated=True`` gesetzt (bewusster Deckel).
+    """
+    q = normalize_search(query.strip())
+    if not q:
+        return [], False
+    matches: list[dict] = []
+    truncated = False
+    # Reihenfolge = page_layouts.Meta.ordering (version_id, page_no); innerhalb der
+    # Seite Wortreihenfolge → Treffer sind natürlich dokumentweit sortiert.
+    for layout in version.page_layouts.all().iterator():
+        for w in layout.words or []:
+            text = str(w.get("t") or "")
+            if q in normalize_search(text):
+                if len(matches) >= limit:
+                    truncated = True
+                    break
+                matches.append(
+                    {
+                        "page_no": layout.page_no,
+                        "width": layout.width,
+                        "height": layout.height,
+                        "bbox": w.get("bbox"),
+                        "t": text,
+                    }
+                )
+        if truncated:
+            break
+    return matches, truncated
 
 
 def extract_page_layout(path: str | Path) -> list[dict]:

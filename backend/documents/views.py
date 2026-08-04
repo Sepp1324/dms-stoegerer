@@ -173,6 +173,7 @@ from .services import evidence as evidence_service
 from .services import entity_graph as entity_graph_service
 from .services import quality as quality_service
 from .services import auto_file as auto_file_service
+from .services import page_layout as page_layout_service
 from .services import duplicates as duplicates_service
 from .services import review_tasks as review_task_service
 from .services import revision_package as revision_package_service
@@ -1985,6 +1986,16 @@ class DocumentViewSet(viewsets.ModelViewSet):
             "version_no": version.version_no,
             "page_count": version.page_count,
         }
+
+        raw_q = request.query_params.get("q")
+        if raw_q is not None:
+            # Seitenübergreifende In-Dokument-Suche: serverseitig gematcht, damit nur
+            # die Treffer (Seite + Wortkasten) übertragen werden – nicht alle Wörter.
+            matches, truncated = page_layout_service.search_layout(version, raw_q)
+            base["matches"] = matches
+            base["total"] = len(matches)
+            base["truncated"] = truncated
+            return Response(base)
 
         raw_page = request.query_params.get("page")
         if raw_page:

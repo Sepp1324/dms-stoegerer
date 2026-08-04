@@ -1,38 +1,45 @@
 import { useMemo } from "react";
 
-import { countMatches, positionWords, type LayoutWord } from "./overlayGeometry";
+import { scaleBox, type Bbox } from "./overlayGeometry";
 
 // Deckungsgleiches OCR-Overlay über der gerenderten PDF.js-Seite (Phase 2).
-// Slice 1: hebt Suchtreffer hervor. Es werden NUR Treffer als Rechtecke gezeichnet
-// (schlankes DOM); die restlichen Wörter bleiben über den auswählbaren Textlayer
-// von PDF.js zugänglich. Das Overlay ist rein visuell (pointer-events: none), damit
-// Markieren/Kopieren im PDF darunter weiter funktioniert.
+// Zeichnet die Suchtreffer DIESER Seite als Rechtecke (schlankes DOM). Der aktive
+// Treffer (Navigation) wird hervorgehoben und beim Wechsel in den Sichtbereich
+// gescrollt. Rein visuell (pointer-events: none) – Markieren/Kopieren im PDF-
+// Textlayer darunter bleibt möglich.
 export function OcrOverlay({
-  words,
+  matches,
+  activeIndex,
   layoutWidth,
   layoutHeight,
   renderedWidth,
   renderedHeight,
-  query,
 }: {
-  words: LayoutWord[];
+  matches: { bbox: Bbox }[];
+  // Index innerhalb ``matches``, der gerade angesteuert ist (oder -1/undefined).
+  activeIndex?: number;
   layoutWidth: number;
   layoutHeight: number;
   renderedWidth: number;
   renderedHeight: number;
-  query: string;
 }) {
-  const matches = useMemo(
+  const boxes = useMemo(
     () =>
-      positionWords(
-        words,
-        layoutWidth,
-        layoutHeight,
-        renderedWidth,
-        renderedHeight,
-        query,
-      ).filter((w) => w.match),
-    [words, layoutWidth, layoutHeight, renderedWidth, renderedHeight, query],
+      matches
+        .map((m, index) => ({
+          index,
+          rect: scaleBox(
+            m.bbox,
+            layoutWidth,
+            layoutHeight,
+            renderedWidth,
+            renderedHeight,
+          ),
+        }))
+        .filter((b): b is { index: number; rect: NonNullable<typeof b.rect> } =>
+          b.rect !== null,
+        ),
+    [matches, layoutWidth, layoutHeight, renderedWidth, renderedHeight],
   );
 
   if (!renderedWidth || !renderedHeight) return null;
@@ -42,17 +49,29 @@ export function OcrOverlay({
       className="ocr-overlay"
       style={{ width: renderedWidth, height: renderedHeight }}
       aria-hidden="true"
-      data-match-count={matches.length}
+      data-match-count={boxes.length}
     >
-      {matches.map((w) => (
-        <span
-          key={w.index}
-          className="ocr-word--match"
-          style={{ left: w.left, top: w.top, width: w.width, height: w.height }}
-        />
-      ))}
+      {boxes.map(({ index, rect }) => {
+        const active = index === activeIndex;
+        return (
+          <span
+            key={index}
+            className={`ocr-word--match${active ? " ocr-word--active" : ""}`}
+            style={{
+              left: rect.left,
+              top: rect.top,
+              width: rect.width,
+              height: rect.height,
+            }}
+            // Aktiven Treffer beim Erscheinen in den Sichtbereich rücken.
+            ref={
+              active
+                ? (el) => el?.scrollIntoView({ block: "center", inline: "center" })
+                : undefined
+            }
+          />
+        );
+      })}
     </div>
   );
 }
-
-export { countMatches, positionWords };
