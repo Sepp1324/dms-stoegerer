@@ -223,7 +223,7 @@ class PageLayoutEndpointTests(TestCase):
     def test_suche_liefert_treffer_seitenuebergreifend(self):
         self.client.force_authenticate(self.user)
         # "Rechnung" (S.1), "Betrag" (S.1), "Seite2" (S.2) sind angelegt.
-        resp = self.client.get(f"/api/documents/{self.doc.id}/page-layout/?q=betrag")
+        resp = self.client.get(f"/api/documents/{self.doc.id}/page-layout/?term=betrag")
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
         self.assertNotIn("pages", data)
@@ -237,7 +237,7 @@ class PageLayoutEndpointTests(TestCase):
 
     def test_suche_ohne_treffer_ist_leer(self):
         self.client.force_authenticate(self.user)
-        resp = self.client.get(f"/api/documents/{self.doc.id}/page-layout/?q=xyz")
+        resp = self.client.get(f"/api/documents/{self.doc.id}/page-layout/?term=xyz")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json()["total"], 0)
 

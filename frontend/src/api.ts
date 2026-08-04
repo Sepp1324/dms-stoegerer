@@ -1833,9 +1833,11 @@ export async function searchPageLayout(
   version?: number | null,
   signal?: AbortSignal,
 ): Promise<PageLayoutSearch> {
+  // Param heißt bewusst ``term`` (nicht ``q``): ``q`` ist am DocumentViewSet der
+  // Volltext-Suchparameter und würde die Objektauflösung des Endpoints stören.
   const sep = layoutQuery(version) ? "&" : "?";
   const res = await apiFetch(
-    `/documents/${id}/page-layout/${layoutQuery(version)}${sep}q=${encodeURIComponent(q)}`,
+    `/documents/${id}/page-layout/${layoutQuery(version)}${sep}term=${encodeURIComponent(q)}`,
     { signal },
   );
   if (!res.ok) throw new Error(`Dokumentsuche fehlgeschlagen: HTTP ${res.status}`);

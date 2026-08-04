@@ -1987,7 +1987,10 @@ class DocumentViewSet(viewsets.ModelViewSet):
             "page_count": version.page_count,
         }
 
-        raw_q = request.query_params.get("q")
+        # Bewusst ``term`` und NICHT ``q``: ``q`` ist am DocumentViewSet der
+        # Volltext-Suchparameter (get_queryset filtert danach) – ein ``?q=`` würde
+        # schon ``get_object()`` auf ein leeres Queryset laufen lassen (404).
+        raw_q = request.query_params.get("term")
         if raw_q is not None:
             # Seitenübergreifende In-Dokument-Suche: serverseitig gematcht, damit nur
             # die Treffer (Seite + Wortkasten) übertragen werden – nicht alle Wörter.
