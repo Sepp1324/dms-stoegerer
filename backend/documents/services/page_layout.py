@@ -62,6 +62,12 @@ def extract_page_layout(path: str | Path) -> list[dict]:
                 raise
             except Exception:
                 continue
+            # Diese Seite darf höchstens so viele Wörter beitragen, dass das
+            # GESAMT-Limit nicht überschritten wird (der Seiten-Deckel greift nur
+            # zusätzlich). Ohne das ``MAX_WORDS_TOTAL - total`` könnte eine Seite bei
+            # z. B. 59.999 bereits vergebenen Wörtern noch bis MAX_WORDS_PER_PAGE
+            # drauflegen und das Gesamtlimit reißen.
+            page_cap = min(MAX_WORDS_PER_PAGE, MAX_WORDS_TOTAL - total)
             words: list[dict] = []
             for w in raw:
                 if len(w) < 5:
@@ -80,7 +86,7 @@ def extract_page_layout(path: str | Path) -> list[dict]:
                         ],
                     }
                 )
-                if len(words) >= MAX_WORDS_PER_PAGE:
+                if len(words) >= page_cap:
                     break
             if not words:
                 continue
