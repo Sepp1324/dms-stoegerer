@@ -220,6 +220,57 @@ class PageLayoutEndpointTests(TestCase):
         resp = self.client.get(f"/api/documents/{self.doc.id}/page-layout/")
         self.assertIn(resp.status_code, (403, 404))
 
+    def test_suche_liefert_treffer_seitenuebergreifend(self):
+        self.client.force_authenticate(self.user)
+        # "Rechnung" (S.1), "Betrag" (S.1), "Seite2" (S.2) sind angelegt.
+        resp = self.client.get(f"/api/documents/{self.doc.id}/page-layout/?term=betrag")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertNotIn("pages", data)
+        self.assertEqual(data["total"], 1)
+        self.assertFalse(data["truncated"])
+        hit = data["matches"][0]
+        self.assertEqual(hit["page_no"], 1)
+        self.assertEqual(hit["t"], "Betrag")
+        self.assertEqual(hit["bbox"], [72, 90, 130, 102])
+        self.assertEqual(hit["width"], 595.0)
+
+    def test_suche_ohne_treffer_ist_leer(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.get(f"/api/documents/{self.doc.id}/page-layout/?term=xyz")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["total"], 0)
+
+
+class SearchLayoutServiceTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="s", password="pw12345!")
+        self.doc = Document.objects.create(title="doc", owner=self.user)
+        self.version = DocumentVersion.objects.create(
+            document=self.doc, version_no=1, file_path="/x.pdf", sha256="e" * 64
+        )
+        DocumentPageLayout.objects.create(
+            version=self.version, page_no=1, width=100, height=100,
+            words=[{"t": "Müller", "bbox": [1, 2, 3, 4]}, {"t": "Rechnung", "bbox": [5, 6, 7, 8]}],
+        )
+        DocumentPageLayout.objects.create(
+            version=self.version, page_no=2, width=100, height=100,
+            words=[{"t": "MÜLLER", "bbox": [9, 9, 9, 9]}],
+        )
+
+    def test_case_und_diakritika_tolerant_seitenuebergreifend(self):
+        matches, truncated = page_layout.search_layout(self.version, "muller")
+        self.assertFalse(truncated)
+        self.assertEqual([m["page_no"] for m in matches], [1, 2])
+
+    def test_leere_suche_liefert_nichts(self):
+        self.assertEqual(page_layout.search_layout(self.version, "   "), ([], False))
+
+    def test_limit_setzt_truncated(self):
+        matches, truncated = page_layout.search_layout(self.version, "muller", limit=1)
+        self.assertEqual(len(matches), 1)
+        self.assertTrue(truncated)
+
 
 class PageLayoutSharingTests(TestCase):
     """Regressionsschutz: Haushaltsmitglieder sehen das Overlay geteilter Dokumente.

@@ -1806,6 +1806,44 @@ export async function getPageLayoutPage(
   return readJsonChecked(res);
 }
 
+// Ein Suchtreffer: Seite + Seitenmaße + Wortkasten (damit der Client ohne
+// Zweitabfrage dorthin springen und den Treffer markieren kann).
+export interface PageLayoutMatch {
+  page_no: number;
+  width: number;
+  height: number;
+  bbox: [number, number, number, number];
+  t: string;
+}
+export interface PageLayoutSearch {
+  document: number;
+  version_id: number;
+  version_no: number;
+  page_count: number | null;
+  total: number;
+  truncated: boolean;
+  matches: PageLayoutMatch[];
+}
+
+// Seitenübergreifende In-Dokument-Suche (serverseitig gematcht, diakritika-/case-
+// tolerant). Liefert nur die Treffer – nicht alle Wörter.
+export async function searchPageLayout(
+  id: number,
+  q: string,
+  version?: number | null,
+  signal?: AbortSignal,
+): Promise<PageLayoutSearch> {
+  // Param heißt bewusst ``term`` (nicht ``q``): ``q`` ist am DocumentViewSet der
+  // Volltext-Suchparameter und würde die Objektauflösung des Endpoints stören.
+  const sep = layoutQuery(version) ? "&" : "?";
+  const res = await apiFetch(
+    `/documents/${id}/page-layout/${layoutQuery(version)}${sep}term=${encodeURIComponent(q)}`,
+    { signal },
+  );
+  if (!res.ok) throw new Error(`Dokumentsuche fehlgeschlagen: HTTP ${res.status}`);
+  return readJsonChecked(res);
+}
+
 export interface InboxCandidateBundle {
   extraction: ExtractionCandidate[];
   cases: CaseFileCandidate[];

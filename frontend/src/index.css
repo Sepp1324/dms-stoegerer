@@ -3462,12 +3462,18 @@ textarea:focus-visible {
   border-radius: 2px;
   mix-blend-mode: multiply;
 }
+/* Aktiver Treffer (Navigation): kräftiger, ohne mix-blend, damit er heraussticht. */
+.ocr-word--active {
+  background: rgba(255, 145, 0, 0.55);
+  outline: 2px solid rgba(200, 90, 0, 0.9);
+  mix-blend-mode: normal;
+}
 .pdf-toolbar__search {
-  flex: 1 1 12rem;
+  flex: 1 1 14rem;
   min-width: 8rem;
 }
 .pdf-toolbar__search input[type="search"] {
-  width: 100%;
+  flex: 1 1 auto;
   min-width: 6rem;
 }
 .pdf-toolbar__hits {

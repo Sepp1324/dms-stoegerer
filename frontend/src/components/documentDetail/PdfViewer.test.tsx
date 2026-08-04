@@ -37,9 +37,9 @@ vi.mock("react-pdf", () => ({
 }));
 
 // page-layout-Endpoint mocken (die Suche lädt die Wortliste der aktuellen Seite).
-const getPageLayoutPage = vi.fn();
+const searchPageLayout = vi.fn();
 vi.mock("../../api", () => ({
-  getPageLayoutPage: (...args: unknown[]) => getPageLayoutPage(...args),
+  searchPageLayout: (...args: unknown[]) => searchPageLayout(...args),
 }));
 
 import { PdfViewer } from "./PdfViewer";
@@ -55,7 +55,9 @@ class IOStub {
 beforeEach(() => {
   h.onLoad = null;
   h.onRender = null;
-  getPageLayoutPage.mockReset();
+  searchPageLayout.mockReset();
+  // scrollIntoView existiert in jsdom nicht.
+  Element.prototype.scrollIntoView = vi.fn();
   // @ts-expect-error – Test-Stub
   globalThis.IntersectionObserver = IOStub;
 });
@@ -121,54 +123,101 @@ describe("PdfViewer – Logik (echter Viewer, react-pdf gemockt)", () => {
   });
 });
 
-describe("PdfViewer – OCR-Overlay / Suche", () => {
+describe("PdfViewer – OCR-Overlay / seitenübergreifende Suche", () => {
+  const search = (
+    matches: {
+      page_no: number;
+      width: number;
+      height: number;
+      bbox: [number, number, number, number];
+      t: string;
+    }[],
+    truncated = false,
+  ) =>
+    searchPageLayout.mockResolvedValue({
+      document: 7,
+      version_id: 1,
+      version_no: 1,
+      page_count: 2,
+      total: matches.length,
+      truncated,
+      matches,
+    });
+
   it("zeigt keine Suche ohne docId (z. B. öffentliche Freigabe)", () => {
     render(<PdfViewer url="blob:a" title="Doc" />);
     load(5);
     expect(screen.queryByLabelText("Im Dokument suchen")).toBeNull();
-    expect(getPageLayoutPage).not.toHaveBeenCalled();
+    expect(searchPageLayout).not.toHaveBeenCalled();
   });
 
-  it("lädt die Wortliste und hebt Treffer hervor", async () => {
-    getPageLayoutPage.mockResolvedValue({
-      document: 7,
-      version_id: 1,
-      version_no: 1,
-      page_count: 1,
-      page: {
-        page_no: 1,
-        width: 100,
-        height: 100,
-        words: [
-          { t: "Rechnung", bbox: [10, 20, 30, 40] },
-          { t: "Müller", bbox: [50, 60, 70, 80] },
-        ],
-      },
-    });
+  it("sucht serverseitig und markiert den aktiven Treffer", async () => {
+    search([
+      { page_no: 1, width: 100, height: 100, bbox: [10, 20, 30, 40], t: "Rechnung" },
+      { page_no: 1, width: 100, height: 100, bbox: [50, 60, 70, 80], t: "Rechnungsnr" },
+    ]);
 
     render(<PdfViewer url="blob:a" title="Doc" docId={7} layoutVersion={null} />);
-    load(1);
-    renderPage(200, 200); // rendered-Maße setzen (Overlay-Bezug)
+    load(2);
+    renderPage(200, 200);
 
     fireEvent.change(screen.getByLabelText("Im Dokument suchen"), {
-      target: { value: "muller" },
+      target: { value: "rechnung" },
     });
 
     await waitFor(() =>
-      expect(getPageLayoutPage).toHaveBeenCalledWith(7, 1, null, expect.anything()),
+      expect(searchPageLayout).toHaveBeenCalledWith(7, "rechnung", null, expect.anything()),
     );
-    // Genau ein Treffer (Müller, diakritika-tolerant) als Overlay-Kasten.
     await waitFor(() => {
       const overlay = document.querySelector(".ocr-overlay");
-      expect(overlay).not.toBeNull();
-      expect(overlay?.querySelectorAll(".ocr-word--match").length).toBe(1);
+      expect(overlay?.querySelectorAll(".ocr-word--match").length).toBe(2);
+      expect(overlay?.querySelectorAll(".ocr-word--active").length).toBe(1);
     });
-    expect(screen.getByRole("status")).toHaveTextContent("1 Treffer auf Seite 1");
+    expect(screen.getByRole("status")).toHaveTextContent("1/2");
   });
 
-  it("meldet Seiten ohne Textebene weich (kein Overlay)", async () => {
-    getPageLayoutPage.mockRejectedValue(new Error("HTTP 404"));
+  it("springt mit »Nächster Treffer« seitenübergreifend", async () => {
+    search([
+      { page_no: 1, width: 100, height: 100, bbox: [10, 20, 30, 40], t: "Treffer1" },
+      { page_no: 2, width: 100, height: 100, bbox: [10, 20, 30, 40], t: "Treffer2" },
+    ]);
 
+    render(<PdfViewer url="blob:a" title="Doc" docId={7} layoutVersion={null} />);
+    load(2);
+    renderPage(200, 200);
+    fireEvent.change(screen.getByLabelText("Im Dokument suchen"), {
+      target: { value: "treffer" },
+    });
+
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("1/2"));
+    expect(mainPageNo()).toBe(1);
+
+    fireEvent.click(screen.getByLabelText("Nächster Treffer"));
+    expect(mainPageNo()).toBe(2);
+    renderPage(200, 200); // neue Seite rendert → Overlay-Bezug
+    await waitFor(() => {
+      expect(document.querySelector(".ocr-word--active")).not.toBeNull();
+    });
+    expect(screen.getByRole("status")).toHaveTextContent("2/2");
+  });
+
+  it("meldet »Keine Treffer« weich (kein Overlay)", async () => {
+    search([]);
+    render(<PdfViewer url="blob:a" title="Doc" docId={7} layoutVersion={null} />);
+    load(1);
+    renderPage(200, 200);
+    fireEvent.change(screen.getByLabelText("Im Dokument suchen"), {
+      target: { value: "zzz" },
+    });
+
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent(/keine treffer/i),
+    );
+    expect(document.querySelector(".ocr-word--match")).toBeNull();
+  });
+
+  it("meldet Endpoint-Fehler weich", async () => {
+    searchPageLayout.mockRejectedValue(new Error("HTTP 500"));
     render(<PdfViewer url="blob:a" title="Doc" docId={7} layoutVersion={null} />);
     load(1);
     renderPage(200, 200);
@@ -177,9 +226,7 @@ describe("PdfViewer – OCR-Overlay / Suche", () => {
     });
 
     await waitFor(() =>
-      expect(screen.getByRole("status")).toHaveTextContent(
-        /keine durchsuchbare Textebene/i,
-      ),
+      expect(screen.getByRole("status")).toHaveTextContent(/nicht verfügbar/i),
     );
     expect(document.querySelector(".ocr-word--match")).toBeNull();
   });
