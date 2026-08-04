@@ -1951,6 +1951,37 @@ class DocumentViewSet(viewsets.ModelViewSet):
             raise Http404("Keine Version vorhanden.")
         return _serve_version_preview(version)
 
+    @action(detail=True, methods=["get"], url_path="page-layout")
+    def page_layout(self, request, pk=None):
+        """Liefert die wortgenaue OCR-Geometrie einer Version fürs Studio-Overlay.
+
+        Standard ist die aktuelle Version; ``?version=<nr>`` wählt eine ältere.
+        Bewusst eigener, lazy geladener Endpoint (statt Teil des Version-Serializers):
+        die Wortlisten können pro Seite groß sein und werden nur beim Öffnen des
+        Studios geholt. Owner-Isolation greift über ``get_object()``.
+        """
+        document = self.get_object()
+        version = self._resolve_version(document)
+        if version is None:
+            raise Http404("Keine Version vorhanden.")
+        pages = [
+            {
+                "page_no": layout.page_no,
+                "width": layout.width,
+                "height": layout.height,
+                "words": layout.words or [],
+            }
+            for layout in version.page_layouts.all()
+        ]
+        return Response(
+            {
+                "document": document.pk,
+                "version": version.version_no,
+                "page_count": version.page_count,
+                "pages": pages,
+            }
+        )
+
     @action(detail=True, methods=["get"])
     def download(self, request, pk=None):
         """Lädt die Originaldatei einer Version herunter (Basis der Hash-Prüfung).

@@ -491,6 +491,8 @@ class ExtractionCandidateSerializer(serializers.ModelSerializer):
             "reason",
             "source",
             "source_page",
+            "source_version",
+            "source_bbox",
             "source_snippet",
             "source_snippet_html",
             "status",
