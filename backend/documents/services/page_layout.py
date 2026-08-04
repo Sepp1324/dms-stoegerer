@@ -103,10 +103,16 @@ def extract_page_layout(path: str | Path) -> list[dict]:
 
 
 def write_page_layout(version, pages: list[dict]) -> int:
-    """Ersetzt das Seiten-Layout einer Version atomar im kleinen Maßstab."""
+    """Ersetzt das Seiten-Layout einer Version atomar im kleinen Maßstab.
+
+    Delete + bulk_create laufen in EINER Transaktion: scheitert der Insert (den die
+    Pipeline weich abfängt), darf nicht das alte Layout gelöscht zurückbleiben.
+    Entweder das neue Layout steht vollständig, oder das alte bleibt unangetastet.
+    """
+    from django.db import transaction
+
     from documents.models import DocumentPageLayout
 
-    DocumentPageLayout.objects.filter(version=version).delete()
     items = [
         DocumentPageLayout(
             version=version,
@@ -118,6 +124,8 @@ def write_page_layout(version, pages: list[dict]) -> int:
         for page in pages
         if page.get("words")
     ]
-    if items:
-        DocumentPageLayout.objects.bulk_create(items)
+    with transaction.atomic():
+        DocumentPageLayout.objects.filter(version=version).delete()
+        if items:
+            DocumentPageLayout.objects.bulk_create(items)
     return len(items)

@@ -17,12 +17,13 @@ redis==5.2.1
 python-dotenv==1.2.2
 gunicorn==23.0.0
 # Symmetrische Verschlüsselung für DB-Geheimnisse (MailAccount.password, STOAA-212).
-# Bump auf 48.0.1 behebt GHSA-537c-gmf6-5ccf sowie PYSEC-2026-2141/2026-35. Die
-# frühere 44.x-Deckelung („Rust/ABI") betraf Source-Builds – das Backend baut auf
-# python:3.12-slim (glibc), wo cryptography vorgebaute manylinux-Wheels liefert;
-# der Bump ist damit ohne Rust-Toolchain installierbar (von CI verifiziert). Nur
-# die stabile Fernet-API wird genutzt.
-cryptography==48.0.1
+# Bump auf 50.0.0 behebt CVE-2026-69247 (Fix 50.0.0) sowie CVE-2026-69248/69249
+# (Fix 49.0.0); die frühere 48.0.1 behob GHSA-537c-gmf6-5ccf + PYSEC-2026-2141/
+# 2026-35. Die frühere 44.x-Deckelung („Rust/ABI") betraf Source-Builds – das
+# Backend baut auf python:3.12-slim (glibc), wo cryptography vorgebaute manylinux-
+# Wheels liefert; der Bump ist damit ohne Rust-Toolchain installierbar (von CI
+# verifiziert). Nur die stabile Fernet-API wird genutzt.
+cryptography==50.0.0
 # OCR-Pipeline
 ocrmypdf==16.10.0
 img2pdf==0.6.0

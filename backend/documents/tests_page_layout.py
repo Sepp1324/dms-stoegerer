@@ -145,7 +145,7 @@ class PageLayoutEndpointTests(TestCase):
         self.doc = Document.objects.create(title="doc", owner=self.user)
         self.version = DocumentVersion.objects.create(
             document=self.doc, version_no=1, file_path="/x.pdf", sha256="b" * 64,
-            page_count=1,
+            page_count=2,
         )
         self.doc.current_version = self.version
         self.doc.save(update_fields=["current_version"])
@@ -154,22 +154,97 @@ class PageLayoutEndpointTests(TestCase):
             page_no=1,
             width=595.0,
             height=842.0,
-            words=[{"t": "Rechnung", "bbox": [72, 72, 140, 84]}],
+            words=[
+                {"t": "Rechnung", "bbox": [72, 72, 140, 84]},
+                {"t": "Betrag", "bbox": [72, 90, 130, 102]},
+            ],
+        )
+        DocumentPageLayout.objects.create(
+            version=self.version, page_no=2, width=595.0, height=842.0,
+            words=[{"t": "Seite2", "bbox": [1, 2, 3, 4]}],
         )
 
-    def test_owner_erhaelt_layout(self):
+    def test_uebersicht_liefert_nur_metadaten_ohne_woerter(self):
+        # Default: klein – Seitenmaße + word_count, KEINE Wortlisten (Mobile-Payload).
         self.client.force_authenticate(self.user)
         resp = self.client.get(f"/api/documents/{self.doc.id}/page-layout/")
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
         self.assertEqual(data["version"], 1)
-        self.assertEqual(len(data["pages"]), 1)
-        self.assertEqual(data["pages"][0]["words"][0]["t"], "Rechnung")
+        self.assertEqual(len(data["pages"]), 2)
+        self.assertEqual(data["pages"][0]["word_count"], 2)
+        self.assertNotIn("words", data["pages"][0])
+
+    def test_einzelseite_liefert_volle_wortliste(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.get(f"/api/documents/{self.doc.id}/page-layout/?page=1")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertNotIn("pages", data)
+        self.assertEqual(data["page"]["page_no"], 1)
+        self.assertEqual(data["page"]["words"][0]["t"], "Rechnung")
+
+    def test_unbekannte_seite_ist_404(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.get(f"/api/documents/{self.doc.id}/page-layout/?page=99")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_ungueltige_seitennummer_ist_404(self):
+        self.client.force_authenticate(self.user)
+        resp = self.client.get(f"/api/documents/{self.doc.id}/page-layout/?page=abc")
+        self.assertEqual(resp.status_code, 404)
 
     def test_fremdes_dokument_ist_nicht_sichtbar(self):
         self.client.force_authenticate(self.other)
         resp = self.client.get(f"/api/documents/{self.doc.id}/page-layout/")
         self.assertIn(resp.status_code, (403, 404))
+
+
+class PageLayoutSharingTests(TestCase):
+    """Regressionsschutz: Haushaltsmitglieder sehen das Overlay geteilter Dokumente.
+
+    Die Action muss in ``SAFE_READ_ACTIONS`` stehen – sonst 404 für Mitglieder,
+    obwohl sie Vorschau/Dokument lesen dürfen (Phase 2 verlöre bei geteilten
+    Dokumenten das OCR-Overlay).
+    """
+
+    def setUp(self):
+        from accounts.models import Household
+
+        self.client = APIClient()
+        self.alice = User.objects.create_user("alice_pl", password="pw", role="user")
+        self.bob = User.objects.create_user("bob_pl", password="pw", role="user")
+        self.carol = User.objects.create_user("carol_pl", password="pw", role="user")
+        household = Household.objects.create(name="Familie", created_by=self.alice)
+        household.members.add(self.alice, self.bob)  # carol NICHT im Haushalt
+
+        self.doc = Document.objects.create(
+            title="geteilt", owner=self.alice, shared_with_household=True
+        )
+        self.version = DocumentVersion.objects.create(
+            document=self.doc, version_no=1, file_path="/s.pdf", sha256="d" * 64,
+            page_count=1,
+        )
+        self.doc.current_version = self.version
+        self.doc.save(update_fields=["current_version"])
+        DocumentPageLayout.objects.create(
+            version=self.version, page_no=1, width=595.0, height=842.0,
+            words=[{"t": "Geteilt", "bbox": [1, 2, 3, 4]}],
+        )
+
+    def test_mitglied_sieht_overlay_des_geteilten_dokuments(self):
+        self.client.force_authenticate(self.bob)
+        meta = self.client.get(f"/api/documents/{self.doc.id}/page-layout/")
+        self.assertEqual(meta.status_code, 200)
+        self.assertEqual(meta.json()["pages"][0]["word_count"], 1)
+        page = self.client.get(f"/api/documents/{self.doc.id}/page-layout/?page=1")
+        self.assertEqual(page.status_code, 200)
+        self.assertEqual(page.json()["page"]["words"][0]["t"], "Geteilt")
+
+    def test_nichtmitglied_sieht_das_overlay_nicht(self):
+        self.client.force_authenticate(self.carol)
+        resp = self.client.get(f"/api/documents/{self.doc.id}/page-layout/")
+        self.assertEqual(resp.status_code, 404)
 
 
 class ExtractionAnchorFieldTests(TestCase):

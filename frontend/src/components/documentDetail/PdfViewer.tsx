@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Document, Page, pdfjs } from "react-pdf";
 import "react-pdf/dist/Page/TextLayer.css";
 import "react-pdf/dist/Page/AnnotationLayer.css";
@@ -98,64 +99,75 @@ export function PdfViewer({
   const [loadError, setLoadError] = useState<string | null>(null);
   const stageRef = useRef<HTMLDivElement>(null);
 
-  // Bei Dokumentwechsel (neue URL) zurücksetzen.
+  // NUR bei echtem Dokumentwechsel (neue URL) das geladene PDF verwerfen. Bewusst
+  // NICHT an initialPage gekoppelt: sonst würde eine nachträgliche initialPage-
+  // Änderung numPages nullen, ohne dass <Document> (gleiche file-URL) onLoadSuccess
+  // erneut feuert – die Folge wären fehlende Thumbnails und deaktivierte Navigation.
   useEffect(() => {
     setNumPages(null);
     setLoadError(null);
+  }, [url]);
+
+  // Sprungseite (Deep-Link) setzen – bei Dokumentwechsel wie bei nachträglicher
+  // initialPage-Änderung. Die harte Begrenzung auf gültige Seiten folgt nach dem Laden.
+  useEffect(() => {
     setPage(initialPage && initialPage > 0 ? initialPage : 1);
   }, [url, initialPage]);
+
+  // Nach dem Laden die aktuelle Seite hart auf [1..numPages] klemmen: eine zu große
+  // (oder aus einem vorigen PDF stammende) initialPage würde sonst eine ungültige
+  // Seite rendern und die Navigation blockieren.
+  useEffect(() => {
+    if (numPages) setPage((p) => Math.min(numPages, Math.max(1, p)));
+  }, [numPages]);
 
   const goTo = (n: number) => {
     if (!numPages) return;
     setPage(Math.min(numPages, Math.max(1, n)));
   };
 
-  // Tastaturnavigation. Ignoriert Eingabefelder, damit Tippen nicht kollidiert.
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      const t = e.target as HTMLElement | null;
-      if (
-        t &&
-        (t.tagName === "INPUT" ||
-          t.tagName === "TEXTAREA" ||
-          t.isContentEditable)
-      ) {
-        return;
-      }
-      if (!stageRef.current) return;
-      switch (e.key) {
-        case "ArrowRight":
-        case "PageDown":
-          setPage((p) => (numPages ? Math.min(numPages, p + 1) : p));
-          break;
-        case "ArrowLeft":
-        case "PageUp":
-          setPage((p) => Math.max(1, p - 1));
-          break;
-        case "Home":
-          setPage(1);
-          break;
-        case "End":
-          if (numPages) setPage(numPages);
-          break;
-        case "+":
-        case "=":
-          setScale((s) => clampScale(s + SCALE_STEP));
-          break;
-        case "-":
-          setScale((s) => clampScale(s - SCALE_STEP));
-          break;
-        case "0":
-          setScale(1.2);
-          break;
-        default:
-          return;
-      }
-      e.preventDefault();
+  // Tastaturnavigation NUR innerhalb des Viewers (Handler am fokussierbaren Stage-Div,
+  // nicht global auf window). Sonst würden Pfeiltasten/Home/End/+/- auch bei Fokus auf
+  // Tabs oder anderen Buttons die Seite umschalten und normales Scrollen verhindern.
+  // Eingabefelder (Seitennummer) werden ausgenommen, damit Tippen nicht kollidiert.
+  const onStageKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    const t = e.target as HTMLElement | null;
+    if (
+      t &&
+      (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)
+    ) {
+      return;
     }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [numPages]);
+    switch (e.key) {
+      case "ArrowRight":
+      case "PageDown":
+        setPage((p) => (numPages ? Math.min(numPages, p + 1) : p));
+        break;
+      case "ArrowLeft":
+      case "PageUp":
+        setPage((p) => Math.max(1, p - 1));
+        break;
+      case "Home":
+        setPage(1);
+        break;
+      case "End":
+        if (numPages) setPage(numPages);
+        break;
+      case "+":
+      case "=":
+        setScale((s) => clampScale(s + SCALE_STEP));
+        break;
+      case "-":
+        setScale((s) => clampScale(s - SCALE_STEP));
+        break;
+      case "0":
+        setScale(1.2);
+        break;
+      default:
+        return;
+    }
+    e.preventDefault();
+  };
 
   const pageNumbers = useMemo(
     () => (numPages ? Array.from({ length: numPages }, (_, i) => i + 1) : []),
@@ -185,7 +197,9 @@ export function PdfViewer({
         className="pdf-stage"
         ref={stageRef}
         role="group"
-        aria-label={`PDF-Vorschau: ${title}`}
+        aria-label={`PDF-Vorschau: ${title} (Pfeiltasten blättern, +/− zoomen)`}
+        tabIndex={0}
+        onKeyDown={onStageKeyDown}
       >
         <div className="pdf-toolbar">
           <div className="pdf-toolbar__group">
