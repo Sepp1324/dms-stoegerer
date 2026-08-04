@@ -1,12 +1,15 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // react-pdf braucht Worker + Canvas (Browser). Hier wird es durch schlanke
 // Stand-ins ersetzt, damit die Viewer-LOGIK (Startseite, Seitenbegrenzung,
-// fokusgebundene Hotkeys, Zustand bei initialPage-Wechsel) in jsdom prüfbar wird –
-// genau die zuvor korrigierten Fälle, die der DetailPreview-Test (PdfViewer gemockt)
-// nicht abdeckt.
-const h = vi.hoisted(() => ({ onLoad: null as null | ((p: { numPages: number }) => void) }));
+// fokusgebundene Hotkeys, Zustand bei initialPage-Wechsel, OCR-Overlay/Suche) in
+// jsdom prüfbar wird. onLoadSuccess/onRenderSuccess werden als Handles exponiert
+// und im Test via act() ausgelöst.
+const h = vi.hoisted(() => ({
+  onLoad: null as null | ((p: { numPages: number }) => void),
+  onRender: null as null | ((p: { width: number; height: number }) => void),
+}));
 
 vi.mock("react-pdf", () => ({
   pdfjs: { GlobalWorkerOptions: {} },
@@ -20,9 +23,23 @@ vi.mock("react-pdf", () => ({
     h.onLoad = onLoadSuccess ?? null;
     return <div data-testid="document">{children}</div>;
   },
-  Page: ({ pageNumber }: { pageNumber: number }) => (
-    <div data-testid="main-page" data-page={pageNumber} />
-  ),
+  Page: ({
+    pageNumber,
+    onRenderSuccess,
+  }: {
+    pageNumber: number;
+    onRenderSuccess?: (p: { width: number; height: number }) => void;
+  }) => {
+    // Nur die Hauptseite reicht onRenderSuccess durch (Thumbnails nicht).
+    if (onRenderSuccess) h.onRender = onRenderSuccess;
+    return <div data-testid="main-page" data-page={pageNumber} />;
+  },
+}));
+
+// page-layout-Endpoint mocken (die Suche lädt die Wortliste der aktuellen Seite).
+const getPageLayoutPage = vi.fn();
+vi.mock("../../api", () => ({
+  getPageLayoutPage: (...args: unknown[]) => getPageLayoutPage(...args),
 }));
 
 import { PdfViewer } from "./PdfViewer";
@@ -37,12 +54,17 @@ class IOStub {
 
 beforeEach(() => {
   h.onLoad = null;
+  h.onRender = null;
+  getPageLayoutPage.mockReset();
   // @ts-expect-error – Test-Stub
   globalThis.IntersectionObserver = IOStub;
 });
 
 function load(numPages: number) {
   act(() => h.onLoad?.({ numPages }));
+}
+function renderPage(width = 200, height = 200) {
+  act(() => h.onRender?.({ width, height }));
 }
 
 const mainPageNo = () =>
@@ -68,7 +90,6 @@ describe("PdfViewer – Logik (echter Viewer, react-pdf gemockt)", () => {
     load(5);
     expect(mainPageNo()).toBe(1);
 
-    // Innerhalb des Viewers: ArrowRight blättert vor.
     fireEvent.keyDown(stage(), { key: "ArrowRight" });
     expect(mainPageNo()).toBe(2);
 
@@ -82,7 +103,7 @@ describe("PdfViewer – Logik (echter Viewer, react-pdf gemockt)", () => {
     load(5);
     const input = screen.getByLabelText("Seite");
     fireEvent.keyDown(input, { key: "ArrowRight" });
-    expect(mainPageNo()).toBe(1); // unverändert
+    expect(mainPageNo()).toBe(1);
   });
 
   it("behält numPages bei bloßer initialPage-Änderung (Thumbnails bleiben)", () => {
@@ -94,10 +115,72 @@ describe("PdfViewer – Logik (echter Viewer, react-pdf gemockt)", () => {
       screen.getAllByRole("button", { name: /^Seite \d+$/ }).length;
     expect(thumbs()).toBe(5);
 
-    // Gleiche URL, neue Startseite: numPages darf NICHT genullt werden (sonst
-    // wäre <Document> nicht neu geladen und die Thumbnails verschwänden).
     rerender(<PdfViewer url="blob:a" title="Doc" initialPage={4} />);
     expect(thumbs()).toBe(5);
     expect(mainPageNo()).toBe(4);
+  });
+});
+
+describe("PdfViewer – OCR-Overlay / Suche", () => {
+  it("zeigt keine Suche ohne docId (z. B. öffentliche Freigabe)", () => {
+    render(<PdfViewer url="blob:a" title="Doc" />);
+    load(5);
+    expect(screen.queryByLabelText("Im Dokument suchen")).toBeNull();
+    expect(getPageLayoutPage).not.toHaveBeenCalled();
+  });
+
+  it("lädt die Wortliste und hebt Treffer hervor", async () => {
+    getPageLayoutPage.mockResolvedValue({
+      document: 7,
+      version_id: 1,
+      version_no: 1,
+      page_count: 1,
+      page: {
+        page_no: 1,
+        width: 100,
+        height: 100,
+        words: [
+          { t: "Rechnung", bbox: [10, 20, 30, 40] },
+          { t: "Müller", bbox: [50, 60, 70, 80] },
+        ],
+      },
+    });
+
+    render(<PdfViewer url="blob:a" title="Doc" docId={7} layoutVersion={null} />);
+    load(1);
+    renderPage(200, 200); // rendered-Maße setzen (Overlay-Bezug)
+
+    fireEvent.change(screen.getByLabelText("Im Dokument suchen"), {
+      target: { value: "muller" },
+    });
+
+    await waitFor(() =>
+      expect(getPageLayoutPage).toHaveBeenCalledWith(7, 1, null, expect.anything()),
+    );
+    // Genau ein Treffer (Müller, diakritika-tolerant) als Overlay-Kasten.
+    await waitFor(() => {
+      const overlay = document.querySelector(".ocr-overlay");
+      expect(overlay).not.toBeNull();
+      expect(overlay?.querySelectorAll(".ocr-word--match").length).toBe(1);
+    });
+    expect(screen.getByRole("status")).toHaveTextContent("1 Treffer auf Seite 1");
+  });
+
+  it("meldet Seiten ohne Textebene weich (kein Overlay)", async () => {
+    getPageLayoutPage.mockRejectedValue(new Error("HTTP 404"));
+
+    render(<PdfViewer url="blob:a" title="Doc" docId={7} layoutVersion={null} />);
+    load(1);
+    renderPage(200, 200);
+    fireEvent.change(screen.getByLabelText("Im Dokument suchen"), {
+      target: { value: "abc" },
+    });
+
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent(
+        /keine durchsuchbare Textebene/i,
+      ),
+    );
+    expect(document.querySelector(".ocr-word--match")).toBeNull();
   });
 });

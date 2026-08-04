@@ -11,6 +11,8 @@ export function DetailPreview({
   pdfError,
   title,
   initialPage,
+  docId,
+  layoutVersion,
 }: {
   pdfUrl: string | null;
   // Erkannter MIME-Typ des Vorschau-Blobs (application/pdf oder image/*).
@@ -18,6 +20,9 @@ export function DetailPreview({
   pdfError: string | null;
   title: string;
   initialPage?: number | null;
+  // Aktiviert das OCR-Overlay/die In-Dokument-Suche (nur in der Detailansicht).
+  docId?: number;
+  layoutVersion?: number | null;
 }) {
   const isPdf = (mime || "").toLowerCase().startsWith("application/pdf");
 
@@ -28,7 +33,13 @@ export function DetailPreview({
       {pdfUrl &&
         !pdfError &&
         (isPdf ? (
-          <PdfViewer url={pdfUrl} title={title} initialPage={initialPage} />
+          <PdfViewer
+            url={pdfUrl}
+            title={title}
+            initialPage={initialPage}
+            docId={docId}
+            layoutVersion={layoutVersion}
+          />
         ) : (
           <img className="preview-image" src={pdfUrl} alt={`Vorschau: ${title}`} />
         ))}
