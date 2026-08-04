@@ -100,6 +100,7 @@ export default function DocumentDetail({
   const [doc, setDoc] = useState<Detail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
+  const [previewMime, setPreviewMime] = useState<string | null>(null);
   const [pdfError, setPdfError] = useState<string | null>(null);
 
   // Aktiver Tab pro Sitzung merkbar (sessionStorage, dokument-spezifisch).
@@ -212,11 +213,16 @@ export default function DocumentDetail({
     const ctrl = new AbortController();
     let url: string | null = null;
     setPdfUrl(null);
+    setPreviewMime(null);
     setPdfError(null);
     getDocumentPreview(id, selectedVersionNo, ctrl.signal)
       .then((blob) => {
         url = URL.createObjectURL(blob);
-        setPdfUrl(initialPage ? `${url}#page=${initialPage}` : url);
+        // Kein ``#page=``-Fragment mehr an der Blob-URL (löste den Safari-
+        // frame-ancestors-Bug aus): PDF.js navigiert die Seite intern über
+        // ``initialPage``.
+        setPdfUrl(url);
+        setPreviewMime(blob.type || null);
       })
       .catch((e) => {
         if (ctrl.signal.aborted) return;
@@ -636,7 +642,13 @@ export default function DocumentDetail({
 
           <div className="detail">
             {/* Linke Spalte: große Vorschau, beim Scrollen der rechten Spalte sticky. */}
-            <DetailPreview pdfUrl={pdfUrl} pdfError={pdfError} title={doc.title} />
+            <DetailPreview
+              pdfUrl={pdfUrl}
+              mime={previewMime}
+              pdfError={pdfError}
+              title={doc.title}
+              initialPage={initialPage}
+            />
 
             {/* Rechte Spalte: kompakte Info-/Aktionsspalte mit ARIA-Tabs. */}
             <section className="card detail-panels">
