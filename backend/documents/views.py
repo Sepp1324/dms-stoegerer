@@ -17,7 +17,7 @@ from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.files import File
 from django.db import connection, transaction
-from django.db.models import Case, DecimalField, F, Q, Value, When
+from django.db.models import Case, DecimalField, F, Func, Q, Value, When
 from django.db.models import Count, IntegerField, Max, OuterRef, Prefetch, Subquery
 from django.db.models.functions import Coalesce
 from django.db.models.functions import Cast
@@ -1976,9 +1976,13 @@ class DocumentViewSet(viewsets.ModelViewSet):
         if version is None:
             raise Http404("Keine Version vorhanden.")
 
+        # Versions-Identität explizit UND eindeutig: ``version_id`` (DB-PK, wie
+        # ``ExtractionCandidate.source_version`` serialisiert) und ``version_no`` (die
+        # fachliche, im UI sichtbare Nummer). Kein mehrdeutiges ``version`` mehr.
         base = {
             "document": document.pk,
-            "version": version.version_no,
+            "version_id": version.id,
+            "version_no": version.version_no,
             "page_count": version.page_count,
         }
 
@@ -1999,15 +2003,24 @@ class DocumentViewSet(viewsets.ModelViewSet):
             }
             return Response(base)
 
-        # Nur Metadaten (klein): keine Wortlisten in der Übersichtsantwort.
+        # Nur Metadaten (klein): die Wortanzahl wird per ``jsonb_array_length`` IN der
+        # Datenbank berechnet; ``.values(...)`` ohne ``words`` sorgt dafür, dass die
+        # (potenziell megabytegroße) JSON-Spalte gar nicht erst übertragen/
+        # deserialisiert wird.
         base["pages"] = [
             {
-                "page_no": layout.page_no,
-                "width": layout.width,
-                "height": layout.height,
-                "word_count": len(layout.words or []),
+                "page_no": row["page_no"],
+                "width": row["width"],
+                "height": row["height"],
+                "word_count": row["word_count"] or 0,
             }
-            for layout in version.page_layouts.all()
+            for row in version.page_layouts.annotate(
+                word_count=Func(
+                    F("words"),
+                    function="jsonb_array_length",
+                    output_field=IntegerField(),
+                )
+            ).values("page_no", "width", "height", "word_count")
         ]
         return Response(base)
 

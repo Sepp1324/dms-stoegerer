@@ -495,6 +495,11 @@ export interface ExtractionCandidate {
   reason: string;
   source: string;
   source_page: number | null;
+  // Studio-Verankerung (Phase 1): DB-PK der Quellversion + Fundstellen-Box
+  // [x0, y0, x1, y1] in PDF-Punkten. source_bbox ist null, wenn keine Version
+  // (mehr) verankert ist – dann fehlt der Box das Koordinatensystem.
+  source_version: number | null;
+  source_bbox: number[] | null;
   source_snippet: string;
   source_snippet_html: string;
   status: ExtractionCandidateStatus;

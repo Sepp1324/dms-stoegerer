@@ -97,6 +97,24 @@ class ExtractPageLayoutTests(TestCase):
         path.write_bytes(b"%PDF-1.7 kaputt")
         self.assertEqual(page_layout.extract_page_layout(path), [])
 
+    def test_gesamtlimit_wird_seitenuebergreifend_eingehalten(self):
+        # Konstanten klein patchen: Gesamt 3, pro Seite 2. Zwei Seiten mit je 2
+        # Wörtern dürfen zusammen NICHT über 3 kommen (Seite 1 → 2, Seite 2 → 1).
+        from unittest.mock import patch
+
+        path = self._path("viele.pdf")
+        _text_pdf(path, ["Alpha Beta", "Gamma Delta"])
+
+        with patch.object(page_layout, "MAX_WORDS_TOTAL", 3), patch.object(
+            page_layout, "MAX_WORDS_PER_PAGE", 2
+        ):
+            pages = page_layout.extract_page_layout(path)
+
+        total = sum(len(p["words"]) for p in pages)
+        self.assertEqual(total, 3)
+        self.assertEqual(len(pages[0]["words"]), 2)
+        self.assertEqual(len(pages[1]["words"]), 1)
+
 
 class WritePageLayoutTests(TestCase):
     def setUp(self):
@@ -170,7 +188,10 @@ class PageLayoutEndpointTests(TestCase):
         resp = self.client.get(f"/api/documents/{self.doc.id}/page-layout/")
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
-        self.assertEqual(data["version"], 1)
+        # Versions-Identität eindeutig: DB-PK und fachliche Nummer getrennt.
+        self.assertEqual(data["version_id"], self.version.id)
+        self.assertEqual(data["version_no"], 1)
+        self.assertNotIn("version", data)
         self.assertEqual(len(data["pages"]), 2)
         self.assertEqual(data["pages"][0]["word_count"], 2)
         self.assertNotIn("words", data["pages"][0])
@@ -291,3 +312,27 @@ class ExtractionAnchorFieldTests(TestCase):
         self.version.delete()
         cand.refresh_from_db()
         self.assertIsNone(cand.source_version)
+
+    def test_serializer_gibt_bbox_ohne_version_als_null(self):
+        # API-Vertrag: ohne source_version ist die Box bezuglos → serialisiert als
+        # null, egal ob in der DB (nach SET_NULL) noch ein Box-Rest liegt.
+        from .serializers import ExtractionCandidateSerializer
+
+        cand = ExtractionCandidate.objects.create(
+            document=self.doc,
+            field=ExtractionCandidate.Field.AMOUNT,
+            value="1,00 €",
+            source_version=self.version,
+            source_bbox=[1, 1, 2, 2],
+        )
+        # Mit Version: Box wird ausgeliefert.
+        self.assertEqual(
+            ExtractionCandidateSerializer(cand).data["source_bbox"], [1, 1, 2, 2]
+        )
+        # Version gelöscht (SET_NULL) → Box in DB bleibt, API liefert aber null.
+        self.version.delete()
+        cand.refresh_from_db()
+        self.assertIsNotNone(cand.source_bbox)  # DB-Rest noch da
+        self.assertIsNone(
+            ExtractionCandidateSerializer(cand).data["source_bbox"]  # API null
+        )

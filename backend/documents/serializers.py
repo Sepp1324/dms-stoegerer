@@ -477,6 +477,7 @@ class ExtractionCandidateSerializer(serializers.ModelSerializer):
     """
 
     field_label = serializers.SerializerMethodField()
+    source_bbox = serializers.SerializerMethodField()
 
     class Meta:
         model = ExtractionCandidate
@@ -504,6 +505,18 @@ class ExtractionCandidateSerializer(serializers.ModelSerializer):
 
     def get_field_label(self, obj) -> str:
         return obj.get_field_display()
+
+    def get_source_bbox(self, obj):
+        """Bounding-Box nur MIT ihrem Koordinatensystem (``source_version``) ausliefern.
+
+        ``source_version`` ist ``SET_NULL``: wird die verankerte Version gelöscht,
+        bleibt ``source_bbox`` zwar in der Zeile, ist aber bezuglos (kein Seiten-Layout
+        mehr, in dessen PDF-Punkten die Box gilt). Eine solche verwaiste Box würde das
+        Overlay an eine falsche Stelle setzen – daher hier als ``null`` ausgeben.
+        """
+        if obj.source_version_id is None:
+            return None
+        return obj.source_bbox
 
 
 class DocumentVersionSerializer(serializers.ModelSerializer):
