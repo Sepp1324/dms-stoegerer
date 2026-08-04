@@ -27,7 +27,7 @@ from .models import (
     Document,
     DocumentVersion,
 )
-from .services import page_text
+from .services import page_layout, page_text
 from documents.services.ocr.engine import run_ocr
 
 logger = logging.getLogger(__name__)
@@ -419,6 +419,21 @@ def ocr_version(version: DocumentVersion) -> dict:
         version,
         page_text.extract_page_texts(page_source, fallback_text=result.text),
     )
+    # Wortgenaue Geometrie fürs Studio-Overlay. Best-effort: ein Fehler hier darf
+    # den OCR-Schritt NIE abbrechen (reine Anzeige-Daten, kein WORM-Original).
+    layout_indexed = 0
+    try:
+        layout_indexed = page_layout.write_page_layout(
+            version, page_layout.extract_page_layout(page_source)
+        )
+    except SoftTimeLimitExceeded:
+        raise  # Soft-Time-Limit reicht der Retry-Layer bewusst durch
+    except Exception:
+        logger.warning(
+            "Seiten-Layout für Version %s konnte nicht erzeugt werden.",
+            version.pk,
+            exc_info=True,
+        )
     version.transition_to(
         DocumentVersion.ProcessingState.OCR_DONE,
         actor=version.created_by,

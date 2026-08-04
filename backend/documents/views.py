@@ -1680,6 +1680,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
             "list",
             "retrieve",
             "preview",
+            "page_layout",
             "download",
             "thumbnail",
             "similar",
@@ -1950,6 +1951,65 @@ class DocumentViewSet(viewsets.ModelViewSet):
         if version is None:
             raise Http404("Keine Version vorhanden.")
         return _serve_version_preview(version)
+
+    @action(detail=True, methods=["get"], url_path="page-layout")
+    def page_layout(self, request, pk=None):
+        """Liefert die wortgenaue OCR-Geometrie einer Version fürs Studio-Overlay.
+
+        Standard ist die aktuelle Version; ``?version=<nr>`` wählt eine ältere.
+        Bewusst eigener Endpoint (statt Teil des Version-Serializers) und
+        SEITENWEISE ladbar:
+
+          * OHNE ``?page`` → nur die kompakten Seiten-Metadaten (``page_no`` +
+            Maße + ``word_count``), damit der Client die Overlay-Geometrie NICHT
+            als ein großes (bis ~60k Wörter) JSON in einem Rutsch holen muss –
+            das würde auf Mobilgeräten mehrere MB und spürbare UI-Pausen kosten.
+          * MIT ``?page=<nr>`` → die volle Wortliste GENAU dieser Seite (eine
+            DB-Zeile). So holt das Studio nur die sichtbare Seite lazy nach.
+
+        Owner-/Freigabe-Sichtbarkeit greift über ``get_object()`` (die Action ist
+        in ``SAFE_READ_ACTIONS`` gelistet, damit Haushaltsmitglieder das Overlay
+        geteilter Dokumente ebenso sehen wie Vorschau/Download).
+        """
+        document = self.get_object()
+        version = self._resolve_version(document)
+        if version is None:
+            raise Http404("Keine Version vorhanden.")
+
+        base = {
+            "document": document.pk,
+            "version": version.version_no,
+            "page_count": version.page_count,
+        }
+
+        raw_page = request.query_params.get("page")
+        if raw_page:
+            try:
+                page_no = int(raw_page)
+            except (TypeError, ValueError):
+                raise Http404("Ungültige Seitennummer.")
+            layout = version.page_layouts.filter(page_no=page_no).first()
+            if layout is None:
+                raise Http404("Für diese Seite liegt kein Layout vor.")
+            base["page"] = {
+                "page_no": layout.page_no,
+                "width": layout.width,
+                "height": layout.height,
+                "words": layout.words or [],
+            }
+            return Response(base)
+
+        # Nur Metadaten (klein): keine Wortlisten in der Übersichtsantwort.
+        base["pages"] = [
+            {
+                "page_no": layout.page_no,
+                "width": layout.width,
+                "height": layout.height,
+                "word_count": len(layout.words or []),
+            }
+            for layout in version.page_layouts.all()
+        ]
+        return Response(base)
 
     @action(detail=True, methods=["get"])
     def download(self, request, pk=None):

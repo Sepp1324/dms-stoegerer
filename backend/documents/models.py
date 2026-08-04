@@ -1157,6 +1157,42 @@ class DocumentPageText(models.Model):
         return f"{self.version} Seite {self.page_no}"
 
 
+class DocumentPageLayout(models.Model):
+    """Wortgenaue OCR-Geometrie einer Dokumentseite (Studio-Overlay).
+
+    Grundlage des visuellen Dokument-Studios (Phase 1): Für jede Seite werden die
+    Wortkästen (``bbox`` in PDF-Punkten, Ursprung oben-links) samt Seitenmaßen
+    abgelegt. Damit kann das Frontend OCR-Text/Treffer deckungsgleich über das
+    gerenderte PDF legen und per Klick zur Fundstelle springen.
+
+    Bewusst SEPARATE Tabelle (nicht als JSON-Feld auf ``DocumentVersion``): Die
+    Layout-Daten können pro Seite hunderte Wörter umfassen; ausgelagert bleiben
+    die häufig geladenen Version-Rows schlank und das Overlay wird gezielt/lazy
+    geladen. Es ist ABGELEITETE Anzeige-Geometrie, kein WORM-Original – ein
+    erneuter OCR-Lauf ersetzt sie idempotent.
+    """
+
+    version = models.ForeignKey(
+        DocumentVersion, on_delete=models.CASCADE, related_name="page_layouts"
+    )
+    page_no = models.PositiveIntegerField()
+    # Seitenmaße in PDF-Punkten (1/72 Zoll). Bezugssystem für alle ``bbox``.
+    width = models.FloatField(default=0.0)
+    height = models.FloatField(default=0.0)
+    # Wortliste: ``[{"t": "Rechnung", "bbox": [x0, y0, x1, y1]}, ...]`` – Koordinaten
+    # in denselben PDF-Punkten wie width/height, Ursprung oben-links.
+    words = models.JSONField(default=list, blank=True)
+
+    class Meta:
+        verbose_name = "Seiten-Layout"
+        verbose_name_plural = "Seiten-Layouts"
+        ordering = ["version_id", "page_no"]
+        unique_together = ("version", "page_no")
+
+    def __str__(self) -> str:
+        return f"{self.version} Seite {self.page_no} ({len(self.words or [])} Wörter)"
+
+
 class ExtractionCandidate(models.Model):
     """Smart-Inbox-Vorschlag für ein extrahiertes Strukturdatum."""
 
@@ -1184,6 +1220,18 @@ class ExtractionCandidate(models.Model):
     source_page = models.PositiveIntegerField(null=True, blank=True)
     source_snippet = models.TextField(blank=True)
     source_snippet_html = models.TextField(blank=True)
+    # Studio-Verankerung (Phase 1): Fundstelle exakt im gerenderten PDF. ``source_bbox``
+    # ist ``[x0, y0, x1, y1]`` in PDF-Punkten (Ursprung oben-links) im Bezugssystem des
+    # ``DocumentPageLayout`` der ``source_version``/``source_page``. Beide bleiben NULL,
+    # solange kein geometrischer Treffer vorliegt (rein textuelle Heuristik).
+    source_version = models.ForeignKey(
+        "DocumentVersion",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    source_bbox = models.JSONField(null=True, blank=True)
     status = models.CharField(
         max_length=16, choices=Status.choices, default=Status.PENDING, db_index=True
     )
