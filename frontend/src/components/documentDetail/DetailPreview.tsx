@@ -1,4 +1,4 @@
-import { PdfViewer } from "./PdfViewer";
+import { PdfViewer, type PdfHighlight } from "./PdfViewer";
 
 // Linke Spalte der Detailansicht: große Dokumentvorschau (STOAA-430). PDFs werden
 // clientseitig via PDF.js/Canvas gerendert (PdfViewer) – KEIN iframe mehr, damit
@@ -13,6 +13,7 @@ export function DetailPreview({
   initialPage,
   docId,
   layoutVersion,
+  highlight,
 }: {
   pdfUrl: string | null;
   // Erkannter MIME-Typ des Vorschau-Blobs (application/pdf oder image/*).
@@ -23,6 +24,7 @@ export function DetailPreview({
   // Aktiviert das OCR-Overlay/die In-Dokument-Suche (nur in der Detailansicht).
   docId?: number;
   layoutVersion?: number | null;
+  highlight?: PdfHighlight | null;
 }) {
   const isPdf = (mime || "").toLowerCase().startsWith("application/pdf");
 
@@ -39,6 +41,7 @@ export function DetailPreview({
             initialPage={initialPage}
             docId={docId}
             layoutVersion={layoutVersion}
+            highlight={highlight}
           />
         ) : (
           <img className="preview-image" src={pdfUrl} alt={`Vorschau: ${title}`} />

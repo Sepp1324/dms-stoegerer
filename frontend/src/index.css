@@ -3481,6 +3481,49 @@ textarea:focus-visible {
   color: var(--muted, #94a3b8);
   white-space: nowrap;
 }
+
+/* Beleg-Daten-Panel (Studio Phase 2): verankerte Extraktionsvorschläge. */
+.studio-extract__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.studio-extract__item {
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+}
+.studio-extract__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+.studio-extract__field {
+  font-weight: 600;
+}
+.studio-extract__conf {
+  font-size: 0.78rem;
+  color: var(--muted, #94a3b8);
+}
+.studio-extract__value {
+  font-variant-numeric: tabular-nums;
+  margin: 0.15rem 0;
+  word-break: break-word;
+}
+.studio-extract__reason {
+  font-size: 0.8rem;
+  color: var(--muted, #94a3b8);
+}
+.studio-extract__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
 @media (max-width: 720px) {
   .pdf-thumbs {
     display: none;

@@ -4,8 +4,21 @@ import { Document, Page, pdfjs } from "react-pdf";
 import "react-pdf/dist/Page/TextLayer.css";
 import "react-pdf/dist/Page/AnnotationLayer.css";
 
-import { searchPageLayout, type PageLayoutMatch } from "../../api";
+import {
+  getPageLayoutMeta,
+  searchPageLayout,
+  type PageLayoutMatch,
+} from "../../api";
 import { OcrOverlay } from "./OcrOverlay";
+import type { Bbox } from "./overlayGeometry";
+
+// Sprungziel aus dem Beleg-Daten-Panel: Seite + Fundstellen-Box. ``nonce`` erlaubt
+// erneutes Anspringen desselben Ziels (der Effekt reagiert auf die Änderung).
+export interface PdfHighlight {
+  page: number;
+  bbox: Bbox;
+  nonce: number;
+}
 
 // PDF.js-Viewer (Phase 0 des Dokument-Studios). Ersetzt den nativen PDF-iframe:
 // gerendert wird auf Canvas – KEIN iframe, KEIN Blob-Frame, KEIN CSP/frame-
@@ -93,6 +106,7 @@ export function PdfViewer({
   initialPage,
   docId,
   layoutVersion,
+  highlight,
 }: {
   url: string;
   title: string;
@@ -102,6 +116,8 @@ export function PdfViewer({
   // Overlay/die Suche aus. layoutVersion = version_no der gerade gezeigten Version.
   docId?: number;
   layoutVersion?: number | null;
+  // Sprungziel aus dem Beleg-Daten-Panel (Fundstelle einer Extraktion markieren).
+  highlight?: PdfHighlight | null;
 }) {
   const [numPages, setNumPages] = useState<number | null>(null);
   const [page, setPage] = useState(initialPage && initialPage > 0 ? initialPage : 1);
@@ -189,6 +205,48 @@ export function PdfViewer({
     setActiveMatch(wrapped);
     setPage(matches[wrapped].page_no);
   };
+
+  // --- Beleg-Daten-Sprung: Fundstelle einer Extraktion markieren ---
+  // Seitenmaße der Highlight-Seite (Bezug fürs Skalieren der Fundstellen-Box).
+  const [hlDims, setHlDims] = useState<{ width: number; height: number } | null>(null);
+  const hlNonce = highlight?.nonce ?? null;
+  useEffect(() => {
+    if (!docId || !highlight) {
+      setHlDims(null);
+      return;
+    }
+    setPage(highlight.page);
+    const ctrl = new AbortController();
+    getPageLayoutMeta(docId, layoutVersion, ctrl.signal)
+      .then((meta) => {
+        const p = meta.pages.find((x) => x.page_no === highlight.page);
+        setHlDims(p ? { width: p.width, height: p.height } : null);
+      })
+      .catch(() => {
+        if (!ctrl.signal.aborted) setHlDims(null);
+      });
+    return () => ctrl.abort();
+    // Absichtlich auf nonce hören: erneuter Klick auf dasselbe Ziel springt wieder.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [docId, layoutVersion, hlNonce]);
+
+  // Vereinheitlichtes Overlay: ein aktiver Fundstellen-Sprung auf der aktuellen Seite
+  // hat Vorrang; sonst die Suchtreffer. So gibt es nie zwei konkurrierende Overlays.
+  const highlightActive =
+    !!docId &&
+    !!highlight &&
+    highlight.page === page &&
+    !!hlDims &&
+    !!rendered;
+  const overlayBoxes: { bbox: Bbox }[] = highlightActive
+    ? [{ bbox: highlight!.bbox }]
+    : pageMatches;
+  const overlayActiveIndex = highlightActive ? 0 : activeOnPage;
+  const overlayDims = highlightActive
+    ? hlDims
+    : overlayLayout
+      ? { width: overlayLayout.width, height: overlayLayout.height }
+      : null;
 
   // NUR bei echtem Dokumentwechsel (neue URL) das geladene PDF verwerfen. Bewusst
   // NICHT an initialPage gekoppelt: sonst würde eine nachträgliche initialPage-
@@ -402,12 +460,12 @@ export function PdfViewer({
                 setRendered({ w: p.width, h: p.height })
               }
             />
-            {docId && rendered && overlayLayout && pageMatches.length > 0 && (
+            {docId && rendered && overlayDims && overlayBoxes.length > 0 && (
               <OcrOverlay
-                matches={pageMatches}
-                activeIndex={activeOnPage}
-                layoutWidth={overlayLayout.width}
-                layoutHeight={overlayLayout.height}
+                matches={overlayBoxes}
+                activeIndex={overlayActiveIndex}
+                layoutWidth={overlayDims.width}
+                layoutHeight={overlayDims.height}
                 renderedWidth={rendered.w}
                 renderedHeight={rendered.h}
               />

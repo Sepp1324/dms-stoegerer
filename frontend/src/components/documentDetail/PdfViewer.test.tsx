@@ -38,8 +38,10 @@ vi.mock("react-pdf", () => ({
 
 // page-layout-Endpoint mocken (die Suche lädt die Wortliste der aktuellen Seite).
 const searchPageLayout = vi.fn();
+const getPageLayoutMeta = vi.fn();
 vi.mock("../../api", () => ({
   searchPageLayout: (...args: unknown[]) => searchPageLayout(...args),
+  getPageLayoutMeta: (...args: unknown[]) => getPageLayoutMeta(...args),
 }));
 
 import { PdfViewer } from "./PdfViewer";
@@ -56,6 +58,7 @@ beforeEach(() => {
   h.onLoad = null;
   h.onRender = null;
   searchPageLayout.mockReset();
+  getPageLayoutMeta.mockReset();
   // scrollIntoView existiert in jsdom nicht.
   Element.prototype.scrollIntoView = vi.fn();
   // @ts-expect-error – Test-Stub
@@ -229,5 +232,47 @@ describe("PdfViewer – OCR-Overlay / seitenübergreifende Suche", () => {
       expect(screen.getByRole("status")).toHaveTextContent(/nicht verfügbar/i),
     );
     expect(document.querySelector(".ocr-word--match")).toBeNull();
+  });
+});
+
+describe("PdfViewer – Beleg-Daten-Highlight", () => {
+  it("springt zum Fundstellen-Ziel und markiert die Box", async () => {
+    getPageLayoutMeta.mockResolvedValue({
+      document: 7,
+      version_id: 1,
+      version_no: 1,
+      page_count: 2,
+      pages: [
+        { page_no: 1, width: 100, height: 100, word_count: 1 },
+        { page_no: 2, width: 100, height: 100, word_count: 1 },
+      ],
+    });
+
+    // Wie in der App: erst ohne Highlight mounten, dann setzt der Klick das Ziel.
+    const { rerender } = render(
+      <PdfViewer url="blob:a" title="Doc" docId={7} layoutVersion={null} highlight={null} />,
+    );
+    load(2);
+    expect(mainPageNo()).toBe(1);
+
+    rerender(
+      <PdfViewer
+        url="blob:a"
+        title="Doc"
+        docId={7}
+        layoutVersion={null}
+        highlight={{ page: 2, bbox: [10, 20, 30, 40], nonce: 1 }}
+      />,
+    );
+    // Der Sprung setzt die Zielseite.
+    expect(mainPageNo()).toBe(2);
+    renderPage(200, 200);
+
+    await waitFor(() =>
+      expect(getPageLayoutMeta).toHaveBeenCalledWith(7, null, expect.anything()),
+    );
+    await waitFor(() =>
+      expect(document.querySelector(".ocr-word--active")).not.toBeNull(),
+    );
   });
 });
