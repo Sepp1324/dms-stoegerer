@@ -91,4 +91,36 @@ describe("StudioExtractionPanel", () => {
       expect(screen.getByText(/Keine offenen Beleg-Daten/i)).toBeInTheDocument(),
     );
   });
+
+  it("übernimmt einen Vorschlag in ein Zusatzfeld und entfernt ihn", async () => {
+    getExtractionCandidates.mockResolvedValue([cand({ id: 3, value: "42,00 EUR" })]);
+    const onAdoptToField = vi.fn().mockResolvedValue(undefined);
+    render(
+      <StudioExtractionPanel
+        documentId={7}
+        onJump={vi.fn()}
+        customFields={[{ id: 11, name: "Betrag brutto" }]}
+        onAdoptToField={onAdoptToField}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByText("42,00 EUR")).toBeInTheDocument());
+    const select = screen.getByRole("combobox", { name: /Zusatzfeld übernehmen/i });
+    fireEvent.change(select, { target: { value: "11" } });
+
+    await waitFor(() =>
+      expect(onAdoptToField).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 3 }),
+        11,
+      ),
+    );
+    await waitFor(() => expect(screen.queryByText("42,00 EUR")).toBeNull());
+  });
+
+  it("zeigt kein Zusatzfeld-Select ohne Felder/Handler", async () => {
+    getExtractionCandidates.mockResolvedValue([cand({ id: 4 })]);
+    render(<StudioExtractionPanel documentId={7} onJump={vi.fn()} />);
+    await waitFor(() => expect(screen.getByText("42,00 EUR")).toBeInTheDocument());
+    expect(screen.queryByRole("combobox")).toBeNull();
+  });
 });

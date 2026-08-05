@@ -3521,8 +3521,13 @@ textarea:focus-visible {
 .studio-extract__actions {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 0.5rem;
   margin-top: 0.5rem;
+}
+.studio-extract__tofield {
+  font-size: 0.85rem;
+  max-width: 12rem;
 }
 @media (max-width: 720px) {
   .pdf-thumbs {
