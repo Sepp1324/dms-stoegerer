@@ -33,6 +33,11 @@ import {
 import { documentLink } from "../documentLink";
 import { shouldCloseOnEscape } from "../detailKeyboard";
 import { DetailPreview } from "./documentDetail/DetailPreview";
+import {
+  StudioExtractionPanel,
+  type HighlightTarget,
+} from "./documentDetail/StudioExtractionPanel";
+import type { PdfHighlight } from "./documentDetail/PdfViewer";
 import { DetailMeta } from "./documentDetail/DetailMeta";
 import { EditForm, type EditFormState } from "./documentDetail/EditForm";
 import { BriefingPanel } from "./documentDetail/BriefingPanel";
@@ -101,6 +106,10 @@ export default function DocumentDetail({
   const [error, setError] = useState<string | null>(null);
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
   const [previewMime, setPreviewMime] = useState<string | null>(null);
+  // Fundstellen-Sprung aus dem Beleg-Daten-Tab in die PDF-Vorschau. Der monotone
+  // Nonce lässt denselben Vorschlag erneut anspringen (der Effekt reagiert darauf).
+  const [highlight, setHighlight] = useState<PdfHighlight | null>(null);
+  const highlightNonce = useRef(1);
   const [pdfError, setPdfError] = useState<string | null>(null);
 
   // Aktiver Tab pro Sitzung merkbar (sessionStorage, dokument-spezifisch).
@@ -650,6 +659,7 @@ export default function DocumentDetail({
               initialPage={initialPage}
               docId={id}
               layoutVersion={selectedVersionNo}
+              highlight={highlight}
             />
 
             {/* Rechte Spalte: kompakte Info-/Aktionsspalte mit ARIA-Tabs. */}
@@ -695,6 +705,17 @@ export default function DocumentDetail({
                     onDownloadQr={downloadQr}
                   />
                 )}
+              </TabPanel>
+
+              {/* Beleg-Daten: verankerte Extraktionsvorschläge – anspringen + übernehmen. */}
+              <TabPanel id="belegdaten" active={activeTab}>
+                <StudioExtractionPanel
+                  documentId={id}
+                  onJump={(t: HighlightTarget) =>
+                    setHighlight({ page: t.page, bbox: t.bbox, nonce: highlightNonce.current++ })
+                  }
+                  onApplied={() => setRefresh((r) => r + 1)}
+                />
               </TabPanel>
 
               {/* Briefing: Copilot-Übersicht mit Risiken, Aktionen und Beziehungen. */}
