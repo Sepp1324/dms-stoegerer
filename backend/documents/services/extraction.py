@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import html
 import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
@@ -16,6 +17,73 @@ from decimal import Decimal, InvalidOperation
 from django.utils import timezone
 
 from documents.models import Document, ExtractionCandidate
+
+# Fenstergröße für die Wort-Verankerung: über wie viele aufeinanderfolgende
+# Layout-Wörter ein Wert höchstens zusammengesetzt sein darf (z. B. eine in
+# 4er-Blöcke getrennte IBAN).
+_ANCHOR_WINDOW = 12
+
+
+def _anchor_norm(s: str) -> str:
+    """Normalisierung fürs Verankern: Diakritika + JEDER Whitespace entfernt, lower.
+
+    Whitespace muss weg, weil ein Wert (IBAN, Betrag mit Währung) im OCR-Layout auf
+    mehrere Wörter verteilt sein kann; verglichen wird die zusammengezogene Form.
+    """
+    decomposed = unicodedata.normalize("NFKD", s or "")
+    return "".join(
+        c
+        for c in decomposed
+        if not unicodedata.combining(c) and not c.isspace()
+    ).lower()
+
+
+def _union_bbox(boxes: list[list[float]]) -> list[float]:
+    return [
+        min(b[0] for b in boxes),
+        min(b[1] for b in boxes),
+        max(b[2] for b in boxes),
+        max(b[3] for b in boxes),
+    ]
+
+
+def _find_bbox(words: list[dict], value: str) -> list[float] | None:
+    """Sucht den Wortkasten (Union) für ``value`` in den Layout-Wörtern einer Seite.
+
+    Ein Wert kann über mehrere aufeinanderfolgende Wörter laufen; gesucht wird das
+    erste Fenster (max. ``_ANCHOR_WINDOW``), dessen zusammengezogener Text den Wert
+    enthält. Best-effort: ohne Treffer ``None`` (der Vorschlag bleibt dann ohne
+    Geometrie, nie ein Fehler).
+    """
+    target = _anchor_norm(value)
+    if not target:
+        return None
+    n = len(words)
+    for start in range(n):
+        acc = ""
+        boxes: list[list[float]] = []
+        for k in range(start, min(start + _ANCHOR_WINDOW, n)):
+            bbox = words[k].get("bbox")
+            if not bbox or len(bbox) < 4:
+                continue
+            acc += _anchor_norm(words[k].get("t") or "")
+            boxes.append([float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])])
+            if target in acc:
+                return _union_bbox(boxes)
+    return None
+
+
+def _anchor_hit(version, page_no, value):
+    """Ermittelt ``(source_version, source_bbox)`` für einen Hit (oder ``(None, None)``)."""
+    if version is None or page_no is None:
+        return None, None
+    layout = version.page_layouts.filter(page_no=page_no).first()
+    if layout is None:
+        return None, None
+    bbox = _find_bbox(layout.words or [], value)
+    if bbox is None:
+        return None, None
+    return version, bbox
 
 
 DATE_RE = re.compile(
@@ -92,6 +160,7 @@ def generate_candidates(document: Document, *, replace_pending: bool = True) -> 
         (item.field, item.normalized_value or item.value)
         for item in document.extraction_candidates.all()
     }
+    version = document.current_version
     hits = _collect_hits(document)
     created = []
     for hit in _best_hits(hits):
@@ -99,6 +168,9 @@ def generate_candidates(document: Document, *, replace_pending: bool = True) -> 
         if signature in existing:
             continue
         existing.add(signature)
+        # Studio-Verankerung (Phase 2): Fundstelle im OCR-Layout der aktuellen
+        # Version. Best-effort – ohne Treffer bleibt der Vorschlag ohne Geometrie.
+        source_version, source_bbox = _anchor_hit(version, hit.page_no, hit.value)
         created.append(
             ExtractionCandidate(
                 document=document,
@@ -109,6 +181,8 @@ def generate_candidates(document: Document, *, replace_pending: bool = True) -> 
                 reason=hit.reason[:255],
                 source="heuristic",
                 source_page=hit.page_no,
+                source_version=source_version,
+                source_bbox=source_bbox,
                 source_snippet=hit.snippet,
                 source_snippet_html=hit.snippet_html,
             )
