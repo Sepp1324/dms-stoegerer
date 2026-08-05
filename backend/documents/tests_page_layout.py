@@ -97,6 +97,39 @@ class ExtractPageLayoutTests(TestCase):
         path.write_bytes(b"%PDF-1.7 kaputt")
         self.assertEqual(page_layout.extract_page_layout(path), [])
 
+    def test_rotierte_seite_wird_ins_anzeige_koordinatensystem_transformiert(self):
+        # /Rotate 90: page.rect liefert getauschte Anzeige-Maße; die Wortkästen
+        # müssen per Rotationsmatrix ins selbe (Anzeige-)System überführt werden,
+        # sonst säße das Overlay verdreht auf der von pdf.js gerenderten Seite.
+        import fitz
+
+        path = self._path("rot90.pdf")
+        doc = fitz.open()
+        page = doc.new_page(width=200, height=300)
+        page.insert_text((20, 40), "TAG")
+        page.set_rotation(90)
+        doc.save(str(path))
+        doc.close()
+
+        pages = page_layout.extract_page_layout(path)
+        self.assertEqual(len(pages), 1)
+        p = pages[0]
+        # 90°-Rotation vertauscht Breite/Höhe (Anzeige-Maße).
+        self.assertEqual((p["width"], p["height"]), (300.0, 200.0))
+
+        # Erwartete Box = Rohkasten * Rotationsmatrix (gerundet) – und NICHT die
+        # un-rotierten Rohkoordinaten.
+        d = fitz.open(str(path))
+        raw = d[0].get_text("words")[0]
+        r = fitz.Rect(raw[:4]) * d[0].rotation_matrix
+        r.normalize()
+        d.close()
+        expected = [round(r.x0, 2), round(r.y0, 2), round(r.x1, 2), round(r.y1, 2)]
+        self.assertEqual(p["words"][0]["bbox"], expected)
+        self.assertNotEqual(
+            p["words"][0]["bbox"], [round(float(v), 2) for v in raw[:4]]
+        )
+
     def test_gesamtlimit_wird_seitenuebergreifend_eingehalten(self):
         # Konstanten klein patchen: Gesamt 3, pro Seite 2. Zwei Seiten mit je 2
         # Wörtern dürfen zusammen NICHT über 3 kommen (Seite 1 → 2, Seite 2 → 1).

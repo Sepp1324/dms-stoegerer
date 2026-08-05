@@ -106,7 +106,15 @@ def extract_page_layout(path: str | Path) -> list[dict]:
             if total >= MAX_WORDS_TOTAL:
                 break
             try:
+                # ``page.rect`` liefert bereits die ANZEIGE-Maße: bei /Rotate 90/270
+                # sind Breite/Höhe vertauscht – deckungsgleich mit dem, was pdf.js
+                # (react-pdf) rendert.
                 rect = page.rect
+                # ``get_text("words")`` liefert die Kästen dagegen im UN-rotierten
+                # System. Damit die Boxen zu den rotierten Anzeige-Maßen passen, wird
+                # jeder Kasten mit der Rotationsmatrix ins Anzeige-System überführt
+                # (bei 0° ist das die Identität → kein Effekt).
+                rmat = page.rotation_matrix
                 # get_text("words") -> (x0, y0, x1, y1, wort, block, line, word_no)
                 raw = page.get_text("words") or []
             except SoftTimeLimitExceeded:
@@ -126,14 +134,16 @@ def extract_page_layout(path: str | Path) -> list[dict]:
                 text = str(w[4] or "").strip()
                 if not text:
                     continue
+                box = fitz.Rect(w[0], w[1], w[2], w[3]) * rmat
+                box.normalize()  # Rotation kann Ecken tauschen → x0<=x1, y0<=y1
                 words.append(
                     {
                         "t": text,
                         "bbox": [
-                            round(float(w[0]), 2),
-                            round(float(w[1]), 2),
-                            round(float(w[2]), 2),
-                            round(float(w[3]), 2),
+                            round(float(box.x0), 2),
+                            round(float(box.y0), 2),
+                            round(float(box.x1), 2),
+                            round(float(box.y1), 2),
                         ],
                     }
                 )
