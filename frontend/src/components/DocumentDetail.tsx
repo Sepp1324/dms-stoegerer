@@ -19,6 +19,7 @@ import {
   submitDocument,
   suggestDocument,
   updateDocument,
+  dismissExtractionCandidate,
   type CustomField,
   type DocumentDetail as Detail,
   type DocumentIntegrity,
@@ -715,6 +716,18 @@ export default function DocumentDetail({
                     setHighlight({ page: t.page, bbox: t.bbox, nonce: highlightNonce.current++ })
                   }
                   onApplied={() => setRefresh((r) => r + 1)}
+                  customFields={canEdit ? customFields : undefined}
+                  onAdoptToField={async (c, fieldId) => {
+                    // Wert ins gewählte Zusatzfeld schreiben (normalisiert, wenn
+                    // vorhanden) und den erledigten Vorschlag verwerfen.
+                    await updateDocument(id, {
+                      custom_field_values: [
+                        { field: fieldId, value: c.normalized_value || c.value },
+                      ],
+                    });
+                    await dismissExtractionCandidate(id, c.id);
+                    setRefresh((r) => r + 1);
+                  }}
                 />
               </TabPanel>
 

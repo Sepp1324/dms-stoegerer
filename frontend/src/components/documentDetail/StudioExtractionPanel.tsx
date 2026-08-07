@@ -21,10 +21,16 @@ export function StudioExtractionPanel({
   documentId,
   onJump,
   onApplied,
+  customFields,
+  onAdoptToField,
 }: {
   documentId: number;
   onJump: (target: HighlightTarget) => void;
   onApplied?: () => void;
+  // Zusatzfelder des Dokuments + Handler, um einen Vorschlag als Zusatzfeld-Wert zu
+  // übernehmen (statt in das feste Standardfeld). Optional – ohne bleibt nur „Übernehmen".
+  customFields?: { id: number; name: string }[];
+  onAdoptToField?: (c: ExtractionCandidate, fieldId: number) => Promise<void>;
 }) {
   const [candidates, setCandidates] = useState<ExtractionCandidate[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -71,6 +77,20 @@ export function StudioExtractionPanel({
       remove(c.id);
     } catch {
       setError("Verwerfen fehlgeschlagen.");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const adoptToField = async (c: ExtractionCandidate, fieldId: number) => {
+    if (!onAdoptToField) return;
+    setBusyId(c.id);
+    setError(null);
+    try {
+      await onAdoptToField(c, fieldId);
+      remove(c.id);
+    } catch {
+      setError("Übernahme ins Zusatzfeld fehlgeschlagen.");
     } finally {
       setBusyId(null);
     }
@@ -143,6 +163,25 @@ export function StudioExtractionPanel({
               >
                 Verwerfen
               </button>
+              {onAdoptToField && customFields && customFields.length > 0 && (
+                <select
+                  className="studio-extract__tofield"
+                  aria-label={`„${c.value}" in Zusatzfeld übernehmen`}
+                  value=""
+                  disabled={busyId === c.id}
+                  onChange={(e) => {
+                    const fieldId = Number(e.target.value);
+                    if (fieldId) adoptToField(c, fieldId);
+                  }}
+                >
+                  <option value="">In Zusatzfeld …</option>
+                  {customFields.map((f) => (
+                    <option key={f.id} value={f.id}>
+                      {f.name}
+                    </option>
+                  ))}
+                </select>
+              )}
             </div>
           </li>
         ))}
