@@ -409,10 +409,10 @@ class ExtractionAnchorFieldTests(TestCase):
             source_version=self.version,
             source_bbox=[1, 1, 2, 2],
         )
-        # Mit Version: Box wird ausgeliefert.
-        self.assertEqual(
-            ExtractionCandidateSerializer(cand).data["source_bbox"], [1, 1, 2, 2]
-        )
+        # Mit Version: Box wird ausgeliefert, samt fachlicher Versionsnummer.
+        data = ExtractionCandidateSerializer(cand).data
+        self.assertEqual(data["source_bbox"], [1, 1, 2, 2])
+        self.assertEqual(data["source_version_no"], self.version.version_no)
         # Version gelöscht (SET_NULL) → Box in DB bleibt, API liefert aber null.
         self.version.delete()
         cand.refresh_from_db()
