@@ -1206,6 +1206,17 @@ class DocumentHighlight(models.Model):
     document = models.ForeignKey(
         Document, on_delete=models.CASCADE, related_name="highlights"
     )
+    # An eine konkrete Version gebunden: die Koordinaten gelten NUR für deren
+    # PDF-Fassung (eine neue Version kann andere Seiten/Geometrie haben). CASCADE:
+    # verschwindet die Version, ist die Markierung bezuglos. ``null`` nur für den
+    # (leeren) Altbestand vor dieser Migration – neue Markierungen tragen immer eine.
+    version = models.ForeignKey(
+        "DocumentVersion",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="highlights",
+    )
     page_no = models.PositiveIntegerField()
     # [x0, y0, x1, y1] in PDF-Punkten (Anzeige-System der Seite).
     bbox = models.JSONField()
