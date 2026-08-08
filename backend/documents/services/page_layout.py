@@ -75,30 +75,47 @@ def search_layout(version, query: str, *, limit: int = MAX_SEARCH_HITS):
                 truncated = True
                 break
             acc = ""
-            boxes: list[list[float]] = []
             hit_end = -1
             # Fenster aufeinanderfolgender Wörter zusammenziehen, bis der Suchbegriff
             # enthalten ist (max. _SEARCH_WINDOW Wörter).
             for k in range(i, min(i + _SEARCH_WINDOW, n)):
-                bbox = words[k].get("bbox")
-                if bbox and len(bbox) >= 4:
-                    boxes.append([float(b) for b in bbox[:4]])
                 acc += _search_norm(words[k].get("t") or "")
                 if target in acc:
                     hit_end = k
                     break
-            if hit_end >= 0 and boxes:
-                matches.append(
-                    {
-                        "page_no": layout.page_no,
-                        "width": layout.width,
-                        "height": layout.height,
-                        "bbox": _union_bbox(boxes),
-                        "t": " ".join(
-                            str(words[j].get("t") or "") for j in range(i, hit_end + 1)
-                        ).strip(),
-                    }
-                )
+            if hit_end >= 0:
+                # Fenster nach LINKS trimmen: führende Wörter weglassen, die nicht zum
+                # Treffer gehören (sonst würde „betrag" ab „Rechnung Betrag" matchen und
+                # eine zu große Box liefern). Kleinstes Fenster [start..hit_end], das den
+                # Begriff noch enthält.
+                start = i
+                while start < hit_end:
+                    sub = "".join(
+                        _search_norm(words[m].get("t") or "")
+                        for m in range(start + 1, hit_end + 1)
+                    )
+                    if target in sub:
+                        start += 1
+                    else:
+                        break
+                boxes = [
+                    [float(b) for b in words[m]["bbox"][:4]]
+                    for m in range(start, hit_end + 1)
+                    if words[m].get("bbox") and len(words[m]["bbox"]) >= 4
+                ]
+                if boxes:
+                    matches.append(
+                        {
+                            "page_no": layout.page_no,
+                            "width": layout.width,
+                            "height": layout.height,
+                            "bbox": _union_bbox(boxes),
+                            "t": " ".join(
+                                str(words[m].get("t") or "")
+                                for m in range(start, hit_end + 1)
+                            ).strip(),
+                        }
+                    )
                 i = hit_end + 1  # weiter HINTER dem Treffer (keine Überlappung)
             else:
                 i += 1
