@@ -121,6 +121,7 @@ from .models import (
     DocumentEntity,
     DocumentFolder,
     DocumentReminder,
+    DocumentHighlight,
     DocumentReviewTask,
     DocumentShareLink,
     DocumentType,
@@ -154,6 +155,7 @@ from .serializers import (
     DocumentTypeSerializer,
     DocumentVersionSerializer,
     DocumentEntitySerializer,
+    DocumentHighlightSerializer,
     EntityRelationSerializer,
     ExtractionCandidateSerializer,
     KnowledgeEntitySerializer,
@@ -1682,6 +1684,12 @@ class DocumentViewSet(viewsets.ModelViewSet):
             "retrieve",
             "preview",
             "page_layout",
+            "highlights",
+            # Markierungen sind separate, nutzereigene Anzeige-Daten: ein Haushalts-
+            # mitglied darf auf einem GETEILTEN Beleg seine EIGENE Markierung anlegen
+            # und löschen. Die Sichtbarkeit wird hier erweitert; die Autorisierung
+            # (nur Ersteller/Admin darf löschen) macht der Guard in delete_highlight.
+            "delete_highlight",
             "download",
             "thumbnail",
             "similar",
@@ -2037,6 +2045,78 @@ class DocumentViewSet(viewsets.ModelViewSet):
             ).values("page_no", "width", "height", "word_count")
         ]
         return Response(base)
+
+    @action(detail=True, methods=["get", "post"], url_path="highlights")
+    def highlights(self, request, pk=None):
+        """Positions-verankerte Markierungen/Notizen eines Belegs listen/anlegen.
+
+        GET ist lesend und über ``get_object()`` owner-/haushalt-gescoped (Action ist
+        in ``SAFE_READ_ACTIONS``). POST legt eine Markierung an – Schreibvorgang, daher
+        ``can_write``-Guard; ``document``/``created_by`` werden serverseitig gesetzt
+        (nie aus dem Request). Reine, abgeleitete Anzeige-Daten – das WORM-Original
+        bleibt unberührt.
+        """
+        document = self.get_object()
+        if request.method == "POST":
+            if not request.user.can_write:
+                return Response(
+                    {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            serializer = DocumentHighlightSerializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            highlight = serializer.save(document=document, created_by=request.user)
+            AuditLogEntry.objects.create(
+                actor=request.user,
+                action="add_highlight",
+                object_type="Document",
+                object_id=str(document.id),
+                detail={"highlight_id": highlight.id, "page_no": highlight.page_no},
+            )
+            return Response(
+                DocumentHighlightSerializer(highlight).data,
+                status=status.HTTP_201_CREATED,
+            )
+
+        highlights = document.highlights.all()
+        return Response(DocumentHighlightSerializer(highlights, many=True).data)
+
+    @action(
+        detail=True,
+        methods=["delete"],
+        url_path=r"highlights/(?P<highlight_id>[0-9]+)",
+    )
+    def delete_highlight(self, request, pk=None, highlight_id=None):
+        """Löscht eine eigene Markierung. Nur der Ersteller oder ein Admin darf das.
+
+        Bewusst nicht owner-des-Dokuments, sondern ERSTELLER: in einem geteilten
+        Haushalt gehört die Markierung dem, der sie gesetzt hat.
+        """
+        if not request.user.can_write:
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        document = self.get_object()
+        highlight = document.highlights.filter(pk=highlight_id).first()
+        if highlight is None:
+            raise Http404("Markierung nicht vorhanden.")
+        is_admin = bool(getattr(request.user, "is_dms_admin", False))
+        if highlight.created_by_id != request.user.id and not is_admin:
+            return Response(
+                {"detail": "Nur der Ersteller darf diese Markierung löschen."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        page_no = highlight.page_no
+        highlight.delete()
+        AuditLogEntry.objects.create(
+            actor=request.user,
+            action="delete_highlight",
+            object_type="Document",
+            object_id=str(document.id),
+            detail={"highlight_id": int(highlight_id), "page_no": page_no},
+        )
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=True, methods=["get"])
     def download(self, request, pk=None):

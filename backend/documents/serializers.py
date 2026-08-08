@@ -14,6 +14,7 @@ from .models import (
     CustomField,
     CustomFieldValue,
     Document,
+    DocumentHighlight,
     Dossier,
     ExtractionCandidate,
     DocumentFolder,
@@ -466,6 +467,61 @@ class CustomFieldValueSerializer(serializers.ModelSerializer):
     class Meta:
         model = CustomFieldValue
         fields = ("field", "value", "field_name", "data_type")
+
+
+class DocumentHighlightSerializer(serializers.ModelSerializer):
+    """Positions-verankerte Markierung/Notiz am Beleg (Studio Phase 2).
+
+    ``bbox`` liegt im Anzeige-Koordinatensystem der Seite (wie ``DocumentPageLayout``).
+    ``document``/``created_by`` werden serverseitig gesetzt, nie aus dem Request.
+    """
+
+    created_by_username = serializers.CharField(
+        source="created_by.username", read_only=True, default=None
+    )
+
+    class Meta:
+        model = DocumentHighlight
+        fields = (
+            "id",
+            "document",
+            "page_no",
+            "bbox",
+            "note",
+            "color",
+            "created_by",
+            "created_by_username",
+            "created_at",
+        )
+        read_only_fields = (
+            "id",
+            "document",
+            "created_by",
+            "created_by_username",
+            "created_at",
+        )
+
+    def validate_bbox(self, value):
+        if (
+            not isinstance(value, (list, tuple))
+            or len(value) != 4
+            or not all(isinstance(n, (int, float)) and not isinstance(n, bool) for n in value)
+        ):
+            raise serializers.ValidationError(
+                "bbox muss [x0, y0, x1, y1] mit vier Zahlen sein."
+            )
+        return [round(float(n), 2) for n in value]
+
+    def validate_page_no(self, value):
+        if value < 1:
+            raise serializers.ValidationError("page_no muss >= 1 sein.")
+        return value
+
+    def validate_note(self, value):
+        # Kommentar mit sinnvoller Obergrenze (die reine Markierung hat leere note).
+        if value and len(value) > 2000:
+            raise serializers.ValidationError("Notiz zu lang (max. 2000 Zeichen).")
+        return value
 
 
 class ExtractionCandidateSerializer(serializers.ModelSerializer):

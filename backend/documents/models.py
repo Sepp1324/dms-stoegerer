@@ -1193,6 +1193,49 @@ class DocumentPageLayout(models.Model):
         return f"{self.version} Seite {self.page_no} ({len(self.words or [])} Wörter)"
 
 
+class DocumentHighlight(models.Model):
+    """Vom Nutzer gesetzte Markierung/Notiz an einer Stelle im Beleg (Studio Phase 2).
+
+    Separate, abgeleitete Anzeige-Daten – das WORM-Original bleibt unangetastet.
+    ``bbox`` liegt im ANZEIGE-Koordinatensystem der Seite (PDF-Punkte, Ursprung
+    oben-links; identisch zu ``DocumentPageLayout``), damit das Frontend die
+    Markierung deckungsgleich über die gerenderte Seite legen kann. ``note`` ist
+    optional (reine Markierung vs. Kommentar).
+    """
+
+    document = models.ForeignKey(
+        Document, on_delete=models.CASCADE, related_name="highlights"
+    )
+    page_no = models.PositiveIntegerField()
+    # [x0, y0, x1, y1] in PDF-Punkten (Anzeige-System der Seite).
+    bbox = models.JSONField()
+    note = models.TextField(blank=True)
+    # Optionale Farbmarkierung (freie, kurze Kennung; das Frontend mappt auf Stile).
+    color = models.CharField(max_length=16, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Markierung"
+        verbose_name_plural = "Markierungen"
+        ordering = ["document_id", "page_no", "created_at"]
+        indexes = [
+            models.Index(
+                fields=["document", "page_no"],
+                name="documents_hl_doc_page_idx",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"Markierung {self.document_id} Seite {self.page_no}"
+
+
 class ExtractionCandidate(models.Model):
     """Smart-Inbox-Vorschlag für ein extrahiertes Strukturdatum."""
 
