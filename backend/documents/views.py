@@ -496,6 +496,32 @@ def _get_or_create_ci(model, name, **extra):
     return obj
 
 
+def _validate_highlight_geometry(version, page_no, bbox):
+    """Prüft Seite + Box einer Markierung gegen die Version (und deren Layout).
+
+    Gibt eine Fehlermeldung (str) oder ``None`` zurück. Seite muss innerhalb der
+    Seitenzahl liegen; existiert ein OCR-Layout der Seite, muss die Box in dessen
+    Anzeige-Maßen liegen (mit kleiner Toleranz gegen Rundung). Ohne Layout (z. B.
+    Bild-Scan) wird nur die Seitenzahl geprüft.
+    """
+    if version.page_count and page_no > version.page_count:
+        return f"Seite {page_no} liegt außerhalb des Dokuments ({version.page_count} Seiten)."
+    layout = version.page_layouts.filter(page_no=page_no).first()
+    if layout is not None:
+        tol = 1.0
+        x0, y0, x1, y1 = bbox
+        if (
+            x0 < -tol
+            or y0 < -tol
+            or x1 > layout.width + tol
+            or y1 > layout.height + tol
+            or x0 > x1
+            or y0 > y1
+        ):
+            return "Markierung liegt außerhalb der Seite."
+    return None
+
+
 def _parse_iso_date(raw):
     """Parst ein striktes ISO-Datum (``YYYY-MM-DD``) zu tz-awarem 00:00 Uhr UTC.
 
@@ -1684,12 +1710,11 @@ class DocumentViewSet(viewsets.ModelViewSet):
             "retrieve",
             "preview",
             "page_layout",
+            # Markierungen LESEN darf der Haushalt (Read-only-Freigabe). Anlegen ist
+            # dagegen owner-only – erzwungen durch einen expliziten Owner-Guard im
+            # POST-Zweig, NICHT über das Queryset. ``delete_highlight`` steht bewusst
+            # NICHT hier: Löschen bleibt strikt owner-/admin-scoped (get_object).
             "highlights",
-            # Markierungen sind separate, nutzereigene Anzeige-Daten: ein Haushalts-
-            # mitglied darf auf einem GETEILTEN Beleg seine EIGENE Markierung anlegen
-            # und löschen. Die Sichtbarkeit wird hier erweitert; die Autorisierung
-            # (nur Ersteller/Admin darf löschen) macht der Guard in delete_highlight.
-            "delete_highlight",
             "download",
             "thumbnail",
             "similar",
@@ -2050,35 +2075,62 @@ class DocumentViewSet(viewsets.ModelViewSet):
     def highlights(self, request, pk=None):
         """Positions-verankerte Markierungen/Notizen eines Belegs listen/anlegen.
 
-        GET ist lesend und über ``get_object()`` owner-/haushalt-gescoped (Action ist
-        in ``SAFE_READ_ACTIONS``). POST legt eine Markierung an – Schreibvorgang, daher
-        ``can_write``-Guard; ``document``/``created_by`` werden serverseitig gesetzt
-        (nie aus dem Request). Reine, abgeleitete Anzeige-Daten – das WORM-Original
-        bleibt unberührt.
+        Immer an eine konkrete Version gebunden (``?version=<nr>``, sonst die
+        aktuelle) – die Koordinaten gelten nur für DEREN PDF-Fassung.
+
+        GET ist lesend und für den Haushalt sichtbar (Read-only-Freigabe), gefiltert
+        auf die aufgelöste Version. POST ist dagegen OWNER-ONLY: der Haushalt hat auf
+        fremden Belegen nur Lesezugriff – ein expliziter Owner-Guard erzwingt das
+        (das Queryset ist für die Read-Action bewusst weiter). ``document``/
+        ``version``/``created_by`` werden serverseitig gesetzt, nie aus dem Request.
+        Seite und Geometrie werden gegen das Layout der Version validiert.
         """
         document = self.get_object()
+        version = self._resolve_version(document)
+        if version is None:
+            raise Http404("Keine Version vorhanden.")
+
         if request.method == "POST":
             if not request.user.can_write:
                 return Response(
                     {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
                     status=status.HTTP_403_FORBIDDEN,
                 )
+            is_admin = bool(getattr(request.user, "is_dms_admin", False))
+            if document.owner_id != request.user.id and not is_admin:
+                # Haushalts-Freigabe ist Read-only: nur der Eigentümer (oder Admin)
+                # darf Markierungen setzen.
+                return Response(
+                    {"detail": "Markierungen darf nur der Eigentümer anlegen."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
             serializer = DocumentHighlightSerializer(data=request.data)
             serializer.is_valid(raise_exception=True)
-            highlight = serializer.save(document=document, created_by=request.user)
+            page_no = serializer.validated_data["page_no"]
+            bbox = serializer.validated_data["bbox"]
+            error = _validate_highlight_geometry(version, page_no, bbox)
+            if error:
+                return Response({"detail": error}, status=status.HTTP_400_BAD_REQUEST)
+            highlight = serializer.save(
+                document=document, version=version, created_by=request.user
+            )
             AuditLogEntry.objects.create(
                 actor=request.user,
                 action="add_highlight",
                 object_type="Document",
                 object_id=str(document.id),
-                detail={"highlight_id": highlight.id, "page_no": highlight.page_no},
+                detail={
+                    "highlight_id": highlight.id,
+                    "version_no": version.version_no,
+                    "page_no": highlight.page_no,
+                },
             )
             return Response(
                 DocumentHighlightSerializer(highlight).data,
                 status=status.HTTP_201_CREATED,
             )
 
-        highlights = document.highlights.all()
+        highlights = document.highlights.filter(version=version)
         return Response(DocumentHighlightSerializer(highlights, many=True).data)
 
     @action(
