@@ -30,6 +30,7 @@ class Command(BaseCommand):
 
         indexed = 0
         skipped = 0
+        cleared = 0
         for version in qs.iterator():
             # Zentrale Fallback-Kette Archiv -> Original (nicht blind
             # ``archive_path or file_path``): ist das Archiv gesetzt, aber
@@ -37,14 +38,23 @@ class Command(BaseCommand):
             # Original. Für Nicht-PDFs/defekte Dateien liefert der Service leer.
             source = pipeline.resolve_readable_version_path(version) or version.file_path
             pages = page_layout.extract_page_layout(source)
+            if not pages:
+                # DATENSCHUTZ (P2): Eine leere Extraktion NICHT blind schreiben – sonst
+                # löschte ``write_page_layout`` ein bestehendes Layout. Ist die Quelle
+                # nur vorübergehend nicht erreichbar (z. B. NFS-Ausfall), wischte ein
+                # ``--all``-Lauf sonst alle Studio-Daten weg. Wir überspringen und
+                # lassen den Bestand unangetastet.
+                skipped += 1
+                continue
             count = page_layout.write_page_layout(version, pages)
             if count:
                 indexed += 1
             else:
-                skipped += 1
+                cleared += 1
 
         self.stdout.write(
             self.style.SUCCESS(
-                f"Fertig: {indexed} Versionen mit Layout, {skipped} übersprungen."
+                f"Fertig: {indexed} Versionen mit Layout, {skipped} übersprungen "
+                f"(kein/unerreichbares Layout, Bestand unangetastet), {cleared} geleert."
             )
         )
