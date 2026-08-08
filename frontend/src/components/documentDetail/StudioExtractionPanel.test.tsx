@@ -24,6 +24,7 @@ const cand = (over: Record<string, unknown>) => ({
   source: "heuristic",
   source_page: 1,
   source_version: 3,
+  source_version_no: 2,
   source_bbox: [10, 20, 30, 40],
   source_snippet: "",
   source_snippet_html: "",
@@ -55,7 +56,11 @@ describe("StudioExtractionPanel", () => {
     expect(jumpButtons).toHaveLength(1);
 
     fireEvent.click(jumpButtons[0]);
-    expect(onJump).toHaveBeenCalledWith({ page: 1, bbox: [10, 20, 30, 40] });
+    expect(onJump).toHaveBeenCalledWith({
+      page: 1,
+      bbox: [10, 20, 30, 40],
+      versionNo: 2,
+    });
   });
 
   it("übernimmt einen Vorschlag und entfernt ihn", async () => {

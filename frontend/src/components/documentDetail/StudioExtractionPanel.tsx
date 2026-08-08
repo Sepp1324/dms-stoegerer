@@ -10,6 +10,9 @@ import {
 export interface HighlightTarget {
   page: number;
   bbox: [number, number, number, number];
+  // Fachliche Nummer der Quellversion: die Vorschau muss auf DIESE Version stellen,
+  // damit die bbox zur gerenderten Seite passt.
+  versionNo: number | null;
 }
 
 // Beleg-Daten-Panel des Dokument-Studios (Phase 2, Slice 3b): zeigt die
@@ -142,6 +145,7 @@ export function StudioExtractionPanel({
                     onJump({
                       page: c.source_page as number,
                       bbox: c.source_bbox as [number, number, number, number],
+                      versionNo: c.source_version_no,
                     })
                   }
                 >
