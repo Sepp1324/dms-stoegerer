@@ -32,7 +32,7 @@ export function StudioExtractionPanel({
   onApplied?: () => void;
   // Zusatzfelder des Dokuments + Handler, um einen Vorschlag als Zusatzfeld-Wert zu
   // übernehmen (statt in das feste Standardfeld). Optional – ohne bleibt nur „Übernehmen".
-  customFields?: { id: number; name: string }[];
+  customFields?: { id: number; name: string; data_type: string }[];
   onAdoptToField?: (c: ExtractionCandidate, fieldId: number) => Promise<void>;
 }) {
   const [candidates, setCandidates] = useState<ExtractionCandidate[] | null>(null);
@@ -104,6 +104,21 @@ export function StudioExtractionPanel({
     Array.isArray(c.source_bbox) &&
     c.source_bbox.length === 4;
 
+  // Welche Zusatzfeld-Typen zu welchem Kandidatenfeld passen (spiegelt die
+  // serverseitige Typprüfung: keine IBAN in ein Zahlenfeld, kein Betrag in ein
+  // Datumsfeld). Nur kompatible Felder werden zur Übernahme angeboten.
+  const ACCEPT: Record<string, string[]> = {
+    amount: ["currency", "number", "text"],
+    document_date: ["date", "text"],
+    iban: ["text"],
+    contract_number: ["text"],
+    policy_number: ["text"],
+  };
+  const compatibleFields = (c: ExtractionCandidate) => {
+    const ok = ACCEPT[c.field] ?? ["text"];
+    return (customFields ?? []).filter((f) => ok.includes(f.data_type));
+  };
+
   if (error && !candidates) {
     return <p className="status status--warn">{error}</p>;
   }
@@ -167,7 +182,7 @@ export function StudioExtractionPanel({
               >
                 Verwerfen
               </button>
-              {onAdoptToField && customFields && customFields.length > 0 && (
+              {onAdoptToField && compatibleFields(c).length > 0 && (
                 <select
                   className="studio-extract__tofield"
                   aria-label={`„${c.value}" in Zusatzfeld übernehmen`}
@@ -179,7 +194,7 @@ export function StudioExtractionPanel({
                   }}
                 >
                   <option value="">In Zusatzfeld …</option>
-                  {customFields.map((f) => (
+                  {compatibleFields(c).map((f) => (
                     <option key={f.id} value={f.id}>
                       {f.name}
                     </option>

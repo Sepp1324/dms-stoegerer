@@ -1,9 +1,53 @@
 import string
+from datetime import date as _date
+from decimal import Decimal, InvalidOperation
 
 from django.db import transaction
 from rest_framework import serializers
 
 from . import regex_safe
+
+
+def validate_custom_field_value(data_type: str, raw) -> str:
+    """Zentrale Typprüfung/Normalisierung eines Zusatzfeld-Werts gegen ``data_type``.
+
+    Gibt den (ggf. normalisierten) Stringwert zurück oder wirft ``ValidationError``.
+    So kann kein Betrag in ein Datumsfeld und keine IBAN in ein Zahlenfeld gelangen –
+    egal ob über PATCH oder die Kandidaten-Übernahme. Leerer Wert = Feld leeren (ok).
+    """
+    value = "" if raw is None else str(raw).strip()
+    if not value:
+        return ""
+    if data_type in ("number", "currency"):
+        norm = "".join(value.split())  # jeglichen Whitespace entfernen
+        # Deutsches Dezimalkomma tolerieren (nur wenn kein Punkt vorhanden ist).
+        if norm.count(",") == 1 and "." not in norm:
+            norm = norm.replace(",", ".")
+        try:
+            Decimal(norm)
+        except (InvalidOperation, ValueError):
+            raise serializers.ValidationError(
+                f"„{value}“ ist keine gültige Zahl für dieses Zusatzfeld."
+            )
+        return norm
+    if data_type == "date":
+        try:
+            _date.fromisoformat(value)
+        except ValueError:
+            raise serializers.ValidationError(
+                f"„{value}“ ist kein gültiges Datum (Format YYYY-MM-DD)."
+            )
+        return value
+    if data_type == "boolean":
+        low = value.lower()
+        if low in {"true", "1", "ja", "yes", "wahr"}:
+            return "true"
+        if low in {"false", "0", "nein", "no", "falsch"}:
+            return "false"
+        raise serializers.ValidationError(
+            f"„{value}“ ist kein gültiger Ja/Nein-Wert."
+        )
+    return value  # text: unverändert
 from .models import (
     AuditLogEntry,
     CaseFile,
@@ -1533,10 +1577,14 @@ class DocumentSerializer(serializers.ModelSerializer):
         nicht genannte bestehende Werte bleiben erhalten (Upsert, kein Replace).
         """
         for item in values:
+            field = item["field"]
+            value = validate_custom_field_value(
+                field.data_type, item.get("value", "")
+            )
             CustomFieldValue.objects.update_or_create(
                 document=document,
-                field=item["field"],
-                defaults={"value": item.get("value", "")},
+                field=field,
+                defaults={"value": value},
             )
 
     def create(self, validated_data):

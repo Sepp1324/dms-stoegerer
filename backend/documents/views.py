@@ -138,6 +138,7 @@ from .models import (
     Workflow,
 )
 from .serializers import (
+    validate_custom_field_value,
     AuditLogEntrySerializer,
     CaseFileCandidateSerializer,
     CaseFileSerializer,
@@ -2651,9 +2652,9 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 detail={"created": created},
             )
 
-        candidates = document.extraction_candidates.order_by(
-            "status", "field", "-confidence", "source_page"
-        )
+        candidates = document.extraction_candidates.select_related(
+            "source_version"
+        ).order_by("status", "field", "-confidence", "source_page")
         return Response(ExtractionCandidateSerializer(candidates, many=True).data)
 
     def _get_candidate(self, document, candidate_id):
@@ -2842,7 +2843,17 @@ class DocumentViewSet(viewsets.ModelViewSet):
                     {"detail": "Zusatzfeld nicht vorhanden."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-            value = candidate.normalized_value or candidate.value
+            # Zentrale Typprüfung: eine IBAN darf nicht in ein Zahlenfeld, ein Betrag
+            # nicht in ein Datumsfeld. Passt der Wert nicht zum data_type → 400, KEIN
+            # Schreiben/Statuswechsel (die Transaktion rollt zurück).
+            raw_value = candidate.normalized_value or candidate.value
+            try:
+                value = validate_custom_field_value(custom_field.data_type, raw_value)
+            except serializers.ValidationError as exc:
+                detail = exc.detail
+                if isinstance(detail, list) and detail:
+                    detail = detail[0]
+                return Response({"detail": detail}, status=status.HTTP_400_BAD_REQUEST)
             CustomFieldValue.objects.update_or_create(
                 document=document,
                 field=custom_field,
@@ -2914,7 +2925,9 @@ class DocumentViewSet(viewsets.ModelViewSet):
             .prefetch_related(
                 Prefetch(
                     "extraction_candidates",
-                    queryset=ExtractionCandidate.objects.order_by(
+                    queryset=ExtractionCandidate.objects.select_related(
+                        "source_version"
+                    ).order_by(
                         "status", "field", "-confidence", "source_page"
                     ),
                 ),

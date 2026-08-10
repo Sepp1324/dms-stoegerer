@@ -55,6 +55,31 @@ class ApplyToFieldTests(APITestCase):
         self.assertEqual(self.cand.status, ExtractionCandidate.Status.PENDING)
         self.assertFalse(CustomFieldValue.objects.filter(document=self.doc).exists())
 
+    def test_iban_in_zahlenfeld_400_kein_write(self):
+        # Typprüfung: eine IBAN darf NICHT in ein Zahlenfeld.
+        num = CustomField.objects.create(name="Betrag", data_type="number")
+        self.client.force_authenticate(self.user)
+        resp = self.client.post(self._url(self.cand.id), {"field": num.id}, format="json")
+        self.assertEqual(resp.status_code, 400)
+        self.cand.refresh_from_db()
+        self.assertEqual(self.cand.status, ExtractionCandidate.Status.PENDING)
+        self.assertFalse(CustomFieldValue.objects.filter(field=num).exists())
+
+    def test_betrag_in_zahlenfeld_ok(self):
+        num = CustomField.objects.create(name="Summe", data_type="number")
+        cand = ExtractionCandidate.objects.create(
+            document=self.doc,
+            field=ExtractionCandidate.Field.AMOUNT,
+            value="42,00 EUR",
+            normalized_value="42.00",
+        )
+        self.client.force_authenticate(self.user)
+        resp = self.client.post(self._url(cand.id), {"field": num.id}, format="json")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(
+            CustomFieldValue.objects.get(document=self.doc, field=num).value, "42.00"
+        )
+
     def test_fehlende_feld_id_400(self):
         self.client.force_authenticate(self.user)
         self.assertEqual(
@@ -73,3 +98,15 @@ class ApplyToFieldTests(APITestCase):
         self.client.force_authenticate(self.guest)
         resp = self.client.post(self._url(self.cand.id), {"field": self.field.id}, format="json")
         self.assertEqual(resp.status_code, 403)
+
+    def test_patch_zahlenfeld_lehnt_text_ab(self):
+        # Die zentrale Typprüfung greift auch beim regulären PATCH.
+        num = CustomField.objects.create(name="Zahl", data_type="number")
+        self.client.force_authenticate(self.user)
+        resp = self.client.patch(
+            f"/api/documents/{self.doc.id}/",
+            {"custom_field_values": [{"field": num.id, "value": "keine zahl"}]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertFalse(CustomFieldValue.objects.filter(field=num).exists())
