@@ -104,7 +104,7 @@ describe("StudioExtractionPanel", () => {
       <StudioExtractionPanel
         documentId={7}
         onJump={vi.fn()}
-        customFields={[{ id: 11, name: "Betrag brutto" }]}
+        customFields={[{ id: 11, name: "Betrag brutto", data_type: "currency" }]}
         onAdoptToField={onAdoptToField}
       />,
     );
@@ -125,6 +125,21 @@ describe("StudioExtractionPanel", () => {
   it("zeigt kein Zusatzfeld-Select ohne Felder/Handler", async () => {
     getExtractionCandidates.mockResolvedValue([cand({ id: 4 })]);
     render(<StudioExtractionPanel documentId={7} onJump={vi.fn()} />);
+    await waitFor(() => expect(screen.getByText("42,00 EUR")).toBeInTheDocument());
+    expect(screen.queryByRole("combobox")).toBeNull();
+  });
+
+  it("bietet nur typkompatible Zusatzfelder an", async () => {
+    // amount-Kandidat + nur ein Datumsfeld → kein Select (inkompatibel).
+    getExtractionCandidates.mockResolvedValue([cand({ id: 6, field: "amount" })]);
+    render(
+      <StudioExtractionPanel
+        documentId={7}
+        onJump={vi.fn()}
+        customFields={[{ id: 20, name: "Belegdatum", data_type: "date" }]}
+        onAdoptToField={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
     await waitFor(() => expect(screen.getByText("42,00 EUR")).toBeInTheDocument());
     expect(screen.queryByRole("combobox")).toBeNull();
   });
