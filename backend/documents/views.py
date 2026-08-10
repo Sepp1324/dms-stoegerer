@@ -2111,26 +2111,32 @@ class DocumentViewSet(viewsets.ModelViewSet):
             error = _validate_highlight_geometry(version, page_no, bbox)
             if error:
                 return Response({"detail": error}, status=status.HTTP_400_BAD_REQUEST)
-            highlight = serializer.save(
-                document=document, version=version, created_by=request.user
-            )
-            AuditLogEntry.objects.create(
-                actor=request.user,
-                action="add_highlight",
-                object_type="Document",
-                object_id=str(document.id),
-                detail={
-                    "highlight_id": highlight.id,
-                    "version_no": version.version_no,
-                    "page_no": highlight.page_no,
-                },
-            )
+            # Markierung + Audit atomar: scheitert das Audit, darf keine
+            # unprotokollierte Markierung zurückbleiben (der Client sähe 500).
+            with transaction.atomic():
+                highlight = serializer.save(
+                    document=document, version=version, created_by=request.user
+                )
+                AuditLogEntry.objects.create(
+                    actor=request.user,
+                    action="add_highlight",
+                    object_type="Document",
+                    object_id=str(document.id),
+                    detail={
+                        "highlight_id": highlight.id,
+                        "version_no": version.version_no,
+                        "page_no": highlight.page_no,
+                    },
+                )
             return Response(
                 DocumentHighlightSerializer(highlight).data,
                 status=status.HTTP_201_CREATED,
             )
 
-        highlights = document.highlights.filter(version=version)
+        # select_related gegen N+1: version_no/created_by_username je Zeile.
+        highlights = document.highlights.filter(version=version).select_related(
+            "version", "created_by"
+        )
         return Response(DocumentHighlightSerializer(highlights, many=True).data)
 
     @action(
@@ -2160,14 +2166,17 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN,
             )
         page_no = highlight.page_no
-        highlight.delete()
-        AuditLogEntry.objects.create(
-            actor=request.user,
-            action="delete_highlight",
-            object_type="Document",
-            object_id=str(document.id),
-            detail={"highlight_id": int(highlight_id), "page_no": page_no},
-        )
+        # Löschen + Audit atomar: sonst bliebe bei einem Audit-Fehler eine gelöschte,
+        # aber nicht protokollierte Markierung zurück.
+        with transaction.atomic():
+            highlight.delete()
+            AuditLogEntry.objects.create(
+                actor=request.user,
+                action="delete_highlight",
+                object_type="Document",
+                object_id=str(document.id),
+                detail={"highlight_id": int(highlight_id), "page_no": page_no},
+            )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=True, methods=["get"])

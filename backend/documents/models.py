@@ -1208,13 +1208,12 @@ class DocumentHighlight(models.Model):
     )
     # An eine konkrete Version gebunden: die Koordinaten gelten NUR für deren
     # PDF-Fassung (eine neue Version kann andere Seiten/Geometrie haben). CASCADE:
-    # verschwindet die Version, ist die Markierung bezuglos. ``null`` nur für den
-    # (leeren) Altbestand vor dieser Migration – neue Markierungen tragen immer eine.
+    # verschwindet die Version, ist die Markierung bezuglos. Pflichtfeld – der
+    # Altbestand wird in der Datenmigration auf current_version gesetzt (Migration
+    # 0074), danach ist ``null=False`` sicher.
     version = models.ForeignKey(
         "DocumentVersion",
         on_delete=models.CASCADE,
-        null=True,
-        blank=True,
         related_name="highlights",
     )
     page_no = models.PositiveIntegerField()

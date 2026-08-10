@@ -62,6 +62,20 @@ class HighlightTests(APITestCase):
         payload = {"page_no": 1, "bbox": [10, 20, 30, 40], "note": "Hallo", **over}
         return self.client.post(self._url(doc), payload, format="json")
 
+    def test_audit_fehler_rollt_markierung_zurueck(self):
+        # Atomar: schlägt der Audit-Eintrag fehl, darf keine Markierung zurückbleiben.
+        from unittest.mock import patch
+
+        from documents.models import AuditLogEntry, DocumentHighlight
+
+        self.client.force_authenticate(self.alice)
+        with patch.object(
+            AuditLogEntry.objects, "create", side_effect=RuntimeError("boom")
+        ):
+            with self.assertRaises(RuntimeError):
+                self._create(self.shared)
+        self.assertEqual(DocumentHighlight.objects.count(), 0)
+
     def test_owner_legt_an_versiongebunden_und_liest(self):
         self.client.force_authenticate(self.alice)
         resp = self._create(self.shared)
