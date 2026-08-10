@@ -71,9 +71,6 @@ def search_layout(version, query: str, *, limit: int = MAX_SEARCH_HITS):
         n = len(words)
         i = 0
         while i < n:
-            if len(matches) >= limit:
-                truncated = True
-                break
             acc = ""
             hit_end = -1
             # Fenster aufeinanderfolgender Wörter zusammenziehen, bis der Suchbegriff
@@ -104,6 +101,13 @@ def search_layout(version, query: str, *, limit: int = MAX_SEARCH_HITS):
                     if words[m].get("bbox") and len(words[m]["bbox"]) >= 4
                 ]
                 if boxes:
+                    # ``truncated`` erst setzen, wenn WIRKLICH ein weiterer Treffer
+                    # existiert: Sind schon ``limit`` Treffer gesammelt und hier steht
+                    # ein echter (limit+1)ter → abbrechen und truncated=True. So zeigt
+                    # die UI bei exakt ``limit`` Treffern nicht fälschlich „500+".
+                    if len(matches) >= limit:
+                        truncated = True
+                        break
                     matches.append(
                         {
                             "page_no": layout.page_no,

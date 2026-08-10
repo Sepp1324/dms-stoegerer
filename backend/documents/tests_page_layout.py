@@ -304,6 +304,13 @@ class SearchLayoutServiceTests(TestCase):
         self.assertEqual(len(matches), 1)
         self.assertTrue(truncated)
 
+    def test_genau_limit_treffer_setzt_truncated_nicht(self):
+        # Zwei „muller"-Treffer (S1 Müller, S2 MÜLLER), limit=2 → KEIN truncated,
+        # weil kein dritter Treffer existiert (UI zeigt sonst fälschlich „2+").
+        matches, truncated = page_layout.search_layout(self.version, "muller", limit=2)
+        self.assertEqual(len(matches), 2)
+        self.assertFalse(truncated)
+
     def test_wortfolge_ueber_mehrere_woerter_mit_union_box(self):
         # „Wien Energie" ist im OCR auf zwei Wörter verteilt.
         v = DocumentVersion.objects.create(
