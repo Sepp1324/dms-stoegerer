@@ -541,6 +541,11 @@ class ExtractionCandidateSerializer(serializers.ModelSerializer):
 
     field_label = serializers.SerializerMethodField()
     source_bbox = serializers.SerializerMethodField()
+    # Fachliche Nummer der verankerten Version – damit das Frontend beim Sprung die
+    # Vorschau auf DIESE Version stellt (die bbox gilt nur für deren PDF-Fassung).
+    source_version_no = serializers.IntegerField(
+        source="source_version.version_no", read_only=True, default=None
+    )
 
     class Meta:
         model = ExtractionCandidate
@@ -556,6 +561,7 @@ class ExtractionCandidateSerializer(serializers.ModelSerializer):
             "source",
             "source_page",
             "source_version",
+            "source_version_no",
             "source_bbox",
             "source_snippet",
             "source_snippet_html",

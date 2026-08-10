@@ -712,9 +712,19 @@ export default function DocumentDetail({
               <TabPanel id="belegdaten" active={activeTab}>
                 <StudioExtractionPanel
                   documentId={id}
-                  onJump={(t: HighlightTarget) =>
-                    setHighlight({ page: t.page, bbox: t.bbox, nonce: highlightNonce.current++ })
-                  }
+                  onJump={(t: HighlightTarget) => {
+                    // Die bbox gilt nur für die Quellversion → Vorschau darauf stellen,
+                    // damit gerenderte Seite und Markierung zusammenpassen (sonst säße
+                    // die Box auf einer fremden Version).
+                    if (t.versionNo != null && t.versionNo !== selectedVersionNo) {
+                      setSelectedVersionNo(t.versionNo);
+                    }
+                    setHighlight({
+                      page: t.page,
+                      bbox: t.bbox,
+                      nonce: highlightNonce.current++,
+                    });
+                  }}
                   onApplied={() => setRefresh((r) => r + 1)}
                   customFields={canEdit ? customFields : undefined}
                   onAdoptToField={async (c, fieldId) => {
