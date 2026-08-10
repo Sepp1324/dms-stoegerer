@@ -479,12 +479,17 @@ class DocumentHighlightSerializer(serializers.ModelSerializer):
     created_by_username = serializers.CharField(
         source="created_by.username", read_only=True, default=None
     )
+    version_no = serializers.IntegerField(
+        source="version.version_no", read_only=True, default=None
+    )
 
     class Meta:
         model = DocumentHighlight
         fields = (
             "id",
             "document",
+            "version",
+            "version_no",
             "page_no",
             "bbox",
             "note",
@@ -496,6 +501,8 @@ class DocumentHighlightSerializer(serializers.ModelSerializer):
         read_only_fields = (
             "id",
             "document",
+            "version",
+            "version_no",
             "created_by",
             "created_by_username",
             "created_at",
