@@ -24,6 +24,8 @@ MAX_WORDS_TOTAL = 60000
 
 # Deckel für die In-Dokument-Suche: begrenzt die Trefferantwort (Payload/Navigation).
 MAX_SEARCH_HITS = 500
+# Wie viele aufeinanderfolgende Wörter eine gesuchte Wortfolge höchstens umfassen darf.
+_SEARCH_WINDOW = 12
 
 
 def normalize_search(s: str) -> str:
@@ -37,40 +39,98 @@ def normalize_search(s: str) -> str:
     return "".join(c for c in decomposed if not unicodedata.combining(c)).lower()
 
 
+def _search_norm(s: str) -> str:
+    """Normalisierung fürs Suchen: Diakritika + JEDER Whitespace entfernt, lower.
+
+    Whitespace muss weg, weil eine gesuchte Wortfolge (``Wien Energie``, eine in
+    Blöcke getrennte IBAN/Vertragsnummer) im OCR über MEHRERE Wörter verteilt ist;
+    verglichen wird die zusammengezogene Form.
+    """
+    return "".join(normalize_search(s).split())
+
+
 def search_layout(version, query: str, *, limit: int = MAX_SEARCH_HITS):
     """Sucht ``query`` seitenübergreifend in den Wortkästen einer Version.
 
     Liefert ``(matches, truncated)``. Jeder Treffer trägt Seite, Seitenmaße und
-    Wortkasten, damit das Frontend ohne Zweitabfrage dorthin springen und den
-    Treffer deckungsgleich markieren kann. Matching ist diakritika-/case-tolerant.
-    Bei Erreichen von ``limit`` wird ``truncated=True`` gesetzt (bewusster Deckel).
+    einen (ggf. über mehrere Wörter zusammengeführten) Wortkasten, damit das
+    Frontend ohne Zweitabfrage dorthin springen und den Treffer deckungsgleich
+    markieren kann. Matching ist diakritika-/case-tolerant UND wortfolgen-fähig:
+    ``Wien Energie`` trifft die Wortfolge ``Wien`` + ``Energie``, eine in Blöcke
+    getrennte IBAN/Vertragsnummer ebenso. Bei ``limit`` wird ``truncated=True``.
     """
-    q = normalize_search(query.strip())
-    if not q:
+    target = _search_norm(query.strip())
+    if not target:
         return [], False
     matches: list[dict] = []
     truncated = False
     # Reihenfolge = page_layouts.Meta.ordering (version_id, page_no); innerhalb der
     # Seite Wortreihenfolge → Treffer sind natürlich dokumentweit sortiert.
     for layout in version.page_layouts.all().iterator():
-        for w in layout.words or []:
-            text = str(w.get("t") or "")
-            if q in normalize_search(text):
-                if len(matches) >= limit:
-                    truncated = True
+        words = layout.words or []
+        n = len(words)
+        i = 0
+        while i < n:
+            if len(matches) >= limit:
+                truncated = True
+                break
+            acc = ""
+            hit_end = -1
+            # Fenster aufeinanderfolgender Wörter zusammenziehen, bis der Suchbegriff
+            # enthalten ist (max. _SEARCH_WINDOW Wörter).
+            for k in range(i, min(i + _SEARCH_WINDOW, n)):
+                acc += _search_norm(words[k].get("t") or "")
+                if target in acc:
+                    hit_end = k
                     break
-                matches.append(
-                    {
-                        "page_no": layout.page_no,
-                        "width": layout.width,
-                        "height": layout.height,
-                        "bbox": w.get("bbox"),
-                        "t": text,
-                    }
-                )
+            if hit_end >= 0:
+                # Fenster nach LINKS trimmen: führende Wörter weglassen, die nicht zum
+                # Treffer gehören (sonst würde „betrag" ab „Rechnung Betrag" matchen und
+                # eine zu große Box liefern). Kleinstes Fenster [start..hit_end], das den
+                # Begriff noch enthält.
+                start = i
+                while start < hit_end:
+                    sub = "".join(
+                        _search_norm(words[m].get("t") or "")
+                        for m in range(start + 1, hit_end + 1)
+                    )
+                    if target in sub:
+                        start += 1
+                    else:
+                        break
+                boxes = [
+                    [float(b) for b in words[m]["bbox"][:4]]
+                    for m in range(start, hit_end + 1)
+                    if words[m].get("bbox") and len(words[m]["bbox"]) >= 4
+                ]
+                if boxes:
+                    matches.append(
+                        {
+                            "page_no": layout.page_no,
+                            "width": layout.width,
+                            "height": layout.height,
+                            "bbox": _union_bbox(boxes),
+                            "t": " ".join(
+                                str(words[m].get("t") or "")
+                                for m in range(start, hit_end + 1)
+                            ).strip(),
+                        }
+                    )
+                i = hit_end + 1  # weiter HINTER dem Treffer (keine Überlappung)
+            else:
+                i += 1
         if truncated:
             break
     return matches, truncated
+
+
+def _union_bbox(boxes: list[list[float]]) -> list[float]:
+    return [
+        round(min(b[0] for b in boxes), 2),
+        round(min(b[1] for b in boxes), 2),
+        round(max(b[2] for b in boxes), 2),
+        round(max(b[3] for b in boxes), 2),
+    ]
 
 
 def extract_page_layout(path: str | Path) -> list[dict]:

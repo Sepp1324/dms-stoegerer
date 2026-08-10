@@ -304,6 +304,40 @@ class SearchLayoutServiceTests(TestCase):
         self.assertEqual(len(matches), 1)
         self.assertTrue(truncated)
 
+    def test_wortfolge_ueber_mehrere_woerter_mit_union_box(self):
+        # „Wien Energie" ist im OCR auf zwei Wörter verteilt.
+        v = DocumentVersion.objects.create(
+            document=self.doc, version_no=2, file_path="/w.pdf", sha256="f" * 64,
+        )
+        DocumentPageLayout.objects.create(
+            version=v, page_no=1, width=100, height=100,
+            words=[
+                {"t": "Wien", "bbox": [10, 20, 30, 40]},
+                {"t": "Energie", "bbox": [32, 20, 60, 40]},
+            ],
+        )
+        matches, _ = page_layout.search_layout(v, "wien energie")
+        self.assertEqual(len(matches), 1)
+        # Union-Box umschließt beide Wörter.
+        self.assertEqual(matches[0]["bbox"], [10.0, 20.0, 60.0, 40.0])
+        self.assertEqual(matches[0]["t"], "Wien Energie")
+
+    def test_iban_mit_leerzeichen_und_bloecken(self):
+        v = DocumentVersion.objects.create(
+            document=self.doc, version_no=3, file_path="/i.pdf", sha256="g" * 64,
+        )
+        DocumentPageLayout.objects.create(
+            version=v, page_no=1, width=100, height=100,
+            words=[
+                {"t": "AT61", "bbox": [10, 20, 25, 30]},
+                {"t": "1904", "bbox": [27, 20, 42, 30]},
+                {"t": "3002", "bbox": [44, 20, 59, 30]},
+            ],
+        )
+        matches, _ = page_layout.search_layout(v, "AT61 1904 3002")
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["bbox"], [10.0, 20.0, 59.0, 30.0])
+
 
 class PageLayoutSharingTests(TestCase):
     """Regressionsschutz: Haushaltsmitglieder sehen das Overlay geteilter Dokumente.
