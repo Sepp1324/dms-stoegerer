@@ -1898,6 +1898,20 @@ export function applyExtractionCandidate(
   );
 }
 
+// Übernimmt einen Kandidaten ATOMAR in ein Zusatzfeld (Wert + Status + Audit in
+// einer Backend-Transaktion). Ersetzt das frühere „PATCH-Wert + separat dismiss",
+// das bei Teilfehlern inkonsistente Zustände hinterließ.
+export function applyExtractionCandidateToField(
+  documentId: number,
+  candidateId: number,
+  fieldId: number,
+): Promise<ExtractionCandidate> {
+  return postJson<ExtractionCandidate>(
+    `/documents/${documentId}/extraction-candidates/${candidateId}/apply-to-field/`,
+    { field: fieldId },
+  );
+}
+
 export function dismissExtractionCandidate(
   documentId: number,
   candidateId: number,

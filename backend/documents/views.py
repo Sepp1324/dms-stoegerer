@@ -2793,6 +2793,80 @@ class DocumentViewSet(viewsets.ModelViewSet):
             review_task_service.sync_document_review_tasks(document)
         return Response(ExtractionCandidateSerializer(candidate).data)
 
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path=r"extraction-candidates/(?P<candidate_id>[0-9]+)/apply-to-field",
+    )
+    def apply_extraction_candidate_to_field(
+        self, request, pk=None, candidate_id=None
+    ):
+        """Übernimmt einen Kandidaten ATOMAR in ein gewähltes Zusatzfeld.
+
+        Wert schreiben, Kandidat auf ``applied`` setzen und Audit passieren in EINER
+        Transaktion. Vorher lief das clientseitig als zwei Requests (PATCH-Wert +
+        dismiss): ein übernommener Vorschlag wurde fälschlich als ``dismissed``
+        protokolliert, und bei einem Fehlschlag des zweiten Requests blieb der Wert
+        gesetzt, der Kandidat aber offen. ``field`` (CustomField-PK) kommt aus dem
+        Body.
+        """
+        if not request.user.can_write:
+            return Response(
+                {"detail": "Keine Schreibberechtigung (Gast-Rolle)."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        document = self.get_object()
+        try:
+            field_id = int(request.data.get("field"))
+        except (TypeError, ValueError):
+            return Response(
+                {"detail": "Feld-ID (field) fehlt oder ist ungültig."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        with transaction.atomic():
+            candidate = (
+                document.extraction_candidates.select_for_update()
+                .filter(pk=candidate_id)
+                .first()
+            )
+            if candidate is None:
+                raise Http404("Extraktionsvorschlag nicht vorhanden.")
+            if candidate.status != ExtractionCandidate.Status.PENDING:
+                return Response(
+                    {"detail": "Dieser Vorschlag ist nicht mehr offen."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            custom_field = CustomField.objects.filter(pk=field_id).first()
+            if custom_field is None:
+                return Response(
+                    {"detail": "Zusatzfeld nicht vorhanden."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            value = candidate.normalized_value or candidate.value
+            CustomFieldValue.objects.update_or_create(
+                document=document,
+                field=custom_field,
+                defaults={"value": value},
+            )
+            candidate.status = ExtractionCandidate.Status.APPLIED
+            candidate.applied_at = timezone.now()
+            candidate.save(update_fields=["status", "applied_at"])
+            AuditLogEntry.objects.create(
+                actor=request.user,
+                action="apply_extraction_candidate_to_field",
+                object_type="Document",
+                object_id=str(document.id),
+                detail={
+                    "candidate": candidate.id,
+                    "field": candidate.field,
+                    "custom_field_id": custom_field.id,
+                    "custom_field": custom_field.name,
+                    "value": value,
+                },
+            )
+            review_task_service.sync_document_review_tasks(document)
+        return Response(ExtractionCandidateSerializer(candidate).data)
+
     @action(detail=True, methods=["get", "post"], url_path="case-candidates")
     def case_candidates(self, request, pk=None):
         """Akten-Autopilot-Kandidaten listen oder neu erzeugen."""

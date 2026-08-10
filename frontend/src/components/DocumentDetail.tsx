@@ -19,7 +19,7 @@ import {
   submitDocument,
   suggestDocument,
   updateDocument,
-  dismissExtractionCandidate,
+  applyExtractionCandidateToField,
   type CustomField,
   type DocumentDetail as Detail,
   type DocumentIntegrity,
@@ -718,14 +718,10 @@ export default function DocumentDetail({
                   onApplied={() => setRefresh((r) => r + 1)}
                   customFields={canEdit ? customFields : undefined}
                   onAdoptToField={async (c, fieldId) => {
-                    // Wert ins gewählte Zusatzfeld schreiben (normalisiert, wenn
-                    // vorhanden) und den erledigten Vorschlag verwerfen.
-                    await updateDocument(id, {
-                      custom_field_values: [
-                        { field: fieldId, value: c.normalized_value || c.value },
-                      ],
-                    });
-                    await dismissExtractionCandidate(id, c.id);
+                    // Atomar: Wert schreiben + Kandidat auf „applied" setzen + Audit
+                    // in EINER Backend-Transaktion (kein falscher dismissed-Status,
+                    // keine Teilerfolge).
+                    await applyExtractionCandidateToField(id, c.id, fieldId);
                     setRefresh((r) => r + 1);
                   }}
                 />
