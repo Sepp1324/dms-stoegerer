@@ -293,6 +293,9 @@ REST_FRAMEWORK = {
         # Integritäts-/Evidence-Prüfung: liest + hasht synchron alle Dateien.
         # Bewusst niedrig – wenige große Requests sollen die Webworker nicht binden.
         "integrity_check": os.getenv("THROTTLE_INTEGRITY_CHECK_RATE", "12/minute"),
+        # OCR-Layoutsuche: scannt synchron bis zu ~60.000 Wörter. Großzügig, damit
+        # die debounced Tipp-Suche nicht anschlägt, aber Dauer-Requests gedrosselt sind.
+        "document_search": os.getenv("THROTTLE_DOCUMENT_SEARCH_RATE", "120/minute"),
         # JWT-Login/Refresh: Brute-Force-Schutz (per Client-IP). Bewusst knapp –
         # legitime Logins sind selten, Angreifer probieren viele durch.
         "login": os.getenv("THROTTLE_LOGIN_RATE", "10/minute"),

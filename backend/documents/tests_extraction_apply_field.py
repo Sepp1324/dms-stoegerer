@@ -99,6 +99,20 @@ class ApplyToFieldTests(APITestCase):
         resp = self.client.post(self._url(self.cand.id), {"field": self.field.id}, format="json")
         self.assertEqual(resp.status_code, 403)
 
+    def test_nan_und_infinity_in_zahlenfeld_400(self):
+        num = CustomField.objects.create(name="Zahl", data_type="number")
+        self.client.force_authenticate(self.user)
+        for bad in ("NaN", "Infinity", "-Infinity"):
+            cand = ExtractionCandidate.objects.create(
+                document=self.doc,
+                field=ExtractionCandidate.Field.AMOUNT,
+                value=bad,
+                normalized_value=bad,
+            )
+            resp = self.client.post(self._url(cand.id), {"field": num.id}, format="json")
+            self.assertEqual(resp.status_code, 400, bad)
+        self.assertFalse(CustomFieldValue.objects.filter(field=num).exists())
+
     def test_patch_zahlenfeld_lehnt_text_ab(self):
         # Die zentrale Typprüfung greift auch beim regulären PATCH.
         num = CustomField.objects.create(name="Zahl", data_type="number")

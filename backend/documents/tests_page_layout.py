@@ -253,6 +253,34 @@ class PageLayoutEndpointTests(TestCase):
         resp = self.client.get(f"/api/documents/{self.doc.id}/page-layout/")
         self.assertIn(resp.status_code, (403, 404))
 
+    def test_suche_ist_gedrosselt_meta_nicht(self):
+        # Der teure Such-Zweig ist gedrosselt; der leichte Meta-Abruf bleibt frei.
+        # LocMem-Cache erzwingen: der Throttle-Zähler braucht einen echten Cache,
+        # unabhängig vom (in CI evtl. fehlenden) Redis.
+        from unittest.mock import patch
+
+        from django.core.cache import cache
+        from django.test import override_settings
+
+        from documents.throttling import DocumentSearchRateThrottle
+
+        locmem = {
+            "default": {
+                "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+                "LOCATION": "throttle-test",
+            }
+        }
+        self.client.force_authenticate(self.user)
+        url = f"/api/documents/{self.doc.id}/page-layout/"
+        with override_settings(CACHES=locmem), patch.object(
+            DocumentSearchRateThrottle, "get_rate", return_value="1/minute"
+        ):
+            cache.clear()
+            self.assertEqual(self.client.get(url + "?term=x").status_code, 200)
+            self.assertEqual(self.client.get(url + "?term=x").status_code, 429)
+            # Meta-Abruf ohne ?term läuft trotz erschöpftem Such-Limit weiter.
+            self.assertEqual(self.client.get(url).status_code, 200)
+
     def test_suche_liefert_treffer_seitenuebergreifend(self):
         self.client.force_authenticate(self.user)
         # "Rechnung" (S.1), "Betrag" (S.1), "Seite2" (S.2) sind angelegt.

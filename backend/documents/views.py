@@ -33,6 +33,7 @@ from kombu.exceptions import OperationalError as BrokerOperationalError
 from rest_framework import serializers, status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.exceptions import APIException
+from rest_framework.exceptions import Throttled
 from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.filters import OrderingFilter
 from rest_framework.parsers import FormParser, MultiPartParser
@@ -98,6 +99,7 @@ from .filetypes import SNIFF_BYTES, UnsupportedFileType, detect, is_safe_inline
 from .throttling import (
     AiRateThrottle,
     CaptureRateThrottle,
+    DocumentSearchRateThrottle,
     IntegrityCheckRateThrottle,
     PdfThumbnailRateThrottle,
     RevisionExportRateThrottle,
@@ -2026,6 +2028,11 @@ class DocumentViewSet(viewsets.ModelViewSet):
         # schon ``get_object()`` auf ein leeres Queryset laufen lassen (404).
         raw_q = request.query_params.get("term")
         if raw_q is not None:
+            # NUR der Such-Zweig ist teuer (Scan über bis zu ~60k Wörter) → gezielt
+            # drosseln; die leichten Meta-/Seiten-Abrufe bleiben ungedrosselt.
+            search_throttle = DocumentSearchRateThrottle()
+            if not search_throttle.allow_request(request, self):
+                raise Throttled(wait=search_throttle.wait())
             # Seitenübergreifende In-Dokument-Suche: serverseitig gematcht, damit nur
             # die Treffer (Seite + Wortkasten) übertragen werden – nicht alle Wörter.
             matches, truncated = page_layout_service.search_layout(version, raw_q)
