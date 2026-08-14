@@ -177,3 +177,14 @@ class RuleSimulateRateThrottle(_PerUserScopeThrottle):
     synchron. Ohne Drossel könnten wiederholte Aufrufe die Webworker binden."""
 
     scope = "rule_simulate"
+
+
+class DocumentSearchRateThrottle(_PerUserScopeThrottle):
+    """Limit für die OCR-Layoutsuche (Scope ``document_search``, P2).
+
+    Der page-layout-Endpoint scannt bei ``?term=`` synchron bis zu ~60.000
+    OCR-Wörter und führt je Startwort ein Fenster-Matching aus. Ohne Drossel könnten
+    wiederholte direkte Requests die wenigen Gunicorn-Worker binden. Bewusst
+    großzügig gewählt, damit die (debounced) Tipp-Suche im Studio nicht anschlägt."""
+
+    scope = "document_search"
