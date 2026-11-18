@@ -63,6 +63,12 @@ jobs:
       - name: Frontend-Image bauen (flüchtiger CI-Tag)
         run: docker build -t "dms-frontend-ci:${GITHUB_SHA}" ./frontend
 
+      # Laufzeit-Check gegen das echte Image: nginx muss alle .js/.mjs-Dateien mit
+      # JavaScript-MIME-Typ ausliefern. Der Build bleibt auch mit falschem Typ grün
+      # (der PDF.js-Worker ging so monatelang als application/octet-stream raus).
+      - name: MIME-Typen der ausgelieferten Skripte prüfen
+        run: frontend/ci/verify-mime-types.sh "dms-frontend-ci:${GITHUB_SHA}"
+
   # Aggregierendes Gate: EIN stabiler Status-Check-Name ("pr-checks"), den der
   # Owner als Required Status Check in der Branch-Protection setzt. Wird nur
   # grün, wenn Backend- UND Frontend-Job grün sind.
