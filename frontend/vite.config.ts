@@ -8,7 +8,7 @@ import { VitePWA } from "vite-plugin-pwa";
 export default defineConfig({
   plugins: [
     react(),
-    // Installierbare PWA (STOAA-514): App-Shell-Precache, KEIN Offline-Sync.
+    // Installierbare PWA (STOAA-514): Asset-Precache, KEIN Offline-Sync.
     // Manifest + Service Worker werden generiert; Icons liegen unter
     // public/icons/ (erzeugt via scripts/generate-pwa-icons.mjs).
     VitePWA({
@@ -36,10 +36,20 @@ export default defineConfig({
         ],
       },
       workbox: {
-        // Nur App-Shell precachen (JS/CSS/HTML/Icons). Bewusst KEIN
+        // Nur statische Assets precachen (JS/CSS/Icons). Bewusst KEIN
         // Runtime-Caching der /api-Aufrufe – kein Offline-Sync (Nicht-Ziel).
-        globPatterns: ["**/*.{js,css,html,ico,png,svg,webmanifest}"],
-        navigateFallbackDenylist: [/^\/api/, /^\/share\//],
+        //
+        // index.html gehört NICHT in den Precache, und Navigationen beantwortet
+        // der Service Worker nicht (navigateFallback: null): Workbox speichert
+        // eine precachte Antwort samt Headern und liefert sie bei jeder
+        // Navigation wieder aus. Die Security-Header aus nginx.conf (CSP!) wären
+        // damit im Browser eingefroren, bis sich der Inhalt von index.html
+        // ändert – eine reine nginx.conf-Änderung käme nie beim Nutzer an
+        // (so passiert bei connect-src blob: für die PDF-Vorschau). Seiten
+        // kommen deshalb immer vom Server; ohne Netz startet die App nicht,
+        // was ohne Offline-Sync ohnehin gilt.
+        globPatterns: ["**/*.{js,css,ico,png,svg,webmanifest}"],
+        navigateFallback: null,
       },
     }),
   ],
