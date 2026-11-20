@@ -102,13 +102,22 @@ function ThumbItem({
 
 export function PdfViewer({
   url,
+  blob,
   title,
   initialPage,
   docId,
   layoutVersion,
   highlight,
 }: {
+  // Blob-URL des Dokuments: Identität für die Effekte (Dokument-/Versionswechsel).
   url: string;
+  // Das PDF selbst. Ist es gesetzt, liest react-pdf die Bytes direkt aus dem Blob
+  // (FileReader) und PDF.js ruft die blob:-URL NICHT per XHR ab. Der Abruf einer
+  // blob:-URL fällt unter die CSP-Direktive connect-src; lädt der Browser die Seite
+  // mit einer Richtlinie ohne ``blob:`` (alter Service-Worker-/HTTP-Cache), scheitert
+  // er mit "Unexpected server response (0) while retrieving PDF". Ohne ``blob``
+  // (z. B. Tests) bleibt es beim Laden über die URL.
+  blob?: Blob | null;
   title: string;
   initialPage?: number | null;
   // Nur gesetzt in der Detailansicht (Owner/Haushalt): aktiviert das OCR-Overlay
@@ -329,7 +338,7 @@ export function PdfViewer({
 
   return (
     <Document
-      file={url}
+      file={blob ?? url}
       onLoadSuccess={({ numPages: n }) => setNumPages(n)}
       onLoadError={(err) => setLoadError(err.message || "PDF konnte nicht geladen werden.")}
       loading={<p className="muted">Lade Vorschau …</p>}

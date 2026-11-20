@@ -7,6 +7,7 @@ import { PdfViewer, type PdfHighlight } from "./PdfViewer";
 // Backend via Magic-Byte-Allowlist) werden direkt als <img> gezeigt.
 export function DetailPreview({
   pdfUrl,
+  pdfBlob,
   mime,
   pdfError,
   title,
@@ -16,6 +17,8 @@ export function DetailPreview({
   highlight,
 }: {
   pdfUrl: string | null;
+  // Der Vorschau-Blob zu ``pdfUrl``; PDFs werden daraus direkt gelesen (siehe PdfViewer).
+  pdfBlob?: Blob | null;
   // Erkannter MIME-Typ des Vorschau-Blobs (application/pdf oder image/*).
   mime: string | null;
   pdfError: string | null;
@@ -37,6 +40,7 @@ export function DetailPreview({
         (isPdf ? (
           <PdfViewer
             url={pdfUrl}
+            blob={pdfBlob}
             title={title}
             initialPage={initialPage}
             docId={docId}

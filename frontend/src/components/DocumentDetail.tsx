@@ -106,6 +106,7 @@ export default function DocumentDetail({
   const [doc, setDoc] = useState<Detail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
+  const [pdfBlob, setPdfBlob] = useState<Blob | null>(null);
   const [previewMime, setPreviewMime] = useState<string | null>(null);
   // Fundstellen-Sprung aus dem Beleg-Daten-Tab in die PDF-Vorschau. Der monotone
   // Nonce lässt denselben Vorschlag erneut anspringen (der Effekt reagiert darauf).
@@ -223,6 +224,7 @@ export default function DocumentDetail({
     const ctrl = new AbortController();
     let url: string | null = null;
     setPdfUrl(null);
+    setPdfBlob(null);
     setPreviewMime(null);
     setPdfError(null);
     getDocumentPreview(id, selectedVersionNo, ctrl.signal)
@@ -232,6 +234,7 @@ export default function DocumentDetail({
         // frame-ancestors-Bug aus): PDF.js navigiert die Seite intern über
         // ``initialPage``.
         setPdfUrl(url);
+        setPdfBlob(blob);
         setPreviewMime(blob.type || null);
       })
       .catch((e) => {
@@ -654,6 +657,7 @@ export default function DocumentDetail({
             {/* Linke Spalte: große Vorschau, beim Scrollen der rechten Spalte sticky. */}
             <DetailPreview
               pdfUrl={pdfUrl}
+              pdfBlob={pdfBlob}
               mime={previewMime}
               pdfError={pdfError}
               title={doc.title}

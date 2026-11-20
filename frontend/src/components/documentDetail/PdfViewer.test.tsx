@@ -9,17 +9,22 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const h = vi.hoisted(() => ({
   onLoad: null as null | ((p: { numPages: number }) => void),
   onRender: null as null | ((p: { width: number; height: number }) => void),
+  // Was der Viewer als ``file`` an react-pdf übergibt (URL-String oder Blob).
+  file: null as unknown,
 }));
 
 vi.mock("react-pdf", () => ({
   pdfjs: { GlobalWorkerOptions: {} },
   Document: ({
     children,
+    file,
     onLoadSuccess,
   }: {
     children: React.ReactNode;
+    file?: unknown;
     onLoadSuccess?: (p: { numPages: number }) => void;
   }) => {
+    h.file = file;
     h.onLoad = onLoadSuccess ?? null;
     return <div data-testid="document">{children}</div>;
   },
@@ -78,6 +83,20 @@ const mainPageNo = () =>
 const stage = () => screen.getByRole("group", { name: /PDF-Vorschau/ });
 
 describe("PdfViewer – Logik (echter Viewer, react-pdf gemockt)", () => {
+  // Regression: PDF.js darf die blob:-URL nicht selbst abrufen. Der Abruf fällt
+  // unter CSP connect-src und scheiterte in Produktion mit "Unexpected server
+  // response (0)". Mit Blob liest react-pdf die Bytes direkt, ohne Netzabruf.
+  it("übergibt den Blob statt der blob:-URL an react-pdf", () => {
+    const blob = new Blob(["%PDF-1.4"], { type: "application/pdf" });
+    render(<PdfViewer url="blob:a" blob={blob} title="Doc" />);
+    expect(h.file).toBe(blob);
+  });
+
+  it("fällt ohne Blob auf die URL zurück", () => {
+    render(<PdfViewer url="blob:a" title="Doc" />);
+    expect(h.file).toBe("blob:a");
+  });
+
   it("startet auf initialPage", () => {
     render(<PdfViewer url="blob:a" title="Doc" initialPage={3} />);
     load(5);
