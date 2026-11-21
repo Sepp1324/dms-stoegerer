@@ -70,7 +70,11 @@ interface Props {
   // Globale Zusatzfeld-Definitionen (STOAA-113) – werden in DocumentsPage einmal
   // geladen und hier zur Anzeige aller Felder (auch ohne Wert) durchgereicht.
   customFields: CustomField[];
+  // Schreibrolle (can_write). Reicht NICHT zum Verwalten eines fremden, nur
+  // read-only geteilten Dokuments – dafür siehe ``canManage`` unten (Eigentümer/Admin).
   canEdit: boolean;
+  // DMS-Admin darf jedes Dokument verwalten (unabhängig vom Eigentümer).
+  isAdmin?: boolean;
   onCreateCorrespondent: (name: string) => Promise<NamedRef>;
   onCreateDocumentType: (name: string) => Promise<NamedRef>;
   onCreateStoragePath: (name: string) => Promise<NamedRef>;
@@ -95,6 +99,7 @@ export default function DocumentDetail({
   allTags,
   customFields,
   canEdit,
+  isAdmin = false,
   onCreateCorrespondent,
   onCreateDocumentType,
   onCreateStoragePath,
@@ -549,7 +554,13 @@ export default function DocumentDetail({
   // KI-Tab nur bei Schreibrecht (Panel ist canEdit-only). Aktiver Tab auf die
   // sichtbaren Tabs klemmen, damit ein gespeicherter „ai"-Tab bei Gästen nicht
   // in eine leere Ansicht führt.
-  const visibleTabs = DETAIL_TABS.filter((t) => t.id !== "ai" || canEdit);
+  // Verwalten (Bearbeiten, Versionsupload, Workbench, Freigaben, Extraktions-/
+  // KI-Aktionen) darf nur der Eigentümer oder ein Admin – NICHT jeder Writer auf
+  // einem fremden, nur read-only geteilten Dokument (Backend lehnt solche Requests
+  // sonst mit 404 ab; die Buttons wären nutzlos). Zentrale Ableitung, an alle Panels
+  // durchgereicht. Vor dem Laden (doc == null) sicherheitshalber false.
+  const canManage = canEdit && (!!doc?.is_owner || isAdmin);
+  const visibleTabs = DETAIL_TABS.filter((t) => t.id !== "ai" || canManage);
   const activeTab: TabId = visibleTabs.some((t) => t.id === tab) ? tab : "overview";
 
   async function copyDocumentLink() {
@@ -570,7 +581,7 @@ export default function DocumentDetail({
         </button>
         {doc && (
           <div className="detail-topbar__actions">
-            {canEdit && !editing && <button onClick={startEdit}>Bearbeiten</button>}
+            {canManage && !editing && <button onClick={startEdit}>Bearbeiten</button>}
             <button
               type="button"
               className="secondary"
@@ -602,7 +613,7 @@ export default function DocumentDetail({
             integrityOk={integrity?.chain_ok ?? null}
             activeTab={activeTab}
             onSelectTab={setTab}
-            canEdit={canEdit}
+            canEdit={canManage}
             editing={editing}
             archiveBusy={archiveBusy}
             onEdit={startEdit}
@@ -616,7 +627,7 @@ export default function DocumentDetail({
                 Als Dublette ausgeblendet – ersetzt durch{" "}
                 <strong>{doc.superseded_by_title ?? `#${doc.superseded_by}`}</strong>.
               </span>
-              {canEdit && (
+              {canManage && (
                 <button className="link" onClick={undoSupersede} disabled={supersedeBusy}>
                   {supersedeBusy ? "…" : "Rückgängig"}
                 </button>
@@ -631,7 +642,7 @@ export default function DocumentDetail({
                   type="checkbox"
                   checked={doc.shared_with_household}
                   onChange={toggleShare}
-                  disabled={shareBusy || !canEdit}
+                  disabled={shareBusy || !canManage}
                 />
                 <span>Für die Familie freigeben (nur Lesen)</span>
               </label>
@@ -649,7 +660,7 @@ export default function DocumentDetail({
           <NotePanel
             documentId={id}
             initialNote={doc.note ?? ""}
-            editable={!!doc.is_owner && canEdit}
+            editable={!!doc.is_owner && canManage}
             onSaved={(updated) => setDoc(updated as Detail)}
           />
 
@@ -697,7 +708,7 @@ export default function DocumentDetail({
                 ) : (
                   <DetailMeta
                     doc={doc}
-                    canEdit={canEdit}
+                    canEdit={canManage}
                     currentVersion={currentVersion}
                     retryBusy={retryBusy}
                     retryError={retryError}
@@ -730,7 +741,7 @@ export default function DocumentDetail({
                     });
                   }}
                   onApplied={() => setRefresh((r) => r + 1)}
-                  customFields={canEdit ? customFields : undefined}
+                  customFields={canManage ? customFields : undefined}
                   onAdoptToField={async (c, fieldId) => {
                     // Atomar: Wert schreiben + Kandidat auf „applied" setzen + Audit
                     // in EINER Backend-Transaktion (kein falscher dismissed-Status,
@@ -745,7 +756,7 @@ export default function DocumentDetail({
               <TabPanel id="briefing" active={activeTab}>
                 <BriefingPanel
                   documentId={id}
-                  canEdit={canEdit}
+                  canEdit={canManage}
                   onSelectTab={setTab}
                   onOpenDocument={(documentId) =>
                     onOpenDocument ? onOpenDocument(documentId) : undefined
@@ -755,24 +766,24 @@ export default function DocumentDetail({
 
               {/* Entitäten: private Wissensgraph-Links dieses Dokuments. */}
               <TabPanel id="entities" active={activeTab}>
-                <EntitiesPanel documentId={id} canEdit={canEdit} />
+                <EntitiesPanel documentId={id} canEdit={canManage} />
               </TabPanel>
 
               {/* Semantik: Auto-Ablage-Vorschlag + ähnliche Dokumente (Embeddings). */}
               <TabPanel id="similar" active={activeTab}>
                 <AutoFilePanel
                   documentId={id}
-                  canEdit={canEdit}
+                  canEdit={canManage}
                   onApplied={(updated) => setDoc(updated as Detail)}
                 />
                 <SimilarDocumentsPanel
                   documentId={id}
-                  canEdit={canEdit}
+                  canEdit={canManage}
                   onOpenDocument={onOpenDocument ?? (() => undefined)}
                 />
                 <DuplicatesPanel
                   documentId={id}
-                  canEdit={canEdit}
+                  canEdit={canManage}
                   onOpenDocument={onOpenDocument ?? (() => undefined)}
                   onChanged={() => setRefresh((r) => r + 1)}
                 />
@@ -788,7 +799,7 @@ export default function DocumentDetail({
                   onDownload={downloadVersion}
                   integrity={integrity}
                   integrityError={integrityError}
-                  canEdit={canEdit}
+                  canEdit={canManage}
                   addBusy={addBusy}
                   addError={addError}
                   fileInputRef={fileInputRef}
@@ -805,13 +816,13 @@ export default function DocumentDetail({
               <TabPanel id="workbench" active={activeTab}>
                 <PdfWorkbenchPanel
                   documentId={id}
-                  canEdit={canEdit}
+                  canEdit={canManage}
                   onChanged={() => setRefresh((r) => r + 1)}
                 />
               </TabPanel>
 
               {/* KI-Vorschläge (nur bei Schreibrecht). */}
-              {canEdit && (
+              {canManage && (
                 <TabPanel id="ai" active={activeTab}>
                   <AiSuggestionsPanel
                     suggestionRows={suggestionRows}
@@ -829,21 +840,21 @@ export default function DocumentDetail({
 
               {/* Wiedervorlage. */}
               <TabPanel id="reminder" active={activeTab}>
-                <ReminderPanel documentId={id} canEdit={canEdit} />
+                <ReminderPanel documentId={id} canEdit={canManage} />
               </TabPanel>
 
               {/* Freigabe: Status/Workflow + Freigabelinks. */}
               <TabPanel id="freigabe" active={activeTab}>
                 <FreigabePanel
                   status={doc.status}
-                  canEdit={canEdit}
+                  canEdit={canManage}
                   busy={freigabeBusy}
                   error={freigabeError}
                   onSubmit={() => runFreigabe(() => submitDocument(id))}
                   onApprove={() => runFreigabe(() => approveDocument(id))}
                   onReject={(reason) => runFreigabe(() => rejectDocument(id, reason))}
                 />
-                <ShareLinksPanel documentId={id} canEdit={canEdit} />
+                <ShareLinksPanel documentId={id} canEdit={canManage} />
               </TabPanel>
 
               {/* Zusatzfelder. */}
@@ -851,7 +862,7 @@ export default function DocumentDetail({
                 <CustomFieldsPanel
                   fields={customFields}
                   values={doc.custom_field_values ?? []}
-                  canEdit={canEdit}
+                  canEdit={canManage}
                   onSave={saveCustomFields}
                   onManageFields={onManageFields}
                 />

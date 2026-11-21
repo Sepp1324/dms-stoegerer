@@ -1077,6 +1077,7 @@ export default function DocumentsPage({ onLogout }: { onLogout: () => void }) {
           allTags={tags}
           customFields={customFields}
           canEdit={!!me?.can_write}
+          isAdmin={!!me?.is_dms_admin}
           onCreateCorrespondent={addCorrespondent}
           onCreateDocumentType={addDocumentType}
           onCreateStoragePath={addStoragePath}
