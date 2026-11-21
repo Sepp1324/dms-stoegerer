@@ -2157,19 +2157,25 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN,
             )
         document = self.get_object()
-        highlight = document.highlights.filter(pk=highlight_id).first()
-        if highlight is None:
-            raise Http404("Markierung nicht vorhanden.")
         is_admin = bool(getattr(request.user, "is_dms_admin", False))
-        if highlight.created_by_id != request.user.id and not is_admin:
-            return Response(
-                {"detail": "Nur der Ersteller darf diese Markierung löschen."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-        page_no = highlight.page_no
-        # Löschen + Audit atomar: sonst bliebe bei einem Audit-Fehler eine gelöschte,
-        # aber nicht protokollierte Markierung zurück.
+        # Lookup, Row-Lock, Löschen UND Audit in EINER Transaktion: sonst könnten zwei
+        # gleichzeitige DELETE dieselbe Zeile lesen und beide einen Lösch-Audit
+        # schreiben, obwohl nur einer wirklich gelöscht hat. select_for_update
+        # serialisiert – der zweite Request sieht die Zeile dann als weg (404).
         with transaction.atomic():
+            highlight = (
+                document.highlights.select_for_update()
+                .filter(pk=highlight_id)
+                .first()
+            )
+            if highlight is None:
+                raise Http404("Markierung nicht vorhanden.")
+            if highlight.created_by_id != request.user.id and not is_admin:
+                return Response(
+                    {"detail": "Nur der Ersteller darf diese Markierung löschen."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            page_no = highlight.page_no
             highlight.delete()
             AuditLogEntry.objects.create(
                 actor=request.user,
