@@ -208,6 +208,21 @@ jobs:
           fi
           echo "cluster-state auf ${TAG} aktualisiert (deployter main + newTag-Bump)."
 
+      - name: Registry aufräumen (alte Image-Tags)
+        # Jeder Deploy pusht zwei neue Tags; ohne Aufräumen läuft der Registry-
+        # Speicher voll und `docker push` scheitert ("blob upload invalid").
+        # Läuft NUR nach erfolgreichem Deploy. Bleiben: die neuesten 10 SHA-Tags je
+        # Repo, der gerade deployte Tag, alles was im Namespace dms läuft/geplant ist,
+        # in den Manifesten steht oder benannt ist (latest, 0.1.0 …).
+        # --namespace dms: die dms-deployer-SA darf nur diesen Namespace lesen.
+        # Bewusst NICHT deploy-kritisch: der Rollout ist hier schon durch – ein
+        # Fehler (Registry erlaubt kein Löschen, nicht erreichbar) gibt nur eine
+        # Warnung. Platz wird erst durch den Garbage-Collect auf dem Registry-Host
+        # frei (scripts/registry-gc.sh per Cron, docs/ci-cd.md §3c).
+        run: |
+          python3 scripts/registry-prune.py --insecure --namespace dms --keep "$TAG" --apply \
+            || echo "::warning::Registry-Aufräumen fehlgeschlagen (Exit $?) – Deploy unberührt; siehe docs/ci-cd.md §3c."
+
       - name: Rollout-Diagnose (bei Timeout/Fehler)
         if: failure()
         # Rein informativ: jeder Befehl mit `|| true`, damit die Diagnose NICHT
