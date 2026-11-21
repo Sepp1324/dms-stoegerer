@@ -222,6 +222,65 @@ state` die Deploy-/Cluster-Wahrheit.
 
 ---
 
+## 3c. Registry aufräumen (alte Image-Tags)
+
+Jeder Deploy pusht `dms-backend` und `dms-frontend` unter dem Git-SHA. Ohne
+Aufräumen läuft der Registry-Speicher voll; `docker push` scheitert dann mit
+`blob upload invalid` / `unknown error` und der Deploy steht. Das Aufräumen hat
+**zwei Teile**, die an verschiedenen Orten laufen:
+
+| Teil | Wo | Wann | Was |
+|---|---|---|---|
+| Tags entfernen | Runner (k3s-01), Schritt *Registry aufräumen* in `deploy.yml` | nach jedem erfolgreichen Voll-Deploy | `scripts/registry-prune.py --apply` löscht alte Tags per Registry-API |
+| Garbage-Collect | Registry-Host | wöchentlich per Cron | `scripts/registry-gc.sh` gibt den Plattenplatz tatsächlich frei |
+
+**Was bleibt:** die neuesten 10 SHA-Tags je Repo, der gerade deployte Tag, alles
+was im Namespace `dms` läuft oder geplant ist (Pods, Deployments, CronJobs), alle
+in `deploy/k8s` referenzierten Tags und alle benannten Tags (`latest`, `0.1.0` …).
+Der Schritt ist nicht deploy-kritisch: schlägt er fehl, gibt es nur eine Warnung
+im Lauf (der Rollout ist dann schon durch).
+
+### Einmalige Einrichtung auf dem Registry-Host
+
+1. **Löschen erlauben.** Der Registry-Container braucht die Umgebungsvariable
+   `REGISTRY_STORAGE_DELETE_ENABLED=true`, sonst antwortet die Registry auf
+   Löschaufrufe mit HTTP 405 und der Workflow-Schritt warnt nur. Prüfen:
+
+   ```bash
+   docker inspect registry --format '{{json .Config.Env}}'
+   ```
+
+   Fehlt sie: den Container mit der zusätzlichen Variable neu anlegen (gleiche
+   Volumes/Ports wie bisher – die Daten liegen im Volume und bleiben erhalten).
+
+2. **Garbage-Collect einplanen.** `scripts/registry-gc.sh` auf den Registry-Host
+   kopieren und wöchentlich nachts als root laufen lassen:
+
+   ```bash
+   install -m 0755 registry-gc.sh /usr/local/bin/registry-gc.sh
+   echo '30 4 * * 0 root /usr/local/bin/registry-gc.sh >> /var/log/registry-gc.log 2>&1' > /etc/cron.d/registry-gc
+   ```
+
+   Heißt der Container nicht `registry` oder liegen die Daten nicht unter
+   `/opt/registry`, die Variablen im Kopf des Skripts setzen (`REGISTRY_CONTAINER`,
+   `REGISTRY_CONFIG`, `REGISTRY_DATA_DIR`).
+
+   **Während des Garbage-Collects nicht deployen** (deshalb nachts): ein gerade
+   hochgeladener Layer könnte sonst mit entfernt werden. Das Skript startet den
+   Container danach neu (wenige Sekunden nicht erreichbar).
+
+### Von Hand
+
+```bash
+scripts/registry-prune.py --insecure                 # Trockenlauf: zeigt nur, was wegfiele
+scripts/registry-prune.py --insecure --apply         # löschen (braucht kubectl; mit der SA: --namespace dms)
+```
+
+Danach auf dem Registry-Host `registry-gc.sh` ausführen. Details und alle
+Schalter: `scripts/registry-prune.py --help`.
+
+---
+
 ## 4. Sicherheitshinweis
 
 Der Runner kann **Images bauen** (Docker ≈ root) und **ins Cluster deployen**
@@ -246,5 +305,6 @@ aber:
 | `permission denied` bei docker | Runner-Nutzer nicht in Gruppe `docker` (neu einloggen nach `usermod`) |
 | `denied` / `unauthorized` beim Push | `docker login registry.stoegerer-home.at` fehlt/abgelaufen |
 | `x509`/Zertifikat beim Push | `insecure-registries` in `/etc/docker/daemon.json` + `systemctl restart docker` |
+| `blob upload invalid` / `unknown error` beim Push (kleine Layer gehen durch) | Registry-Speicher voll: auf dem Registry-Host `df -h` + Registry-Log prüfen, dann aufräumen → §3c (läuft der Cron für `registry-gc.sh`? warnt der Schritt *Registry aufräumen* im letzten Deploy?) |
 | `kubectl` kann nicht verbinden | Kubeconfig nicht lesbar → §1 (write-kubeconfig-mode) |
 | `rollout status` Timeout | Pod-Fehler → `kubectl -n dms describe pod …`; siehe deploy/k8s/README.md §15 |
