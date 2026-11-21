@@ -24,10 +24,16 @@ def validate_custom_field_value(data_type: str, raw) -> str:
         if norm.count(",") == 1 and "." not in norm:
             norm = norm.replace(",", ".")
         try:
-            Decimal(norm)
+            parsed = Decimal(norm)
         except (InvalidOperation, ValueError):
             raise serializers.ValidationError(
                 f"„{value}“ ist keine gültige Zahl für dieses Zusatzfeld."
+            )
+        # Decimal("NaN")/Decimal("Infinity") werfen KEINE Exception – solche Werte
+        # dürfen nicht als vermeintlich gültige Zahl gespeichert werden.
+        if not parsed.is_finite():
+            raise serializers.ValidationError(
+                f"„{value}“ ist keine endliche Zahl."
             )
         return norm
     if data_type == "date":
